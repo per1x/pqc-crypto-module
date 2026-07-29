@@ -117,6 +117,7 @@ add_library(pqchsm
   src/slot/slot.c
   src/util/util.c
   src/util/kat.c
+  src/util/selftest.c
 )
 target_include_directories(pqchsm
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -174,6 +175,7 @@ function(pqchsm_test name src)
 endfunction()
 
 pqchsm_test(test_util      tests/unit/test_util.c)
+pqchsm_test(test_selftest  tests/unit/test_selftest.c)
 pqchsm_test(test_kat_parse tests/unit/test_kat_parse.c)
 pqchsm_test(test_pqc_meta  tests/unit/test_pqc_meta.c)
 pqchsm_test(test_pqc_roundtrip tests/unit/test_pqc_roundtrip.c)
@@ -225,6 +227,7 @@ pqchsm_test(test_e2e       tests/integration/test_e2e.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
 add_test(NAME util          COMMAND test_util)
+add_test(NAME selftest      COMMAND test_selftest)
 add_test(NAME kat_parse     COMMAND test_kat_parse)
 add_test(NAME pqc_meta      COMMAND test_pqc_meta)
 add_test(NAME pqc_roundtrip COMMAND test_pqc_roundtrip)

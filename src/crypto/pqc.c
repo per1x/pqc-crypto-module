@@ -1,5 +1,11 @@
-/* pqc.c —— 算法元数据表 + 后端分发与参数校验 */
+/* pqc.c —— 算法元数据表 + 后端分发与参数校验
+ *
+ * 每个入口都先过一次上电自测闸门：自测未通过时模块处于错误状态，一律拒绝服务。
+ * 这是 FIPS 140-3 与 GM/T 0028 对"错误状态下不得输出密码运算结果"的要求，
+ * 闸门放在分发层是因为所有对外的密码运算都从这里过。
+ */
 #include "pqchsm/pqc.h"
+#include "pqchsm/selftest.h"
 
 #include <string.h>
 
@@ -46,6 +52,7 @@ const char *pqc_strerror(pqc_status_t st)
 	case PQC_ERR_UNSUPPORTED: return "unsupported by backend";
 	case PQC_ERR_BACKEND:     return "backend failure";
 	case PQC_ERR_VERIFY:      return "verification failed";
+	case PQC_ERR_SELF_TEST:   return "module in error state: self-test failed";
 	}
 	return "unknown";
 }
@@ -65,10 +72,11 @@ const pqc_backend_t *pqc_get_backend(void)
 	return g_backend;
 }
 
-/* 统一的前置校验：算法已知、种类匹配、后端实现了该方法 */
+/* 统一的前置校验：模块可用、算法已知、种类匹配、后端实现了该方法 */
 #define PROLOGUE(want_kind, method)                                    \
 	const pqc_alg_info_t *info = pqc_alg_info(alg);                \
 	const pqc_backend_t  *be   = pqc_get_backend();                \
+	if (!pqc_self_test_passed()) return PQC_ERR_SELF_TEST;         \
 	if (!info || info->kind != (want_kind)) return PQC_ERR_BAD_ARG; \
 	if (!be || !be->method) return PQC_ERR_UNSUPPORTED
 
@@ -76,6 +84,9 @@ pqc_status_t pqc_keypair(pqc_alg_t alg, uint8_t *pk, uint8_t *sk)
 {
 	const pqc_alg_info_t *info = pqc_alg_info(alg);
 	const pqc_backend_t  *be   = pqc_get_backend();
+	if (!pqc_self_test_passed()) {
+		return PQC_ERR_SELF_TEST;
+	}
 	if (!info || !pk || !sk) {
 		return PQC_ERR_BAD_ARG;
 	}
@@ -90,6 +101,9 @@ pqc_status_t pqc_keypair_from_seed(pqc_alg_t alg, const uint8_t *seed, size_t se
 {
 	const pqc_alg_info_t *info = pqc_alg_info(alg);
 	const pqc_backend_t  *be   = pqc_get_backend();
+	if (!pqc_self_test_passed()) {
+		return PQC_ERR_SELF_TEST;
+	}
 	if (!info || !seed || !pk || !sk) {
 		return PQC_ERR_BAD_ARG;
 	}

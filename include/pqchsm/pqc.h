@@ -30,6 +30,7 @@ typedef enum {
 	PQC_ERR_UNSUPPORTED = -2,  /* 后端不具备该能力（如硬件核未实现该参数集） */
 	PQC_ERR_BACKEND     = -3,  /* 后端内部失败 */
 	PQC_ERR_VERIFY      = -4,  /* 验签/解封装校验不通过 —— 非错误，是结果 */
+	PQC_ERR_SELF_TEST   = -5,  /* 模块处于错误状态：上电自测未通过，拒绝服务 */
 } pqc_status_t;
 
 typedef enum {
