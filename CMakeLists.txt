@@ -67,6 +67,10 @@ target_link_libraries(pqchsmd PRIVATE pqchsm)
 add_executable(pqchsm-cli cli/pqchsm_cli.c)
 target_link_libraries(pqchsm-cli PRIVATE pqchsm)
 
+# ---- 性能基线与热点采样靶子（§5.2）-----------------------------------------
+add_executable(pqchsm-bench tools/bench.c)
+target_link_libraries(pqchsm-bench PRIVATE pqchsm)
+
 # ---- 测试 -------------------------------------------------------------------
 enable_testing()
 
