@@ -10,6 +10,15 @@ Vivado 需要 AMD 账号且体积几十 GB，本项目的开发机上没装。
 vivado -mode batch -source syn/ooc_synth.tcl -tclargs xck26-sfvc784-2LV-c butterfly_ct
 ```
 
+可综合的顶层：`mont_reduce`、`barrett_reduce`、`butterfly_ct`、`butterfly_gs`
+（纯组合，走 `ooc_comb.xdc`）；`ntt_core`、**`keccak_f1600`**（有 clk 端口，
+走 `ooc_seq.xdc`）。
+
+`keccak_f1600` 是最值得先跑的一个：**它的资源占用直接检验"单轮迭代而不是
+24 轮展开"这个决策**。1600 个状态触发器 + 一轮组合逻辑应当在小几千 LUT 的
+量级；如果 24 轮展开，逻辑要乘 24，小器件上放不下 —— 这正是当初选单轮的理由，
+拿到综合报告就能把它从"设计判断"变成"有数字支撑的结论"。
+
 常用 part：
 
 | 板子 | part |
