@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """分层黄金向量导出
 
-绝大多数人只导出整机 KAT，结果 RTL 仿真一挂就完全无法定位。
-正确做法是**按硬件模块划分层次，每层都导出向量**：
+只导出整机 KAT 的话，RTL 仿真一挂就无法定位问题出在哪一层。
+因此**按硬件模块划分层次，每层都导出向量**：
 
   L0 算子  mont_reduce.hex   Montgomery 约减 (input, output)
   L0 算子  barrett.hex       Barrett 约减
@@ -14,7 +14,7 @@
 
 格式：每行若干个十六进制字段，`#` 开头是注释。
 **Verilog 的 $readmemh 能直接读单列文件**；多列的由 cocotb 侧解析。
-字节序在每个文件的注释头里写清楚 —— 特别强调这点，踩坑率极高。
+字节序在每个文件的注释头里写清楚 —— 这是这类向量最容易出错的地方。
 """
 from __future__ import annotations
 
@@ -354,8 +354,7 @@ def export_shake(rng: random.Random) -> None:
 def cross_check() -> None:
     """交叉验证：本模型的 Keccak 置换必须能拼出标准库的 SHAKE 结果。
 
-    这是 说的"两份独立实现输出一致才算可信"——
-    左边是自己写的置换，右边是 hashlib。
+    判据是"两份独立实现输出一致才算可信"：左边是自己写的置换，右边是 hashlib。
     """
     rate = 168  # SHAKE-128
     msg = b"cross-check"

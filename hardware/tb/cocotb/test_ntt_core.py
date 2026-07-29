@@ -123,7 +123,7 @@ async def test_ntt_inverse(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
     pairs = load_pairs("invntt.hex")
-    assert len(pairs) == 20        # 与正变换测试对称（原来只有正变换断言了条数）
+    assert len(pairs) == 20        # 与正变换测试对称：条数也要断言
     for idx, (vin, vexp) in enumerate(pairs):
         coeffs = [s16(int(x, 16)) for x in vin]
         expect = [s16(int(x, 16)) for x in vexp]

@@ -9,9 +9,9 @@
 // 寄存器语义对得上，这样 Verilator 仿真出来的核可以直接挂到 accel transport 上。
 //
 // **done 是电平不是脉冲**：置位后一直保持，直到下一次 start（或复位）才清。
-// 原来写成 1 周期脉冲，逐周期轮询的 cocotb / Verilator 桥能抓到，
-// 但 accel.h 的契约是软件"轮询 STATUS.DONE" —— 真实寄存器/AXI 轮询在任意时刻
-// 采样会**漏掉 1 周期脉冲**。将来的 AXI 包装层把它映射成 sticky 的 STATUS.DONE 即可。
+// accel.h 的契约是软件"轮询 STATUS.DONE"，而真实寄存器/AXI 轮询在任意时刻采样
+// 会**漏掉 1 周期脉冲**，因此核这一侧就要给出可锁存的电平；
+// hardware/rtl/bus 的 AXI 包装层把它映射成 sticky 的 STATUS.DONE。
 //
 // ⚠️ ML-KEM 的 NTT 只做 **7 层**（到 2 次多项式为止，不是完整 8 层）。
 // 逆变换最后要乘 f = mont^2/128 = 1441，所以 invntt(ntt(x)) ≡ x·2^16 (mod q)，
@@ -81,10 +81,9 @@ module ntt_core (
     reg signed [15:0] mem [0:255];
     assign rd_data = mem[rd_addr];
 
-    // ---- 组合算子：**例化 mont_reduce / butterfly_*，不再内联重写** ----
-    // 原来核里内联了一份 mont/barr 与 CT/GS 蝶形，而 butterfly.v / mont_reduce.v
-    // 里另有一份、只被独立 cocotb 测试用。两份实现改一处忘另一处就会漂移，
-    // 而且让"cocotb 测的到底是不是核里真正跑的那份"说不清。现在只有一份。
+    // ---- 组合算子：例化 mont_reduce / butterfly_*，核里不内联重写 ----
+    // 同一段数学只保留一处实现：cocotb 独立测的就是核里真正跑的那份，
+    // 也不会出现两份实现改一处忘另一处而漂移的情况。
     // ---- 状态机 ----
     localparam S_IDLE = 3'd0, S_RUN = 3'd1, S_SCALE = 3'd2, S_DONE = 3'd3;
 

@@ -2,9 +2,9 @@
 """NTT 的**独立预言机**
 
 【要解决的问题】
-原来 cocotb 里写的"三方一致"其实是**两方**：`vectors/rtl/*.hex` 是
-`export_vectors.py` 从 `ref_model` 生成的，向量与模型同源，
-所以 `RTL == 向量 == 模型` 实际只等价于 `RTL == ref_model`。
+cocotb 里的"三方一致"实际只有两方：`vectors/rtl/*.hex` 由
+`export_vectors.py` 从 `ref_model` 生成，向量与模型同源，
+因此 `RTL == 向量 == 模型` 等价于 `RTL == ref_model`。
 一张"自洽但错误"的旋转因子表 / 层序，照样能让往返测试通过。
 
 【两道独立校验】

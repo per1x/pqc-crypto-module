@@ -11,8 +11,8 @@
 // 每一步的位宽都显式写出：Verilator 是 2-state，隐式截断会**真的算错**，
 // 而 Icarus 的 4-state 可能"碰巧"对上。两个仿真器都跑就是为了逼出这类差异。
 //
-// **本模块是 Montgomery 约减的唯一实现** —— ntt_core 例化它，不再自己内联一份
-// （原来两份独立实现，改一处忘另一处就会漂移）。
+// **本模块是 Montgomery 约减的唯一实现** —— ntt_core 例化它，核里不再内联一份，
+// 以免同一段数学存在两处实现而互相漂移。
 `default_nettype none
 
 module mont_reduce (

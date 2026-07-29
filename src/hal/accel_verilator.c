@@ -6,8 +6,8 @@
  * 已实现的模式：NTT_FWD / NTT_INV（hardware/rtl/mlkem/ntt_core.v）、
  *               KECCAK_F1600（hardware/rtl/keccak/keccak_f1600.v）。
  * 其余模式置 STATUS.ERR + ERRCODE=3（"该模式未实现"），
- * 上层会收到 PQC_ERR_UNSUPPORTED —— 完整的 ML-KEM/ML-DSA 核属于
- * –4，不是这一层能变出来的。
+ * 上层会收到 PQC_ERR_UNSUPPORTED —— RTL 侧没有完整的 ML-KEM/ML-DSA 核，
+ * 这一层不会替它变出来。
  */
 #include "pqchsm/accel.h"
 
@@ -117,8 +117,8 @@ static void vr_write_reg(uint32_t off, uint32_t val)
 		return;
 	}
 
-	/* 其余模式：RTL 侧还没有对应的核。**明确报"未实现"而不是偷偷回落软件** ——
-	 * 否则"跑通了"就变成了假象。完整的 ML-KEM/ML-DSA 核是 –4 的工作。 */
+	/* 其余模式：RTL 侧没有对应的核。**明确报"未实现"而不是偷偷回落软件** ——
+	 * 否则"跑通了"就变成了假象。 */
 	g_regs[ACCEL_REG_ERRCODE / 4] = 3;
 	g_regs[ACCEL_REG_STATUS / 4] = ACCEL_ST_DONE | ACCEL_ST_ERR;
 }

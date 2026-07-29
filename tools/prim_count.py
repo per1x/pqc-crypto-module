@@ -77,7 +77,7 @@ def sponge(msg: bytes, rate: int, suffix: int, outlen: int) -> bytes:
 class IncrementalShake:
     """可增量挤压的 SHAKE —— **这一条对计数的正确性是决定性的**。
 
-    ntt_oracle.sample_ntt 原来是"块数不够就把 digest(168*n) 从头再算一遍"，
+    ntt_oracle.sample_ntt 的写法是"块数不够就把 digest(168*n) 从头再算一遍"，
     写着简单，但那样每次重试都要重新吸收一遍，置换次数被凭空放大：
     一个需要 3 块的元素会被数成 1+2+3=6 次置换，实际只要 3 次。
     真实的 ML-KEM 实现（以及硬件）都是**吸收一次、按需继续挤压**，
