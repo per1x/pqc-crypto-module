@@ -140,6 +140,9 @@ add_test(NAME inject        COMMAND test_inject)
 add_test(NAME p11           COMMAND test_p11)
 
 # pkcs11-tool 冒烟 + SoftHSMv2 行为对比。没装 OpenSC 时脚本自己 SKIP（退出 0）。
+# RTL 对拍（无 cocotb/iverilog 时脚本自己 SKIP）
+add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
+
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
          ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME p11_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/p11_smoke.sh

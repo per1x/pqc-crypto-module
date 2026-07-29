@@ -1,11 +1,15 @@
 build/
 build-asan/
 build-tsan/
+.venv-rtl/
+tb/cocotb/sim_build/
+tb/cocotb/results.xml
 compile_commands.json
 
 # 向量是可复现的派生物（tools/fetch_vectors.sh 钉死了 ACVP commit），
 # 共 13 MB 原始 JSON + 4.6 MB 展平结果，不入库。
 vectors/acvp/
 vectors/*.kat
+vectors/rtl/
 
 .DS_Store
