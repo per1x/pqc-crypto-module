@@ -16,6 +16,12 @@ void pqc_secure_zero(void *p, size_t n);
 /* 常量时间比较：相等返回 1。用于 PIN 校验（§7.3）与 tag 比对。 */
 int pqc_ct_equal(const void *a, const void *b, size_t n);
 
+/* 存放密钥材料的缓冲：分配后尽力 mlock（防换页到磁盘），
+ * 释放前必定清零。mlock 失败不算错误（容器/无权限环境常见），
+ * 但清零永远执行 —— 对应 Phase 5 的"mlock + 用后清零"过渡性妥协。 */
+void *pqc_secure_alloc(size_t n);
+void  pqc_secure_free(void *p, size_t n);
+
 /* hex → bytes。返回写入字节数，出错返回 -1（奇数长度 / 非法字符 / 缓冲不足）。
  * hex_len 为 SIZE_MAX 时按 strlen 计算。 */
 long pqc_hex_decode(const char *hex, size_t hex_len, uint8_t *out, size_t out_cap);

@@ -28,6 +28,11 @@ add_library(pqchsm
   src/crypto/pqc.c
   src/crypto/pqc_liboqs.c
   src/crypto/oqs_rng.c
+  src/crypto/kdf.c
+  src/crypto/kdr.c
+  src/slot/fsm.c
+  src/slot/meta.c
+  src/slot/slot.c
   src/util/util.c
   src/util/kat.c
 )
@@ -54,12 +59,20 @@ pqchsm_test(test_util      tests/unit/test_util.c)
 pqchsm_test(test_kat_parse tests/unit/test_kat_parse.c)
 pqchsm_test(test_pqc_meta  tests/unit/test_pqc_meta.c)
 pqchsm_test(test_pqc_roundtrip tests/unit/test_pqc_roundtrip.c)
+pqchsm_test(test_kdf       tests/unit/test_kdf.c)
+pqchsm_test(test_slot_fsm  tests/unit/test_slot_fsm.c)
+pqchsm_test(test_slot_meta tests/unit/test_slot_meta.c)
+pqchsm_test(test_slot      tests/unit/test_slot.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
 add_test(NAME util          COMMAND test_util)
 add_test(NAME kat_parse     COMMAND test_kat_parse)
 add_test(NAME pqc_meta      COMMAND test_pqc_meta)
 add_test(NAME pqc_roundtrip COMMAND test_pqc_roundtrip)
+add_test(NAME kdf           COMMAND test_kdf)
+add_test(NAME slot_fsm      COMMAND test_slot_fsm)
+add_test(NAME slot_meta     COMMAND test_slot_meta)
+add_test(NAME slot          COMMAND test_slot)
 
 # 每类 ACVP 向量一个 ctest 用例，失败时一眼看出是哪一类
 foreach(v mlkem_keygen mlkem_encaps mlkem_decaps mldsa_keygen mldsa_siggen mldsa_sigver)

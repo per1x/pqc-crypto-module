@@ -1,7 +1,9 @@
 #include "pqchsm/util.h"
 
 #include <openssl/crypto.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 void pqc_secure_zero(void *p, size_t n)
 {
@@ -21,6 +23,32 @@ int pqc_ct_equal(const void *a, const void *b, size_t n)
 		diff |= (uint8_t)(x[i] ^ y[i]);
 	}
 	return diff == 0;
+}
+
+void *pqc_secure_alloc(size_t n)
+{
+	if (n == 0) {
+		return NULL;
+	}
+	void *p = malloc(n);
+	if (!p) {
+		return NULL;
+	}
+	/* best-effort：macOS/容器里常因 RLIMIT_MEMLOCK 失败，不作为错误。
+	 * 真正不可妥协的是 free 时的清零。 */
+	(void)mlock(p, n);
+	memset(p, 0, n);
+	return p;
+}
+
+void pqc_secure_free(void *p, size_t n)
+{
+	if (!p) {
+		return;
+	}
+	pqc_secure_zero(p, n);
+	(void)munlock(p, n);
+	free(p);
 }
 
 static int hexval(char c)

@@ -1,0 +1,961 @@
+/* slot.c —— 槽位管理器实现（路线图 §7，Phase 5）
+ *
+ * 三条贯穿全文件的规矩：
+ *   1. 任何状态变化都必须经 slot_fsm_next()，非法转移返回 HSM_ERR_BAD_STATE；
+ *   2. 任何元数据变化后立刻重新盖 KMAC 标签；任何读取前先验标签（§7.2）；
+ *   3. 明文私钥只在 pqc_* 调用的那一瞬间存在于本文件的栈/堆缓冲里，
+ *      用完即 pqc_secure_zero —— 对外接口一律句柄进句柄出。
+ */
+#include "pqchsm/slot.h"
+
+#include "meta.h"
+#include "pqchsm/kdr.h"
+#include "pqchsm/util.h"
+
+#include <openssl/rand.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define MAX_SESSIONS 16
+#define PIN_SALT_LEN 16
+#define VERIFIER_LEN 32
+
+typedef struct {
+	int           open;
+	hsm_slot_id_t slot;
+	hsm_role_t    role;
+	uint32_t      gen;
+} session_t;
+
+typedef struct {
+	slot_meta_t  meta;
+	uint8_t      meta_tag[SLOT_META_TAG_LEN];
+	slot_state_t pre_lock;
+
+	uint8_t so_salt[PIN_SALT_LEN],   so_verifier[VERIFIER_LEN];
+	uint8_t user_salt[PIN_SALT_LEN], user_verifier[VERIFIER_LEN];
+	int     has_so_pin, has_user_pin;
+
+	uint8_t *pk;   size_t pk_len;
+	uint8_t *sk;   size_t sk_len;     /* SEED_STORAGE 策略下恒为 NULL */
+	uint8_t  seed[64]; size_t seed_len; int has_seed;
+} slot_t;
+
+struct hsm_token {
+	size_t    n_slots;
+	slot_t   *slots;
+	session_t sessions[MAX_SESSIONS];
+	uint32_t  session_gen;
+};
+
+const char *hsm_strerror(hsm_status_t st)
+{
+	switch (st) {
+	case HSM_OK:                 return "ok";
+	case HSM_ERR_BAD_ARG:        return "bad argument";
+	case HSM_ERR_BAD_STATE:      return "illegal state transition";
+	case HSM_ERR_NOT_AUTHORIZED: return "not authorized";
+	case HSM_ERR_PIN_INCORRECT:  return "incorrect PIN";
+	case HSM_ERR_PIN_LOCKED:     return "slot locked";
+	case HSM_ERR_BAD_HANDLE:     return "invalid handle";
+	case HSM_ERR_USAGE_DENIED:   return "key usage denied";
+	case HSM_ERR_POLICY:         return "policy denied";
+	case HSM_ERR_INTEGRITY:      return "metadata integrity failure";
+	case HSM_ERR_SLOT_BUSY:      return "slot busy";
+	case HSM_ERR_CRYPTO:         return "crypto failure";
+	case HSM_ERR_NOMEM:          return "out of memory";
+	case HSM_ERR_FULL:           return "no free session";
+	}
+	return "unknown";
+}
+
+/* ---- 内部辅助 ----------------------------------------------------------- */
+
+static uint64_t now_secs(void)
+{
+	return (uint64_t)time(NULL);
+}
+
+static hsm_status_t reseal(slot_t *s)
+{
+	return slot_meta_seal(&s->meta, s->meta_tag) == 0 ? HSM_OK : HSM_ERR_CRYPTO;
+}
+
+static hsm_status_t check_integrity(const slot_t *s)
+{
+	return slot_meta_verify(&s->meta, s->meta_tag) == 0 ? HSM_OK : HSM_ERR_INTEGRITY;
+}
+
+/* 走状态机；PIN_LOCKOUT 时记下锁定前状态，SO_UNLOCK 时按其恢复 */
+static hsm_status_t fsm_apply(slot_t *s, slot_event_t ev)
+{
+	slot_state_t nxt = slot_fsm_next(s->meta.state, ev);
+	if (nxt == SLOT_ST_INVALID) {
+		return HSM_ERR_BAD_STATE;
+	}
+	if (ev == SLOT_EV_PIN_LOCKOUT) {
+		s->pre_lock = s->meta.state;
+	} else if (ev == SLOT_EV_SO_UNLOCK) {
+		nxt = slot_fsm_unlock_target(s->pre_lock);
+	}
+	s->meta.state = nxt;
+	return HSM_OK;
+}
+
+static void wipe_key_material(slot_t *s)
+{
+	if (s->pk) {
+		pqc_secure_free(s->pk, s->pk_len);
+		s->pk = NULL;
+	}
+	if (s->sk) {
+		pqc_secure_free(s->sk, s->sk_len);
+		s->sk = NULL;
+	}
+	s->pk_len = s->sk_len = 0;
+	pqc_secure_zero(s->seed, sizeof(s->seed));
+	s->seed_len = 0;
+	s->has_seed = 0;
+}
+
+static void wipe_pins(slot_t *s)
+{
+	pqc_secure_zero(s->so_salt, sizeof(s->so_salt));
+	pqc_secure_zero(s->so_verifier, sizeof(s->so_verifier));
+	pqc_secure_zero(s->user_salt, sizeof(s->user_salt));
+	pqc_secure_zero(s->user_verifier, sizeof(s->user_verifier));
+	s->has_so_pin = s->has_user_pin = 0;
+}
+
+static hsm_status_t resolve_session(hsm_token_t *tok, hsm_session_t sess, session_t **out)
+{
+	if (!tok || sess == 0) {
+		return HSM_ERR_BAD_ARG;
+	}
+	uint32_t idx = (uint32_t)(sess & 0xffffffffu);
+	uint32_t gen = (uint32_t)(sess >> 32);
+	if (idx == 0 || idx > MAX_SESSIONS) {
+		return HSM_ERR_BAD_ARG;
+	}
+	session_t *s = &tok->sessions[idx - 1];
+	if (!s->open || s->gen != gen) {
+		return HSM_ERR_BAD_ARG;
+	}
+	*out = s;
+	return HSM_OK;
+}
+
+/* 句柄 = (generation << 32) | (slot_id + 1)。
+ * destroy/zeroize 递增 generation，旧句柄立刻变成 HSM_ERR_BAD_HANDLE。 */
+static hsm_handle_t make_handle(const slot_t *s)
+{
+	return ((hsm_handle_t)s->meta.generation << 32) | (hsm_handle_t)(s->meta.slot_id + 1);
+}
+
+static hsm_status_t resolve_handle(hsm_token_t *tok, hsm_handle_t h, slot_t **out)
+{
+	if (!tok || h == HSM_INVALID_HANDLE) {
+		return HSM_ERR_BAD_HANDLE;
+	}
+	uint32_t sid = (uint32_t)(h & 0xffffffffu);
+	uint32_t gen = (uint32_t)(h >> 32);
+	if (sid == 0 || sid > tok->n_slots) {
+		return HSM_ERR_BAD_HANDLE;
+	}
+	slot_t *s = &tok->slots[sid - 1];
+	if (s->meta.generation != gen) {
+		return HSM_ERR_BAD_HANDLE;
+	}
+	if (s->meta.state != SLOT_ST_LOADED && s->meta.state != SLOT_ST_IN_USE) {
+		return HSM_ERR_BAD_HANDLE;
+	}
+	hsm_status_t st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	*out = s;
+	return HSM_OK;
+}
+
+static hsm_status_t require_role(hsm_token_t *tok, hsm_session_t sess,
+                                 hsm_role_t need, session_t **out)
+{
+	session_t *s = NULL;
+	hsm_status_t st = resolve_session(tok, sess, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (s->role != need) {
+		return HSM_ERR_NOT_AUTHORIZED;   /* 默认拒绝（§7.3） */
+	}
+	*out = s;
+	return HSM_OK;
+}
+
+/* §7.2：用途互斥，禁止一钥多用 —— 位必须落在该算法种类的允许集合内 */
+static hsm_status_t validate_usage(pqc_alg_t alg, uint32_t usage)
+{
+	const pqc_alg_info_t *info = pqc_alg_info(alg);
+	if (!info || usage == 0) {
+		return HSM_ERR_BAD_ARG;
+	}
+	uint32_t allowed = (info->kind == PQC_KIND_KEM)
+	                   ? (uint32_t)(KEY_USAGE_ENCAP | KEY_USAGE_DECAP)
+	                   : (uint32_t)(KEY_USAGE_SIGN | KEY_USAGE_VERIFY);
+	if (usage & ~allowed) {
+		return HSM_ERR_USAGE_DENIED;
+	}
+	return HSM_OK;
+}
+
+/* PIN 验证值 = KDF(KDR, slot_id ‖ role ‖ salt ‖ pin)。
+ * 不存明文、不存可离线爆破的哈希 —— 没有 KDR 就无法离线枚举 PIN。 */
+static int pin_verifier(uint32_t slot_id, hsm_role_t role, const uint8_t *salt,
+                        const char *pin, uint8_t out[VERIFIER_LEN])
+{
+	uint8_t buf[4 + 4 + PIN_SALT_LEN + HSM_PIN_MAX_LEN];
+	size_t pin_len = strlen(pin);
+	if (pin_len > HSM_PIN_MAX_LEN) {
+		return -1;
+	}
+	size_t n = 0;
+	for (int i = 0; i < 4; i++) {
+		buf[n++] = (uint8_t)(slot_id >> (8 * i));
+	}
+	uint32_t r = (uint32_t)role;
+	for (int i = 0; i < 4; i++) {
+		buf[n++] = (uint8_t)(r >> (8 * i));
+	}
+	memcpy(buf + n, salt, PIN_SALT_LEN);
+	n += PIN_SALT_LEN;
+	memcpy(buf + n, pin, pin_len);
+	n += pin_len;
+
+	int rc = pqc_kdr_derive("pqc-hsm/pin-verifier", buf, n, out, VERIFIER_LEN);
+	pqc_secure_zero(buf, sizeof(buf));
+	return rc;
+}
+
+static int valid_pin(const char *pin)
+{
+	if (!pin) {
+		return 0;
+	}
+	size_t n = strlen(pin);
+	return n >= HSM_PIN_MIN_LEN && n <= HSM_PIN_MAX_LEN;
+}
+
+/* ---- Token 生命周期 ----------------------------------------------------- */
+
+hsm_token_t *hsm_token_new(size_t n_slots)
+{
+	if (n_slots == 0 || n_slots > 4096) {
+		return NULL;
+	}
+	hsm_token_t *tok = calloc(1, sizeof(*tok));
+	if (!tok) {
+		return NULL;
+	}
+	tok->slots = calloc(n_slots, sizeof(slot_t));
+	if (!tok->slots) {
+		free(tok);
+		return NULL;
+	}
+	tok->n_slots = n_slots;
+	for (size_t i = 0; i < n_slots; i++) {
+		slot_t *s = &tok->slots[i];
+		s->meta.version  = SLOT_META_VERSION;
+		s->meta.slot_id  = (uint32_t)i;
+		s->meta.alg      = PQC_ALG_NONE;
+		s->meta.state    = SLOT_ST_UNINIT;
+		s->pre_lock      = SLOT_ST_EMPTY;
+		if (reseal(s) != HSM_OK) {
+			hsm_token_free(tok);
+			return NULL;
+		}
+	}
+	return tok;
+}
+
+void hsm_token_free(hsm_token_t *tok)
+{
+	if (!tok) {
+		return;
+	}
+	if (tok->slots) {
+		for (size_t i = 0; i < tok->n_slots; i++) {
+			wipe_key_material(&tok->slots[i]);
+			wipe_pins(&tok->slots[i]);
+		}
+		pqc_secure_zero(tok->slots, tok->n_slots * sizeof(slot_t));
+		free(tok->slots);
+	}
+	pqc_secure_zero(tok, sizeof(*tok));
+	free(tok);
+}
+
+size_t hsm_token_slot_count(const hsm_token_t *tok)
+{
+	return tok ? tok->n_slots : 0;
+}
+
+static hsm_status_t get_slot(hsm_token_t *tok, hsm_slot_id_t id, slot_t **out)
+{
+	if (!tok || id >= tok->n_slots) {
+		return HSM_ERR_BAD_ARG;
+	}
+	*out = &tok->slots[id];
+	return HSM_OK;
+}
+
+hsm_status_t hsm_slot_get_meta(hsm_token_t *tok, hsm_slot_id_t id, slot_meta_t *out)
+{
+	slot_t *s = NULL;
+	hsm_status_t st = get_slot(tok, id, &s);
+	if (st != HSM_OK || !out) {
+		return st == HSM_OK ? HSM_ERR_BAD_ARG : st;
+	}
+	st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	*out = s->meta;
+	return HSM_OK;
+}
+
+hsm_status_t hsm_slot_get_state(hsm_token_t *tok, hsm_slot_id_t id, slot_state_t *out)
+{
+	slot_t *s = NULL;
+	hsm_status_t st = get_slot(tok, id, &s);
+	if (st != HSM_OK || !out) {
+		return st == HSM_OK ? HSM_ERR_BAD_ARG : st;
+	}
+	st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	*out = s->meta.state;
+	return HSM_OK;
+}
+
+hsm_status_t hsm_slot_meta_tag(hsm_token_t *tok, hsm_slot_id_t id, uint8_t out[32])
+{
+	slot_t *s = NULL;
+	hsm_status_t st = get_slot(tok, id, &s);
+	if (st != HSM_OK || !out) {
+		return st == HSM_OK ? HSM_ERR_BAD_ARG : st;
+	}
+	memcpy(out, s->meta_tag, SLOT_META_TAG_LEN);
+	return HSM_OK;
+}
+
+hsm_status_t hsm_slot_force_state(hsm_token_t *tok, hsm_slot_id_t id, slot_state_t want)
+{
+	slot_t *s = NULL;
+	hsm_status_t st = get_slot(tok, id, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (want < 0 || want >= SLOT_ST__COUNT) {
+		return HSM_ERR_BAD_ARG;
+	}
+	s->meta.state = want;
+	return reseal(s);
+}
+
+/* ---- 初始化与 PIN ------------------------------------------------------- */
+
+hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t id,
+                                 const char *label, const char *so_pin)
+{
+	slot_t *s = NULL;
+	hsm_status_t st = get_slot(tok, id, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (!label || !valid_pin(so_pin)) {
+		return HSM_ERR_BAD_ARG;
+	}
+	st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	st = fsm_apply(s, SLOT_EV_INIT_TOKEN);
+	if (st != HSM_OK) {
+		return st;
+	}
+
+	if (RAND_bytes(s->so_salt, PIN_SALT_LEN) != 1) {
+		return HSM_ERR_CRYPTO;
+	}
+	if (pin_verifier(s->meta.slot_id, HSM_ROLE_SO, s->so_salt, so_pin, s->so_verifier) != 0) {
+		return HSM_ERR_CRYPTO;
+	}
+	s->has_so_pin = 1;
+
+	memset(s->meta.label, 0, SLOT_LABEL_MAX);
+	strncpy(s->meta.label, label, SLOT_LABEL_MAX - 1);
+	s->meta.created_at     = now_secs();
+	s->meta.so_pin_fails   = 0;
+	s->meta.user_pin_fails = 0;
+	s->meta.use_count      = 0;
+	return reseal(s);
+}
+
+hsm_status_t hsm_slot_set_user_pin(hsm_token_t *tok, hsm_session_t sess, const char *user_pin)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = require_role(tok, sess, HSM_ROLE_SO, &sn);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (!valid_pin(user_pin)) {
+		return HSM_ERR_BAD_ARG;
+	}
+	slot_t *s = &tok->slots[sn->slot];
+	st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (s->meta.state == SLOT_ST_UNINIT) {
+		return HSM_ERR_BAD_STATE;
+	}
+	if (RAND_bytes(s->user_salt, PIN_SALT_LEN) != 1) {
+		return HSM_ERR_CRYPTO;
+	}
+	if (pin_verifier(s->meta.slot_id, HSM_ROLE_USER, s->user_salt, user_pin,
+	                 s->user_verifier) != 0) {
+		return HSM_ERR_CRYPTO;
+	}
+	s->has_user_pin = 1;
+	s->meta.user_pin_fails = 0;
+	return reseal(s);
+}
+
+/* ---- 会话 --------------------------------------------------------------- */
+
+hsm_status_t hsm_session_open(hsm_token_t *tok, hsm_slot_id_t id, hsm_session_t *out)
+{
+	slot_t *s = NULL;
+	hsm_status_t st = get_slot(tok, id, &s);
+	if (st != HSM_OK || !out) {
+		return st == HSM_OK ? HSM_ERR_BAD_ARG : st;
+	}
+	for (int i = 0; i < MAX_SESSIONS; i++) {
+		if (!tok->sessions[i].open) {
+			tok->sessions[i].open = 1;
+			tok->sessions[i].slot = id;
+			tok->sessions[i].role = HSM_ROLE_PUBLIC;
+			tok->sessions[i].gen  = ++tok->session_gen;
+			*out = ((hsm_session_t)tok->sessions[i].gen << 32) | (hsm_session_t)(i + 1);
+			return HSM_OK;
+		}
+	}
+	return HSM_ERR_FULL;
+}
+
+hsm_status_t hsm_session_close(hsm_token_t *tok, hsm_session_t sess)
+{
+	session_t *s = NULL;
+	hsm_status_t st = resolve_session(tok, sess, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	memset(s, 0, sizeof(*s));
+	return HSM_OK;
+}
+
+hsm_status_t hsm_session_role(hsm_token_t *tok, hsm_session_t sess, hsm_role_t *out)
+{
+	session_t *s = NULL;
+	hsm_status_t st = resolve_session(tok, sess, &s);
+	if (st != HSM_OK || !out) {
+		return st == HSM_OK ? HSM_ERR_BAD_ARG : st;
+	}
+	*out = s->role;
+	return HSM_OK;
+}
+
+hsm_status_t hsm_session_logout(hsm_token_t *tok, hsm_session_t sess)
+{
+	session_t *s = NULL;
+	hsm_status_t st = resolve_session(tok, sess, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	s->role = HSM_ROLE_PUBLIC;
+	return HSM_OK;
+}
+
+hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
+                               hsm_role_t role, const char *pin)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = resolve_session(tok, sess, &sn);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (!pin || (role != HSM_ROLE_SO && role != HSM_ROLE_USER)) {
+		return HSM_ERR_BAD_ARG;
+	}
+	slot_t *s = &tok->slots[sn->slot];
+	st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (s->meta.state == SLOT_ST_UNINIT) {
+		return HSM_ERR_BAD_STATE;     /* 还没有 PIN 可验 */
+	}
+	/* 槽位锁定时 User 一律拒绝；SO 仍可登录 —— 否则没人能解锁（§7.3） */
+	if (s->meta.state == SLOT_ST_LOCKED && role == HSM_ROLE_USER) {
+		return HSM_ERR_PIN_LOCKED;
+	}
+
+	const uint8_t *salt = (role == HSM_ROLE_SO) ? s->so_salt : s->user_salt;
+	const uint8_t *want = (role == HSM_ROLE_SO) ? s->so_verifier : s->user_verifier;
+	int has = (role == HSM_ROLE_SO) ? s->has_so_pin : s->has_user_pin;
+	if (!has) {
+		return HSM_ERR_NOT_AUTHORIZED;
+	}
+
+	uint8_t got[VERIFIER_LEN];
+	if (pin_verifier(s->meta.slot_id, role, salt, pin, got) != 0) {
+		return HSM_ERR_CRYPTO;
+	}
+	int ok = pqc_ct_equal(got, want, VERIFIER_LEN);
+	pqc_secure_zero(got, sizeof(got));
+
+	if (ok) {
+		if (role == HSM_ROLE_SO) {
+			s->meta.so_pin_fails = 0;
+		} else {
+			s->meta.user_pin_fails = 0;
+		}
+		sn->role = role;
+		return reseal(s);
+	}
+
+	/* 失败计数持久化在元数据里（并进 KMAC），断电重置绕不过去（§7.3） */
+	if (role == HSM_ROLE_SO) {
+		/* SO 失败只计数不锁槽位：锁了就没人能解锁，设备直接变砖。
+		 * SO 凭证的兜底恢复归 §8.4 的 Shamir M-of-N 仪式管（第 4 步）。 */
+		s->meta.so_pin_fails++;
+		(void)reseal(s);
+		return HSM_ERR_PIN_INCORRECT;
+	}
+	s->meta.user_pin_fails++;
+	if (s->meta.user_pin_fails >= HSM_PIN_MAX_FAILS) {
+		hsm_status_t lst = fsm_apply(s, SLOT_EV_PIN_LOCKOUT);
+		(void)reseal(s);
+		return lst == HSM_OK ? HSM_ERR_PIN_LOCKED : HSM_ERR_PIN_INCORRECT;
+	}
+	(void)reseal(s);
+	return HSM_ERR_PIN_INCORRECT;
+}
+
+/* ---- 对象操作 ----------------------------------------------------------- */
+
+static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32_t policy,
+                                const uint8_t *seed, size_t seed_len, hsm_handle_t *out)
+{
+	const pqc_alg_info_t *info = pqc_alg_info(alg);
+	hsm_status_t st = validate_usage(alg, usage);
+	if (st != HSM_OK) {
+		return st;
+	}
+	uint8_t *pk = pqc_secure_alloc(info->pk_len);
+	uint8_t *sk = pqc_secure_alloc(info->sk_len);
+	if (!pk || !sk) {
+		pqc_secure_free(pk, info->pk_len);
+		pqc_secure_free(sk, info->sk_len);
+		return HSM_ERR_NOMEM;
+	}
+
+	uint8_t local_seed[64];
+	size_t  local_seed_len = info->seed_len;
+	if (seed) {
+		if (seed_len != info->seed_len) {
+			pqc_secure_free(pk, info->pk_len);
+			pqc_secure_free(sk, info->sk_len);
+			return HSM_ERR_BAD_ARG;
+		}
+		memcpy(local_seed, seed, seed_len);
+	} else if (RAND_bytes(local_seed, (int)local_seed_len) != 1) {
+		pqc_secure_free(pk, info->pk_len);
+		pqc_secure_free(sk, info->sk_len);
+		return HSM_ERR_CRYPTO;
+	}
+
+	/* 一律走种子生成：这样"生成"和"由种子装载"是同一条代码路径，
+	 * §7.6 的种子存储策略才不会成为一条没人走的旁路。 */
+	pqc_status_t cst = pqc_keypair_from_seed(alg, local_seed, local_seed_len, pk, sk);
+	if (cst != PQC_OK) {
+		pqc_secure_zero(local_seed, sizeof(local_seed));
+		pqc_secure_free(pk, info->pk_len);
+		pqc_secure_free(sk, info->sk_len);
+		return HSM_ERR_CRYPTO;
+	}
+
+	wipe_key_material(s);
+	s->pk = pk;
+	s->pk_len = info->pk_len;
+
+	if (policy & SLOT_POLICY_SEED_STORAGE) {
+		/* §7.6：只留种子，私钥用时再展开。这里立刻把刚算出的 sk 清掉，
+		 * 证明后续签名确实是从种子重展开来的，而不是偷偷留了副本。 */
+		memcpy(s->seed, local_seed, local_seed_len);
+		s->seed_len = local_seed_len;
+		s->has_seed = 1;
+		pqc_secure_free(sk, info->sk_len);
+		s->sk = NULL;
+		s->sk_len = 0;
+	} else {
+		s->sk = sk;
+		s->sk_len = info->sk_len;
+	}
+	pqc_secure_zero(local_seed, sizeof(local_seed));
+
+	s->meta.alg          = alg;
+	s->meta.usage        = usage;
+	s->meta.policy       = policy;
+	s->meta.use_count    = 0;
+	s->meta.last_used_at = 0;
+	hsm_status_t rs = reseal(s);
+	if (rs != HSM_OK) {
+		return rs;
+	}
+	if (out) {
+		*out = make_handle(s);
+	}
+	return HSM_OK;
+}
+
+static hsm_status_t create_object(hsm_token_t *tok, hsm_session_t sess,
+                                  pqc_alg_t alg, uint32_t usage, uint32_t policy,
+                                  const uint8_t *seed, size_t seed_len,
+                                  slot_event_t ev, hsm_handle_t *out)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = require_role(tok, sess, HSM_ROLE_USER, &sn);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (!out || !pqc_alg_info(alg)) {
+		return HSM_ERR_BAD_ARG;
+	}
+	slot_t *s = &tok->slots[sn->slot];
+	st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	slot_state_t saved = s->meta.state;
+	st = fsm_apply(s, ev);
+	if (st != HSM_OK) {
+		return st;
+	}
+	st = install_key(s, alg, usage, policy, seed, seed_len, out);
+	if (st != HSM_OK) {
+		s->meta.state = saved;    /* 装载失败必须回滚，不能停在 LOADED 却没有密钥 */
+		(void)reseal(s);
+	}
+	return st;
+}
+
+hsm_status_t hsm_slot_generate(hsm_token_t *tok, hsm_session_t sess,
+                               pqc_alg_t alg, uint32_t usage, uint32_t policy,
+                               hsm_handle_t *out)
+{
+	return create_object(tok, sess, alg, usage, policy, NULL, 0, SLOT_EV_GENERATE, out);
+}
+
+hsm_status_t hsm_slot_load_seed(hsm_token_t *tok, hsm_session_t sess,
+                                pqc_alg_t alg, uint32_t usage, uint32_t policy,
+                                const uint8_t *seed, size_t seed_len, hsm_handle_t *out)
+{
+	const pqc_alg_info_t *info = pqc_alg_info(alg);
+	/* 便宜的参数校验放在状态机之前：不该因为一个长度写错的调用
+	 * 就去动槽位状态（哪怕后面会回滚）。 */
+	if (!seed || !info || seed_len != info->seed_len) {
+		return HSM_ERR_BAD_ARG;
+	}
+	return create_object(tok, sess, alg, usage, policy, seed, seed_len, SLOT_EV_LOAD, out);
+}
+
+hsm_status_t hsm_object_public_key(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t h,
+                                   uint8_t *out, size_t cap, size_t *out_len)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = resolve_session(tok, sess, &sn);   /* 公钥不要求登录 */
+	if (st != HSM_OK) {
+		return st;
+	}
+	slot_t *s = NULL;
+	st = resolve_handle(tok, h, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (sn->slot != s->meta.slot_id) {
+		return HSM_ERR_BAD_HANDLE;   /* 会话不能操作别的槽位 */
+	}
+	if (!out || !out_len || cap < s->pk_len) {
+		return HSM_ERR_BAD_ARG;
+	}
+	memcpy(out, s->pk, s->pk_len);
+	*out_len = s->pk_len;
+	return HSM_OK;
+}
+
+/* 取出可用的私钥：普通槽位直接返回内部缓冲；SEED_STORAGE 槽位现场重展开。
+ * *tmp 非 NULL 时调用方负责 pqc_secure_free(*tmp, tmp_len)。 */
+static hsm_status_t borrow_secret(slot_t *s, const uint8_t **sk_out,
+                                  uint8_t **tmp, size_t *tmp_len)
+{
+	*tmp = NULL;
+	*tmp_len = 0;
+	if (s->sk) {
+		*sk_out = s->sk;
+		return HSM_OK;
+	}
+	if (!s->has_seed) {
+		return HSM_ERR_BAD_STATE;
+	}
+	const pqc_alg_info_t *info = pqc_alg_info(s->meta.alg);
+	uint8_t *pk = pqc_secure_alloc(info->pk_len);
+	uint8_t *sk = pqc_secure_alloc(info->sk_len);
+	if (!pk || !sk) {
+		pqc_secure_free(pk, info->pk_len);
+		pqc_secure_free(sk, info->sk_len);
+		return HSM_ERR_NOMEM;
+	}
+	pqc_status_t cst = pqc_keypair_from_seed(s->meta.alg, s->seed, s->seed_len, pk, sk);
+	pqc_secure_free(pk, info->pk_len);
+	if (cst != PQC_OK) {
+		pqc_secure_free(sk, info->sk_len);
+		return HSM_ERR_CRYPTO;
+	}
+	*sk_out = sk;
+	*tmp = sk;
+	*tmp_len = info->sk_len;
+	return HSM_OK;
+}
+
+/* 所有用密钥的操作共用的外壳：ACL → USE_BEGIN → 运算 → USE_END → 计数 → 重盖标签 */
+static hsm_status_t with_key(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t h,
+                             uint32_t need_usage, slot_t **slot_out,
+                             const uint8_t **sk_out, uint8_t **tmp, size_t *tmp_len)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = require_role(tok, sess, HSM_ROLE_USER, &sn);
+	if (st != HSM_OK) {
+		return st;
+	}
+	slot_t *s = NULL;
+	st = resolve_handle(tok, h, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (sn->slot != s->meta.slot_id) {
+		return HSM_ERR_BAD_HANDLE;
+	}
+	if (!(s->meta.usage & need_usage)) {
+		return HSM_ERR_USAGE_DENIED;
+	}
+	st = fsm_apply(s, SLOT_EV_USE_BEGIN);
+	if (st != HSM_OK) {
+		return st;
+	}
+	st = borrow_secret(s, sk_out, tmp, tmp_len);
+	if (st != HSM_OK) {
+		(void)fsm_apply(s, SLOT_EV_USE_END);
+		return st;
+	}
+	*slot_out = s;
+	return HSM_OK;
+}
+
+static hsm_status_t finish_key(slot_t *s, uint8_t *tmp, size_t tmp_len, hsm_status_t op_st)
+{
+	if (tmp) {
+		pqc_secure_free(tmp, tmp_len);   /* 重展开的私钥用后即清（§8.7） */
+	}
+	(void)fsm_apply(s, SLOT_EV_USE_END);
+	if (op_st == HSM_OK) {
+		s->meta.use_count++;
+		s->meta.last_used_at = now_secs();
+	}
+	hsm_status_t rs = reseal(s);
+	return op_st != HSM_OK ? op_st : rs;
+}
+
+hsm_status_t hsm_object_sign(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t h,
+                             const uint8_t *msg, size_t msg_len,
+                             const uint8_t *ctx, size_t ctx_len,
+                             uint8_t *sig, size_t cap, size_t *sig_len)
+{
+	slot_t *s = NULL;
+	const uint8_t *sk = NULL;
+	uint8_t *tmp = NULL;
+	size_t tmp_len = 0;
+
+	hsm_status_t st = with_key(tok, sess, h, KEY_USAGE_SIGN, &s, &sk, &tmp, &tmp_len);
+	if (st != HSM_OK) {
+		return st;
+	}
+	const pqc_alg_info_t *info = pqc_alg_info(s->meta.alg);
+	hsm_status_t op = HSM_OK;
+	if (!sig || !sig_len || cap < info->sig_len) {
+		op = HSM_ERR_BAD_ARG;
+	} else {
+		size_t n = cap;
+		/* rnd = NULL → hedged 签名，由后端取 TRNG（FIPS 204 推荐模式） */
+		op = (pqc_sign(s->meta.alg, sk, msg, msg_len, ctx, ctx_len, NULL, sig, &n) == PQC_OK)
+		     ? HSM_OK : HSM_ERR_CRYPTO;
+		if (op == HSM_OK) {
+			*sig_len = n;
+		}
+	}
+	return finish_key(s, tmp, tmp_len, op);
+}
+
+hsm_status_t hsm_object_decaps(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t h,
+                               const uint8_t *ct, size_t ct_len,
+                               uint8_t *ss, size_t cap, size_t *ss_len)
+{
+	slot_t *s = NULL;
+	const uint8_t *sk = NULL;
+	uint8_t *tmp = NULL;
+	size_t tmp_len = 0;
+
+	hsm_status_t st = with_key(tok, sess, h, KEY_USAGE_DECAP, &s, &sk, &tmp, &tmp_len);
+	if (st != HSM_OK) {
+		return st;
+	}
+	const pqc_alg_info_t *info = pqc_alg_info(s->meta.alg);
+	hsm_status_t op = HSM_OK;
+	if (!ct || !ss || !ss_len || ct_len != info->ct_len || cap < info->ss_len) {
+		op = HSM_ERR_BAD_ARG;
+	} else {
+		op = (pqc_decaps(s->meta.alg, sk, ct, ss) == PQC_OK) ? HSM_OK : HSM_ERR_CRYPTO;
+		if (op == HSM_OK) {
+			*ss_len = info->ss_len;
+		}
+	}
+	return finish_key(s, tmp, tmp_len, op);
+}
+
+hsm_status_t hsm_object_destroy(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t h)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = require_role(tok, sess, HSM_ROLE_USER, &sn);
+	if (st != HSM_OK) {
+		return st;
+	}
+	slot_t *s = NULL;
+	st = resolve_handle(tok, h, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (sn->slot != s->meta.slot_id) {
+		return HSM_ERR_BAD_HANDLE;
+	}
+	st = fsm_apply(s, SLOT_EV_DESTROY);
+	if (st != HSM_OK) {
+		return st;
+	}
+	wipe_key_material(s);
+	s->meta.alg    = PQC_ALG_NONE;
+	s->meta.usage  = 0;
+	s->meta.policy = 0;
+	s->meta.generation++;    /* 旧句柄立即失效 */
+	return reseal(s);
+}
+
+/* ---- zeroize 与解锁 ----------------------------------------------------- */
+
+static hsm_status_t do_zeroize(slot_t *s)
+{
+	hsm_status_t st = fsm_apply(s, SLOT_EV_ZEROIZE);
+	if (st != HSM_OK) {
+		return st;
+	}
+	wipe_key_material(s);
+	wipe_pins(s);
+	uint32_t id  = s->meta.slot_id;
+	uint32_t gen = s->meta.generation + 1;
+	pqc_secure_zero(&s->meta, sizeof(s->meta));
+	s->meta.version    = SLOT_META_VERSION;
+	s->meta.slot_id    = id;
+	s->meta.generation = gen;
+	s->meta.alg        = PQC_ALG_NONE;
+	s->meta.state      = SLOT_ST_UNINIT;
+	s->pre_lock        = SLOT_ST_EMPTY;
+	return reseal(s);
+}
+
+hsm_status_t hsm_slot_zeroize(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t id)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = require_role(tok, sess, HSM_ROLE_SO, &sn);
+	if (st != HSM_OK) {
+		return st;
+	}
+	slot_t *s = NULL;
+	st = get_slot(tok, id, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (sn->slot != id) {
+		return HSM_ERR_NOT_AUTHORIZED;
+	}
+	st = do_zeroize(s);
+	if (st == HSM_OK) {
+		sn->role = HSM_ROLE_PUBLIC;   /* 清零后登录态一并失效 */
+	}
+	return st;
+}
+
+hsm_status_t hsm_slot_zeroize_forced(hsm_token_t *tok, hsm_slot_id_t id)
+{
+	slot_t *s = NULL;
+	hsm_status_t st = get_slot(tok, id, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	st = do_zeroize(s);
+	if (st == HSM_OK) {
+		for (int i = 0; i < MAX_SESSIONS; i++) {
+			if (tok->sessions[i].open && tok->sessions[i].slot == id) {
+				tok->sessions[i].role = HSM_ROLE_PUBLIC;
+			}
+		}
+	}
+	return st;
+}
+
+hsm_status_t hsm_slot_unlock(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t id)
+{
+	session_t *sn = NULL;
+	hsm_status_t st = require_role(tok, sess, HSM_ROLE_SO, &sn);
+	if (st != HSM_OK) {
+		return st;
+	}
+	slot_t *s = NULL;
+	st = get_slot(tok, id, &s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	if (sn->slot != id) {
+		return HSM_ERR_NOT_AUTHORIZED;
+	}
+	st = check_integrity(s);
+	if (st != HSM_OK) {
+		return st;
+	}
+	st = fsm_apply(s, SLOT_EV_SO_UNLOCK);
+	if (st != HSM_OK) {
+		return st;
+	}
+	s->meta.user_pin_fails = 0;
+	return reseal(s);
+}
