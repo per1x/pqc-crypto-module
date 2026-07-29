@@ -61,6 +61,14 @@ parameter set cannot pass unnoticed.
 by a shift. The two are equal over the whole input domain, which is only 3329 values, so
 the testbench verifies the substitution **exhaustively** rather than by sampling.
 
+`pqc_accel_axi`'s data buffer is sized to the largest operation the hardware actually
+implements — 512 bytes for the NTT — rather than to `ACCEL_BUF_MAX`, which is the
+software-side bound of 16 KiB. The buffer has two read ports and a write port, so no
+synthesis tool can map it to block RAM; at 16 KiB it becomes 131072 flip-flops, more
+than an XC7Z020 has in total. Sizing it to what the implemented operation codes need
+brings it to 4096 bits. `tools/rtl_synth_check.sh` reports every memory that gets
+spread into registers for exactly this reason.
+
 `ByteEncode_d` for `d < 12` is omitted deliberately: packing coefficients that already
 fit in `d` bits is pure wiring, with no logic to get wrong. Only the 12-bit path, which
 additionally folds signed coefficients back into `[0, q)`, exists as a module.
@@ -85,6 +93,8 @@ same RTL is exercised by cocotb and by the C test suite.
 
 ```bash
 ./tools/rtl_sim.sh                        # full cocotb regression, Icarus Verilog
+./tools/rtl_lint.sh                       # Verilator -Wall + Icarus, every module as top
+./tools/rtl_synth_check.sh                # Yosys: synthesisability, vendor-neutral
 python3 hardware/model/ntt_oracle.py      # the two independent NTT oracles
 python3 hardware/model/mlkem_oracle.py    # oracles for the rest of the ML-KEM datapath
 python3 hardware/model/mldsa_oracle.py    # oracles for the ML-DSA datapath
@@ -155,6 +165,12 @@ cores to stay free of vendor primitives, which is also what makes them portable.
 
 Verilator's 2-state semantics and Icarus's 4-state semantics disagree on width
 truncation, and that disagreement has caught real bugs. Both are run.
+
+A third tool answers a question neither simulator can: whether the source means the same
+thing to a synthesiser. Yosys rejects, for instance, an asynchronous reset branch that
+also tests a signal absent from the sensitivity list — a construct both simulators
+execute exactly as written while synthesis produces different hardware.
+`tools/rtl_synth_check.sh` runs it over every module.
 
 ## Synthesis
 

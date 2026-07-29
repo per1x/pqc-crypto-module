@@ -59,9 +59,18 @@ module pqc_accel_axi #(
     input  wire        m_axis_tready,
     output wire        m_axis_tlast
 );
-    // 缓冲区大小与 accel.h 的 ACCEL_BUF_MAX 一致：16 KiB = 4096 个 32 位字，
-    // 地址位宽因此固定为 12 位。
-    localparam integer BUF_WORDS = 4096;
+    // 【缓冲区按已实现的操作码定尺寸，而不是照抄软件侧的上界】
+    // accel.h 的 ACCEL_BUF_MAX 是 16 KiB，那是软件侧要容纳完整 ML-KEM/ML-DSA
+    // 输入的上界；本层只实现 NTT（512 字节）与 Keccak（200 字节），因此硬件
+    // 缓冲区取 512 字节 = 128 个 32 位字就够。
+    //
+    // 这不是省资源的小优化：这块存储是双读口（输出流一路、装载一路）加写口，
+    // 综合工具无法把它映射成块 RAM，只能摊成寄存器或分布式 RAM。按 16 KiB 写
+    // 就是 131072 个触发器 —— 超过 XC7Z020 全片 106400 个触发器，根本放不下。
+    // 按实际需要的 128 字定尺寸后是 4096 位，映射成分布式 RAM 只占几十个 LUT。
+    // 今后若增加输入更大的操作码，这里要一并改成同步读的单口结构。
+    localparam integer BUF_WORDS = 128;
+    localparam integer BUF_AW    = 7;
 
     localparam [31:0] MODE_NTT_FWD = 32'd7;
     localparam [31:0] MODE_NTT_INV = 32'd8;
@@ -75,9 +84,9 @@ module pqc_accel_axi #(
                      S_FIN   = 3'd5;
 
     reg [31:0] bufmem [0:BUF_WORDS-1];
-    reg [11:0] wr_ptr;                     // 输入流写指针（按字）
-    reg [11:0] rd_ptr;                     // 输出流读指针（按字）
-    reg [11:0] out_words;                  // 本次结果的字数
+    reg [8:0]  wr_ptr;                     // 输入流写指针（按字）
+    reg [8:0]  rd_ptr;                     // 输出流读指针（按字）
+    reg [8:0]  out_words;                  // 本次结果的字数
 
     // ---- 寄存器组 ----
     wire        start, soft_reset;
@@ -106,7 +115,16 @@ module pqc_accel_axi #(
         .out_len_in(out_len_r), .errcode_in(errcode_r), .out_we(out_we));
 
     // ---- 算法核 ----
-    wire core_rst_n = rst_n && !soft_reset;
+    // 核的复位口寄存一拍再驱动，而不是把 soft_reset 组合进异步复位网络：
+    // 组合出来的异步复位是有毛刺风险的，综合工具也会就此报 DRC。
+    reg core_rst_n;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            core_rst_n <= 1'b0;
+        end else begin
+            core_rst_n <= !soft_reset;
+        end
+    end
 
     reg                ntt_start, ntt_inverse, ntt_wr_en;
     reg  [7:0]         ntt_wr_addr;
@@ -136,9 +154,9 @@ module pqc_accel_axi #(
 
     // ---- 数据面握手 ----
     assign s_axis_tready = !busy;
-    assign m_axis_tvalid = (out_words != 12'd0) && (rd_ptr < out_words);
-    assign m_axis_tdata  = bufmem[rd_ptr];
-    assign m_axis_tlast  = m_axis_tvalid && (rd_ptr == out_words - 12'd1);
+    assign m_axis_tvalid = (out_words != 9'd0) && (rd_ptr < out_words);
+    assign m_axis_tdata  = bufmem[rd_ptr[BUF_AW-1:0]];
+    assign m_axis_tlast  = m_axis_tvalid && (rd_ptr == out_words - 9'd1);
 
     // ---- 命令状态机 ----
     // 缓冲区只在这一个 always 块里被写：输入流、结果回写共用同一组端口，
@@ -154,14 +172,17 @@ module pqc_accel_axi #(
     wire cmd_ok      = (mode_ntt && (in_len == 32'd512))
                     || (mode_keccak && (in_len == 32'd200));
 
-    wire [11:0] widx_half = {3'd0, cnt[9:1]};              // NTT：两系数一字
+    wire [BUF_AW-1:0] widx_half = cnt[7:1];               // NTT：两系数一字
     wire [31:0] load_word = bufmem[widx_half];
     wire [15:0] load_half = cnt[0] ? load_word[31:16] : load_word[15:0];
-    wire [11:0] widx_lane = {2'd0, cnt[9:1], cnt[0]};      // Keccak：两字一 lane
+    wire [BUF_AW-1:0] widx_lane = cnt[6:0];               // Keccak：一字一次
     wire        kick_busy = ntt_start || kec_start;
 
+    // 异步复位分支里只允许出现 rst_n 本身：把 soft_reset 一起写进去，
+    // 会让综合工具看到一个不在敏感表里的复位条件，行为与仿真不一致。
+    // soft_reset 因此走独立的同步分支，复位到与上电相同的取值。
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n || soft_reset) begin
+        if (!rst_n) begin
             state       <= S_IDLE;
             cnt         <= 10'd0;
             busy        <= 1'b0;
@@ -170,9 +191,35 @@ module pqc_accel_axi #(
             out_we      <= 1'b0;
             out_len_r   <= 32'd0;
             errcode_r   <= 32'd0;
-            out_words   <= 12'd0;
-            rd_ptr      <= 12'd0;
-            wr_ptr      <= 12'd0;
+            out_words   <= 9'd0;
+            rd_ptr      <= 9'd0;
+            wr_ptr      <= 9'd0;
+            is_ntt      <= 1'b0;
+            ntt_start   <= 1'b0;
+            ntt_inverse <= 1'b0;
+            ntt_wr_en   <= 1'b0;
+            ntt_wr_addr <= 8'd0;
+            ntt_wr_data <= 16'sd0;
+            ntt_rd_addr <= 8'd0;
+            kec_start   <= 1'b0;
+            kec_wr_en   <= 1'b0;
+            kec_wr_addr <= 5'd0;
+            kec_wr_data <= 64'd0;
+            kec_rd_addr <= 5'd0;
+            lo_lat      <= 16'd0;
+            lane_lo     <= 32'd0;
+        end else if (soft_reset) begin
+            state       <= S_IDLE;
+            cnt         <= 10'd0;
+            busy        <= 1'b0;
+            done_set    <= 1'b0;
+            err_set     <= 1'b0;
+            out_we      <= 1'b0;
+            out_len_r   <= 32'd0;
+            errcode_r   <= 32'd0;
+            out_words   <= 9'd0;
+            rd_ptr      <= 9'd0;
+            wr_ptr      <= 9'd0;
             is_ntt      <= 1'b0;
             ntt_start   <= 1'b0;
             ntt_inverse <= 1'b0;
@@ -196,19 +243,22 @@ module pqc_accel_axi #(
             ntt_wr_en <= 1'b0;
             kec_wr_en <= 1'b0;
 
-            // 输入流：命令进行中不接收
+            // 输入流：命令进行中不接收。超出缓冲区的拍照常握手但丢弃，
+            // 否则写指针回绕会把包首已经收好的字覆盖掉。
             if (s_axis_tvalid && s_axis_tready) begin
-                bufmem[wr_ptr] <= s_axis_tdata;
-                wr_ptr <= s_axis_tlast ? 12'd0 : (wr_ptr + 12'd1);
+                if (wr_ptr < BUF_WORDS[8:0]) begin
+                    bufmem[wr_ptr[BUF_AW-1:0]] <= s_axis_tdata;
+                end
+                wr_ptr <= s_axis_tlast ? 9'd0 : (wr_ptr + 9'd1);
             end
 
             // 输出流：取完读指针归零，TVALID 随之落下
             if (m_axis_tvalid && m_axis_tready) begin
                 if (m_axis_tlast) begin
-                    rd_ptr    <= 12'd0;
-                    out_words <= 12'd0;
+                    rd_ptr    <= 9'd0;
+                    out_words <= 9'd0;
                 end else begin
-                    rd_ptr <= rd_ptr + 12'd1;
+                    rd_ptr <= rd_ptr + 9'd1;
                 end
             end
 
@@ -227,8 +277,8 @@ module pqc_accel_axi #(
                         is_ntt      <= mode_ntt;
                         ntt_inverse <= (mode == MODE_NTT_INV);
                         cnt         <= 10'd0;
-                        rd_ptr      <= 12'd0;
-                        out_words   <= 12'd0;
+                        rd_ptr      <= 9'd0;
+                        out_words   <= 9'd0;
                         state       <= S_LOAD;
                     end
                 end
@@ -296,18 +346,18 @@ module pqc_accel_axi #(
                     end
                     if (cnt == 10'd255) begin
                         out_len_r <= 32'd512;
-                        out_words <= 12'd128;
+                        out_words <= 9'd128;
                         state     <= S_FIN;
                     end else begin
                         cnt <= cnt + 10'd1;
                     end
                 end else begin
                     kec_rd_addr <= cnt[5:1] + {4'd0, cnt[0]};
-                    bufmem[{2'd0, cnt}] <=
+                    bufmem[cnt[BUF_AW-1:0]] <=
                         cnt[0] ? kec_rd_data[63:32] : kec_rd_data[31:0];
                     if (cnt == 10'd49) begin
                         out_len_r <= 32'd200;
-                        out_words <= 12'd50;
+                        out_words <= 9'd50;
                         state     <= S_FIN;
                     end else begin
                         cnt <= cnt + 10'd1;

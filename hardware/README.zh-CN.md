@@ -56,6 +56,12 @@ ML-KEM 与 ML-DSA 是两套不同的算术：模数不同（3329 对 8380417）�
 `mlkem_compress` 把对 `q` 的除法换成乘 `ceil(2^33/q)` 再右移。两者在整个输入域上相等，
 而输入域只有 3329 个取值，因此测试台是**穷举**验证这一替换，而不是抽样。
 
+`pqc_accel_axi` 的数据缓冲区按硬件**实际实现**的最大操作定尺寸——NTT 的 512 字节——
+而不是照抄 `ACCEL_BUF_MAX` 那个 16 KiB 的软件侧上界。这块存储有两个读口加一个写口，
+任何综合工具都无法把它映射成块 RAM；按 16 KiB 写就是 131072 个触发器，比整片
+XC7Z020 的触发器还多。按已实现的操作码定尺寸后是 4096 位。
+`tools/rtl_synth_check.sh` 会把每一处摊成寄存器的存储列出来，正是为了这个。
+
 `d < 12` 的 `ByteEncode_d` 刻意没有做成模块：把已经落在 `d` 位内的系数拼进字节流纯粹是
 导线，没有可写错的逻辑。只有 12 位这一路多一步"把有符号系数折回 `[0, q)`"，才是模块。
 
@@ -76,6 +82,8 @@ AXI4-Stream，底下挂算法核。它实现的正是 `include/pqchsm/accel.h` �
 
 ```bash
 ./tools/rtl_sim.sh                        # 完整 cocotb 回归，Icarus Verilog
+./tools/rtl_lint.sh                       # Verilator -Wall + Icarus，逐模块作顶层
+./tools/rtl_synth_check.sh                # Yosys 可综合性检查，厂商中立
 python3 hardware/model/ntt_oracle.py      # 两道独立的 NTT 预言机
 python3 hardware/model/mlkem_oracle.py    # ML-KEM 数据通路其余算子的预言机
 python3 hardware/model/mldsa_oracle.py    # ML-DSA 数据通路的预言机
@@ -134,6 +142,10 @@ C 侧构建同样会 verilate 两个核，并断言仿真 RTL 与软件桩逐字
 
 Verilator 的 2-state 语义与 Icarus 的 4-state 语义在位宽截断上并不一致，这种差异曾
 暴露过真实缺陷。因此两者都运行。
+
+第三个工具回答的是两个仿真器都答不了的问题：同一份源码在综合工具眼里是不是同一个
+意思。例如异步复位分支里还判了一个不在敏感表里的信号——两个仿真器都会照字面执行，
+综合出来的却是另一个电路。`tools/rtl_synth_check.sh` 用 Yosys 逐模块跑这一遍。
 
 ## 综合
 

@@ -18,6 +18,7 @@ clean checkout by running the command in the last column.
 | libFuzzer | 1.38 M executions, no crashes | `./tools/fuzz.sh` |
 | cocotb RTL regression | 78 tests across 10 top levels | `./tools/rtl_sim.sh` |
 | RTL lint | 31 modules, 0 warnings | `./tools/rtl_lint.sh` |
+| RTL synthesisability (Yosys) | 31 modules, all synthesise | `./tools/rtl_synth_check.sh` |
 | Constant-time source audit | 0 unannotated findings, 1 justified waiver | `python3 tools/ct_audit.py` |
 | Zeroisation structure check | 0 gaps, 9 justified waivers | `python3 tools/check_zeroize.py` |
 | Independent oracles | all pass, each with its own negative control | `python3 hardware/model/*_oracle.py` |
@@ -91,6 +92,7 @@ ctest --test-dir build --output-on-failure
 ./tools/kat_evidence.sh                    # regenerates the ACVP evidence table
 ./tools/rtl_sim.sh                         # cocotb regression
 ./tools/rtl_lint.sh                        # Verilator + Icarus lint
+./tools/rtl_synth_check.sh                 # Yosys synthesisability check
 python3 tools/ct_audit.py --self-test && python3 tools/ct_audit.py
 python3 tools/check_zeroize.py --self-test && python3 tools/check_zeroize.py
 python3 hardware/model/ntt_oracle.py

@@ -251,6 +251,7 @@ Vivado 脚本已写好但未验证），没有时序收敛、功耗测量、TRNG
 | aarch64 Linux（GCC 12） | 45 / 45 |
 | cocotb RTL 回归 | 10 个顶层共 78 个测试 |
 | RTL lint（Verilator `-Wall` + Icarus） | 31 个模块，0 条告警 |
+| RTL 可综合性（Yosys） | 31 个模块全部可综合 |
 
 测试源码中贯穿两条做法：
 

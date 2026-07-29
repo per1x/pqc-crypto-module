@@ -17,6 +17,7 @@
 | libFuzzer | 138 万次执行，无崩溃 | `./tools/fuzz.sh` |
 | cocotb RTL 回归 | 10 个顶层共 78 个测试 | `./tools/rtl_sim.sh` |
 | RTL lint | 31 个模块，0 条告警 | `./tools/rtl_lint.sh` |
+| RTL 可综合性（Yosys） | 31 个模块全部可综合 | `./tools/rtl_synth_check.sh` |
 | 常量时间源码审计 | 0 条未标注问题，1 条带理由的白名单 | `python3 tools/ct_audit.py` |
 | 清零结构性检查 | 0 条遗漏，9 条带理由的豁免 | `python3 tools/check_zeroize.py` |
 | 独立预言机 | 全部通过，每道自带反证 | `python3 hardware/model/*_oracle.py` |
@@ -82,6 +83,7 @@ ctest --test-dir build --output-on-failure
 ./tools/kat_evidence.sh                    # 重新生成 ACVP 证据表
 ./tools/rtl_sim.sh                         # cocotb 回归
 ./tools/rtl_lint.sh                        # Verilator + Icarus lint
+./tools/rtl_synth_check.sh                 # Yosys 可综合性检查
 python3 tools/ct_audit.py --self-test && python3 tools/ct_audit.py
 python3 tools/check_zeroize.py --self-test && python3 tools/check_zeroize.py
 python3 hardware/model/ntt_oracle.py

@@ -280,6 +280,7 @@ PKCS#11 multi-part signing buffers the whole message rather than streaming a dig
 | aarch64 Linux (GCC 12) | 45 / 45 |
 | cocotb RTL regression | 78 tests across 10 top levels |
 | RTL lint (Verilator `-Wall` + Icarus) | 31 modules, 0 warnings |
+| RTL synthesisability (Yosys) | 31 modules, all synthesise |
 
 Two habits run throughout the test sources:
 
