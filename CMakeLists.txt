@@ -36,6 +36,7 @@ add_library(pqchsm
   src/audit/anchor.c
   src/backup/shamir.c
   src/backup/backup.c
+  src/backup/inject.c
   src/store/wrap.c
   src/store/keystore.c
   src/slot/persist.c
@@ -95,6 +96,7 @@ pqchsm_test(test_zeroize   tests/unit/test_zeroize.c)
 pqchsm_test(test_audit     tests/unit/test_audit.c)
 pqchsm_test(test_kdr       tests/unit/test_kdr.c)
 pqchsm_test(test_proto     tests/unit/test_proto.c)
+pqchsm_test(test_inject    tests/unit/test_inject.c)
 
 # PKCS#11 测试要 dlopen 真正的 .dylib —— 测的是发布出去的那个库，
 # 包括符号导出与函数表填得对不对；直接链接会绕过这些。
@@ -130,6 +132,7 @@ add_test(NAME zeroize       COMMAND test_zeroize)
 add_test(NAME audit         COMMAND test_audit)
 add_test(NAME kdr           COMMAND test_kdr)
 add_test(NAME proto         COMMAND test_proto)
+add_test(NAME inject        COMMAND test_inject)
 add_test(NAME p11           COMMAND test_p11)
 
 # pkcs11-tool 冒烟 + SoftHSMv2 行为对比。没装 OpenSC 时脚本自己 SKIP（退出 0）。
