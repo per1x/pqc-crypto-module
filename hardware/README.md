@@ -12,7 +12,8 @@ hardware/
 │   │               compress.v, sample.v, pack.v
 │   ├── mldsa/      mont_reduce.v, reduce.v, butterfly.v, ntt_core.v,
 │   │               rounding.v, sample.v
-│   └── keccak/     keccak_f1600.v
+│   ├── keccak/     keccak_f1600.v
+│   └── bus/        axi4lite_regs.v, pqc_accel_axi.v
 ├── tb/cocotb/      cocotb testbenches, simulation-only top levels, Makefile
 ├── model/          Python reference model, vector export, independent oracles
 └── syn/            Vivado out-of-context synthesis scripts and constraints
@@ -42,6 +43,8 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `mldsa_rej_uniform`, `mldsa_rej_eta` | combinational | — |
 | `mldsa_rej_uniform_buf` | collector, one 3-byte group per cycle | ~340 per polynomial |
 | `keccak_f1600` | single-round iterative, `round_cnt` over 24 rounds | 24 per permutation |
+| `axi4lite_regs` | AXI4-Lite slave, control and status registers | — |
+| `pqc_accel_axi` | accelerator top level: AXI4-Lite + AXI4-Stream + cores | — |
 
 ML-KEM and ML-DSA use different arithmetic — different modulus (3329 against 8380417),
 different Montgomery base (2^16 against 2^32), different coefficient width — so the two
@@ -67,8 +70,16 @@ the round logic by 24 for no benefit at the call rates involved: 24 cycles at 10
 240 ns per permutation, and an ML-KEM-768 key generation needs 43 of them — about 1000
 cycles in total, against roughly 6900 for the NTTs. The bottleneck is elsewhere.
 
-Both cores are driven from C through the register interface in `include/pqchsm/accel.h`,
-which means the same RTL is exercised by cocotb and by the C test suite.
+`pqc_accel_axi` is the accelerator as a system would see it: AXI4-Lite for the control
+and status registers, AXI4-Stream for bulk data, and the algorithm cores underneath. The
+register semantics it implements are the ones `include/pqchsm/accel.h` was written
+against — START self-clearing, DONE latched as a level, status registers written by
+hardware and read-only to software. [docs/register-map.md](../docs/register-map.md) is
+the contract; `test_axi.py` verifies it clause by clause with a hand-written bus
+functional model and no third-party AXI library.
+
+The cores are also driven from C through the same register interface, which means the
+same RTL is exercised by cocotb and by the C test suite.
 
 ## Verification
 

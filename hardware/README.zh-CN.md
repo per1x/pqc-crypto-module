@@ -12,7 +12,8 @@ hardware/
 │   │               compress.v、sample.v、pack.v
 │   ├── mldsa/      mont_reduce.v、reduce.v、butterfly.v、ntt_core.v、
 │   │               rounding.v、sample.v
-│   └── keccak/     keccak_f1600.v
+│   ├── keccak/     keccak_f1600.v
+│   └── bus/        axi4lite_regs.v、pqc_accel_axi.v
 ├── tb/cocotb/      cocotb 测试台、仅供仿真的汇总顶层、Makefile
 ├── model/          Python 参考模型、向量导出、独立预言机
 └── syn/            Vivado out-of-context 综合脚本与约束
@@ -42,6 +43,8 @@ hardware/
 | `mldsa_rej_uniform`、`mldsa_rej_eta` | 组合逻辑 | — |
 | `mldsa_rej_uniform_buf` | 收集器，每周期吃一组 3 字节 | 约 340 / 个多项式 |
 | `keccak_f1600` | 单轮迭代，`round_cnt` 走 24 轮 | 24 / 次置换 |
+| `axi4lite_regs` | AXI4-Lite 从机，控制/状态寄存器 | — |
+| `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核 | — |
 
 ML-KEM 与 ML-DSA 是两套不同的算术：模数不同（3329 对 8380417）、Montgomery 基不同
 （2¹⁶ 对 2³²）、系数位宽不同，所以两组模块彼此独立、不共用任何东西。ML-DSA 的 NTT 做满
@@ -60,8 +63,14 @@ ML-KEM 与 ML-DSA 是两套不同的算术：模数不同（3329 对 8380417）�
 毫无收益：100 MHz 下 24 周期即 240 ns/次置换，而一次 ML-KEM-768 密钥生成需要 43 次
 置换，合计约 1000 周期，相较 NTT 的约 6900 周期微不足道。瓶颈不在这里。
 
-两个核都通过 `include/pqchsm/accel.h` 的寄存器接口由 C 侧驱动，因此同一份 RTL 既被
-cocotb 对拍，也被 C 测试套件覆盖。
+`pqc_accel_axi` 是系统视角下的加速器：控制/状态寄存器走 AXI4-Lite，成块数据走
+AXI4-Stream，底下挂算法核。它实现的正是 `include/pqchsm/accel.h` 当初据以编写的那套
+寄存器语义——START 自清、DONE 电平锁存、状态寄存器由硬件写而软件只读。
+[docs/register-map.zh-CN.md](../docs/register-map.zh-CN.md) 是这份契约，
+`test_axi.py` 用手写的总线功能模型逐条验证，不引入任何第三方 AXI 库。
+
+算法核同样通过这套寄存器接口由 C 侧驱动，因此同一份 RTL 既被 cocotb 对拍，
+也被 C 测试套件覆盖。
 
 ## 验证
 

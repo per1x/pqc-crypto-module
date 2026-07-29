@@ -25,7 +25,9 @@ total=0
 run() { # run <MODULE> <TOPLEVEL> [PARAM_D]
   local label="$2"
   [ -n "${3:-}" ] && label="$2 D=$3"
-  make -s clean >/dev/null 2>&1          # 必须清，否则 make 认为没变化直接跳过
+  # 必须清干净：残留的 sim_build 会让 make 认为没变化而跳过重新编译，
+  # 于是新的 TOPLEVEL 用上一次的编译产物，报"找不到根句柄"
+  rm -rf sim_build results.xml
   if ! make -s MODULE="$1" TOPLEVEL="$2" PARAM_D="${3:-}" >"$LOG" 2>&1; then
     printf '  ✗ %-18s %-24s （make 失败）\n' "$1" "$label"; fail=1; return
   fi
@@ -65,7 +67,11 @@ echo
 echo "  Keccak"
 run test_keccak      keccak_f1600
 
-make -s clean >/dev/null 2>&1
+echo
+echo "  总线接口"
+run test_axi         pqc_accel_axi
+
+rm -rf sim_build results.xml
 echo
 if [ "$fail" -eq 0 ]; then
   echo "全部通过（$total 个测试）"
