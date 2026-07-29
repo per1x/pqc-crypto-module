@@ -138,8 +138,17 @@ module ntt_core (
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE;
-            done  <= 1'b0;
+            state   <= S_IDLE;
+            done    <= 1'b0;
+            // 数据通路寄存器也给确定初值。功能上它们都在 start 命中时被无条件加载，
+            // X 值不会传播到输出；但不复位会让复位后头几拍在 4-state 仿真（Icarus）里
+            // 出现 X，也不符合"计数器/控制寄存器要有复位"的通行要求。
+            len     <= 9'd128;
+            grp     <= 9'd0;
+            j       <= 9'd0;
+            k       <= 8'd1;
+            inv_r   <= 1'b0;
+            scale_i <= 9'd0;
         end else begin
             case (state)
             S_IDLE: begin

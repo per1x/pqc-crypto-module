@@ -125,6 +125,35 @@ async def test_ntt_inverse(dut):
 
 
 @cocotb.test()
+async def test_reset_is_clean(dut):
+    """复位后内部计数器有确定值：Icarus 是 4-state，没复位的话会看到 X
+
+    判据不看内部信号（那样太依赖实现），而是看**复位后立刻发一次变换**能不能
+    算对 —— 如果 len/grp/j/k 复位后是 X，第一次变换就会错。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+    assert int(dut.done.value) == 0
+
+    pairs = load_pairs("ntt.hex")
+    vin, vexp = pairs[0]
+    coeffs = [s16(int(x, 16)) for x in vin]
+    expect = [s16(int(x, 16)) for x in vexp]
+    await load_poly(dut, coeffs)
+    await run_transform(dut, 0)
+    got = await read_poly(dut)
+    assert got == expect, "复位后的第一次变换就算错了 —— 检查计数器复位"
+
+    # 中途复位再来一次，也必须干净
+    await reset(dut)
+    assert int(dut.done.value) == 0, "复位必须清 done"
+    await load_poly(dut, coeffs)
+    await run_transform(dut, 0)
+    assert await read_poly(dut) == expect, "复位后重跑结果不一致"
+    dut._log.info("复位干净：复位后第一次变换即正确，中途复位可重跑")
+
+
+@cocotb.test()
 async def test_done_is_level(dut):
     """done 必须是**电平**：置位后保持到下一次 start，而不是 1 周期脉冲
 
