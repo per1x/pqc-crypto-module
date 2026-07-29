@@ -31,6 +31,9 @@ add_library(pqchsm
   src/crypto/oqs_rng.c
   src/crypto/kdf.c
   src/crypto/kdr.c
+  src/store/wrap.c
+  src/store/keystore.c
+  src/slot/persist.c
   src/slot/fsm.c
   src/slot/meta.c
   src/slot/slot.c
@@ -64,6 +67,8 @@ pqchsm_test(test_kdf       tests/unit/test_kdf.c)
 pqchsm_test(test_slot_fsm  tests/unit/test_slot_fsm.c)
 pqchsm_test(test_slot_meta tests/unit/test_slot_meta.c)
 pqchsm_test(test_slot      tests/unit/test_slot.c)
+pqchsm_test(test_wrap      tests/unit/test_wrap.c)
+pqchsm_test(test_keystore  tests/unit/test_keystore.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
@@ -76,6 +81,8 @@ add_test(NAME slot_fsm      COMMAND test_slot_fsm)
 add_test(NAME slot_meta     COMMAND test_slot_meta)
 add_test(NAME slot          COMMAND test_slot)
 add_test(NAME slot_concurrent COMMAND test_slot_concurrent)
+add_test(NAME wrap          COMMAND test_wrap)
+add_test(NAME keystore      COMMAND test_keystore)
 
 # 每类 ACVP 向量一个 ctest 用例，失败时一眼看出是哪一类
 foreach(v mlkem_keygen mlkem_encaps mlkem_decaps mldsa_keygen mldsa_siggen mldsa_sigver)

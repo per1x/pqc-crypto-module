@@ -11,7 +11,7 @@
  */
 #include "pqchsm/slot.h"
 
-#include "meta.h"
+#include "slot_internal.h"
 #include "pqchsm/kdr.h"
 #include "pqchsm/util.h"
 
@@ -21,42 +21,7 @@
 #include <string.h>
 #include <time.h>
 
-#define MAX_SESSIONS 16
-#define PIN_SALT_LEN 16
-#define VERIFIER_LEN 32
-
-typedef struct {
-	int           open;
-	hsm_slot_id_t slot;
-	hsm_role_t    role;
-	uint32_t      gen;
-} session_t;
-
-typedef struct {
-	pthread_mutex_t lock;
-	slot_meta_t  meta;
-	uint8_t      meta_tag[SLOT_META_TAG_LEN];
-	slot_state_t pre_lock;
-
-	uint8_t so_salt[PIN_SALT_LEN],   so_verifier[VERIFIER_LEN];
-	uint8_t user_salt[PIN_SALT_LEN], user_verifier[VERIFIER_LEN];
-	int     has_so_pin, has_user_pin;
-
-	uint8_t *pk;   size_t pk_len;
-	uint8_t *sk;   size_t sk_len;     /* SEED_STORAGE 策略下恒为 NULL */
-	uint8_t  seed[64]; size_t seed_len; int has_seed;
-} slot_t;
-
-struct hsm_token {
-	pthread_mutex_t tlock;      /* 只保护会话表 */
-	size_t    n_slots;
-	slot_t   *slots;
-	session_t sessions[MAX_SESSIONS];
-	uint32_t  session_gen;
-};
-
-#define SLOCK(s)   pthread_mutex_lock(&(s)->lock)
-#define SUNLOCK(s) pthread_mutex_unlock(&(s)->lock)
+/* 私有结构与锁宏见 slot_internal.h */
 
 const char *hsm_strerror(hsm_status_t st)
 {
@@ -86,12 +51,12 @@ static uint64_t now_secs(void)
 	return (uint64_t)time(NULL);
 }
 
-static hsm_status_t reseal(slot_t *s)
+hsm_status_t slot_reseal(slot_t *s)
 {
 	return slot_meta_seal(&s->meta, s->meta_tag) == 0 ? HSM_OK : HSM_ERR_CRYPTO;
 }
 
-static hsm_status_t check_integrity(const slot_t *s)
+hsm_status_t slot_check_integrity(const slot_t *s)
 {
 	return slot_meta_verify(&s->meta, s->meta_tag) == 0 ? HSM_OK : HSM_ERR_INTEGRITY;
 }
@@ -111,7 +76,7 @@ static hsm_status_t fsm_apply(slot_t *s, slot_event_t ev)
 	return HSM_OK;
 }
 
-static void wipe_key_material(slot_t *s)
+void slot_wipe_key_material(slot_t *s)
 {
 	if (s->pk) {
 		pqc_secure_free(s->pk, s->pk_len);
@@ -127,7 +92,7 @@ static void wipe_key_material(slot_t *s)
 	s->has_seed = 0;
 }
 
-static void wipe_pins(slot_t *s)
+void slot_wipe_pins(slot_t *s)
 {
 	pqc_secure_zero(s->so_salt, sizeof(s->so_salt));
 	pqc_secure_zero(s->so_verifier, sizeof(s->so_verifier));
@@ -284,7 +249,7 @@ hsm_token_t *hsm_token_new(size_t n_slots)
 		s->meta.alg     = PQC_ALG_NONE;
 		s->meta.state   = SLOT_ST_UNINIT;
 		s->pre_lock     = SLOT_ST_EMPTY;
-		if (reseal(s) != HSM_OK) {
+		if (slot_reseal(s) != HSM_OK) {
 			tok->n_slots = i + 1;
 			hsm_token_free(tok);
 			return NULL;
@@ -301,8 +266,8 @@ void hsm_token_free(hsm_token_t *tok)
 	if (tok->slots) {
 		for (size_t i = 0; i < tok->n_slots; i++) {
 			slot_t *s = &tok->slots[i];
-			wipe_key_material(s);
-			wipe_pins(s);
+			slot_wipe_key_material(s);
+			slot_wipe_pins(s);
 			pthread_mutex_destroy(&s->lock);
 		}
 		pqc_secure_zero(tok->slots, tok->n_slots * sizeof(slot_t));
@@ -318,7 +283,7 @@ size_t hsm_token_slot_count(const hsm_token_t *tok)
 	return tok ? tok->n_slots : 0;
 }
 
-static slot_t *slot_at(hsm_token_t *tok, hsm_slot_id_t id)
+slot_t *slot_at(hsm_token_t *tok, hsm_slot_id_t id)
 {
 	if (!tok || id >= tok->n_slots) {
 		return NULL;
@@ -333,7 +298,7 @@ hsm_status_t hsm_slot_get_meta(hsm_token_t *tok, hsm_slot_id_t id, slot_meta_t *
 		return HSM_ERR_BAD_ARG;
 	}
 	SLOCK(s);
-	hsm_status_t st = check_integrity(s);
+	hsm_status_t st = slot_check_integrity(s);
 	if (st == HSM_OK) {
 		*out = s->meta;
 	}
@@ -348,7 +313,7 @@ hsm_status_t hsm_slot_get_state(hsm_token_t *tok, hsm_slot_id_t id, slot_state_t
 		return HSM_ERR_BAD_ARG;
 	}
 	SLOCK(s);
-	hsm_status_t st = check_integrity(s);
+	hsm_status_t st = slot_check_integrity(s);
 	if (st == HSM_OK) {
 		*out = s->meta.state;
 	}
@@ -379,7 +344,7 @@ hsm_status_t hsm_slot_force_state(hsm_token_t *tok, hsm_slot_id_t id, slot_state
 	}
 	SLOCK(s);
 	s->meta.state = want;
-	hsm_status_t st = reseal(s);
+	hsm_status_t st = slot_reseal(s);
 	SUNLOCK(s);
 	return st;
 }
@@ -397,7 +362,7 @@ hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t id,
 		return HSM_ERR_BAD_ARG;
 	}
 	SLOCK(s);
-	hsm_status_t st = check_integrity(s);
+	hsm_status_t st = slot_check_integrity(s);
 	if (st != HSM_OK) {
 		goto out;
 	}
@@ -417,7 +382,7 @@ hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t id,
 	s->meta.so_pin_fails   = 0;
 	s->meta.user_pin_fails = 0;
 	s->meta.use_count      = 0;
-	st = reseal(s);
+	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
 	return st;
@@ -438,7 +403,7 @@ hsm_status_t hsm_slot_set_user_pin(hsm_token_t *tok, hsm_session_t sess, const c
 		return HSM_ERR_BAD_ARG;
 	}
 	SLOCK(s);
-	st = check_integrity(s);
+	st = slot_check_integrity(s);
 	if (st != HSM_OK) {
 		goto out;
 	}
@@ -454,7 +419,7 @@ hsm_status_t hsm_slot_set_user_pin(hsm_token_t *tok, hsm_session_t sess, const c
 	}
 	s->has_user_pin = 1;
 	s->meta.user_pin_fails = 0;
-	st = reseal(s);
+	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
 	return st;
@@ -533,7 +498,7 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 
 	int login_ok = 0;
 	SLOCK(s);
-	st = check_integrity(s);
+	st = slot_check_integrity(s);
 	if (st != HSM_OK) {
 		goto out;
 	}
@@ -569,7 +534,7 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 				s->meta.user_pin_fails = 0;
 			}
 			login_ok = 1;
-			st = reseal(s);
+			st = slot_reseal(s);
 			goto out;
 		}
 		/* 失败计数持久化在元数据里（并进 KMAC），断电重置绕不过去（§7.3） */
@@ -577,18 +542,18 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 			/* SO 失败只计数不锁槽位：锁了就没人能解锁，设备直接变砖。
 			 * SO 凭证的兜底恢复归 §8.4 的 Shamir M-of-N 仪式管。 */
 			s->meta.so_pin_fails++;
-			(void)reseal(s);
+			(void)slot_reseal(s);
 			st = HSM_ERR_PIN_INCORRECT;
 			goto out;
 		}
 		s->meta.user_pin_fails++;
 		if (s->meta.user_pin_fails >= HSM_PIN_MAX_FAILS) {
 			hsm_status_t lst = fsm_apply(s, SLOT_EV_PIN_LOCKOUT);
-			(void)reseal(s);
+			(void)slot_reseal(s);
 			st = (lst == HSM_OK) ? HSM_ERR_PIN_LOCKED : HSM_ERR_PIN_INCORRECT;
 			goto out;
 		}
-		(void)reseal(s);
+		(void)slot_reseal(s);
 		st = HSM_ERR_PIN_INCORRECT;
 	}
 out:
@@ -643,7 +608,7 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 		return HSM_ERR_CRYPTO;
 	}
 
-	wipe_key_material(s);
+	slot_wipe_key_material(s);
 	s->pk = pk;
 	s->pk_len = info->pk_len;
 
@@ -667,7 +632,7 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 	s->meta.policy       = policy;
 	s->meta.use_count    = 0;
 	s->meta.last_used_at = 0;
-	hsm_status_t rs = reseal(s);
+	hsm_status_t rs = slot_reseal(s);
 	if (rs != HSM_OK) {
 		return rs;
 	}
@@ -695,7 +660,7 @@ static hsm_status_t create_object(hsm_token_t *tok, hsm_session_t sess,
 		return HSM_ERR_BAD_ARG;
 	}
 	SLOCK(s);
-	st = check_integrity(s);
+	st = slot_check_integrity(s);
 	if (st != HSM_OK) {
 		goto out;
 	}
@@ -709,7 +674,7 @@ static hsm_status_t create_object(hsm_token_t *tok, hsm_session_t sess,
 		if (st != HSM_OK) {
 			/* 装载失败必须回滚，不能停在 LOADED 却没有密钥 */
 			s->meta.state = saved;
-			(void)reseal(s);
+			(void)slot_reseal(s);
 		}
 	}
 out:
@@ -748,7 +713,7 @@ static hsm_status_t check_handle(const slot_t *s, hsm_handle_t h)
 	if (s->meta.state != SLOT_ST_LOADED && s->meta.state != SLOT_ST_IN_USE) {
 		return HSM_ERR_BAD_HANDLE;
 	}
-	return check_integrity(s);
+	return slot_check_integrity(s);
 }
 
 hsm_status_t hsm_object_public_key(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t h,
@@ -845,7 +810,7 @@ static hsm_status_t end_use(slot_t *s, uint8_t *tmp, size_t tmp_len, hsm_status_
 		s->meta.use_count++;
 		s->meta.last_used_at = now_secs();
 	}
-	hsm_status_t rs = reseal(s);
+	hsm_status_t rs = slot_reseal(s);
 	return op_st != HSM_OK ? op_st : rs;
 }
 
@@ -953,12 +918,12 @@ hsm_status_t hsm_object_destroy(hsm_token_t *tok, hsm_session_t sess, hsm_handle
 	if (st != HSM_OK) {
 		goto out;
 	}
-	wipe_key_material(s);
+	slot_wipe_key_material(s);
 	s->meta.alg    = PQC_ALG_NONE;
 	s->meta.usage  = 0;
 	s->meta.policy = 0;
 	s->meta.generation++;    /* 旧句柄立即失效 */
-	st = reseal(s);
+	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
 	return st;
@@ -973,8 +938,8 @@ static hsm_status_t do_zeroize(slot_t *s)
 	if (st != HSM_OK) {
 		return st;
 	}
-	wipe_key_material(s);
-	wipe_pins(s);
+	slot_wipe_key_material(s);
+	slot_wipe_pins(s);
 	uint32_t id  = s->meta.slot_id;
 	uint32_t gen = s->meta.generation + 1;
 	pqc_secure_zero(&s->meta, sizeof(s->meta));
@@ -984,7 +949,7 @@ static hsm_status_t do_zeroize(slot_t *s)
 	s->meta.alg        = PQC_ALG_NONE;
 	s->meta.state      = SLOT_ST_UNINIT;
 	s->pre_lock        = SLOT_ST_EMPTY;
-	return reseal(s);
+	return slot_reseal(s);
 }
 
 hsm_status_t hsm_slot_zeroize(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t id)
@@ -1040,7 +1005,7 @@ hsm_status_t hsm_slot_unlock(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t
 		return HSM_ERR_NOT_AUTHORIZED;
 	}
 	SLOCK(s);
-	st = check_integrity(s);
+	st = slot_check_integrity(s);
 	if (st != HSM_OK) {
 		goto out;
 	}
@@ -1049,7 +1014,7 @@ hsm_status_t hsm_slot_unlock(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t
 		goto out;
 	}
 	s->meta.user_pin_fails = 0;
-	st = reseal(s);
+	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
 	return st;

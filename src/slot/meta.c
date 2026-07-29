@@ -7,7 +7,9 @@
 #include <string.h>
 
 /* 元数据的序列化长度：固定，方便栈上缓冲 */
-#define META_WIRE_LEN (4 + 4 + SLOT_LABEL_MAX + 4 + 4 + 4 + 4 + 8 + 4 + 4 + 8 + 8 + 4)
+#define META_WIRE_LEN SLOT_META_WIRE_LEN
+_Static_assert(SLOT_META_WIRE_LEN == 4 + 4 + SLOT_LABEL_MAX + 4 + 4 + 4 + 4 + 8 + 4 + 4 + 8 + 8 + 4,
+               "SLOT_META_WIRE_LEN 与字段之和不符");
 
 static void put_u32(uint8_t **p, uint32_t v)
 {
@@ -90,4 +92,56 @@ int slot_meta_verify(const slot_meta_t *m, const uint8_t tag[SLOT_META_TAG_LEN])
 	int ok = pqc_ct_equal(want, tag, SLOT_META_TAG_LEN);
 	pqc_secure_zero(want, sizeof(want));
 	return ok ? 0 : -1;
+}
+
+static uint32_t get_u32(const uint8_t **p)
+{
+	uint32_t v = 0;
+	for (int i = 0; i < 4; i++) {
+		v |= (uint32_t)(*p)[i] << (8 * i);
+	}
+	*p += 4;
+	return v;
+}
+
+static uint64_t get_u64(const uint8_t **p)
+{
+	uint64_t v = 0;
+	for (int i = 0; i < 8; i++) {
+		v |= (uint64_t)(*p)[i] << (8 * i);
+	}
+	*p += 8;
+	return v;
+}
+
+long slot_meta_deserialize(slot_meta_t *m, const uint8_t *in, size_t len)
+{
+	if (!m || !in || len < META_WIRE_LEN) {
+		return -1;
+	}
+	const uint8_t *p = in;
+	memset(m, 0, sizeof(*m));
+	m->version = get_u32(&p);
+	m->slot_id = get_u32(&p);
+	memcpy(m->label, p, SLOT_LABEL_MAX);
+	m->label[SLOT_LABEL_MAX - 1] = '\0';
+	p += SLOT_LABEL_MAX;
+	m->alg    = (pqc_alg_t)get_u32(&p);
+	m->usage  = get_u32(&p);
+	m->policy = get_u32(&p);
+	m->state  = (slot_state_t)get_u32(&p);
+	m->use_count      = get_u64(&p);
+	m->so_pin_fails   = get_u32(&p);
+	m->user_pin_fails = get_u32(&p);
+	m->created_at     = get_u64(&p);
+	m->last_used_at   = get_u64(&p);
+	m->generation     = get_u32(&p);
+	/* 合法性：状态与算法必须在枚举范围内，否则就是被改过的文件 */
+	if (m->state < SLOT_ST_UNINIT || m->state >= SLOT_ST__COUNT) {
+		return -1;
+	}
+	if (m->alg != PQC_ALG_NONE && !pqc_alg_info(m->alg)) {
+		return -1;
+	}
+	return (long)(p - in);
 }
