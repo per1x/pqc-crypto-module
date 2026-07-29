@@ -34,10 +34,14 @@ void *pqc_secure_alloc(size_t n)
 	if (!p) {
 		return NULL;
 	}
+	/* 先清零再锁页。顺序不是随意的：glibc 把 mlock 声明成读 const void *，
+	 * 反过来写（先 mlock 后 memset）会让 GCC 报 -Wmaybe-uninitialized
+	 * ——它说的是"被指内存未初始化"，不是指针未初始化。
+	 * 这是在 aarch64 Linux + GCC 12 上跑回归才发现的，clang 不报。 */
+	memset(p, 0, n);
 	/* best-effort：macOS/容器里常因 RLIMIT_MEMLOCK 失败，不作为错误。
 	 * 真正不可妥协的是 free 时的清零。 */
 	(void)mlock(p, n);
-	memset(p, 0, n);
 	return p;
 }
 
