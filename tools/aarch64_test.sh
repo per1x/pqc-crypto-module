@@ -19,15 +19,47 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 command -v docker >/dev/null 2>&1 || { echo "SKIP: 没有 docker/OrbStack"; exit 0; }
 docker info >/dev/null 2>&1 || { echo "SKIP: docker 守护进程没起来"; exit 0; }
 
+# 【为什么要把宿主代理透进容器】
+# 容器**不继承**宿主的 HTTP_PROXY，而且容器里的 127.0.0.1 是它自己，
+# 所以容器里的一切都是彻底直连。这台机器上实测（单跑、无竞争）：
+#
+#     操作                              直连            经宿主代理
+#     ----------------------------      -----------     ----------
+#     curl codeload.github.com          14.2 KB/s       8.4 MB/s     ~590x
+#     apt-get update                    >150s 超时      3s           >50x
+#
+# liboqs 源码包 9.4 MB —— 直连要十几分钟且经常断，正是本脚本"卡住"的根因。
+# 注意 **apt 也一样慢**：一开始我以为只有 GitHub 需要代理、Debian 源直连很快，
+# 于是只给拉 liboqs 那条 curl 加了 --proxy —— 结果卡在 apt-get update 上。
+# 上面那张表就是为了纠正这个错判量的：整个容器都走代理才对。
+#
+# 做法：--add-host 把 host.docker.internal 指到宿主网关，再把 *_proxy 传进去。
+# **只在宿主代理端口确实在监听时才加**，否则原样直连（脚本在没有代理的机器上
+# 照样能跑，不会因为这段而失败）。端口可用 PQCHSM_PROXY_PORT 覆盖。
+PROXY_PORT="${PQCHSM_PROXY_PORT:-6152}"
+PROXY_ARGS=()
+if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$PROXY_PORT" 2>/dev/null; then
+  PROXY_URL="http://host.docker.internal:${PROXY_PORT}"
+  PROXY_ARGS=(--add-host=host.docker.internal:host-gateway
+              -e "http_proxy=$PROXY_URL"  -e "https_proxy=$PROXY_URL"
+              -e "HTTP_PROXY=$PROXY_URL"  -e "HTTPS_PROXY=$PROXY_URL"
+              -e "no_proxy=localhost,127.0.0.1")
+  echo "宿主 127.0.0.1:${PROXY_PORT} 在监听 -> 容器整体走宿主代理"
+else
+  echo "宿主 127.0.0.1:${PROXY_PORT} 没在监听 -> 容器直连"
+  echo "  （受限网络下 apt 与 liboqs 都会很慢；有代理时设 PQCHSM_PROXY_PORT 指过去）"
+fi
+
 echo "在 linux/arm64 Debian 容器里构建并测试（原生 aarch64，非模拟）"
 docker run --rm --platform linux/arm64 \
+  "${PROXY_ARGS[@]}" \
   -v "$ROOT":/src:ro \
   -w /work \
   debian:bookworm-slim bash -euo pipefail -c '
 set -x
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-    build-essential cmake ninja-build git libssl-dev python3 ca-certificates >/dev/null
+    build-essential cmake ninja-build git curl libssl-dev python3 ca-certificates >/dev/null
 set +x
 
 echo "=== 目标平台信息 ==="
@@ -36,7 +68,13 @@ gcc --version | head -1
 echo "sizeof(long)=$(printf "#include <stdio.h>\nint main(){printf(\"%%zu\", sizeof(long));}" > /tmp/a.c && gcc /tmp/a.c -o /tmp/a && /tmp/a)"
 
 echo "=== 构建 liboqs（最小集：本项目用到的 6 个参数集）==="
-git clone --depth 1 --branch 0.16.0 https://github.com/open-quantum-safe/liboqs.git /work/liboqs -q
+# 用 codeload 的 tarball 而不是 git clone：单个 HTTP 流，走代理最稳；
+# git 的 smart-http 是多次往返，在高延迟链路上更吃亏。
+# 代理由外层通过 *_proxy 环境变量注入（见脚本上方说明），curl 自动读取。
+mkdir -p /work/liboqs
+curl -fsSL --retry 3 --retry-delay 2 \
+  https://codeload.github.com/open-quantum-safe/liboqs/tar.gz/refs/tags/0.16.0 \
+  | tar xz -C /work/liboqs --strip-components=1
 cmake -S /work/liboqs -B /work/liboqs/b -GNinja \
   -DCMAKE_BUILD_TYPE=Release -DOQS_BUILD_ONLY_LIB=ON -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_INSTALL_PREFIX=/work/oqs \
