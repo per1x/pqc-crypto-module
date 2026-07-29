@@ -97,7 +97,8 @@ static void fsync_dir(const char *path)
 	free(copy);
 }
 
-hsm_status_t hsm_keystore_save(hsm_token_t *tok, const char *path)
+static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
+                                       const char *audit_detail)
 {
 	if (!tok || !path) {
 		return HSM_ERR_BAD_ARG;
@@ -210,8 +211,27 @@ out:
 	pqc_secure_zero(fkey, sizeof(fkey));
 	pqc_secure_zero(salt, sizeof(salt));
 	/* 每次 save 都换新 KEK，等价于一次 KEK 轮换（§8.1） */
-	slot_audit(tok, AUDIT_OP_KEK_ROTATE, HSM_ROLE_PUBLIC, 0, st, "keystore-save");
+	slot_audit(tok, AUDIT_OP_KEK_ROTATE, HSM_ROLE_PUBLIC, 0, st, audit_detail);
 	return st;
+}
+
+hsm_status_t hsm_keystore_save(hsm_token_t *tok, const char *path)
+{
+	return keystore_save_impl(tok, path, "keystore-save");
+}
+
+hsm_status_t hsm_keystore_rotate_kek(hsm_token_t *tok, const char *path)
+{
+	/* 轮换前先确认在内存里的 token 是自洽的：所有槽位元数据标签都验得过。
+	 * 否则就是拿一个已经可疑的状态去覆盖盘上那份。 */
+	for (size_t i = 0; i < hsm_token_slot_count(tok); i++) {
+		slot_meta_t m;
+		hsm_status_t st = hsm_slot_get_meta(tok, (hsm_slot_id_t)i, &m);
+		if (st != HSM_OK) {
+			return st;
+		}
+	}
+	return keystore_save_impl(tok, path, "kek-rotate");
 }
 
 hsm_status_t hsm_keystore_load(hsm_token_t *tok, const char *path)

@@ -77,6 +77,7 @@ pqchsm_test(test_shamir    tests/unit/test_shamir.c)
 pqchsm_test(test_backup    tests/unit/test_backup.c)
 pqchsm_test(test_zeroize   tests/unit/test_zeroize.c)
 pqchsm_test(test_audit     tests/unit/test_audit.c)
+pqchsm_test(test_kdr       tests/unit/test_kdr.c)
 pqchsm_test(test_anchor    tests/unit/test_anchor.c)
 pqchsm_test(test_audit_integration tests/unit/test_audit_integration.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
@@ -97,7 +98,17 @@ add_test(NAME shamir        COMMAND test_shamir)
 add_test(NAME backup        COMMAND test_backup)
 add_test(NAME zeroize       COMMAND test_zeroize)
 add_test(NAME audit         COMMAND test_audit)
+add_test(NAME kdr           COMMAND test_kdr)
 add_test(NAME anchor        COMMAND test_anchor)
+
+# 结构性回归：KDR 铁律是"只进不出"。这条用例扫公共头，确保没人加回读出根密钥的接口。
+# 与 Phase 7 的"地址译码上物理不存在读回路径"是同一句话在软件阶段的实现。
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME kdr_no_readback COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_readback.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/pqchsm/kdr.h)
+endif()
 add_test(NAME audit_integration COMMAND test_audit_integration)
 
 # 每类 ACVP 向量一个 ctest 用例，失败时一眼看出是哪一类

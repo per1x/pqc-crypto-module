@@ -38,6 +38,13 @@ hsm_status_t hsm_keystore_save(hsm_token_t *tok, const char *path);
  * 任何完整性校验失败都返回 HSM_ERR_INTEGRITY，且**不改动 token 的现有内容**。 */
 hsm_status_t hsm_keystore_load(hsm_token_t *tok, const char *path);
 
+/* 显式 KEK 轮换（§8.1）：用一把新的 KEK 重新包裹全部槽位并原子写回。
+ *
+ * 实现上与 save 相同（每次 save 本来就换新盐、新 KEK），区别在**语义与审计**：
+ * 轮换是一个应当被单独记录、单独调度的运维事件，不该混在普通落盘里看不出来。
+ * 落审计时 detail 为 "kek-rotate"，普通落盘为 "keystore-save"。 */
+hsm_status_t hsm_keystore_rotate_kek(hsm_token_t *tok, const char *path);
+
 /* ---- 测试钩子 ----------------------------------------------------------- */
 /* 令下一次 save 在第 n 次写操作后立刻 _exit(9)，用于模拟掉电。
  * n < 0 关闭。仅供 tests/unit/test_keystore.c 在子进程里使用。 */
