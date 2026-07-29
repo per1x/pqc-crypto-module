@@ -112,7 +112,7 @@ Verilator 是 2-state，隐式位宽截断会**真的算错**，而 Icarus 的 4
 
 ```bash
 # 全量回归（36 个用例）
-cd /Users/jinling/code/pqc-hsm && ./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j && ctest --test-dir build --output-on-failure
+./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j && ctest --test-dir build --output-on-failure
 
 # Level A：从 PKCS#11 驱动的整条链
 ./tools/e2e_p11.sh
