@@ -112,7 +112,7 @@ aarch64 汇编**（`..._ntt_aarch64_asm`、`..._rej_uniform_aarch64_asm` 等）�
 占比 = 调用次数 × 单次代价 / 总耗时
 ```
 
-**次数怎么拿到（精确值，不是估计）**：`model/ntt_oracle.py` 里那份 FIPS 203
+**次数怎么拿到（精确值，不是估计）**：`hardware/model/ntt_oracle.py` 里那份 FIPS 203
 KeyGen 实现**已经逐字节重现过 NIST ACVP 向量**（见该文件的预言机 B），
 所以它就是真正的 ML-KEM。把它用的 hashlib 换成 `ref_model.keccak_f1600`
 搭的海绵，边跑边计数即可 —— **不用改 liboqs 一行代码**。

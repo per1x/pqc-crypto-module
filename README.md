@@ -1,119 +1,292 @@
-# pqc-hsm — PQC 密码机（HSM）原型：纯软件轨
+# pqc-crypto-module
 
-对应 [`FPGA_PQC_实现路线图.md`](../FPGA_PQC_实现路线图.md) 的 **§5「零硬件阶段」** 与 **Phase 5/6**：
-软件槽位管理器、密钥库、KEK 包裹、备份恢复、审计日志。
+A post-quantum cryptographic module prototype: key storage, slot management, backup
+and recovery, tamper-evident audit logging, and a PKCS#11 v3.2 front end — plus the
+RTL and simulation harness for moving the arithmetic cores into an FPGA.
 
-目标不是"KAT 过了"，而是路线图 §0.1 的验收标准：
-**任何时刻明文私钥不出安全边界，且密钥可管理、可恢复、可销毁。**
-本阶段安全边界暂时放宽到"主机进程内存"（Phase 7 收紧到 PL），但**接口按最终形态设计**。
+> **Status: research prototype.** The security boundary is a process address space,
+> not hardware. Do not use this to protect anything real. See
+> [Security model and limitations](#security-model-and-limitations).
 
----
+## Overview
 
-## 纯软件启动清单
+Post-quantum algorithms are standardised (FIPS 203 / 204), but the surrounding
+machinery — how keys are stored, wrapped, backed up, revoked, and exposed to
+applications — is where a cryptographic module actually lives or dies. This project
+builds that machinery around ML-KEM and ML-DSA, in the shape a real device would take,
+so that the software can later be lifted onto a Zynq-class SoC with the algorithm cores
+in programmable logic.
 
-| # | 事项 | 状态 |
-|---|------|------|
-| 0 | 工具链：CMake ≥3.20、C11 编译器、Python ≥3.11 | ✅ |
-| 1 | liboqs 0.16.0（ML-KEM / ML-DSA 最终版 FIPS 203/204） | ✅ `brew install liboqs` |
-| 2 | OpenSSL 3（AES-256-GCM 包裹、SHA3/KMAC256 派生与哈希链） | ✅ `brew install openssl@3` |
-| 3 | ACVP 最终版向量（**非 round-3**）→ 扁平化黄金向量 | ✅ `vectors/` |
-| 4 | crypto 后端抽象（liboqs ↔ 未来 FPGA 核可替换） | ✅ `include/pqchsm/pqc.h` |
-| 5 | 槽位管理器 / 密钥库 / 包裹 / 恢复 / 审计 | ✅ 见 `doc/STATUS.md` |
+Two consequences of that goal explain most of the design:
 
-### 一键跑通
+- **Everything is behind a handle.** No API in `include/pqchsm/` returns private key
+  material. The keystore, the slot manager, and the PKCS#11 front end all operate on
+  opaque handles, so tightening the boundary later does not change any caller.
+- **The hardware seam exists from day one.** Cryptographic operations go through a
+  vtable (`pqc_backend_t`) and, below it, an AXI-style register interface
+  (`accel_transport_t`). Three transports implement that interface identically: a
+  software stub, a Verilator-simulated RTL backend, and — once there is a board —
+  `/dev/mem` + `mmap`. Swapping between them changes nothing above the seam.
 
-```bash
-./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j && ctest --test-dir build --output-on-failure
-```
+Every cryptographic operation on the live path uses
+[liboqs](https://github.com/open-quantum-safe/liboqs) or OpenSSL; no primitive is
+hand-rolled for production use. The hand-written NTT and Keccak implementations that do
+exist (`src/hal/accel_stub.c`, `hardware/model/`) serve only as reference points for
+RTL comparison and are never used to protect key material. Correctness is pinned to
+NIST ACVP vectors.
 
-消毒器构建（内存/未定义行为/数据竞争）：
-
-```bash
-cmake -S . -B build-asan -DCMAKE_C_FLAGS="-fsanitize=address,undefined" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" && cmake --build build-asan -j && ctest --test-dir build-asan
-```
-
----
-
-## 技术栈选择理由
-
-### 编排层：C11（不是 Python）
-
-路线图本身已经给了答案——§5.7.1 的桩加速器写作 `fw/hal/accel_stub.c`，Phase 5 写的是
-"槽位管理器 **C 库**"。在此之上有三条独立理由：
-
-1. **零化（zeroize）在 Python 里不可验证。** Python 的 `bytes` 不可变、赋值即拷贝，
-   解释器、GC 和字符串驻留会在你不知道的地方留下副本——路线图 §8.7 红线
-   "恢复过程中间值用后即清"、Phase 7 "内存 dump 中搜不到 KEK 明文" 在 Python 里
-   **根本无法写出成立的测试**。C 里 `OPENSSL_cleanse` + `mlock` 才有意义，
-   而且可以写"清零后扫描整块缓冲断言全 0"的真实负测试。
-2. **PKCS#11 是 C ABI。** 第 4 步的对外接口是一个导出 `C_GetFunctionList` 的动态库，
-   用 Python 写等于将来整层重写。
-3. **PS 侧固件直接复用。** 这套代码最终跑在 Zynq 的 Cortex-A 上（裸机或 Linux），
-   C11 + 无第三方运行时可以直接交叉编译过去。
-
-代价是迭代比 Python 慢。用两个办法补偿：小步提交 + 每步配单测；把**数据加工**
-（ACVP JSON 解析、向量导出）放到 Python，C 只读极简扁平格式（见下）。
-
-### 密码运算：liboqs 0.16.0（不自己写算法）
-
-- 直接对齐**最终版** FIPS 203/204，不是 round-3（路线图 §5.1.1 反复强调的版本陷阱）。
-- ML-KEM 提供完整**去随机化 API**（`keypair_derand` / `encaps_derand`），
-  ACVP 的 keyGen / encapDecap 向量可以逐条驱动。
-- ML-DSA **没有**去随机化 API — 本项目通过 `OQS_randombytes_custom_algorithm`
-  注入确定性随机源来实现（见 `src/crypto/oqs_rng.c`）。这不只是测试手段：
-  路线图 §7.6 的**种子存储优化**（每槽只存 32B ξ，用时重展开）在生产路径上就需要
-  "从种子确定性生成 ML-DSA 密钥对"。
-
-### 对称原语：OpenSSL 3
-
-AES-256-GCM（§8.2 包裹）、SHA3-256（§8.6 审计哈希链）、KMAC256（§8.1 KDF）
-全都现成且经过 FIPS 验证路径，无需引第二个库。liboqs 本身也依赖 openssl@3。
-
-### 向量流水线：Python 加工 → C 消费扁平格式
-
-ACVP 是嵌套 JSON，在 C 里解析要引 JSON 库、且没有复用价值。做法：
-`tools/acvp_to_kat.py` 把 ACVP 的 `prompt.json` + `expectedResults.json` 合并、
-展平成 `key = hex` 的文本格式落到 `vectors/`。
-
-这不是权宜之计——路线图 §5.1.3 要求的正是 `vectors/` 下一批
-"`$readmemh` 可直接读"的分层黄金向量，将来 cocotb testbench 和 RTL 仿真
-消费的是同一批文件。C 侧因此只需要一个 60 行的 key=hex 解析器。
-
----
-
-## 目录结构
+## Architecture
 
 ```
-pqc-hsm/
-├── include/pqchsm/     公共头：pqc.h(算法后端抽象) util.h kat.h
+                PKCS#11 v3.2 shared library  (src/p11)
+                Daemon / CLI / admin tools   (cli)
+ ──────────────────────────────────────────────────────────────────
+  slot manager    keystore      backup / recovery    audit chain
+  (src/slot)      (src/store)   (src/backup)         (src/audit)
+    FSM,          AES-256-GCM   Shamir M-of-N        SHA3-256 chain
+    sessions,     wrapping,     over GF(256),        + ML-DSA anchor
+    handles,      atomic        device-bound KEK       signing
+    ACLs          file I/O      vs portable BEK
+ ──────────────────────────────────────────────────────────────────
+                  pqc_backend_t vtable  (include/pqchsm/pqc.h)
+                             │
+             ┌───────────────┴────────────────┐
+       liboqs backend                  register-interface backend
+       (src/crypto)                    (src/hal/pqc_accel.c)
+                                               │
+                             accel_transport_t (include/pqchsm/accel.h)
+                                               │
+                       ┌───────────────────────┼───────────────────┐
+                  software stub          Verilator RTL           mmap
+                  (accel_stub.c)      (accel_verilator.c)       (future)
+                                               │
+                                     hardware/rtl: ntt_core,
+                                                   keccak_f1600
+```
+
+### Key hierarchy
+
+A device-bound root (`KDR`, currently a stub — see limitations) derives a **KEK** that
+wraps keys at rest. Backup instead uses a **BEK** derived from a randomly generated
+recovery master key, split with Shamir's scheme over GF(256) using a constant-time
+multiply. The distinction is deliberate: KEK-wrapped material cannot leave the device,
+BEK-wrapped material is portable to a replacement device, and a slot must opt in to
+being backed up at all.
+
+### Audit chain
+
+Every state transition appends a record whose hash covers the previous record's hash.
+A pure hash chain only guarantees that tampering propagates forward, so the chain head
+is additionally signed with an ML-DSA device identity key and anchored outside the
+device — otherwise rewriting the whole file is undetectable.
+
+### Hardware seam
+
+`accel.h` fixes the register map (`CTRL`, `STATUS`, `MODE`, `PARAM`, `IN_LEN`,
+`OUT_LEN`, `ERRCODE`) before any RTL was written, so interface bugs surface in software
+first. Two cores currently exist in RTL and run under Verilator through that same
+register interface:
+
+| Core | Structure | Cycles |
+|---|---|---|
+| `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT | 1153 per transform |
+| `keccak_f1600` | single-round iterative, `round_cnt` over 24 rounds | 24 per permutation |
+
+SHA3 and SHAKE are built as a sponge in C on top of the permutation, so the entire
+SHA3/SHAKE path can be run against simulated RTL and compared byte-for-byte with
+OpenSSL. All other accelerator modes fall back to the software stub, and the Verilator
+transport reports "unsupported" rather than silently substituting software.
+
+## Features
+
+- **ML-KEM-512/768/1024 and ML-DSA-44/65/87**, verified against 390 NIST ACVP vectors
+  byte-for-byte (vectors pinned to a specific ACVP-Server commit).
+- **Slot/token/object/session model** with an explicit FSM transition table, role-based
+  access control, PIN lockout, and generation counters that invalidate stale handles.
+- **Encrypted keystore** — AES-256-GCM wrapping with metadata as AAD, whole-file KMAC,
+  and atomic `tmp → fsync → rename → fsync(dir)` writes.
+- **M-of-N backup and recovery** across devices, with per-slot policy controlling
+  whether a key may be backed up at all.
+- **Tamper-evident audit log** with ML-DSA anchor signing.
+- **Secure key injection** — a one-time session key is encapsulated to the device's own
+  ML-KEM public key, so plaintext key material never appears on the wire.
+- **PKCS#11 v3.2 front end** exposing native `CKM_ML_KEM` / `CKM_ML_DSA` mechanisms,
+  including `C_EncapsulateKey` / `C_DecapsulateKey` reachable via `C_GetInterface`.
+- **RTL cores with independent verification** — cocotb testbenches check against the
+  published Keccak all-zero permutation vector and against `hashlib`/OpenSSL, not only
+  against this project's own reference model.
+
+## Repository layout
+
+```
+├── include/pqchsm/     Public headers — the API surface. No private key crosses it.
 ├── src/
-│   ├── crypto/         pqc_liboqs.c(后端) oqs_rng.c(确定性RNG) kdf.c(KMAC/SHA3) kdr.c(根密钥桩)
-│   ├── hal/            (Phase 7) 桩加速器 / AXI mmap —— 与真 PL 二选一
-│   ├── slot/           fsm.c(状态机) slot.c(主体) meta.c(元数据KMAC) persist.c(槽位↔密文)
-│   ├── store/          wrap.c(AES-GCM 包裹) keystore.c(密钥库文件、原子写)
-│   ├── backup/         shamir.c(GF(256) 门限) backup.c(RMK→BEK 备份恢复)
-│   ├── audit/          audit.c —— append-only 哈希链日志
-│   └── util/           hex、安全清零/分配、KAT 解析
-├── tests/
-│   ├── unit/           各模块单测
-│   └── kat/            ACVP 黄金向量回归
-├── tools/              acvp_to_kat.py 等 Python 加工脚本
-├── vectors/
-│   ├── acvp/           上游原始 JSON（不改动）
-│   └── *.kat           展平后的黄金向量（C 与未来 cocotb 共用）
-└── doc/
+│   ├── crypto/         liboqs binding, KDF, key derivation root (KDR)
+│   ├── slot/           Slot FSM, sessions, metadata, persistence
+│   ├── store/          AES-256-GCM wrapping, keystore file format
+│   ├── backup/         Shamir splitting, backup/restore, key injection
+│   ├── audit/          Hash chain and ML-DSA anchoring
+│   ├── hal/            Accelerator abstraction: stub, Verilator, register semantics
+│   ├── p11/            PKCS#11 v3.2 shared library
+│   ├── proto/          TLV command protocol
+│   └── util/           Secure zeroing, locked allocation, KAT parsing
+├── cli/                Daemon, client CLI, admin tool
+├── tests/              Unit, integration, KAT, and fuzz targets
+├── demo/               PKCS#11 provider demos (Python, Java)
+├── hardware/
+│   ├── rtl/            Verilog sources: mlkem/ (NTT), keccak/
+│   ├── tb/cocotb/      cocotb testbenches
+│   ├── model/          Python reference model, vector export, independent oracles
+│   └── syn/            Vivado out-of-context synthesis scripts and constraints
+├── tools/              Vector fetching, benchmarks, profiling, regression scripts
+├── third_party/        Vendored OASIS PKCS#11 v3.2 headers (unmodified)
+└── docs/
+    ├── design/         Status, roadmap, development log
+    └── reports/        Profiling, RTL review, and other investigation write-ups
 ```
 
-## 当前状态 / 下一步
+Documents under `docs/` are written in Chinese; this README is the English entry point.
 
-- [`doc/现状与后续计划.md`](doc/现状与后续计划.md) —— **成篇文档**：已完成 / 遗留 / 无硬件还能做什么 / 拿到板子后怎么做
-- [`doc/网络与代理排查.md`](doc/网络与代理排查.md) —— 本机拉 GitHub 极慢的根因与用户级绕行
-- [`doc/STATUS.md`](doc/STATUS.md) —— 逐步进度与每步的决策记录
+## Building
 
-## 许可
+Requirements: CMake ≥ 3.20, a C11 compiler, OpenSSL 3, and liboqs.
 
-[Apache-2.0](LICENSE)。选它而不是 MIT，是因为它带**显式的专利授权与专利报复终止条款**
-（第 3 条）—— 后量子密码这个方向上专利是真实存在的风险面，MIT 对此完全沉默。
+```bash
+brew install liboqs openssl@3 cmake        # macOS
+# Debian/Ubuntu: liboqs from source; libssl-dev, cmake, ninja-build for the rest
+```
 
-`third_party/pkcs11-v3.2/` 下的三个头文件来自 OASIS，未作任何修改，
-按其自身条款可自由复制使用，详见该目录的 README。
+```bash
+./tools/fetch_vectors.sh                   # download and flatten NIST ACVP vectors
+cmake -S . -B build
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+Optional components are detected, not required. Without Verilator the simulated RTL
+backend is simply not compiled in and `accel_transport_verilator()` returns `NULL`;
+tests that need `cocotb`, `iverilog`, or `pkcs11-tool` skip themselves with a message
+rather than failing.
+
+### Additional checks
+
+```bash
+./tools/rtl_sim.sh          # cocotb regression (Icarus Verilog)
+./tools/aarch64_test.sh     # full rebuild and regression in an aarch64 Linux container
+./tools/fuzz.sh             # libFuzzer targets (requires LLVM clang)
+./tools/profile.sh          # sampling profile
+./build/pqchsm-bench        # algorithm-level baseline
+./build/pqchsm-prim-bench   # per-primitive cost and measured RTL cycle counts
+```
+
+## Running the demos
+
+Both demos drive the shared library through the full lifecycle: initialise the token,
+set PINs, log in, generate ML-DSA and ML-KEM keys into slots, sign and verify, read
+attributes, and enumerate objects.
+
+```bash
+cmake --build build --target pqchsm-p11
+
+# Python, via PyKCS11
+python3 -m venv .venv-p11 && ./.venv-p11/bin/pip install -q PyKCS11
+./.venv-p11/bin/python demo/python/pqchsm_demo.py
+
+# Java, via the JDK 22+ FFM API (no external dependency)
+java --enable-native-access=ALL-UNNAMED demo/java/PqcHsmDemo.java \
+     "$PWD/build/pqchsm-pkcs11.dylib"
+```
+
+Both use the low-level PKCS#11 binding directly. Higher-level provider frameworks are
+**not** used, because they do not yet support these mechanisms — see
+[demo/README.md](demo/README.md) for details and for a probe that demonstrates it.
+
+## Security model and limitations
+
+This is a prototype. The following are accurate statements about what it does and does
+not do.
+
+**The security boundary is software.** Plaintext key material exists in process memory
+during operations. Callers only ever see handles, and buffers are zeroed and `mlock`-ed
+where possible, but nothing here defends against an attacker who can read the process
+address space. Moving the boundary into hardware is future work.
+
+**The key derivation root is a stub.** `src/crypto/kdr.c` contains a fixed 32-byte
+constant whose literal text reads `PQC-HSM STUB KDR -- NOT SECRET!!`. On a real device
+this value comes from eFUSE, BBRAM, or a PUF and never leaves the chip. Until then,
+device binding is not real.
+
+**RTL coverage is two arithmetic cores, not a cryptographic accelerator.** `ntt_core`
+and `keccak_f1600` exist and are verified in simulation. Sampling, encoding,
+compression, and the overall ML-KEM/ML-DSA dataflow are all still software. There is no
+hardware implementation of the full algorithms.
+
+**Nothing has run on real hardware.** No board, no synthesis run (the Vivado scripts in
+`hardware/syn/` are written but unverified), no timing closure, no power measurement, no
+TRNG entropy assessment, no eFUSE, no tamper detection, no verified `mlock` behaviour
+under memory pressure.
+
+**No speedup figure is available.** On the development machine the simulated cores at
+100 MHz are *slower* than liboqs's hand-written NEON assembly. That comparison is not
+meaningful — the target is a Cortex-A53 without SIMD — but it does mean this project
+cannot currently claim a speedup. See [docs/reports/profiling.md](docs/reports/profiling.md).
+
+**Other known gaps.** The audit module assumes a single writer and does not lock the
+file. Shamir share checksums are unkeyed: they detect corruption, not tampering. SO PIN
+failures increment a counter but do not lock the slot — locking it would brick the
+device, and the fallback is M-of-N recovery. `CKM_HASH_ML_DSA_*` is not implemented, so
+PKCS#11 multi-part signing buffers the whole message rather than streaming a digest.
+
+## Testing
+
+| Check | Result |
+|---|---|
+| `ctest` | 38 / 38 |
+| Assertions | ~3700 |
+| NIST ACVP vectors | 390 byte-exact, 60 explicitly skipped |
+| ASan + UBSan | 38 / 38 |
+| ThreadSanitizer | 0 races (validated by removing locks: 9 reported) |
+| macOS `leaks` | 0 leaks |
+| libFuzzer | 1.38 M executions, no crashes |
+| aarch64 Linux (GCC 12) | 38 / 38 |
+| cocotb RTL regression | 14 tests across 5 modules |
+
+Two habits run throughout the test sources:
+
+- **Independent oracles.** A result is not trusted because it matches this project's own
+  model. KMAC is checked against the NIST document, OpenSSL, and a separate Keccak. The
+  NTT is checked against a schoolbook negacyclic convolution that never touches the
+  twiddle table, and by reconstructing ML-KEM key generation and reproducing ACVP
+  `ek`/`dk` byte-for-byte. Keccak is checked against the published all-zero permutation
+  vector and against `hashlib`/OpenSSL.
+- **Negative controls.** Assertions are validated by breaking something and confirming
+  the test fails — perturbing a twiddle factor, dropping an NTT layer, flipping a bit in
+  a Keccak round constant, removing a lock under TSan, adding a fake key-readback
+  function.
+
+## Roadmap
+
+Software work that does not require a board is largely complete. What remains is
+hardware-dependent:
+
+1. Full ML-KEM / ML-DSA cores in RTL (sampling, encoding, dataflow), replacing the
+   software stub mode by mode through the existing register interface.
+2. Synthesis and timing closure on a target part; the out-of-context scripts in
+   `hardware/syn/` are ready but have never been run.
+3. Move the key derivation root into eFUSE/BBRAM/PUF and the security boundary into
+   programmable logic.
+4. Ring-oscillator TRNG with SP 800-90B entropy assessment, replacing `RAND_bytes`.
+5. Measured end-to-end speedup on the target platform — the only place a real number
+   can come from.
+
+[docs/design/status-and-roadmap.md](docs/design/status-and-roadmap.md) has the detailed
+breakdown.
+
+## License
+
+[Apache-2.0](LICENSE). Chosen over MIT for its explicit patent grant and patent
+retaliation clause (§3); patents are a real exposure in this field and MIT is silent on
+them.
+
+The three headers under `third_party/pkcs11-v3.2/` are OASIS documents, included
+unmodified under their own terms.

@@ -3,7 +3,7 @@
 #
 # 前置：iverilog（brew install icarus-verilog）
 #       cocotb（本仓库用 .venv-rtl 虚拟环境 —— PEP 668 禁止往系统 Python 装包）
-#       黄金向量（python3 model/export_vectors.py，脚本会自动生成）
+#       黄金向量（python3 hardware/model/export_vectors.py，脚本会自动生成）
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$ROOT/.venv-rtl"
@@ -13,10 +13,10 @@ if [ ! -x "$VENV/bin/cocotb-config" ]; then
   exit 0
 fi
 command -v iverilog >/dev/null 2>&1 || { echo "SKIP: 没装 iverilog（brew install icarus-verilog）"; exit 0; }
-[ -f "$ROOT/vectors/rtl/mont_reduce.hex" ] || python3 "$ROOT/model/export_vectors.py" >/dev/null
+[ -f "$ROOT/vectors/hardware/rtl/mont_reduce.hex" ] || python3 "$ROOT/hardware/model/export_vectors.py" >/dev/null
 
 export PATH="$VENV/bin:$PATH"
-cd "$ROOT/tb/cocotb"
+cd "$ROOT/hardware/tb/cocotb"
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 fail=0

@@ -88,15 +88,15 @@ vendored 了 OASIS 官方 v3.2 头 —— v3.2 才**原生定义** `CKM_ML_KEM`/
 （`nm` 查得 65 个 `aarch64_asm` 符号；样本 89% 落在调用点 `run_op`）。
 
 **没有硬凑数字** —— 用错的占比做硬件决策比没有数字更危险。
-`doc/profiling_report.md` 里记了完整排查过程，并给出在目标平台上用
+`docs/reports/profiling.md` 里记了完整排查过程，并给出在目标平台上用
 `perf --call-graph dwarf` 或确定性计数拿真数字的做法。
 
 ### 3.7 RTL 纯仿真闭环
-`model/ref_model.py` 是**独立重写**的 ML-KEM 参考模型；
+`hardware/model/ref_model.py` 是**独立重写**的 ML-KEM 参考模型；
 `export_vectors.py` 导出 §5.1.3 要求的分层向量（L0 算子 / L1 蝶形 / L2 NTT /
 Keccak / SHAKE），每个文件头写明字段与字节序。
 
-`rtl/mlkem/` 下是纯 RTL（不依赖厂商 IP），cocotb 做**三方比对**：
+`hardware/rtl/mlkem/` 下是纯 RTL（不依赖厂商 IP），cocotb 做**三方比对**：
 RTL == 向量文件 == 模型现算。3000 条全过。
 
 **独立模型抓到的约定坑**：`invntt(ntt(x))` 不是恒等，而是 ≡ x·2¹⁶ (mod q)
@@ -109,7 +109,7 @@ RTL == 向量文件 == 模型现算。3000 条全过。
 1 并行 910 cycles/6.07 µs，8 并行 126 cycles/0.84 µs，附并行度 → BRAM bank 的取舍。
 
 **没做成**：实际综合。Vivado 需 AMD 账号且几十 GB，按约定不在本机装。
-`syn/ooc_synth.tcl`（OOC 综合 + 布局布线 + 直接算 Fmax）已写全并在 README
+`hardware/syn/ooc_synth.tcl`（OOC 综合 + 布局布线 + 直接算 Fmax）已写全并在 README
 里**明确标注"未经实机验证"**，附常用 part 对照表。
 
 ### 3.9 fuzz
@@ -150,7 +150,7 @@ CI 不能依赖 brew 装没装 llvm）。独立驱动从**合法语料**出发�
 
 ### A. Keccak-f[1600] 核 —— 按 Amdahl 的第一顺位
 
-`rtl/keccak/keccak_f1600.v`，**单轮迭代**（`round_cnt` 走 24 轮），不是 24 轮
+`hardware/rtl/keccak/keccak_f1600.v`，**单轮迭代**（`round_cnt` 走 24 轮），不是 24 轮
 全展开。理由在文件头写了：全展开是 24 份轮逻辑、面积没必要地爆掉，而
 24 cycle @100 MHz = 240 ns 对 PS 侧调用频度完全够。接口与 `ntt_core` 同形，
 `done` 是电平语义，可直接挂到 `accel.h` 的寄存器契约上。
@@ -162,7 +162,7 @@ CI 不能依赖 brew 装没装 llvm）。独立驱动从**合法语料**出发�
 2. **hashlib / OpenSSL EVP**：在 RTL 核之上手工搭海绵做
    SHAKE128/256、SHA3-256/512，逐字节比对。**这条最强** —— 它验的不只是
    置换，padding、rate、lane 小端序、多块吸收与多块挤压全在内。
-3. `model/ref_model.py` 的 Python 置换只作辅助定位，不算独立来源。
+3. `hardware/model/ref_model.py` 的 Python 置换只作辅助定位，不算独立来源。
 
 **反证**：把 RC[17] 改一个 bit 重编，`test_accel` 从 791/791 变成 57 条失败；
 改回来又全绿 —— 断言确实是活的。

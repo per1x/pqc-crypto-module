@@ -11,7 +11,7 @@ NTT 那边踩过的坑是"向量与模型同源，三方一致其实是两方"�
      海绵结构，与 Python 标准库逐字节比对。hashlib 背后是 OpenSSL/tiny_sha3，
      与本项目毫无关系。**这一条是最强的**：它把 padding、rate、吸收/挤压、
      字节序全都验了，而不只是置换本身。
-  3. model/ref_model.py 的 Python 置换（同源，只作辅助定位用）。
+  3. hardware/model/ref_model.py 的 Python 置换（同源，只作辅助定位用）。
 """
 import sys
 from pathlib import Path
@@ -20,8 +20,10 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "model"))
+# parents[2] = hardware/；黄金向量在仓库根的 vectors/（C 侧测试也读它）
+HW = Path(__file__).resolve().parents[2]
+REPO = HW.parent
+sys.path.insert(0, str(HW / "model"))
 
 from ref_model import keccak_f1600  # noqa: E402  （仅作辅助比对）
 

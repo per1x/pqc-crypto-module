@@ -66,7 +66,7 @@ P11 前端生成密钥时 policy 恒为 0 ⇒ **从 PKCS#11 建的密钥永远�
 | 寄存器表 | `include/pqchsm/accel.h` | §5.8.2 要求"写 RTL 之前定死"的那张表 |
 | 软件桩 | `src/hal/accel_stub.c` | 暴露与真 PL 完全相同的寄存器语义，内部调 liboqs（§5.7.1） |
 | 后端 | `src/hal/pqc_accel.c` | 用寄存器接口实现 `pqc_backend_t`，与 liboqs 后端可互换 |
-| RTL | `rtl/mlkem/ntt_core.v` | 256 点 NTT/INTT，1 蝶形/周期，**1154 cycles** |
+| RTL | `hardware/rtl/mlkem/ntt_core.v` | 256 点 NTT/INTT，1 蝶形/周期，**1154 cycles** |
 | 仿真接入 | `src/hal/verilator/ntt_sim.cpp` + `accel_verilator.c` | Verilate 出来的真 RTL 挂到同一个 transport 上 |
 
 三种 transport 实现同一张 `accel_transport_t`：
@@ -104,7 +104,7 @@ Verilator 是 2-state，隐式位宽截断会**真的算错**，而 Icarus 的 4
 3.1 审计锚点 / 3.2 KDR provider / 3.3 PKCS#11 前端 / 3.4 TCP+TLV 命令接口 /
 3.5 安全密钥注入 / 3.6 profiling+Amdahl（符号级归因如实标注失败）/
 3.7 cocotb 纯仿真 / 3.8 综合脚本+cycle 预算（Vivado 未装，标注未验证）/
-3.9 fuzz / 3.10 aarch64 Linux 回归 —— 见 `doc/无硬件推进报告.md`。
+3.9 fuzz / 3.10 aarch64 Linux 回归 —— 见 `docs/reports/software-only-progress.md`。
 
 ---
 

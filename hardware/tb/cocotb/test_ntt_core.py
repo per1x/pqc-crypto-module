@@ -1,10 +1,10 @@
 """cocotb：256 点 NTT 核对拍 —— L2 层（路线图 §5.1.3 的 ntt_vectors）
 
-比对：RTL == vectors/rtl/ntt.hex == model/ref_model.py 现算。
+比对：RTL == vectors/rtl/ntt.hex == hardware/model/ref_model.py 现算。
 
 ⚠️ **这三者并不互相独立**：向量是 export_vectors.py 从 ref_model 生成的，
 所以上面这条实际只等价于 `RTL == ref_model`。一张"自洽但错误"的旋转因子表
-照样能全绿。ref_model 本身的正确性由 **model/ntt_oracle.py** 的两道
+照样能全绿。ref_model 本身的正确性由 **hardware/model/ntt_oracle.py** 的两道
 独立预言机保证（schoolbook 负循环卷积 + 重建 ML-KEM KeyGen 比对 ACVP 向量），
 那里才是"对得上真实 ML-KEM"的依据。
 
@@ -17,12 +17,14 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "model"))
+# parents[2] = hardware/；黄金向量在仓库根的 vectors/（C 侧测试也读它）
+HW = Path(__file__).resolve().parents[2]
+REPO = HW.parent
+sys.path.insert(0, str(HW / "model"))
 
 from ref_model import invntt, ntt  # noqa: E402
 
-VEC = ROOT / "vectors" / "rtl"
+VEC = REPO / "vectors" / "rtl"
 
 
 def s16(x: int) -> int:
@@ -34,7 +36,7 @@ def load_pairs(name: str):
     """文件里一行输入、一行输出，交替"""
     path = VEC / name
     if not path.exists():
-        raise FileNotFoundError(f"{path} 不存在 —— 先跑 model/export_vectors.py")
+        raise FileNotFoundError(f"{path} 不存在 —— 先跑 hardware/model/export_vectors.py")
     rows = [l.split() for l in path.read_text().splitlines()
             if l.strip() and not l.startswith("#")]
     return [(rows[i], rows[i + 1]) for i in range(0, len(rows) - 1, 2)]

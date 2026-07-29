@@ -4,8 +4,8 @@
 #    **未经实机验证** —— 它是照 Vivado 的标准 non-project 流程写的，
 #    第一次跑可能需要按你的 Vivado 版本微调。装了 Vivado 之后：
 #
-#      vivado -mode batch -source syn/ooc_synth.tcl -tclargs <part> <top>
-#      # 例：vivado -mode batch -source syn/ooc_synth.tcl -tclargs xck26-sfvc784-2LV-c butterfly_ct
+#      vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top>
+#      # 例：vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xck26-sfvc784-2LV-c butterfly_ct
 #
 # 为什么值得先跑：§5.0 明确说资源占用、时序收敛与 Fmax 估算**不需要板子**，
 # 只需指定 part。在下单开发板**之前**跑一遍，才知道选的器件够不够用 ——

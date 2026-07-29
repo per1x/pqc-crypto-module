@@ -14,7 +14,7 @@
 // 这样可以直接挂到 pqchsm/accel.h 的寄存器语义上。
 // **done 是电平**：置位后保持到下一次 start 才清（理由见 ntt_core.v）。
 //
-// lane 编号：index = x + 5*y，与 model/ref_model.py 的 keccak_f1600 一致。
+// lane 编号：index = x + 5*y，与 hardware/model/ref_model.py 的 keccak_f1600 一致。
 `default_nettype none
 
 module keccak_f1600 (

@@ -21,7 +21,7 @@ zeta 表错一个数、层序错一层，同态就不成立。
 能重现 ⇒ **ref_model 的 NTT 就是真实 ML-KEM 用的那个 NTT**，
 而不只是"某个自洽的 NTT"。这条把 RTL 一路钉到 NIST 向量上。
 
-用法：python3 model/ntt_oracle.py
+用法：python3 hardware/model/ntt_oracle.py
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from ref_model import Q, ZETAS, fqmul, invntt, montgomery_reduce, ntt  # noqa: E402
 
-KAT = Path(__file__).resolve().parent.parent / "vectors" / "mlkem_keygen.kat"
+KAT = Path(__file__).resolve().parents[2] / "vectors" / "mlkem_keygen.kat"
 
 # 参数集：k, eta1
 PARAMS = {"ML-KEM-512": (2, 3), "ML-KEM-768": (3, 2), "ML-KEM-1024": (4, 2)}

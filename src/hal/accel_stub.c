@@ -47,7 +47,7 @@ static void set_done(uint32_t out_len)
 	g_regs[ACCEL_REG_STATUS / 4] = ACCEL_ST_DONE;
 }
 
-/* NTT：桩里用 Python 参考模型同款的软件实现（与 rtl/ 对拍用的是同一套定义） */
+/* NTT：桩里用 Python 参考模型同款的软件实现（与 hardware/rtl/ 对拍用的是同一套定义） */
 #define NTT_Q 3329
 #define NTT_QINV (-3327)
 
@@ -115,7 +115,7 @@ static void ntt_inv(int16_t *r)
 	}
 }
 
-/* Keccak-f[1600] 的软件实现（桩用）。与 rtl/keccak/keccak_f1600.v 同一套定义，
+/* Keccak-f[1600] 的软件实现（桩用）。与 hardware/rtl/keccak/keccak_f1600.v 同一套定义，
  * 二者的一致性由 test_accel 的"RTL 与桩逐字节相同"断言保证。 */
 static void keccak_f1600_sw(uint64_t A[25])
 {

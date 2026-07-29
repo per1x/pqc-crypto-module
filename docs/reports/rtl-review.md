@@ -1,7 +1,7 @@
 # RTL 静态审查报告 —— pqc-hsm / ML-KEM NTT 核
 
 **审查日期**：2026-07-29
-**审查范围**：`rtl/mlkem/` 全部 RTL、`tb/cocotb/` 对拍、`syn/` 综合脚本与约束、`src/hal/` 的 Verilator 桥、`model/ref_model.py` 参考模型
+**审查范围**：`hardware/rtl/mlkem/` 全部 RTL、`hardware/tb/cocotb/` 对拍、`hardware/syn/` 综合脚本与约束、`src/hal/` 的 Verilator 桥、`hardware/model/ref_model.py` 参考模型
 **审查方式**：grep 文本扫描 + 逐行人工审查（不改动任何 RTL 源码）
 **背景校正**：本项目目前**只有 NTT 侧写成了 RTL**（Keccak 尚未开始）。用户清单里 “DSP=0” 是 Keccak 专用硬指标，**不适用于 NTT**——NTT 必然含模乘，用 DSP 是正常且正确的，本报告按 NTT 的预期（蝶形结构、模约减、位宽、旋转因子 ROM）来判。
 
@@ -11,15 +11,15 @@
 
 | 文件 | 行数 | 性质 | 结论一句话 |
 |------|------|------|-----------|
-| `rtl/mlkem/mont_reduce.v` | 29 | 纯组合 Montgomery 约减 | 位宽显式、与 C 逐位等价，干净 |
-| `rtl/mlkem/butterfly.v` | 54 | 纯组合 barrett + CT/GS 蝶形 | 干净；但**未被 NTT 核例化**（见 D） |
-| `rtl/mlkem/ntt_core.v` | 222 | 时序：256 点 NTT/INTT 状态机 | **单蝶形/周期迭代版**，功能对得上模型；有若干工程性建议 |
-| `tb/cocotb/test_ops.py` | 76 | mont 对拍 + 定义式性质断言 | 好 |
-| `tb/cocotb/test_butterfly.py` | 60 | CT/GS 蝶形对拍 | 好 |
-| `tb/cocotb/test_ntt_core.py` | 133 | 正/逆 NTT + 往返性质 | 好，但“三方”实为“两方”（见 E） |
-| `syn/ooc_synth.tcl` / `syn/constraints/ooc.xdc` | — | OOC 综合脚本 + 约束 | **XDC 已与 ntt_core 脱节，必须修** |
+| `hardware/rtl/mlkem/mont_reduce.v` | 29 | 纯组合 Montgomery 约减 | 位宽显式、与 C 逐位等价，干净 |
+| `hardware/rtl/mlkem/butterfly.v` | 54 | 纯组合 barrett + CT/GS 蝶形 | 干净；但**未被 NTT 核例化**（见 D） |
+| `hardware/rtl/mlkem/ntt_core.v` | 222 | 时序：256 点 NTT/INTT 状态机 | **单蝶形/周期迭代版**，功能对得上模型；有若干工程性建议 |
+| `hardware/tb/cocotb/test_ops.py` | 76 | mont 对拍 + 定义式性质断言 | 好 |
+| `hardware/tb/cocotb/test_butterfly.py` | 60 | CT/GS 蝶形对拍 | 好 |
+| `hardware/tb/cocotb/test_ntt_core.py` | 133 | 正/逆 NTT + 往返性质 | 好，但“三方”实为“两方”（见 E） |
+| `hardware/syn/ooc_synth.tcl` / `hardware/syn/constraints/ooc.xdc` | — | OOC 综合脚本 + 约束 | **XDC 已与 ntt_core 脱节，必须修** |
 | `src/hal/verilator/ntt_sim.cpp` | 128 | Verilator→C 桥 | 功能对；依赖 done 脉冲逐周期轮询 |
-| `model/ref_model.py` / `export_vectors.py` | — | 独立参考模型 + 向量导出 | NTT 无独立预言机（见 E） |
+| `hardware/model/ref_model.py` / `export_vectors.py` | — | 独立参考模型 + 向量导出 | NTT 无独立预言机（见 E） |
 
 **没有找到任何 AXI / 寄存器接口 RTL 文件**（`grep -i axi/hal/reg_if/apb` 命中的都是 C 头文件或 C 实现）。这一点直接回答问题②，详见第 6 节。
 
@@ -27,7 +27,7 @@
 
 ## 第一轮 · 文本 / 逐行可综合性审查
 
-grep 扫描结果（设计文件 `rtl/mlkem/*.v`，不含 tb）：
+grep 扫描结果（设计文件 `hardware/rtl/mlkem/*.v`，不含 tb）：
 
 | 检查项 | 结果 |
 |--------|------|
@@ -98,13 +98,13 @@ grep 扫描结果（设计文件 `rtl/mlkem/*.v`，不含 tb）：
 
 ## 第三轮 · 综合后核对 / 预期
 
-**现状：`syn/rpt/` 为空，没有任何 utilization / timing / Fmax 报告。** `syn/README.md` 与 `ooc_synth.tcl` 都注明“本机没装 Vivado，脚本未经实机验证”。因此**没有可贴的综合数字，需综合验证**。以下给预期与必须先修项。
+**现状：`hardware/syn/rpt/` 为空，没有任何 utilization / timing / Fmax 报告。** `hardware/syn/README.md` 与 `ooc_synth.tcl` 都注明“本机没装 Vivado，脚本未经实机验证”。因此**没有可贴的综合数字，需综合验证**。以下给预期与必须先修项。
 
 **latch / multi-driven（零容忍）扫描** —— 通过。
 无 `always @(*)`（无组合 latch）；每个寄存器只有单一驱动源（`mem` 仅在唯一 always 块内写，`rd_data` 仅一处 `assign`）；无 multi-driven。综合后 `report_synth` 若报 latch/multi-driver 反而要怀疑约束或流程问题。
 
-**必须先修：`syn/constraints/ooc.xdc` 已与 `ntt_core` 脱节** —— 【必须修】
-XDC 现在只 `create_clock -period 6.667 -name virt_clk`（虚拟时钟，**未绑定任何端口**），且文件注释仍写“当前 rtl/mlkem 下的模块都是纯组合逻辑”。这在 `ntt_core` 已是时序电路之后**不再成立**。若用此 XDC 综合 `ntt_core`，其 `clk` 端口上没有时钟约束 → 所有时序路径不被计时 → `report_timing_summary` 给出的是**失真/空**的结果，会让人误判“时序很好”。这与 `syn/` 存在的全部意义（买板前拿到可信时序）直接冲突。
+**必须先修：`hardware/syn/constraints/ooc.xdc` 已与 `ntt_core` 脱节** —— 【必须修】
+XDC 现在只 `create_clock -period 6.667 -name virt_clk`（虚拟时钟，**未绑定任何端口**），且文件注释仍写“当前 hardware/rtl/mlkem 下的模块都是纯组合逻辑”。这在 `ntt_core` 已是时序电路之后**不再成立**。若用此 XDC 综合 `ntt_core`，其 `clk` 端口上没有时钟约束 → 所有时序路径不被计时 → `report_timing_summary` 给出的是**失真/空**的结果，会让人误判“时序很好”。这与 `hardware/syn/` 存在的全部意义（买板前拿到可信时序）直接冲突。
 修法（不在本次改动范围，仅记账）：综合 `ntt_core` 时改为
 ```
 create_clock -period 6.667 -name clk [get_ports clk]
@@ -129,7 +129,7 @@ set_output_delay -clock clk 1.0 [all_outputs]
 
 ## 第四轮 · 仿真对拍现状评估
 
-现有 cocotb 对拍（`tb/cocotb/`，Icarus 默认，可切 Verilator）：
+现有 cocotb 对拍（`hardware/tb/cocotb/`，Icarus 默认，可切 Verilator）：
 
 | 层 | 测试 | 对拍方式 | 覆盖 |
 |----|------|---------|------|
@@ -142,7 +142,7 @@ set_output_delay -clock clk 1.0 [all_outputs]
 **优点**：分层导出向量（不是只有整机 KAT），既比对逐条向量又有性质断言（`test_mont_definition` / `test_roundtrip` 能防住“表和实现一起错”），并顺带采集 cycle 数作为无板阶段的性能数据。方向完全正确。
 
 **不足（覆盖缺口）** —— 【建议改】：
-- **“三方一致”实为“两方一致”**：`vectors/rtl/*.hex` 是 `export_vectors.py` 从 `ref_model` 生成的，**向量与模型同源**。cocotb 里 `RTL == 向量 == 模型` 实际只等价于 `RTL == ref_model`。对 Montgomery 有 `test_mont_definition` 独立兜底、对 Keccak 有 hashlib 交叉验证兜底，但**NTT 没有任何独立预言机**——`test_roundtrip` 只验证 invntt 能逆 ntt，一张“自洽但错误”的旋转因子表/层序也能通过往返。
+- **“三方一致”实为“两方一致”**：`vectors/hardware/rtl/*.hex` 是 `export_vectors.py` 从 `ref_model` 生成的，**向量与模型同源**。cocotb 里 `RTL == 向量 == 模型` 实际只等价于 `RTL == ref_model`。对 Montgomery 有 `test_mont_definition` 独立兜底、对 Keccak 有 hashlib 交叉验证兜底，但**NTT 没有任何独立预言机**——`test_roundtrip` 只验证 invntt 能逆 ntt，一张“自洽但错误”的旋转因子表/层序也能通过往返。
 - **ref_model 的 NTT 未与真实 C/liboqs 的 NTT 交叉验证**：存在“RTL 对得上模型、却对不上 HSM 里实际用的 ML-KEM”的风险（见第 7 节风险项）。
 - 建议补两条独立校验：
   1. 用 **schoolbook 负循环卷积**（直接在 `mod (x^256+1, q)` 上做多项式乘）与 “ntt → 逐点乘 → invntt → 除 mont 因子” 互证，验证整条 NTT 的**语义**而非仅自洽。
@@ -160,7 +160,7 @@ set_output_delay -clock clk 1.0 [all_outputs]
 → **都不是——目前没有 AXI / 寄存器接口 RTL**。`ntt_core` 用自研握手端口（start/inverse/done + 读写口）。accel.h 里的寄存器表（CTRL/STATUS/MODE/…）**由 C 实现**（`src/hal/accel_verilator.c` + `ntt_sim.cpp` 的 Verilator 桥，以及 stub 后端），不是 RTL。真正的 AXI-Lite 从机 + AXI-DMA 属后续 Phase，未编写。等它出来时按第 2 轮的记账项（DONE 锁存、START 自清、STATUS 只读、VERSION 常量、BUSY/ERR 来源）审。
 
 **③ 若已综合，贴 utilization 与 timing？**
-→ **尚未综合，无数字**。`syn/rpt/` 为空，本机无 Vivado、脚本未实机验证。预期见第 3 轮：资源约 **数百 LUT + 数百 FF + 1~3 DSP48**（NTT 用 DSP 属正常，**不套 Keccak 的 DSP=0**）；**100 MHz WNS 预期为正，150 MHz 偏紧、必要时把蝶形打一拍**。**先决条件：修好 `ooc.xdc` 对 `clk` 端口的约束，否则综合出的时序报告不可信。**
+→ **尚未综合，无数字**。`hardware/syn/rpt/` 为空，本机无 Vivado、脚本未实机验证。预期见第 3 轮：资源约 **数百 LUT + 数百 FF + 1~3 DSP48**（NTT 用 DSP 属正常，**不套 Keccak 的 DSP=0**）；**100 MHz WNS 预期为正，150 MHz 偏紧、必要时把蝶形打一拍**。**先决条件：修好 `ooc.xdc` 对 `clk` 端口的约束，否则综合出的时序报告不可信。**
 
 ---
 
@@ -178,7 +178,7 @@ set_output_delay -clock clk 1.0 [all_outputs]
 
 | 档位 | 条目 |
 |------|------|
-| **【必须修】** | 1) `syn/constraints/ooc.xdc` 对 `ntt_core` 失效：虚拟时钟未绑定 `clk` 端口、注释仍称“纯组合”，会导致时序报告失真——综合 `ntt_core` 前必须改为 `create_clock ... [get_ports clk]` 并补 I/O delay。 |
+| **【必须修】** | 1) `hardware/syn/constraints/ooc.xdc` 对 `ntt_core` 失效：虚拟时钟未绑定 `clk` 端口、注释仍称“纯组合”，会导致时序报告失真——综合 `ntt_core` 前必须改为 `create_clock ... [get_ports clk]` 并补 I/O delay。 |
 | **【建议改】** | 1) `done` 由 1 周期脉冲改为电平锁存（AXI 阶段升为必须修）；2) 数据通路寄存器 `len/grp/j/k/inv_r/scale_i` 补复位分支；3) `ntt_core` 例化 `mont_reduce/butterfly_*` 消除双实现；4) NTT 补独立预言机 + `ref_model` 与 liboqs NTT 交叉验证；5) 核暴露 `busy` 供 STATUS.BUSY。 |
 | **【可放过】** | 1) zetas 用 `initial` 初始化（Xilinx 允许，ASIC 再议）；2) Q/QINV/BARV/FINV 常量集中到 params 头；3) `mem` 多异步读口→分布式 RAM，当前规模 OK；4) `barrett.hex` 无独立测试目标、正逆 NTT 测试断言不对称。 |
 

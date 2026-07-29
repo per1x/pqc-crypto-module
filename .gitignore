@@ -1,20 +1,25 @@
+# Build outputs
 build/
 build-asan/
 build-tsan/
-.venv-rtl/
-__pycache__/
-*.pyc
-tb/cocotb/sim_build/
-tb/cocotb/results.xml
 compile_commands.json
 
-# 向量是可复现的派生物（tools/fetch_vectors.sh 钉死了 ACVP commit），
-# 共 13 MB 原始 JSON + 4.6 MB 展平结果，不入库。
-vectors/acvp/
-vectors/*.kat
-vectors/rtl/
+# Python
+__pycache__/
+*.pyc
+.venv-rtl/
+.venv-p11/
+
+# Simulation and synthesis outputs
+hardware/tb/cocotb/sim_build/
+hardware/tb/cocotb/results.xml
+hardware/syn/rpt/
+
+# Test vectors are reproducible derivatives (tools/fetch_vectors.sh pins the ACVP
+# commit): 13 MB of raw JSON plus 4.6 MB of flattened output. Not tracked.
+vectors/
+
+# Fuzzing corpus
+.fuzz-corpus/
 
 .DS_Store
-syn/rpt/
-.fuzz-corpus/
-.venv-p11/

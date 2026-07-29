@@ -28,7 +28,7 @@ from ref_model import (  # noqa: E402
     keccak_f1600, montgomery_reduce, ntt, shake128, shake256,
 )
 
-OUT = Path(__file__).resolve().parent.parent / "vectors" / "rtl"
+OUT = Path(__file__).resolve().parents[2] / "vectors" / "rtl"
 SEED = 20260729
 
 
@@ -41,7 +41,7 @@ def header(f, title: str, fields: str, endian: str) -> None:
     f.write(f"# {title}\n")
     f.write(f"# 字段：{fields}\n")
     f.write(f"# 字节序/位宽：{endian}\n")
-    f.write(f"# 由 model/export_vectors.py 生成，seed={SEED}\n")
+    f.write(f"# 由 hardware/model/export_vectors.py 生成，seed={SEED}\n")
 
 
 def export_mont(rng: random.Random) -> None:

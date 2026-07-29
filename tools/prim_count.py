@@ -2,7 +2,7 @@
 """数出 ML-KEM-768 每次操作到底跑了多少次 Keccak 置换与多少次 NTT
 
 【为什么要有这个脚本 —— 它绕开了 profiling 卡住的地方】
-doc/profiling_report.md 记了一次失败：本机上的**符号级热点归因做不了**，
+docs/reports/profiling.md 记了一次失败：本机上的**符号级热点归因做不了**，
 因为 liboqs 0.16 对 ML-KEM/ML-DSA 走手写 aarch64 汇编，没有帧指针可回溯，
 统计采样穿不过去。于是 tools/amdahl.py 一直只能用路线图的**文献占比**
 （SHAKE ~55%、NTT ~30%）跑，不是本项目的实测值。
@@ -10,7 +10,7 @@ doc/profiling_report.md 记了一次失败：本机上的**符号级热点归因
 采样归因走不通，但还有一条路：**热点占比 = 调用次数 × 单次代价**。
 这两个因子都能不依赖采样地拿到：
 
-  · 调用次数：FIPS 203 的算法是确定的。把 model/ntt_oracle.py 里那份
+  · 调用次数：FIPS 203 的算法是确定的。把 hardware/model/ntt_oracle.py 里那份
     已经**逐字节重现过 NIST ACVP 向量**的 KeyGen/Encaps/Decaps 实现，
     把它用的 hashlib 换成 ref_model.keccak_f1600 搭的海绵，边跑边计数。
     数出来的是**精确值**，不是估计 —— 唯一的不确定来自 SampleNTT 的
@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "model"))
+sys.path.insert(0, str(ROOT / "hardware" / "model"))
 
 from ref_model import Q, keccak_f1600, ntt  # noqa: E402
 import ntt_oracle as O  # noqa: E402
@@ -55,7 +55,7 @@ def reset() -> None:
 def sponge(msg: bytes, rate: int, suffix: int, outlen: int) -> bytes:
     """用 ref_model 的置换搭的海绵，**每做一次置换就记一笔**。
 
-    与 tb/cocotb/test_keccak.py 里那份 rtl_shake 是同一套 padding/rate 逻辑，
+    与 hardware/tb/cocotb/test_keccak.py 里那份 rtl_shake 是同一套 padding/rate 逻辑，
     而那份是与 hashlib 逐字节对过的 —— 所以这里数的置换次数对应的是
     真正的 SHAKE，不是某个自制变体。
     """

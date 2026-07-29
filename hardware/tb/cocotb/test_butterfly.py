@@ -5,12 +5,14 @@ from pathlib import Path
 import cocotb
 from cocotb.triggers import Timer
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "model"))
+# parents[2] = hardware/；黄金向量在仓库根的 vectors/（C 侧测试也读它）
+HW = Path(__file__).resolve().parents[2]
+REPO = HW.parent
+sys.path.insert(0, str(HW / "model"))
 
 from ref_model import ct_butterfly, gs_butterfly  # noqa: E402
 
-VEC = ROOT / "vectors" / "rtl"
+VEC = REPO / "vectors" / "rtl"
 
 
 def s16(x: int) -> int:
@@ -21,7 +23,7 @@ def s16(x: int) -> int:
 def load(name: str):
     path = VEC / name
     if not path.exists():
-        raise FileNotFoundError(f"{path} 不存在 —— 先跑 model/export_vectors.py")
+        raise FileNotFoundError(f"{path} 不存在 —— 先跑 hardware/model/export_vectors.py")
     rows = []
     for line in path.read_text().splitlines():
         line = line.strip()

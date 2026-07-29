@@ -2,7 +2,7 @@
 # 拉取 NIST ACVP 最终版 FIPS 203/204 向量，然后展平成 vectors/*.kat
 #
 # 为什么钉死 commit：ACVP-Server 的 master 会滚动更新，不钉死就无法解释
-# "上周还全绿今天怎么挂了"。升级向量时改这里并重跑，把差异写进 doc/STATUS.md。
+# "上周还全绿今天怎么挂了"。升级向量时改这里并重跑，把差异写进 docs/design/development-log.md。
 set -euo pipefail
 
 # ACVP-Server master @ 2026-07-28

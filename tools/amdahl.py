@@ -9,7 +9,7 @@
     tools/amdahl.py --keccak 0.48 --ntt 0.34   # 用你自己测出来的占比
 
 ⚠️ 默认占比来自路线图正文（ML-KEM-768：SHAKE ~55%、NTT 相关 ~30%），
-**不是本项目的实测值** —— 本机上的符号级归因失败了，原因见 doc/profiling_report.md。
+**不是本项目的实测值** —— 本机上的符号级归因失败了，原因见 docs/reports/profiling.md。
 拿到目标平台的实测数字后，用 --keccak/--ntt 覆盖再跑一遍。
 """
 from __future__ import annotations

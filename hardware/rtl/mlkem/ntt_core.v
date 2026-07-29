@@ -15,7 +15,7 @@
 //
 // ⚠️ ML-KEM 的 NTT 只做 **7 层**（到 2 次多项式为止，不是完整 8 层）。
 // 逆变换最后要乘 f = mont^2/128 = 1441，所以 invntt(ntt(x)) ≡ x·2^16 (mod q)，
-// **不是恒等** —— 这一条最容易被当成 bug，见 model/ref_model.py 的说明。
+// **不是恒等** —— 这一条最容易被当成 bug，见 hardware/model/ref_model.py 的说明。
 `default_nettype none
 
 module ntt_core (

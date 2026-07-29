@@ -234,7 +234,7 @@ static void test_full_chain_on_accel(void)
 /* ---- Keccak-f[1600] / SHA3 / SHAKE 经寄存器接口 ------------------------- */
 
 /* ★ 独立预言机 1：全零态一次置换的输出是**公开已知**的官方向量。
- * 硬编码在这里，不由本项目任何代码生成 —— 与 tb/cocotb/test_keccak.py 同源于
+ * 硬编码在这里，不由本项目任何代码生成 —— 与 hardware/tb/cocotb/test_keccak.py 同源于
  * Keccak 团队的中间值文档，而不是同源于我们自己的实现。 */
 static const uint64_t KECCAK_ALL_ZERO[25] = {
 	0xF1258F7940E1DDE7ULL, 0x84D5CCF933C0478AULL, 0xD598261EA65AA9EEULL,

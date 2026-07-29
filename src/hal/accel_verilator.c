@@ -3,8 +3,8 @@
  * 编译时若没有 PQCHSM_HAVE_VERILATOR（即本机没装 verilator），
  * 这里返回 NULL —— **如实反映"这条路没编进来"**，而不是悄悄退回软件。
  *
- * 已实现的模式：NTT_FWD / NTT_INV（rtl/mlkem/ntt_core.v）、
- *               KECCAK_F1600（rtl/keccak/keccak_f1600.v）。
+ * 已实现的模式：NTT_FWD / NTT_INV（hardware/rtl/mlkem/ntt_core.v）、
+ *               KECCAK_F1600（hardware/rtl/keccak/keccak_f1600.v）。
  * 其余模式置 STATUS.ERR + ERRCODE=3（"该模式未实现"），
  * 上层会收到 PQC_ERR_UNSUPPORTED —— 完整的 ML-KEM/ML-DSA 核属于
  * 路线图 Phase 1–4，不是这一层能变出来的。

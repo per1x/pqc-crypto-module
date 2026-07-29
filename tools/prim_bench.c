@@ -1,7 +1,7 @@
 /* prim_bench.c —— 单次原语代价的实测（配合 tools/prim_count.py）
  *
  * 【它补的是哪一块】
- * doc/profiling_report.md 记过一次失败：本机符号级热点归因做不了
+ * docs/reports/profiling.md 记过一次失败：本机符号级热点归因做不了
  * （liboqs 0.16 在 arm64 上是手写汇编，没有帧指针，采样穿不过去）。
  * 于是 amdahl.py 一直只能用路线图的文献占比。
  *

@@ -65,7 +65,7 @@ def main() -> int:
     print("怎么用这张表：")
     print("  1. 先定端到端目标（比如 KeyGen < 1 ms），反推 NTT 需要多快；")
     print("  2. 从表里挑满足要求的最小并行度 —— 并行度越高，存储端口越难做；")
-    print("  3. 把选中的并行度写进 doc/uarch.md，再开始写 RTL。")
+    print("  3. 把选中的并行度写进 docs/design/uarch.md，再开始写 RTL。")
     print("  ⚠️ 这里只算了 NTT。若 §5.2 的结论是 Keccak 占比更大，")
     print("     那么先做 Keccak 核才是端到端收益更高的选择（见 tools/amdahl.py）。")
     return 0
