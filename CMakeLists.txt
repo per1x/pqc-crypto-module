@@ -190,6 +190,15 @@ add_test(NAME p11           COMMAND test_p11)
 # RTL 对拍（无 cocotb/iverilog 时脚本自己 SKIP）
 add_test(NAME fuzz COMMAND fuzz_standalone 4000)
 
+find_package(Python3 COMPONENTS Interpreter)
+
+# NTT 的独立预言机：schoolbook 负循环卷积 + 重建 ML-KEM KeyGen 比对 ACVP 向量。
+# 这是"RTL 对得上真实 ML-KEM"而不只是"对得上自己的模型"的依据。
+if(Python3_Interpreter_FOUND)
+  add_test(NAME ntt_oracle COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/model/ntt_oracle.py)
+endif()
+
 add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
 
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
@@ -210,7 +219,6 @@ add_test(NAME anchor        COMMAND test_anchor)
 
 # 结构性回归：KDR 铁律是"只进不出"。这条用例扫公共头，确保没人加回读出根密钥的接口。
 # 与 Phase 7 的"地址译码上物理不存在读回路径"是同一句话在软件阶段的实现。
-find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
   add_test(NAME kdr_no_readback COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_readback.py

@@ -1,6 +1,13 @@
 """cocotb：256 点 NTT 核对拍 —— L2 层（路线图 §5.1.3 的 ntt_vectors）
 
-三方比对：RTL == vectors/rtl/ntt.hex == model/ref_model.py 现算。
+比对：RTL == vectors/rtl/ntt.hex == model/ref_model.py 现算。
+
+⚠️ **这三者并不互相独立**：向量是 export_vectors.py 从 ref_model 生成的，
+所以上面这条实际只等价于 `RTL == ref_model`。一张"自洽但错误"的旋转因子表
+照样能全绿。ref_model 本身的正确性由 **model/ntt_oracle.py** 的两道
+独立预言机保证（schoolbook 负循环卷积 + 重建 ML-KEM KeyGen 比对 ACVP 向量），
+那里才是"对得上真实 ML-KEM"的依据。
+
 同时记录 cycle 数 —— 这就是无板阶段能拿到的性能数据（§5.3.3 那段注释）。
 """
 import sys
@@ -104,7 +111,8 @@ async def test_ntt_forward(dut):
         assert got == expect == model, (
             f"第 {idx} 组不匹配\n  RTL   前8={got[:8]}\n  向量  前8={expect[:8]}\n"
             f"  模型  前8={model[:8]}")
-    dut._log.info(f"ntt 正变换 {len(pairs)} 组三方一致，平均 {total_cycles // len(pairs)} cycles/次")
+    dut._log.info(f"ntt 正变换 {len(pairs)} 组与 ref_model 一致（其正确性见 ntt_oracle.py），"
+                  f"平均 {total_cycles // len(pairs)} cycles/次")
 
 
 @cocotb.test()
@@ -113,6 +121,7 @@ async def test_ntt_inverse(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
     pairs = load_pairs("invntt.hex")
+    assert len(pairs) == 20        # 与正变换测试对称（原来只有正变换断言了条数）
     for idx, (vin, vexp) in enumerate(pairs):
         coeffs = [s16(int(x, 16)) for x in vin]
         expect = [s16(int(x, 16)) for x in vexp]
@@ -121,7 +130,7 @@ async def test_ntt_inverse(dut):
         got = await read_poly(dut)
         model = invntt(list(coeffs))
         assert got == expect == model, f"第 {idx} 组逆变换不匹配"
-    dut._log.info(f"ntt 逆变换 {len(pairs)} 组三方一致")
+    dut._log.info(f"ntt 逆变换 {len(pairs)} 组与 ref_model 一致")
 
 
 @cocotb.test()
