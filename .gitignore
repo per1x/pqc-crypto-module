@@ -2,6 +2,8 @@ build/
 build-asan/
 build-tsan/
 .venv-rtl/
+__pycache__/
+*.pyc
 tb/cocotb/sim_build/
 tb/cocotb/results.xml
 compile_commands.json
