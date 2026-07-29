@@ -5,13 +5,13 @@
 
 ## 可运行命令
 
+> 下面的命令都假定**在仓库根目录执行**。
+
 **Python**（PyKCS11，25 项断言）
 
 ```bash
 python3 -m venv .venv-p11 && ./.venv-p11/bin/pip install -q PyKCS11 && cmake --build build --target pqchsm-p11 && ./.venv-p11/bin/python demo/python/pqchsm_demo.py
 ```
-
-> 下面的命令都假定**在仓库根目录执行**。
 
 **Java**（JDK 22+ 自带的 FFM，零外部依赖，30 项断言）
 
