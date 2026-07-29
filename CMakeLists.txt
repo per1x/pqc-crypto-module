@@ -31,6 +31,7 @@ add_library(pqchsm
   src/crypto/oqs_rng.c
   src/crypto/kdf.c
   src/crypto/kdr.c
+  src/proto/proto.c
   src/audit/audit.c
   src/audit/anchor.c
   src/backup/shamir.c
@@ -58,6 +59,12 @@ target_include_directories(pqchsm-p11 PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src/p11)
 target_link_libraries(pqchsm-p11 PRIVATE pqchsm)
 set_target_properties(pqchsm-p11 PROPERTIES PREFIX "" OUTPUT_NAME "pqchsm-pkcs11")
+
+# ---- 命令接口：daemon 与 CLI（Phase 5 第 3 项）------------------------------
+add_executable(pqchsmd cli/pqchsmd.c)
+target_link_libraries(pqchsmd PRIVATE pqchsm)
+add_executable(pqchsm-cli cli/pqchsm_cli.c)
+target_link_libraries(pqchsm-cli PRIVATE pqchsm)
 
 # ---- 测试 -------------------------------------------------------------------
 enable_testing()
@@ -87,6 +94,7 @@ pqchsm_test(test_backup    tests/unit/test_backup.c)
 pqchsm_test(test_zeroize   tests/unit/test_zeroize.c)
 pqchsm_test(test_audit     tests/unit/test_audit.c)
 pqchsm_test(test_kdr       tests/unit/test_kdr.c)
+pqchsm_test(test_proto     tests/unit/test_proto.c)
 
 # PKCS#11 测试要 dlopen 真正的 .dylib —— 测的是发布出去的那个库，
 # 包括符号导出与函数表填得对不对；直接链接会绕过这些。
@@ -121,9 +129,12 @@ add_test(NAME backup        COMMAND test_backup)
 add_test(NAME zeroize       COMMAND test_zeroize)
 add_test(NAME audit         COMMAND test_audit)
 add_test(NAME kdr           COMMAND test_kdr)
+add_test(NAME proto         COMMAND test_proto)
 add_test(NAME p11           COMMAND test_p11)
 
 # pkcs11-tool 冒烟 + SoftHSMv2 行为对比。没装 OpenSC 时脚本自己 SKIP（退出 0）。
+add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
+         ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME p11_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/p11_smoke.sh
          $<TARGET_FILE:pqchsm-p11>)
 add_test(NAME anchor        COMMAND test_anchor)
