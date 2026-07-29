@@ -106,4 +106,5 @@ pqc-hsm/
 
 ## 当前状态 / 下一步
 
-见 [`doc/STATUS.md`](doc/STATUS.md)。
+- [`doc/现状与后续计划.md`](doc/现状与后续计划.md) —— **成篇文档**：已完成 / 遗留 / 无硬件还能做什么 / 拿到板子后怎么做
+- [`doc/STATUS.md`](doc/STATUS.md) —— 逐步进度与每步的决策记录
