@@ -126,6 +126,10 @@ target_link_libraries(pqchsm-cli PRIVATE pqchsm)
 add_executable(pqchsm-bench tools/bench.c)
 target_link_libraries(pqchsm-bench PRIVATE pqchsm)
 
+# 单次原语代价 —— 与 tools/prim_count.py 的精确计数相乘得到实测占比
+add_executable(pqchsm-prim-bench tools/prim_bench.c)
+target_link_libraries(pqchsm-prim-bench PRIVATE pqchsm)
+
 # ---- fuzz 靶子（§3.9）-------------------------------------------------------
 # 独立驱动版：不依赖 libFuzzer，接进 ctest，跑在 ASan 下。
 # libFuzzer 版另见 tools/fuzz.sh（需要 brew 的 llvm，Apple clang 不带）。
@@ -217,6 +221,10 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
+
+# 原语计数的自检：海绵与 hashlib 对拍 + 计数与手推解析式对拍（含反证）
+add_test(NAME prim_count COMMAND python3
+         ${CMAKE_CURRENT_SOURCE_DIR}/tools/prim_count.py --self-test)
 
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
          ${CMAKE_CURRENT_BINARY_DIR})

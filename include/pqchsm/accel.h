@@ -117,6 +117,11 @@ int accel_keccak_f1600(const uint8_t state_in[200], uint8_t state_out[200]);
  * rate：SHAKE128=168，SHAKE256/SHA3-256=136，SHA3-512=72
  * suffix：SHAKE 用 0x1F，SHA3 用 0x06
  * 成功返回 0。 */
+/* 上一次经 verilator 后端跑的 NTT / Keccak 各用了多少 cycle。
+ * 没编 Verilator 支持时返回 0。无板阶段的硬件侧性能数据就是从这里来的。 */
+uint64_t accel_verilator_last_cycles(void);
+uint64_t accel_verilator_keccak_cycles(void);
+
 int accel_shake(int rate, uint8_t suffix,
                 const uint8_t *msg, size_t msg_len,
                 uint8_t *out, size_t out_len);

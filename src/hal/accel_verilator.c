@@ -155,4 +155,14 @@ const accel_transport_t *accel_transport_verilator(void)
 	return NULL;
 }
 
+uint64_t accel_verilator_last_cycles(void)
+{
+	return 0;
+}
+
+uint64_t accel_verilator_keccak_cycles(void)
+{
+	return 0;
+}
+
 #endif
