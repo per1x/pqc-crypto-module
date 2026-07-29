@@ -36,10 +36,9 @@ module ntt_core (
     output wire signed [15:0] rd_data
 );
 
-    localparam signed [15:0] Q    =  16'sd3329;
-    localparam signed [15:0] QINV = -16'sd3327;
-    localparam signed [15:0] BARV =  16'sd20159;   // ((1<<26)+q/2)/q
-    localparam signed [15:0] FINV =  16'sd1441;    // mont^2/128
+    // Q / QINV / BARV 现在由 mont_reduce / barrett_reduce 各自持有 ——
+    // 核里不再重复定义，避免"改一处忘另一处"。
+    localparam signed [15:0] FINV = 16'sd1441;     // mont^2/128，只有 S_SCALE 用
 
     // ---- zeta ROM（Montgomery 域，与 pq-crystals 的表一致）----
     reg signed [15:0] zetas [0:127];
@@ -82,34 +81,10 @@ module ntt_core (
     reg signed [15:0] mem [0:255];
     assign rd_data = mem[rd_addr];
 
-    // ---- 组合算子 ----
-    // 显式写出每一步的位宽：Verilator 是 2-state，隐式截断在这里会真的算错，
-    // 而 Icarus 的 4-state 可能"碰巧"对上 —— 两个仿真器都要跑就是为了逼出这类问题。
-    function automatic signed [15:0] mont;
-        input signed [31:0] a;
-        reg signed [15:0] m;
-        reg signed [31:0] prod;
-        reg signed [31:0] diff;
-        begin
-            m    = $signed(a[15:0]) * QINV;      // 低 16 位相乘后截断（对应 C 的 (int16_t) 赋值）
-            prod = $signed({{16{m[15]}}, m}) * $signed({{16{Q[15]}}, Q});
-            diff = a - prod;
-            mont = diff[31:16];                  // 算术右移 16 == 取高 16 位
-        end
-    endfunction
-
-    function automatic signed [15:0] barr;
-        input signed [15:0] a;
-        reg signed [31:0] t;
-        reg signed [15:0] t16;
-        begin
-            t    = ($signed({{16{BARV[15]}}, BARV}) * $signed({{16{a[15]}}, a})
-                    + 32'sd33554432) >>> 26;
-            t16  = t[15:0];
-            barr = a - t16 * Q;
-        end
-    endfunction
-
+    // ---- 组合算子：**例化 mont_reduce / butterfly_*，不再内联重写** ----
+    // 原来核里内联了一份 mont/barr 与 CT/GS 蝶形，而 butterfly.v / mont_reduce.v
+    // 里另有一份、只被独立 cocotb 测试用。两份实现改一处忘另一处就会漂移，
+    // 而且让"cocotb 测的到底是不是核里真正跑的那份"说不清。现在只有一份。
     // ---- 状态机 ----
     localparam S_IDLE = 3'd0, S_RUN = 3'd1, S_SCALE = 3'd2, S_DONE = 3'd3;
 
@@ -126,15 +101,19 @@ module ntt_core (
     wire signed [15:0] b_val = mem[j_hi[7:0]];
     wire signed [15:0] zeta  = zetas[k[6:0]];
 
-    // CT（正）与 GS（逆）两种蝶形
-    wire signed [31:0] ct_prod = $signed({{16{zeta[15]}}, zeta}) * $signed({{16{b_val[15]}}, b_val});
-    wire signed [15:0] ct_t  = mont(ct_prod);
-    wire signed [15:0] ct_a  = a_val + ct_t;
-    wire signed [15:0] ct_b  = a_val - ct_t;
-    wire signed [15:0] gs_a  = barr(a_val + b_val);
-    wire signed [15:0] gs_diff = b_val - a_val;
-    wire signed [31:0] gs_prod = $signed({{16{zeta[15]}}, zeta}) * $signed({{16{gs_diff[15]}}, gs_diff});
-    wire signed [15:0] gs_b  = mont(gs_prod);
+    // CT（正）与 GS（逆）两种蝶形 —— 直接例化 butterfly.v 里的模块
+    wire signed [15:0] ct_a, ct_b, gs_a, gs_b;
+    butterfly_ct u_bf_ct (.a(a_val), .b(b_val), .zeta(zeta), .a_out(ct_a), .b_out(ct_b));
+    butterfly_gs u_bf_gs (.a(a_val), .b(b_val), .zeta(zeta), .a_out(gs_a), .b_out(gs_b));
+
+    // S_SCALE 用：正变换末尾统一 Barrett 归约，逆变换末尾乘 f = mont^2/128
+    wire signed [15:0] scale_in = mem[scale_i[7:0]];
+    wire signed [15:0] scale_barr;
+    barrett_reduce u_scale_barr (.a(scale_in), .r(scale_barr));
+    wire signed [31:0] finv_prod =
+        $signed({{16{FINV[15]}}, FINV}) * $signed({{16{scale_in[15]}}, scale_in});
+    wire signed [15:0] scale_mont;
+    mont_reduce u_scale_mont (.a(finv_prod), .t_out(scale_mont));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -212,10 +191,7 @@ module ntt_core (
 
             S_SCALE: begin
                 // 正变换：最后统一 Barrett 归约；逆变换：乘 f
-                mem[scale_i[7:0]] <= inv_r
-                    ? mont($signed({{16{FINV[15]}}, FINV})
-                           * $signed({{16{mem[scale_i[7:0]][15]}}, mem[scale_i[7:0]]}))
-                    : barr(mem[scale_i[7:0]]);
+                mem[scale_i[7:0]] <= inv_r ? scale_mont : scale_barr;
                 if (scale_i == 9'd255) begin
                     state <= S_DONE;
                 end else begin

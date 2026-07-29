@@ -8,8 +8,11 @@
 // 截断这一步是本模块唯一容易写错的地方：m 必须只保留低 16 位再当有符号数用，
 // 否则 (a - m*Q) 不会被 2^16 整除，右移出来的结果就是错的。
 //
-// 纯组合逻辑，不依赖任何厂商 IP —— 这样 cocotb + Verilator/Icarus 就能跑，
-// 将来也能直接移植到 Lattice/国产器件（路线图 §5.3.1 分层的用意）。
+// 每一步的位宽都显式写出：Verilator 是 2-state，隐式截断会**真的算错**，
+// 而 Icarus 的 4-state 可能"碰巧"对上。两个仿真器都跑就是为了逼出这类差异。
+//
+// **本模块是 Montgomery 约减的唯一实现** —— ntt_core 例化它，不再自己内联一份
+// （原来两份独立实现，改一处忘另一处就会漂移）。
 `default_nettype none
 
 module mont_reduce (
@@ -22,8 +25,9 @@ module mont_reduce (
     // 低 16 位相乘后截断回 16 位有符号 —— 对应 C 里的 (int16_t) 赋值
     wire signed [15:0] m = $signed(a[15:0]) * QINV;
 
-    wire signed [31:0] prod = m * Q;
-    assign t_out = (a - prod) >>> 16;             // 算术右移
+    wire signed [31:0] prod = $signed({{16{m[15]}}, m}) * $signed({{16{Q[15]}}, Q});
+    wire signed [31:0] diff = a - prod;
+    assign t_out = diff[31:16];                   // 算术右移 16 == 取高 16 位
 endmodule
 
 `default_nettype wire
