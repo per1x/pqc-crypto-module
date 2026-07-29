@@ -48,7 +48,28 @@ ML-KEM 的 256 点 NTT：每层 128 个蝶形 × 7 层 = 896 个蝶形运算
 
 ```
 syn/
-├── ooc_synth.tcl       out-of-context 综合 + 布局布线 + 直接打印 Fmax
-├── constraints/ooc.xdc 最小时钟约束
-└── rpt/                报告输出（gitignore）
+├── ooc_synth.tcl            OOC 综合 + 布局布线 + 直接打印 Fmax
+├── constraints/ooc_seq.xdc  时序模块（ntt_core）：绑 clk 端口，100 MHz + I/O delay
+├── constraints/ooc_comb.xdc 纯组合模块：虚拟时钟，只报 in2out
+└── rpt/                     报告输出（gitignore）
 ```
+
+## 约束为什么分两份（这是一处真会误导人的坑）
+
+早先只有一份 `ooc.xdc`，里面是个**没有绑定任何端口的虚拟时钟**，
+注释还写着"当前 rtl/mlkem 下都是纯组合逻辑"。那在 `ntt_core` 写出来之后就不成立了：
+用它综合 `ntt_core`，`clk` 端口上没有时钟约束 → 所有时序路径不被计时 →
+`report_timing_summary` 给出的是**失真/空**的结果，反而让人误判"时序很好"。
+
+现在按模块性质分流（`ooc_synth.tcl` 会自己选）：
+
+| 模块 | 约束 | 说明 |
+|------|------|------|
+| `ntt_core` | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]` + I/O delay + `rst_n` false path |
+| `mont_reduce` / `butterfly_ct` / `butterfly_gs` | `ooc_comb.xdc` | 虚拟时钟，报组合路径延迟 |
+
+**为什么是 100 MHz 而不是 150 MHz**：单周期蝶形里有**两级串行乘法**
+（`zeta·b` 与 `mont` 内的 `m·Q`）加模约减加 LUTRAM 异步读。
+150 MHz（6.667 ns）偏紧，先在 100 MHz 拿到可信的正 WNS 更有意义；
+若要冲 150 MHz，把蝶形打一拍（`mont` 输出后插流水寄存器）即可，
+代价是每蝶形 2 拍、cycle 数翻倍但仍在 `cycle_budget.py` 的预算内。

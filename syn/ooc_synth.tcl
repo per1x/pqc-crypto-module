@@ -28,8 +28,16 @@ file mkdir $rpt
 read_verilog -sv [glob $root/rtl/mlkem/*.v]
 
 # ---- 约束 --------------------------------------------------------------------
-# OOC 综合下没有顶层引脚，只给时钟周期约束即可。
-read_xdc $root/syn/constraints/ooc.xdc
+# 时序模块与纯组合模块需要不同的约束：
+#   ntt_core 有真实 clk 端口 → 必须 create_clock 到该端口，否则时序报告失真；
+#   mont_reduce / butterfly_* 是纯组合 → 只能用虚拟时钟报 in2out 延迟。
+if {$top eq "ntt_core"} {
+    read_xdc $root/syn/constraints/ooc_seq.xdc
+    puts "约束：ooc_seq.xdc（clk 端口，100 MHz）"
+} else {
+    read_xdc $root/syn/constraints/ooc_comb.xdc
+    puts "约束：ooc_comb.xdc（虚拟时钟，纯组合）"
+}
 
 # ---- 综合 --------------------------------------------------------------------
 synth_design -top $top -part $part -mode out_of_context -flatten_hierarchy rebuilt
@@ -52,7 +60,7 @@ report_power          -file $rpt/${top}_power.rpt
 # Fmax = 1 / (T_target - WNS)。这一步是整个脚本的重点：
 # 报告里只有 WNS，人工换算容易出错，直接打印出来。
 set period [get_property PERIOD [get_clocks -quiet]]
-if {$period eq ""} { set period 6.667 }
+if {$period eq ""} { set period 10.000 }
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup]]
 if {$wns ne ""} {
     set fmax [expr {1000.0 / ($period - $wns)}]
