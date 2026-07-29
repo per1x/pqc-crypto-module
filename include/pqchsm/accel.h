@@ -10,7 +10,7 @@
  *
  * 【三种 transport】
  *   stub       软件桩，内部调 liboqs                    —— 现在就能跑，全套测试通过
- *   verilator  驱动 Verilator 仿真出来的真 RTL          —— 目前只实现了 NTT 模式
+ *   verilator  驱动 Verilator 仿真出来的真 RTL          —— 已实现 NTT + Keccak 模式
  *   mmap       /dev/mem + mmap 打真 PL                  —— Phase 3+，待板子
  *
  * 三者实现同一张 accel_transport_t，pqc_accel.c 之上完全不区分。
@@ -66,6 +66,7 @@ typedef enum {
 	ACCEL_MODE_SIG_VERIFY    = 6,   /* in: pk‖siglen‖sig‖ctx_len‖ctx‖msg     */
 	ACCEL_MODE_NTT_FWD       = 7,   /* in: 256×int16       out: 256×int16    */
 	ACCEL_MODE_NTT_INV       = 8,
+	ACCEL_MODE_KECCAK_F1600  = 9,   /* in: 200B 状态       out: 200B 状态    */
 } accel_mode_t;
 
 /* 数据缓冲上限：够放最大的 pk‖sk（ML-DSA-87: 2592+4896）与签名输入 */
@@ -86,7 +87,7 @@ typedef struct accel_transport {
 /* 软件桩：内部调 liboqs，暴露与真 PL 相同的寄存器语义（§5.7.1） */
 const accel_transport_t *accel_transport_stub(void);
 
-/* Verilator 仿真：驱动真 RTL。**目前只实现 NTT 模式**，
+/* Verilator 仿真：驱动真 RTL。**目前只实现 NTT 与 Keccak-f[1600] 模式**，
  * 其余模式置 ERR —— 完整的 ML-KEM/ML-DSA 核属于路线图 Phase 1–4。
  * 没编 Verilator 支持时返回 NULL。 */
 const accel_transport_t *accel_transport_verilator(void);
@@ -101,6 +102,24 @@ const pqc_backend_t *pqc_backend_accel(void);
 /* 直接跑一次 NTT（给 RTL 对拍用；正常密码路径不经这里）。
  * in/out 都是 256 个 int16，小端。成功返回 0。 */
 int accel_ntt(const int16_t *in, int16_t *out, int inverse);
+
+/* 直接跑一次 Keccak-f[1600] 置换。state 是 200 字节（25 个小端 lane）。
+ * 成功返回 0。 */
+int accel_keccak_f1600(const uint8_t state_in[200], uint8_t state_out[200]);
+
+/* 用当前 transport 的 Keccak 置换搭出 SHAKE / SHA3。
+ *
+ * 【分工说明】置换在"硬件"（RTL 仿真或软件桩）里做，**海绵的吸收/挤压/padding
+ * 在这里用 C 做**。这是有意的分层：真 PL 上 Keccak 核通常也只暴露置换（或
+ * absorb/squeeze 原语），framing 由 PS 侧负责 —— 那样核更小、也更通用
+ * （SHAKE128/256、SHA3-256/512 共用同一个置换核，只是 rate 与域分隔后缀不同）。
+ *
+ * rate：SHAKE128=168，SHAKE256/SHA3-256=136，SHA3-512=72
+ * suffix：SHAKE 用 0x1F，SHA3 用 0x06
+ * 成功返回 0。 */
+int accel_shake(int rate, uint8_t suffix,
+                const uint8_t *msg, size_t msg_len,
+                uint8_t *out, size_t out_len);
 
 #ifdef __cplusplus
 }

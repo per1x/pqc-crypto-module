@@ -274,6 +274,79 @@ int accel_ntt(const int16_t *in, int16_t *out, int inverse)
 	return 0;
 }
 
+int accel_keccak_f1600(const uint8_t state_in[200], uint8_t state_out[200])
+{
+	if (!state_in || !state_out) {
+		return -1;
+	}
+	uint8_t buf[200];
+	memcpy(buf, state_in, 200);
+	uint32_t olen = 0;
+	pqc_status_t st = run(ACCEL_MODE_KECCAK_F1600, PQC_ALG_ML_KEM_768,
+	                      buf, 200, &olen);
+	if (st != PQC_OK || olen != 200) {
+		return -1;
+	}
+	accel_get_transport()->read_data(0, state_out, 200);
+	return 0;
+}
+
+/* SHAKE / SHA3：置换交给"硬件"，海绵在这里做（分工理由见 accel.h）。
+ *
+ * 这条路径把 padding（pad10*1 + 域分隔后缀）、rate、lane 小端序、
+ * 多块吸收与多块挤压全都串起来 —— 换句话说，它验的不只是置换本身。
+ * 正确性由 tests/unit/test_accel.c 对 OpenSSL 的逐字节比对钉住。 */
+int accel_shake(int rate, uint8_t suffix,
+                const uint8_t *msg, size_t msg_len,
+                uint8_t *out, size_t out_len)
+{
+	if (rate <= 0 || rate > 200 || rate % 8 != 0 || (!msg && msg_len) || !out) {
+		return -1;
+	}
+	uint8_t state[200];
+	memset(state, 0, sizeof(state));
+
+	size_t off = 0;
+	/* 吸收整块 */
+	for (; msg_len - off >= (size_t)rate; off += (size_t)rate) {
+		for (int i = 0; i < rate; i++) {
+			state[i] ^= msg[off + i];
+		}
+		if (accel_keccak_f1600(state, state) != 0) {
+			return -1;
+		}
+	}
+	/* 末块 + pad10*1 */
+	uint8_t last[200];
+	memset(last, 0, sizeof(last));
+	memcpy(last, msg + off, msg_len - off);
+	last[msg_len - off] = suffix;
+	last[rate - 1] ^= 0x80;
+	for (int i = 0; i < rate; i++) {
+		state[i] ^= last[i];
+	}
+	pqc_secure_zero(last, sizeof(last));
+	if (accel_keccak_f1600(state, state) != 0) {
+		return -1;
+	}
+
+	/* 挤压 */
+	size_t done = 0;
+	for (;;) {
+		size_t n = out_len - done < (size_t)rate ? out_len - done : (size_t)rate;
+		memcpy(out + done, state, n);
+		done += n;
+		if (done >= out_len) {
+			break;
+		}
+		if (accel_keccak_f1600(state, state) != 0) {
+			return -1;
+		}
+	}
+	pqc_secure_zero(state, sizeof(state));
+	return 0;
+}
+
 static const pqc_backend_t g_accel = {
 	.name              = "accel(register-interface)",
 	.keypair           = ac_keypair,

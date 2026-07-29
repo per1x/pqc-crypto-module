@@ -9,11 +9,13 @@
 SIM           ?= icarus
 TOPLEVEL_LANG ?= verilog
 RTL           := $(PWD)/../../rtl/mlkem
+RTL_KECCAK    := $(PWD)/../../rtl/keccak
 
 # 用法：make MODULE=test_ops TOPLEVEL=mont_reduce
 MODULE   ?= test_ops
 TOPLEVEL ?= mont_reduce
 
-VERILOG_SOURCES = $(RTL)/mont_reduce.v $(RTL)/butterfly.v $(RTL)/ntt_core.v
+VERILOG_SOURCES = $(RTL)/mont_reduce.v $(RTL)/butterfly.v $(RTL)/ntt_core.v \
+                  $(RTL_KECCAK)/keccak_f1600.v
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

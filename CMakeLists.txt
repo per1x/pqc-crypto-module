@@ -25,7 +25,7 @@ endif()
 message(STATUS "liboqs: ${LIBOQS_LIBRARY}")
 
 # ---- Verilator 仿真后端（Level B）------------------------------------------
-# 把 rtl/mlkem/ntt_core.v 仿真成一个可被 C 调用的"加速器"，
+# 把 rtl/mlkem/ntt_core.v 与 rtl/keccak/keccak_f1600.v 仿真成可被 C 调用的"加速器"，
 # 经 accel_transport_t 接到 pqc_accel.c 的寄存器语义上 —— 与将来真 PL 同一条路径。
 # 没装 verilator 就跳过，accel_transport_verilator() 返回 NULL（如实反映）。
 find_program(VERILATOR_BIN verilator)
@@ -33,20 +33,37 @@ if(VERILATOR_BIN)
   execute_process(COMMAND ${VERILATOR_BIN} --getenv VERILATOR_ROOT
                   OUTPUT_VARIABLE VERILATOR_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE)
   set(VOBJ ${CMAKE_CURRENT_BINARY_DIR}/verilated)
+  set(VOBJ_K ${CMAKE_CURRENT_BINARY_DIR}/verilated-keccak)
   add_custom_command(
     OUTPUT ${VOBJ}/libntt_core_lib.a ${VOBJ}/Vntt_core.h
     COMMAND ${VERILATOR_BIN} --cc --build --lib-create ntt_core_lib
-            -Mdir ${VOBJ} -Wno-fatal
+            --top-module ntt_core -Mdir ${VOBJ} -Wno-fatal
+            ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/mont_reduce.v
+            ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/butterfly.v
             ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/ntt_core.v
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/ntt_core.v
+            ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/butterfly.v
+            ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/mont_reduce.v
     COMMENT "Verilating rtl/mlkem/ntt_core.v")
   add_custom_target(verilate_ntt DEPENDS ${VOBJ}/libntt_core_lib.a)
 
-  add_library(pqchsm-vsim STATIC src/hal/verilator/ntt_sim.cpp)
-  add_dependencies(pqchsm-vsim verilate_ntt)
+  add_custom_command(
+    OUTPUT ${VOBJ_K}/libkeccak_f1600_lib.a ${VOBJ_K}/Vkeccak_f1600.h
+    COMMAND ${VERILATOR_BIN} --cc --build --lib-create keccak_f1600_lib
+            -Mdir ${VOBJ_K} -Wno-fatal
+            ${CMAKE_CURRENT_SOURCE_DIR}/rtl/keccak/keccak_f1600.v
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rtl/keccak/keccak_f1600.v
+    COMMENT "Verilating rtl/keccak/keccak_f1600.v")
+  add_custom_target(verilate_keccak DEPENDS ${VOBJ_K}/libkeccak_f1600_lib.a)
+
+  add_library(pqchsm-vsim STATIC
+    src/hal/verilator/ntt_sim.cpp
+    src/hal/verilator/keccak_sim.cpp)
+  add_dependencies(pqchsm-vsim verilate_ntt verilate_keccak)
   target_include_directories(pqchsm-vsim PRIVATE
-    ${VOBJ} ${VERILATOR_ROOT}/include ${VERILATOR_ROOT}/include/vltstd)
-  target_link_libraries(pqchsm-vsim PUBLIC ${VOBJ}/libntt_core_lib.a)
+    ${VOBJ} ${VOBJ_K} ${VERILATOR_ROOT}/include ${VERILATOR_ROOT}/include/vltstd)
+  target_link_libraries(pqchsm-vsim PUBLIC
+    ${VOBJ}/libntt_core_lib.a ${VOBJ_K}/libkeccak_f1600_lib.a)
   set_target_properties(pqchsm-vsim PROPERTIES CXX_STANDARD 20)
   message(STATUS "Verilator: ${VERILATOR_BIN}（Level B 仿真后端已启用）")
 else()

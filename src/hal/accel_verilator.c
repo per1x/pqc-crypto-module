@@ -3,7 +3,8 @@
  * 编译时若没有 PQCHSM_HAVE_VERILATOR（即本机没装 verilator），
  * 这里返回 NULL —— **如实反映"这条路没编进来"**，而不是悄悄退回软件。
  *
- * 已实现的模式：NTT_FWD / NTT_INV（rtl/mlkem/ntt_core.v）。
+ * 已实现的模式：NTT_FWD / NTT_INV（rtl/mlkem/ntt_core.v）、
+ *               KECCAK_F1600（rtl/keccak/keccak_f1600.v）。
  * 其余模式置 STATUS.ERR + ERRCODE=3（"该模式未实现"），
  * 上层会收到 PQC_ERR_UNSUPPORTED —— 完整的 ML-KEM/ML-DSA 核属于
  * 路线图 Phase 1–4，不是这一层能变出来的。
@@ -20,6 +21,11 @@ int      ntt_sim_reset(void);
 int      ntt_sim_run(const int16_t *in, int16_t *out, int inverse);
 uint64_t ntt_sim_last_cycles(void);
 
+/* 由 src/hal/verilator/keccak_sim.cpp 提供 */
+int      keccak_sim_reset(void);
+int      keccak_sim_run(const uint64_t *state_in, uint64_t *state_out);
+uint64_t keccak_sim_last_cycles(void);
+
 static uint32_t g_regs[16];
 static uint8_t  g_buf[ACCEL_BUF_MAX];
 
@@ -27,7 +33,9 @@ static int vr_reset(void)
 {
 	memset(g_regs, 0, sizeof(g_regs));
 	pqc_secure_zero(g_buf, sizeof(g_buf));
-	return ntt_sim_reset();
+	int a = ntt_sim_reset();
+	int b = keccak_sim_reset();
+	return a ? a : b;
 }
 
 static uint32_t vr_read_reg(uint32_t off)
@@ -84,6 +92,31 @@ static void vr_write_reg(uint32_t off, uint32_t val)
 		return;
 	}
 
+	if (mode == ACCEL_MODE_KECCAK_F1600 && in_len == 200) {
+		uint64_t in[25], out[25];
+		/* 缓冲里是 200 字节小端 lane —— 显式转换，不靠 memcpy 的字节序运气 */
+		for (int i = 0; i < 25; i++) {
+			uint64_t v = 0;
+			for (int b = 0; b < 8; b++) {
+				v |= (uint64_t)g_buf[i * 8 + b] << (8 * b);
+			}
+			in[i] = v;
+		}
+		if (keccak_sim_run(in, out) != 0) {
+			g_regs[ACCEL_REG_ERRCODE / 4] = 2;
+			g_regs[ACCEL_REG_STATUS / 4] = ACCEL_ST_DONE | ACCEL_ST_ERR;
+			return;
+		}
+		for (int i = 0; i < 25; i++) {
+			for (int b = 0; b < 8; b++) {
+				g_buf[i * 8 + b] = (uint8_t)(out[i] >> (8 * b));
+			}
+		}
+		g_regs[ACCEL_REG_OUT_LEN / 4] = 200;
+		g_regs[ACCEL_REG_STATUS / 4] = ACCEL_ST_DONE;
+		return;
+	}
+
 	/* 其余模式：RTL 侧还没有对应的核。**明确报"未实现"而不是偷偷回落软件** ——
 	 * 否则"跑通了"就变成了假象。完整的 ML-KEM/ML-DSA 核是 Phase 1–4 的工作。 */
 	g_regs[ACCEL_REG_ERRCODE / 4] = 3;
@@ -91,7 +124,7 @@ static void vr_write_reg(uint32_t off, uint32_t val)
 }
 
 static const accel_transport_t g_verilator = {
-	.name        = "verilator(RTL ntt_core; 仅 NTT 模式)",
+	.name        = "verilator(RTL ntt_core + keccak_f1600; 仅 NTT/Keccak 模式)",
 	.is_hardware = 0,          /* 仿真不是硬件 */
 	.reset       = vr_reset,
 	.write_reg   = vr_write_reg,
@@ -108,6 +141,11 @@ const accel_transport_t *accel_transport_verilator(void)
 uint64_t accel_verilator_last_cycles(void)
 {
 	return ntt_sim_last_cycles();
+}
+
+uint64_t accel_verilator_keccak_cycles(void)
+{
+	return keccak_sim_last_cycles();
 }
 
 #else

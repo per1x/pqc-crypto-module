@@ -16,6 +16,8 @@
 #include "pqchsm/slot.h"
 #include "pqchsm/util.h"
 
+#include <openssl/evp.h>
+
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -229,6 +231,136 @@ static void test_full_chain_on_accel(void)
 	unlink(bk);
 }
 
+/* ---- Keccak-f[1600] / SHA3 / SHAKE 经寄存器接口 ------------------------- */
+
+/* ★ 独立预言机 1：全零态一次置换的输出是**公开已知**的官方向量。
+ * 硬编码在这里，不由本项目任何代码生成 —— 与 tb/cocotb/test_keccak.py 同源于
+ * Keccak 团队的中间值文档，而不是同源于我们自己的实现。 */
+static const uint64_t KECCAK_ALL_ZERO[25] = {
+	0xF1258F7940E1DDE7ULL, 0x84D5CCF933C0478AULL, 0xD598261EA65AA9EEULL,
+	0xBD1547306F80494DULL, 0x8B284E056253D057ULL, 0xFF97A42D7F8E6FD4ULL,
+	0x90FEE5A0A44647C4ULL, 0x8C5BDA0CD6192E76ULL, 0xAD30A6F71B19059CULL,
+	0x30935AB7D08FFC64ULL, 0xEB5AA93F2317D635ULL, 0xA9A6E6260D712103ULL,
+	0x81A57C16DBCF555FULL, 0x43B831CD0347C826ULL, 0x01F22F1A11A5569FULL,
+	0x05E5635A21D9AE61ULL, 0x64BEFEF28CC970F2ULL, 0x613670957BC46611ULL,
+	0xB87C5A554FD00ECBULL, 0x8C3EE88A1CCF32C8ULL, 0x940C7922AE3A2614ULL,
+	0x1841F924A2C509E4ULL, 0x16F53526E70465C2ULL, 0x75F644E97F30A13BULL,
+	0xEAF1FF7B5CECA249ULL,
+};
+
+static void keccak_state_bytes(const uint64_t lanes[25], uint8_t out[200])
+{
+	for (int i = 0; i < 25; i++) {
+		for (int b = 0; b < 8; b++) {
+			out[i * 8 + b] = (uint8_t)(lanes[i] >> (8 * b));
+		}
+	}
+}
+
+/* ★ 独立预言机 2：OpenSSL 的 SHA3/SHAKE —— 与本项目完全无关的另一套实现。
+ * 它验的不只是置换：padding、rate、字节序、多块吸收/挤压全在内。 */
+static void openssl_xof(const char *name, const uint8_t *msg, size_t mlen,
+                        uint8_t *out, size_t olen)
+{
+	EVP_MD_CTX *c = EVP_MD_CTX_new();
+	const EVP_MD *md = EVP_get_digestbyname(name);
+	CHECK(md != NULL);
+	CHECK_EQ_INT(EVP_DigestInit_ex(c, md, NULL), 1);
+	CHECK_EQ_INT(EVP_DigestUpdate(c, msg, mlen), 1);
+	if (EVP_MD_get_flags(md) & EVP_MD_FLAG_XOF) {
+		CHECK_EQ_INT(EVP_DigestFinalXOF(c, out, olen), 1);
+	} else {
+		unsigned int n = 0;
+		CHECK_EQ_INT(EVP_DigestFinal_ex(c, out, &n), 1);
+		CHECK_EQ_INT((int)n, (int)olen);
+	}
+	EVP_MD_CTX_free(c);
+}
+
+/* 在给定 transport 上把 Keccak 那条路径整条验一遍 */
+static void keccak_suite_on(const char *who)
+{
+	uint8_t zero[200], want[200], got[200];
+	memset(zero, 0, sizeof(zero));
+	keccak_state_bytes(KECCAK_ALL_ZERO, want);
+
+	printf("    [%s] ★ 全零态置换 == Keccak 官方公开向量\n", who);
+	CHECK_EQ_INT(accel_keccak_f1600(zero, got), 0);
+	CHECK_EQ_MEM(got, want, 200);
+
+	printf("    [%s] ★ SHA3/SHAKE（经 accel_shake，置换走该 transport）== OpenSSL\n", who);
+	static const struct {
+		const char *evp;
+		int rate;
+		uint8_t suffix;
+		size_t olen;
+	} CASES[] = {
+		{ "SHA3-256", 136, 0x06, 32 },
+		{ "SHA3-512", 72,  0x06, 64 },
+		{ "SHAKE128", 168, 0x1F, 32 },
+		{ "SHAKE256", 136, 0x1F, 64 },
+		{ "SHAKE128", 168, 0x1F, 200 },  /* 多块挤压 */
+	};
+	/* 消息长度刻意覆盖块边界：0 / 小 / rate-1 / rate / rate+1 / 跨多块 */
+	static const size_t MLENS[] = { 0, 3, 71, 72, 135, 136, 137, 167, 168, 169, 400 };
+
+	uint8_t msg[400];
+	for (size_t i = 0; i < sizeof(msg); i++) {
+		msg[i] = (uint8_t)(i * 7 + 3);
+	}
+	for (size_t c = 0; c < sizeof(CASES) / sizeof(CASES[0]); c++) {
+		for (size_t m = 0; m < sizeof(MLENS) / sizeof(MLENS[0]); m++) {
+			uint8_t mine[256], theirs[256];
+			CHECK_EQ_INT(accel_shake(CASES[c].rate, CASES[c].suffix, msg, MLENS[m],
+			                         mine, CASES[c].olen), 0);
+			openssl_xof(CASES[c].evp, msg, MLENS[m], theirs, CASES[c].olen);
+			CHECK_EQ_MEM(mine, theirs, CASES[c].olen);
+		}
+	}
+}
+
+static void test_keccak_mode(void)
+{
+	TCASE("Keccak-f[1600] / SHA3 / SHAKE 经寄存器接口（软件桩）");
+	accel_set_transport(accel_transport_stub());
+	keccak_suite_on("stub");
+
+	/* 反证：预言机必须真的能抓错。故意扰动一个 lane，OpenSSL 那条必须不同。
+	 * 不做这一步，"全绿"可能只是断言压根没生效。 */
+	TCASE("反证：扰动状态后与官方向量必须不同（证明断言有效）");
+	{
+		uint8_t st[200], out[200], want[200];
+		memset(st, 0, sizeof(st));
+		st[0] = 1;                       /* 只动一个比特 */
+		CHECK_EQ_INT(accel_keccak_f1600(st, out), 0);
+		keccak_state_bytes(KECCAK_ALL_ZERO, want);
+		CHECK(memcmp(out, want, 200) != 0);
+	}
+
+	const accel_transport_t *v = accel_transport_verilator();
+	if (!v) {
+		printf("      Verilator transport 未编入 —— RTL 侧的 Keccak 断言跳过\n");
+		return;
+	}
+
+	TCASE("★ Keccak：真 RTL(Verilator) 走同一寄存器接口，官方向量与 OpenSSL 都对得上");
+	accel_set_transport(v);
+	keccak_suite_on("RTL");
+
+	/* ★ 桩与 RTL 逐字节相同 —— 这条把两个实现钉在一起 */
+	TCASE("★ SHA3-256：软件桩与 RTL 的结果逐字节相同");
+	{
+		uint8_t a[32], b[32];
+		const uint8_t m[] = "the same register interface, two backends";
+		accel_set_transport(accel_transport_stub());
+		CHECK_EQ_INT(accel_shake(136, 0x06, m, sizeof(m) - 1, a, 32), 0);
+		accel_set_transport(v);
+		CHECK_EQ_INT(accel_shake(136, 0x06, m, sizeof(m) - 1, b, 32), 0);
+		CHECK_EQ_MEM(a, b, 32);
+	}
+	accel_set_transport(accel_transport_stub());
+}
+
 int main(void)
 {
 	TCASE("默认 transport 是软件桩，且明确标记为非硬件");
@@ -284,6 +416,7 @@ int main(void)
 		}
 	}
 
+	test_keccak_mode();
 	test_backend_equivalence();
 	test_ntt_mode();
 	test_full_chain_on_accel();

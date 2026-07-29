@@ -43,6 +43,7 @@ run test_ops       mont_reduce
 run test_butterfly butterfly_ct
 run test_butterfly butterfly_gs
 run test_ntt_core   ntt_core
+run test_keccak     keccak_f1600
 make -s clean >/dev/null 2>&1
 echo
 [ "$fail" -eq 0 ] && echo "全部通过" || echo "有失败"
