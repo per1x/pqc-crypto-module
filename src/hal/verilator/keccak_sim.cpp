@@ -75,7 +75,7 @@ int keccak_sim_run(const uint64_t *state_in, uint64_t *state_out)
 	tick();
 
 	// done 是电平语义 —— 先确认这次 start 把它清掉了，再等它重新拉高。
-	// （NTT 那边踩过：残留的 done=1 会让等待循环立刻退出，读到中途的状态。）
+	// 否则上一次残留的 done=1 会让等待循环立刻退出，读到变换中途的状态。
 	g_dut->start = 1;
 	tick();
 	g_dut->start = 0;

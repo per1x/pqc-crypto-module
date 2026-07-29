@@ -1,7 +1,7 @@
 /* pqchsm/kdf.h —— KMAC256 / SHA3-256 / 密钥派生
  *
  * KMAC256 来自 NIST SP 800-185，本项目里承担两个角色：
- *   1. 密钥派生（路线图 §8.1）：KEK = KMAC256(KDR, 盐, custom="storage")
+ *   1. 密钥派生：KEK = KMAC256(KDR, 盐, custom="storage")
  *   2. 完整性 tag：对存储对象/审计记录打标签
  * 选 KMAC 而不是 HMAC-SHA2，是因为它自带 custom 域分隔串，
  * 不同用途的派生天然隔离，不需要额外拼接约定。
@@ -28,7 +28,7 @@ int pqc_kmac256(const uint8_t *key, size_t key_len,
 int pqc_sha3_256(const uint8_t *data, size_t data_len, uint8_t out[32]);
 
 /* 密钥派生：out = KMAC256(ikm, salt, custom=label)。
- * 对应路线图 §8.1 的 KDF: KMAC256(KDR, "storage" || 盐) -> KEK。
+ * 对应的 KDF: KMAC256(KDR, "storage" || 盐) -> KEK。
  * label 不可为 NULL（强制域分隔）。成功返回 0。 */
 int pqc_kdf(const uint8_t *ikm, size_t ikm_len,
             const uint8_t *salt, size_t salt_len,

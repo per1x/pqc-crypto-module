@@ -1,7 +1,7 @@
-/* pqchsm/accel.h —— 硬件加速器抽象（路线图 §5.7.1 + §5.8.2）
+/* pqchsm/accel.h —— 硬件加速器抽象
  *
  * 【这一层解决的问题】
- * §5.7.1 的原话：**先把 AXI 寄存器表定死，然后写一个 C 实现的"假加速器"**，
+ * 的原话：**先把 AXI 寄存器表定死，然后写一个 C 实现的"假加速器"**，
  * 它暴露与真 PL 完全相同的寄存器语义（写 CTRL.START → 轮询 STATUS.DONE →
  * 读结果），内部调 liboqs 完成实际运算。真板到手后换成 /dev/mem + mmap 即可，
  * **上层槽位管理器、密钥库、PKCS#11 一行不改**。
@@ -11,11 +11,11 @@
  * 【三种 transport】
  *   stub       软件桩，内部调 liboqs                    —— 现在就能跑，全套测试通过
  *   verilator  驱动 Verilator 仿真出来的真 RTL          —— 已实现 NTT + Keccak 模式
- *   mmap       /dev/mem + mmap 打真 PL                  —— Phase 3+，待板子
+ *   mmap       /dev/mem + mmap 打真 PL                  —— +，待板子
  *
  * 三者实现同一张 accel_transport_t，pqc_accel.c 之上完全不区分。
  *
- * 【寄存器表】（§5.8.2 要求在写 RTL 之前定死）
+ * 【寄存器表】
  *   偏移  名字      读写  说明
  *   0x00  CTRL      W     [0]=START（写 1 触发）[1]=SOFT_RESET
  *   0x04  STATUS    R     [0]=DONE [1]=BUSY [2]=ERR
@@ -84,11 +84,11 @@ typedef struct accel_transport {
 	void     (*read_data)(uint32_t off, uint8_t *dst, size_t n);
 } accel_transport_t;
 
-/* 软件桩：内部调 liboqs，暴露与真 PL 相同的寄存器语义（§5.7.1） */
+/* 软件桩：内部调 liboqs，暴露与真 PL 相同的寄存器语义 */
 const accel_transport_t *accel_transport_stub(void);
 
 /* Verilator 仿真：驱动真 RTL。**目前只实现 NTT 与 Keccak-f[1600] 模式**，
- * 其余模式置 ERR —— 完整的 ML-KEM/ML-DSA 核属于路线图 Phase 1–4。
+ * 其余模式置 ERR —— 完整的 ML-KEM/ML-DSA 核属于–4。
  * 没编 Verilator 支持时返回 NULL。 */
 const accel_transport_t *accel_transport_verilator(void);
 

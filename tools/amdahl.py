@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""把 profiling 的占比变成硬件切分决策（路线图 §5.2.3）
+"""把 profiling 的占比变成硬件切分决策
 
-§5.2 的目的不是"知道 SHAKE 慢"，而是算出**各种硬件切分方案的端到端加速比上界**，
+的目的不是"知道 SHAKE 慢"，而是算出**各种硬件切分方案的端到端加速比上界**，
 据此决定先做哪个核。这个脚本就是那张表的生成器。
 
 用法：
-    tools/amdahl.py                       # 用路线图 §5.2.3 的文献占比
+    tools/amdahl.py                       # 用的文献占比
     tools/amdahl.py --keccak 0.48 --ntt 0.34   # 用你自己测出来的占比
 
-⚠️ 默认占比来自路线图正文（ML-KEM-768：SHAKE ~55%、NTT 相关 ~30%），
+⚠️ 默认占比来自（ML-KEM-768：SHAKE ~55%、NTT 相关 ~30%），
 **不是本项目的实测值** —— 本机上的符号级归因失败了，原因见 docs/reports/profiling.md。
 拿到目标平台的实测数字后，用 --keccak/--ntt 覆盖再跑一遍。
 """
@@ -32,9 +32,9 @@ def speedup(keccak: float, ntt: float, kec_hw: float, ntt_hw: float,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--keccak", type=float, default=0.55,
-                    help="Keccak/SHAKE 占比（默认 0.55，路线图文献值）")
+                    help="Keccak/SHAKE 占比（默认 0.55，文献值）")
     ap.add_argument("--ntt", type=float, default=0.30,
-                    help="NTT 相关占比（默认 0.30，路线图文献值）")
+                    help="NTT 相关占比（默认 0.30，文献值）")
     ap.add_argument("--kec-speedup", type=float, default=20.0, help="Keccak 核加速倍数")
     ap.add_argument("--ntt-speedup", type=float, default=10.0, help="NTT 核加速倍数")
     ap.add_argument("--measured", action="store_true",

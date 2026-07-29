@@ -1,6 +1,6 @@
 // ntt_sim.cpp —— 把 Verilator 仿真出来的 ntt_core 包成 C 接口
 //
-// 这是 Level B 的落点：**同一个 RTL 模块，既被 cocotb 对拍，也被 C 代码
+// 同一个 RTL 模块既被 cocotb 对拍，也被 C 代码
 // 当成"加速器"驱动**。上面接 src/hal/accel_verilator.c 实现 accel_transport_t，
 // 再上面就是 pqc_accel.c 的寄存器语义 —— 与将来真 PL 走的是同一条路径。
 //
@@ -13,8 +13,8 @@
 #include <cstdint>
 #include <cstring>
 
-/* Verilator 的运行时要求提供仿真时间；我们用 VerilatedContext 自己推进时间，
- * 这个回调只是让链接器满意。 */
+/* Verilator 运行时要求提供仿真时间。本文件用 VerilatedContext 自行推进时间，
+ * 该回调仅用于满足链接。 */
 double sc_time_stamp()
 {
 	return 0;

@@ -1,4 +1,4 @@
-/* Level A 端到端集成：把整条链一次串起来
+/* 端到端集成：把整条链一次串起来
  *
  *   建库 → 生成 ML-DSA / ML-KEM 密钥 → sign/verify + encaps/decaps
  *        → 密钥库落盘 → 备份导出（M-of-N 分片）→ 审计锚点固化
@@ -173,7 +173,7 @@ int main(void)
 		hsm_session_close(tok, s);
 
 		s = login_user(tok, SLOT_ID);
-		/* 身份钥不带 BACKUPABLE：设备损坏就该跟着消失（§8.3） */
+		/* 身份钥不带 BACKUPABLE：设备损坏就该跟着消失 */
 		CHECK_EQ_INT(hsm_slot_generate(tok, s, PQC_ALG_ML_DSA_65, KEY_USAGE_SIGN, 0, &h),
 		             HSM_OK);
 		CHECK_EQ_INT(hsm_object_public_key(tok, s, h, idpk, dsa->pk_len, &n), HSM_OK);
@@ -289,7 +289,7 @@ int main(void)
 		hsm_session_close(tok, s);
 	}
 
-	TCASE("9. 身份钥没进备份，所以恢复后仍是空的（§8.3 的代价，不是 bug）");
+	TCASE("9. 身份钥没进备份，所以恢复后仍是空的");
 	{
 		slot_meta_t m;
 		CHECK_EQ_INT(hsm_slot_get_meta(tok, SLOT_ID, &m), HSM_OK);

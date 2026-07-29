@@ -142,7 +142,7 @@ int main(void)
 	CHECK_EQ_INT(pqc_sha3_256(small_data, 4, NULL), -1);
 	CHECK_EQ_INT(pqc_sha3_256(NULL, 4, got32), -1);
 
-	/* §8.1：KEK = KMAC256(KDR, 盐, custom="storage") */
+	/* ：KEK = KMAC256(KDR, 盐, custom="storage") */
 	TCASE("pqc_kdf 等价于带 label 的 KMAC256");
 	{
 		uint8_t salt[16];

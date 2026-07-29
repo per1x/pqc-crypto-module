@@ -2,7 +2,7 @@
  *
  * pqc_wrap_with_nonce 允许指定 nonce —— 生产代码**绝不可以**调用它，
  * 它存在的唯一目的是让 tests/unit/test_wrap.c 能把"nonce 复用会怎样"
- * 演示成一条可执行的断言（§8.2 红线）。所以它不出现在公共头里。
+ * 演示成一条可执行的断言。所以它不出现在公共头里。
  */
 #ifndef PQCHSM_WRAP_INTERNAL_H
 #define PQCHSM_WRAP_INTERNAL_H

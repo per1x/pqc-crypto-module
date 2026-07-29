@@ -1,6 +1,6 @@
-/* pqchsm/wrap.h —— KEK 密钥包裹（路线图 §8.2）
+/* pqchsm/wrap.h —— KEK 密钥包裹
  *
- * blob 格式（与 §8.2 的「版本‖算法ID‖元数据‖nonce‖密文‖tag」对应）：
+ * blob 格式（与 的「版本‖算法ID‖元数据‖nonce‖密文‖tag」对应）：
  *
  *   偏移  长度  字段
  *   0     4     magic  "PWRP"
@@ -13,13 +13,13 @@
  *   ...   16    GCM tag
  *
  * 认证范围 = 头部 16 字节 ‖ 调用方 aad。于是版本、算法 ID、长度、以及调用方
- * 传入的槽位元数据全部被 GCM 认证 —— 这就是 §8.2 说的"元数据进 AAD，
+ * 传入的槽位元数据全部被 GCM 认证 —— 这就是 说的"元数据进 AAD，
  * 防改元数据复用密文"。
  *
  * 元数据本身**不写进 blob**：它在密钥库里已经以明文记录存在（unwrap 时由
  * 调用方重新提供），blob 里再存一份只会造成两处可能不一致。
  *
- * nonce：每次 wrap 由 RAND_bytes 现取 96 bit，对应 SP 800-38D §8.2.2 的
+ * nonce：每次 wrap 由 RAND_bytes 现取 96 bit，对应 SP 800-38D 的
  * RBG-based 构造（无状态、可跨重启，不需要维护计数器）。该构造下同一把 KEK
  * 的调用次数上限是 2^32，本项目的量级（每槽位每次改动一次）远达不到。
  * **严禁复用 nonce** —— 见 tests/unit/test_wrap.c 里那条演示复用后果的测试。
@@ -59,7 +59,7 @@ int pqc_unwrap(const uint8_t *kek, size_t kek_len,
                const uint8_t *blob, size_t blob_len,
                uint8_t *pt, size_t cap, size_t *pt_len);
 
-/* 由 KDR 派生存储主密钥 KEK（§8.1：KMAC256(KDR, "storage" ‖ 盐)）。
+/* 由 KDR 派生存储主密钥 KEK）。
  * KEK 每次开机现场派生、不落盘；salt 存在密钥库头部。 */
 int pqc_kek_derive(const uint8_t *salt, size_t salt_len, uint8_t kek[PQC_KEK_LEN]);
 

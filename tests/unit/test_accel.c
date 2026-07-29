@@ -1,7 +1,7 @@
-/* Level B 的核心断言：**把后端换成寄存器接口，上层一行不改还能跑**
+/* 核心断言：**把后端换成寄存器接口，上层一行不改还能跑**
  *
  * 换后端只有一句 pqc_set_backend(pqc_backend_accel())，
- * 之后槽位管理器、密钥库、备份恢复全都照常工作 —— 这就是 §5.7.1 说的
+ * 之后槽位管理器、密钥库、备份恢复全都照常工作 —— 这就是 说的
  * "真板到手后把 accel_stub.c 换成 accel_mmap.c，上层一行不改"。
  *
  * 这里同时验证两件事：
@@ -234,8 +234,8 @@ static void test_full_chain_on_accel(void)
 /* ---- Keccak-f[1600] / SHA3 / SHAKE 经寄存器接口 ------------------------- */
 
 /* ★ 独立预言机 1：全零态一次置换的输出是**公开已知**的官方向量。
- * 硬编码在这里，不由本项目任何代码生成 —— 与 hardware/tb/cocotb/test_keccak.py 同源于
- * Keccak 团队的中间值文档，而不是同源于我们自己的实现。 */
+ * 硬编码在这里，不由本项目任何代码生成 —— 与 cocotb 测试同源于 Keccak 团队的
+ * 中间值文档，而非同源于本仓库的实现。 */
 static const uint64_t KECCAK_ALL_ZERO[25] = {
 	0xF1258F7940E1DDE7ULL, 0x84D5CCF933C0478AULL, 0xD598261EA65AA9EEULL,
 	0xBD1547306F80494DULL, 0x8B284E056253D057ULL, 0xFF97A42D7F8E6FD4ULL,
@@ -381,7 +381,7 @@ int main(void)
 		}
 	}
 
-	/* ★ Level B 的核心断言：真 RTL 与软件桩，经**同一个寄存器接口**，结果逐字节相同 */
+	/* ★ 核心断言：真 RTL 与软件桩，经**同一个寄存器接口**，结果逐字节相同 */
 	{
 		const accel_transport_t *v = accel_transport_verilator();
 		if (v) {

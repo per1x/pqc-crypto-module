@@ -1,4 +1,4 @@
-/* 命令协议测试（Phase 5 第 3 项）
+/* 命令协议测试
  *
  * 全部在进程内直接调 pqc_proto_dispatch —— 不碰 socket。
  * 端到端的 TCP 流程由 tools/cli_smoke.sh 覆盖。

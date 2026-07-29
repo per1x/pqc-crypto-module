@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 跑全部 cocotb 对拍（路线图 §5.3）
+# 跑全部 cocotb 对拍
 #
 # 前置：iverilog（brew install icarus-verilog）
 #       cocotb（本仓库用 .venv-rtl 虚拟环境 —— PEP 668 禁止往系统 Python 装包）

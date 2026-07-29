@@ -1,6 +1,6 @@
-/* 槽位生命周期状态机穷举测试（路线图 §7.1 / §5.7.3）
+/* 槽位生命周期状态机穷举测试
  *
- * 关键：下面这张 EXPECT 表是**照着 §7.1 的图独立写第二遍**的，
+ * 关键：下面这张 EXPECT 表是**照着 的图独立写第二遍**的，
  * 不是从 src/slot/fsm.c 抄的。两份独立表述一致，才说明状态机是对的；
  * 如果直接引用实现里的表，这个测试就只是在证明"表等于它自己"。
  */
@@ -74,7 +74,7 @@ int main(void)
 	CHECK_EQ_INT(slot_fsm_next(SLOT_ST_LOCKED, SLOT_EV_PIN_LOCKOUT), SLOT_ST_INVALID);
 
 	TCASE("解锁回到锁定前的状态，而不是一律回 LOADED");
-	/* §7.1 的图写"回已装载"；空槽位被锁后回 LOADED 会谎报槽位有密钥 */
+	/* 的图写"回已装载"；空槽位被锁后回 LOADED 会谎报槽位有密钥 */
 	CHECK_EQ_INT(slot_fsm_unlock_target(SLOT_ST_EMPTY),  SLOT_ST_EMPTY);
 	CHECK_EQ_INT(slot_fsm_unlock_target(SLOT_ST_LOADED), SLOT_ST_LOADED);
 	CHECK_EQ_INT(slot_fsm_unlock_target(SLOT_ST_IN_USE), SLOT_ST_LOADED);

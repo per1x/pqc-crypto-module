@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 热点采样（路线图 §5.2）—— 用 macOS 自带的 sample(1) 做统计式剖析
+# 热点采样—— 用 macOS 自带的 sample(1) 做统计式剖析
 #
 # 为什么用 sample 而不是 perf/callgrind：perf 是 Linux 的；valgrind 在
 # arm64 macOS 上支持不完整。sample 是系统自带的采样剖析器，对自己的进程

@@ -1,4 +1,4 @@
-/* 槽位元数据的 KMAC 完整性标签（§7.2）
+/* 槽位元数据的 KMAC 完整性标签
  *
  * 要防的具体攻击：攻击者离线改密钥库文件，把"不可导出"改成"可导出"、
  * 把用途从 decap 改成 sign、或把 slot 3 的记录整条搬到 slot 5。
@@ -98,7 +98,7 @@ int main(void)
 	tag2[SLOT_META_TAG_LEN - 1] ^= 0x80;
 	CHECK_EQ_INT(slot_meta_verify(&m, tag2), -1);
 
-	TCASE("设备绑定：换一台设备的 KDR，旧标签必须失效（§8.3 sealing）");
+	TCASE("设备绑定：换一台设备的 KDR，旧标签必须失效");
 	CHECK_EQ_INT(slot_meta_verify(&m, tag), 0);
 	pqc_kdr_set_test_root((const uint8_t *)"another device", 14);
 	CHECK_EQ_INT(slot_meta_verify(&m, tag), -1);

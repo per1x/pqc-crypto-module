@@ -40,7 +40,7 @@ int main(void)
 	CHECK_EQ_INT(pqc_ct_equal(a, c, 3), 1);     /* 只比前 3 字节 */
 	CHECK_EQ_INT(pqc_ct_equal(NULL, b, 4), 0);
 
-	/* 路线图 §8.7：中间值用后即清。这里验证清零真的落到了内存上
+	/* ：中间值用后即清。这里验证清零真的落到了内存上
 	 * —— 这类测试在 Python 里写不出来，也是选 C 的理由之一。 */
 	TCASE("secure_zero 确实清零");
 	uint8_t secret[64];

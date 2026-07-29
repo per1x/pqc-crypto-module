@@ -1,5 +1,5 @@
 /* 槽位管理器集成测试：ACL、PIN 锁定、句柄、用途互斥、种子存储、zeroize
- * 对应路线图 Phase 5 的产出/验证清单。
+ * 对应的产出/验证清单。
  */
 #include "testlib.h"
 #include "pqchsm/slot.h"
@@ -115,7 +115,7 @@ static void test_acl(void)
 
 	CHECK_EQ_INT(hsm_session_login(tok, sess, HSM_ROLE_USER, USER_PIN), HSM_OK);
 	CHECK_EQ_INT(hsm_slot_generate(tok, sess, PQC_ALG_ML_DSA_65, KEY_USAGE_SIGN, 0, &h), HSM_OK);
-	/* zeroize 是 SO 专属敏感操作（§7.3） */
+	/* zeroize 是 SO 专属敏感操作 */
 	CHECK_EQ_INT(hsm_slot_zeroize(tok, sess, 0), HSM_ERR_NOT_AUTHORIZED);
 	/* 设 User PIN 也是 SO 专属 */
 	CHECK_EQ_INT(hsm_slot_set_user_pin(tok, sess, "another-pin"), HSM_ERR_NOT_AUTHORIZED);
@@ -125,7 +125,7 @@ static void test_acl(void)
 
 static void test_usage_exclusive(void)
 {
-	TCASE("用途互斥：禁止一钥多用（§7.2）");
+	TCASE("用途互斥：禁止一钥多用");
 	hsm_session_t sess;
 	hsm_token_t *tok = fixture(&sess);
 	CHECK(tok != NULL);
@@ -228,7 +228,7 @@ static void test_sign_and_handles(void)
 
 static void test_kem_and_seed_storage(void)
 {
-	TCASE("KEM 解封装 + 种子存储（§7.6）");
+	TCASE("KEM 解封装 + 种子存储");
 	hsm_session_t sess;
 	hsm_token_t *tok = fixture(&sess);
 	CHECK(tok != NULL);
@@ -298,7 +298,7 @@ static void test_kem_and_seed_storage(void)
 
 static void test_pin_lockout(void)
 {
-	TCASE("PIN 错误计数 → 锁定 → SO 解锁（Phase 5 验收项）");
+	TCASE("PIN 错误计数 → 锁定 → SO 解锁");
 	hsm_session_t sess;
 	hsm_token_t *tok = fixture(&sess);
 	CHECK(tok != NULL);

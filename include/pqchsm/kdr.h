@@ -1,9 +1,9 @@
-/* pqchsm/kdr.h —— 设备根密钥 KDR 与派生层级（路线图 §8.1 / §8.3）
+/* pqchsm/kdr.h —— 设备根密钥 KDR 与派生层级
  *
  * 【铁律，也是本头文件的全部设计】
  * **KDR 只进不出**：这里没有、将来也不会有任何形如 pqc_kdr_get() 的接口。
  * 外部只能拿到由它派生出来的子密钥。这条在软件阶段靠"接口里不存在读出函数"保证，
- * Phase 7 之后靠"地址译码上物理不存在读回路径"保证 —— 两个阶段是同一句话的两种实现。
+ * 之后靠"地址译码上物理不存在读回路径"保证 —— 两个阶段是同一句话的两种实现。
  * tests/unit/test_kdr.c 里有一条结构性回归测试，扫本头文件确保没人偷偷加回读出接口。
  *
  * 【provider 抽象：现在就把结构定死，将来只换实现】
@@ -11,13 +11,13 @@
  * 只有"根密钥从哪来"这一个点需要硬件。所以把根密钥抽象成 provider：
  *
  *     stub    —— 当前唯一实现，源码里一段固定的假根密钥（src/crypto/kdr.c）
- *     bbram   —— Phase 7：Zynq-7000 的 BBRAM AES-256 密钥
- *     efuse   —— Phase 7：eFUSE（⚠️ 烧录不可逆，先在 BBRAM 上跑通再考虑）
- *     puf     —— Phase 7：Zynq UltraScale+ 的 PUF 生成设备唯一 KEK（首选）
+ *     bbram   —— ：Zynq-7000 的 BBRAM AES-256 密钥
+ *     efuse   —— ：eFUSE（⚠️ 烧录不可逆，先在 BBRAM 上跑通再考虑）
+ *     puf     —— ：Zynq UltraScale+ 的 PUF 生成设备唯一 KEK（首选）
  *
  * 换 provider 时上层一行不改 —— 与 pqchsm/pqc.h 的算法后端 vtable 是同一个套路。
  *
- * 【派生层级】（§8.1）
+ * 【派生层级】
  *
  *   KDR ─┬─ "pqc-hsm/storage-kek"      → KEK      包裹密钥库（绑定设备）
  *        ├─ "pqc-hsm/keystore-filemac" → K_file   密钥库全文件 MAC
@@ -61,7 +61,7 @@ void                       pqc_kdr_set_provider(const pqc_kdr_provider_t *p);
 const pqc_kdr_provider_t  *pqc_kdr_get_provider(void);
 
 /* 便捷判定：当前根密钥是否有硬件保证。
- * 启动自检（POST）里应当检查它 —— Phase 7 之后为 0 就说明信任根没落地。 */
+ * 启动自检（POST）里应当检查它 —— 之后为 0 就说明信任根没落地。 */
 int pqc_kdr_is_hardware_backed(void);
 
 /* 由 KDR 派生子密钥。label 必须非空（强制域分隔，避免不同用途的子密钥互相替换）。

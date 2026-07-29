@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ML-KEM 的独立 Python 参考模型（路线图 §5.1.3 的"路线 B"）
+"""ML-KEM 的独立 Python 参考模型
 
 【为什么要独立重写一遍】
-只导出整机 KAT，RTL 一挂就完全无法定位。§5.1.3 要求**按硬件模块分层**导出向量，
+只导出整机 KAT，RTL 一挂就完全无法定位。要求**按硬件模块分层**导出向量，
 而且要用一份**独立实现**去证伪自己对 C 实现的理解偏差 ——
 两份独立实现输出逐字节一致，才认定为可信黄金模型。
 
@@ -148,7 +148,7 @@ def keccak_f1600(state: list[int]) -> list[int]:
 
 
 def shake128(msg: bytes, outlen: int) -> bytes:
-    """交叉验证用：直接白嫖标准库（§5.1.3 的建议）"""
+    """交叉验证用：直接白嫖标准库"""
     return hashlib.shake_128(msg).digest(outlen)
 
 

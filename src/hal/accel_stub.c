@@ -1,4 +1,4 @@
-/* accel_stub.c —— 软件桩加速器（路线图 §5.7.1 的那段代码的完整版）
+/* accel_stub.c —— 软件桩加速器
  *
  * 暴露与真 PL **完全相同**的寄存器语义：
  *     写 MODE / PARAM / IN_LEN → 送数据 → 写 CTRL.START → 轮询 STATUS.DONE → 读数据

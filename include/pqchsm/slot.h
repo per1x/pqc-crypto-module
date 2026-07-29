@@ -1,15 +1,15 @@
 /* pqchsm/slot.h —— 槽位管理器（slot / token / object / session）
  *
- * 对标 PKCS#11 v3.2 的对象模型，实现路线图 §7 的设计规格（Phase 5）：
+ * 对标 PKCS#11 v3.2 的对象模型，实现的设计规格：
  *   slot    = 逻辑插槽
  *   token   = 插槽中的密钥容器
  *   object  = 密钥 + 属性，对外只以**句柄**暴露
  *   session = 登录会话，携带角色（SO / User）
  *
- * 安全边界（Phase 5 的过渡性妥协，Phase 7 收紧）：
+ * 安全边界：
  *   明文密钥此阶段位于进程内存（best-effort mlock + 用后清零），
  *   上层与调用方**只见句柄**，永远拿不到明文私钥指针 —— 这条现在就成立，
- *   所以 Phase 7 把存储换成 PL 的 Key Vault 时，本头文件不用改。
+ *   所以 把存储换成 PL 的 Key Vault 时，本头文件不用改。
  *
  * 密码运算一律经 pqchsm/pqc.h 的后端 vtable，不直接调 liboqs。
  */
@@ -29,12 +29,12 @@ extern "C" {
 typedef enum {
 	HSM_OK = 0,
 	HSM_ERR_BAD_ARG,
-	HSM_ERR_BAD_STATE,        /* 非法状态转移（§7.1） */
-	HSM_ERR_NOT_AUTHORIZED,   /* ACL 拒绝：角色不对或未登录（§7.3） */
+	HSM_ERR_BAD_STATE,        /* 非法状态转移 */
+	HSM_ERR_NOT_AUTHORIZED,   /* ACL 拒绝：角色不对或未登录 */
 	HSM_ERR_PIN_INCORRECT,
 	HSM_ERR_PIN_LOCKED,       /* 失败计数超限，仅 SO 可解锁 */
 	HSM_ERR_BAD_HANDLE,       /* 句柄无效或已因 destroy/zeroize 失效 */
-	HSM_ERR_USAGE_DENIED,     /* 用途位不允许该操作（§7.2 用途互斥） */
+	HSM_ERR_USAGE_DENIED,     /* 用途位不允许该操作 */
 	HSM_ERR_POLICY,           /* 策略位禁止（如不可导出） */
 	HSM_ERR_INTEGRITY,        /* 元数据 KMAC 校验失败 —— 疑似离线篡改 */
 	HSM_ERR_SLOT_BUSY,
@@ -45,7 +45,7 @@ typedef enum {
 
 const char *hsm_strerror(hsm_status_t st);
 
-/* ---- 生命周期状态机（§7.1）---------------------------------------------- */
+/* ---- 生命周期状态机---------------------------------------------- */
 typedef enum {
 	SLOT_ST_INVALID = -1,
 	SLOT_ST_UNINIT  = 0,   /* 未初始化 */
@@ -72,7 +72,7 @@ typedef enum {
 /* 纯函数形式的转移表：非法转移返回 SLOT_ST_INVALID。
  * 所有真实操作都必须经过它，这样 test_slot_fsm 的穷举才有意义。
  *
- * 注意 SLOT_EV_SO_UNLOCK：§7.1 的图画的是"解锁→回已装载"，但若锁定发生在
+ * 注意 SLOT_EV_SO_UNLOCK：的图画的是"解锁→回已装载"，但若锁定发生在
  * 空槽位上，回到"已装载"就是在谎报槽位有密钥。因此本实现解锁后**恢复到
  * 锁定前的状态**，该状态由 slot_fsm_unlock_target() 给出。 */
 slot_state_t slot_fsm_next(slot_state_t cur, slot_event_t ev);
@@ -81,14 +81,14 @@ slot_state_t slot_fsm_unlock_target(slot_state_t pre_lock);
 const char *slot_state_name(slot_state_t s);
 const char *slot_event_name(slot_event_t e);
 
-/* ---- 角色与访问控制（§7.3）---------------------------------------------- */
+/* ---- 角色与访问控制---------------------------------------------- */
 typedef enum {
 	HSM_ROLE_PUBLIC = 0,   /* 未登录 */
 	HSM_ROLE_SO,           /* 安全官：初始化 / 解锁 / 清零 / 备份恢复 */
 	HSM_ROLE_USER,         /* 日常密钥操作 */
 } hsm_role_t;
 
-/* ---- 密钥用途与策略（§7.2）---------------------------------------------- */
+/* ---- 密钥用途与策略---------------------------------------------- */
 typedef enum {
 	KEY_USAGE_ENCAP  = 1u << 0,
 	KEY_USAGE_DECAP  = 1u << 1,
@@ -97,13 +97,13 @@ typedef enum {
 } key_usage_t;
 
 typedef enum {
-	SLOT_POLICY_EXTRACTABLE  = 1u << 0,  /* 允许明文导出 —— 默认关，红线 §8.7 */
+	SLOT_POLICY_EXTRACTABLE  = 1u << 0,  /* 允许明文导出 —— 默认关，红线 */
 	SLOT_POLICY_BACKUPABLE   = 1u << 1,  /* 允许被 KEK 包裹备份（第 3/4 步） */
-	SLOT_POLICY_INJECTABLE   = 1u << 2,  /* 允许注入更新（§8.5） */
-	SLOT_POLICY_SEED_STORAGE = 1u << 3,  /* 只存种子，用时重展开（§7.6） */
+	SLOT_POLICY_INJECTABLE   = 1u << 2,  /* 允许注入更新 */
+	SLOT_POLICY_SEED_STORAGE = 1u << 3,  /* 只存种子，用时重展开 */
 } slot_policy_t;
 
-/* ---- 槽位元数据（§7.2）-------------------------------------------------- */
+/* ---- 槽位元数据-------------------------------------------------- */
 #define SLOT_LABEL_MAX   32
 #define SLOT_META_VERSION 1u
 
@@ -135,7 +135,7 @@ typedef struct hsm_token hsm_token_t;
 
 #define HSM_PIN_MIN_LEN   4
 #define HSM_PIN_MAX_LEN   64
-#define HSM_PIN_MAX_FAILS 3      /* 超过即锁定（§7.3） */
+#define HSM_PIN_MAX_FAILS 3      /* 超过即锁定 */
 
 hsm_token_t *hsm_token_new(size_t n_slots);
 void         hsm_token_free(hsm_token_t *tok);
@@ -153,7 +153,7 @@ hsm_status_t hsm_slot_pin_status(hsm_token_t *tok, hsm_slot_id_t slot,
 
 /* ---- 初始化与 PIN ------------------------------------------------------- */
 /* 设备级供应操作：UNINIT → EMPTY，同时确立 SO PIN。
- * Phase 7 起需由"制造模式"门控（§8.5），此处先不要求会话。 */
+ * 起需由"制造模式"门控，此处先不要求会话。 */
 hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t slot,
                                  const char *label, const char *so_pin);
 
@@ -169,12 +169,12 @@ hsm_status_t hsm_session_logout(hsm_token_t *tok, hsm_session_t sess);
 hsm_status_t hsm_session_role(hsm_token_t *tok, hsm_session_t sess, hsm_role_t *out);
 
 /* ---- 对象操作（全部句柄进、句柄出）------------------------------------- */
-/* 需 User 会话；EMPTY → LOADED。usage 必须与 alg 的种类相符且不跨类（§7.2）。 */
+/* 需 User 会话；EMPTY → LOADED。usage 必须与 alg 的种类相符且不跨类。 */
 hsm_status_t hsm_slot_generate(hsm_token_t *tok, hsm_session_t sess,
                                pqc_alg_t alg, uint32_t usage, uint32_t policy,
                                hsm_handle_t *out);
 
-/* 由种子装载（§7.6 种子存储）；同样 EMPTY → LOADED。 */
+/* 由种子装载；同样 EMPTY → LOADED。 */
 hsm_status_t hsm_slot_load_seed(hsm_token_t *tok, hsm_session_t sess,
                                 pqc_alg_t alg, uint32_t usage, uint32_t policy,
                                 const uint8_t *seed, size_t seed_len,
@@ -200,13 +200,13 @@ hsm_status_t hsm_object_destroy(hsm_token_t *tok, hsm_session_t sess, hsm_handle
 /* 任意状态可达、不可逆：清密钥材料 + 元数据 + PIN，回到 UNINIT。需 SO。 */
 hsm_status_t hsm_slot_zeroize(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t slot);
 
-/* 无会话的设备级紧急清零（对应硬件 tamper 线，§0.2）。 */
+/* 无会话的设备级紧急清零（对应硬件 tamper 线，）。 */
 hsm_status_t hsm_slot_zeroize_forced(hsm_token_t *tok, hsm_slot_id_t slot);
 
 /* 解锁并重置 User PIN 失败计数；恢复到锁定前的状态。需 SO。 */
 hsm_status_t hsm_slot_unlock(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t slot);
 
-/* ---- 审计（§8.6）-------------------------------------------------------- */
+/* ---- 审计-------------------------------------------------------- */
 /* 挂接 append-only 哈希链日志。挂上之后所有敏感操作自动落审计；
  * log 的生命周期由调用方管理，传 NULL 解除挂接。
  * 前向声明避免 slot.h 依赖 audit.h。 */

@@ -1,4 +1,4 @@
-"""cocotb：256 点 NTT 核对拍 —— L2 层（路线图 §5.1.3 的 ntt_vectors）
+"""cocotb：256 点 NTT 核对拍 —— L2 层
 
 比对：RTL == vectors/rtl/ntt.hex == hardware/model/ref_model.py 现算。
 
@@ -8,7 +8,7 @@
 独立预言机保证（schoolbook 负循环卷积 + 重建 ML-KEM KeyGen 比对 ACVP 向量），
 那里才是"对得上真实 ML-KEM"的依据。
 
-同时记录 cycle 数 —— 这就是无板阶段能拿到的性能数据（§5.3.3 那段注释）。
+同时记录 cycle 数 —— 这就是无板阶段能拿到的性能数据。
 """
 import sys
 from pathlib import Path

@@ -1,9 +1,9 @@
-/* fsm.c —— 槽位生命周期状态机（路线图 §7.1）
+/* fsm.c —— 槽位生命周期状态机
  *
  * 刻意写成一张显式的表 + 纯函数：
  *   1. 非法转移是"表里没有"，而不是"某个 if 忘了写"；
  *   2. test_slot_fsm 可以穷举 5 状态 × 9 事件 = 45 种组合逐一断言
- *      （§5.7.3：这类 bug 在板上极难复现，在 PC 上是几分钟的事）。
+ *      。
  */
 #include "pqchsm/slot.h"
 
@@ -29,7 +29,7 @@ slot_state_t slot_fsm_next(slot_state_t cur, slot_event_t ev)
 }
 
 /* SO 解锁后回到哪个状态。
- * §7.1 的图写的是"回已装载"，但锁定也可能发生在空槽位上 ——
+ * 的图写的是"回已装载"，但锁定也可能发生在空槽位上 ——
  * 那时回到"已装载"等于谎报槽位里有密钥。所以恢复锁定前的状态；
  * 仅当锁定前状态不是 EMPTY/LOADED（理论上不会）时兜底到 EMPTY。 */
 slot_state_t slot_fsm_unlock_target(slot_state_t pre_lock)

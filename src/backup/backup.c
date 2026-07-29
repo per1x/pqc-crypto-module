@@ -40,7 +40,7 @@ static uint32_t get_u32(const uint8_t *p)
 }
 
 /* BEK / 文件 MAC 密钥都从 RMK 派生，**不经过 KDR** —— 这正是备份能跨设备
- * 恢复而密钥库不能的原因（§8.3）。两者用不同域分隔串，互不可替换。 */
+ * 恢复而密钥库不能的原因。两者用不同域分隔串，互不可替换。 */
 static int derive_from_rmk(const uint8_t rmk[HSM_RMK_LEN], const uint8_t *salt,
                            const char *label, uint8_t *out, size_t out_len)
 {
@@ -58,7 +58,7 @@ hsm_status_t hsm_backup_export(hsm_token_t *tok, hsm_session_t sess, const char 
 	if (m < 2 || m > n || n > 16) {
 		return HSM_ERR_BAD_ARG;
 	}
-	/* §7.3：导出备份是敏感操作，要求 SO */
+	/* ：导出备份是敏感操作，要求 SO */
 	hsm_role_t role;
 	hsm_status_t st = hsm_session_role(tok, sess, &role);
 	if (st != HSM_OK) {
@@ -101,7 +101,7 @@ hsm_status_t hsm_backup_export(hsm_token_t *tok, hsm_session_t sess, const char 
 		if (hsm_slot_get_meta(tok, (hsm_slot_id_t)i, &meta) != HSM_OK) {
 			continue;
 		}
-		/* §8.3：只有"可恢复槽位"进备份；纯 sealed 槽位跟着设备一起消失 */
+		/* ：只有"可恢复槽位"进备份；纯 sealed 槽位跟着设备一起消失 */
 		if (!(meta.policy & SLOT_POLICY_BACKUPABLE)) {
 			continue;
 		}
@@ -178,12 +178,12 @@ out:
 	free(tmp_path);
 	free(body);
 	pqc_secure_free(blob, blob_cap);
-	/* RMK / BEK 用后即清（§8.7）：此后世上只剩分片 */
+	/* RMK / BEK 用后即清：此后世上只剩分片 */
 	pqc_secure_zero(rmk, sizeof(rmk));
 	pqc_secure_zero(bek, sizeof(bek));
 	pqc_secure_zero(fkey, sizeof(fkey));
 	pqc_secure_zero(salt, sizeof(salt));
-	/* §8.6：备份导出是最敏感的操作之一，成功失败都要留痕 */
+	/* ：备份导出是最敏感的操作之一，成功失败都要留痕 */
 	slot_audit(tok, AUDIT_OP_BACKUP_EXPORT, HSM_ROLE_SO, 0, st, path);
 	return st;
 }
@@ -307,11 +307,11 @@ out:
 		pqc_secure_zero(buf, fsz);
 		free(buf);
 	}
-	/* 恢复过程的中间值用后即清（§8.7 红线） */
+	/* 恢复过程的中间值用后即清 */
 	pqc_secure_zero(rmk, sizeof(rmk));
 	pqc_secure_zero(bek, sizeof(bek));
 	pqc_secure_zero(fkey, sizeof(fkey));
-	/* 恢复仪式：谁、何时、恢复了哪个库、成功与否（§8.4 全程审计） */
+	/* 恢复仪式：谁、何时、恢复了哪个库、成功与否 */
 	slot_audit(tok, AUDIT_OP_RESTORE, HSM_ROLE_SO, 0, st, path);
 	return st;
 }

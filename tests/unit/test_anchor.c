@@ -1,4 +1,4 @@
-/* 审计链头签名固化（§8.6）
+/* 审计链头签名固化
  *
  * 这个测试的核心是一条对照：**同一份被整体重写过的假日志**，
  *   audit_verify_file  → 返回 0（哈希链自身发现不了，这是已知的洞）
@@ -63,7 +63,7 @@ static hsm_token_t *make_device(hsm_session_t *sess, hsm_handle_t *idkey,
 	    hsm_slot_set_user_pin(tok, *sess, USER_PIN) != HSM_OK ||
 	    hsm_session_logout(tok, *sess) != HSM_OK ||
 	    hsm_session_login(tok, *sess, HSM_ROLE_USER, USER_PIN) != HSM_OK ||
-	    /* 身份钥：纯 sealed（不带 BACKUPABLE），跟着设备走（§8.3） */
+	    /* 身份钥：纯 sealed（不带 BACKUPABLE），跟着设备走 */
 	    hsm_slot_generate(tok, *sess, PQC_ALG_ML_DSA_65, KEY_USAGE_SIGN, 0, idkey) != HSM_OK) {
 		hsm_token_free(tok);
 		return NULL;

@@ -1,14 +1,10 @@
 /* prim_bench.c —— 单次原语代价的实测（配合 tools/prim_count.py）
  *
- * 【它补的是哪一块】
- * docs/reports/profiling.md 记过一次失败：本机符号级热点归因做不了
- * （liboqs 0.16 在 arm64 上是手写汇编，没有帧指针，采样穿不过去）。
- * 于是 amdahl.py 一直只能用路线图的文献占比。
- *
- * 绕过去的办法是把占比拆成两个能分别拿到的因子：
+ * 热点占比可拆成两个能分别测得的因子：
  *     占比 = 调用次数 × 单次代价 / 总耗时
- * 次数由 tools/prim_count.py 从 FIPS 203 参考实现里**精确数出来**；
- * 单次代价就是本文件量的。
+ * 调用次数由 tools/prim_count.py 从 FIPS 203 参考实现精确统计；
+ * 单次代价由本文件测量。这条路径不依赖统计采样，因此不受 liboqs 手写汇编
+ * 缺少帧指针的影响。
  *
  * 【怎么量单次 Keccak 置换 —— 用差分，不是除法】
  * 直接 `time(SHAKE(1 块)) ` 里混着 EVP 的建栈/初始化/收尾开销，除出来的数
@@ -16,17 +12,14 @@
  *     t_perm = (t(2N) - t(N)) / N
  * 固定开销在相减时抵掉，剩下的就是纯粹多做 N 次置换的代价。
  *
- * 【为什么用 OpenSSL 的 Keccak 而不是我们自己的】
- * 目标是估 liboqs 里那部分的占比，所以要一个**优化过的**软件 Keccak 作代表。
- * OpenSSL 的接近这个量级；accel_stub 里那份是给 RTL 对拍用的直白 C 版，
- * 实测慢约 50 倍 —— 拿它当代表会把占比算爆（NTT 那一栏就是这么爆的）。
- * 两个都打出来，是为了让这个不确定度可见，而不是藏起来。
+ * 【代表值的选取】估算 liboqs 中该部分的占比，需要一个经过优化的软件 Keccak
+ * 作为代表值。OpenSSL 的实现符合这个量级；accel_stub 中那份是为 RTL 对拍准备的
+ * 直白 C 实现，实测慢约 50 倍，不适合作代表。两者都会打印出来，以便看到这项
+ * 不确定度的幅度。
  *
- * 【这个工具最重要的一句结论】
- * 在本机（Apple M 系列）上，我们的单蝶形 NTT 核 @100MHz 比 liboqs 的软件
- * NTT **慢**。这不是 bug，是对象不对：真正的比较基准是目标平台的
- * Cortex-A53，那上面没有这些 SIMD 汇编。表里如实打出这一点，
- * 不拿"硬件一定更快"糊弄过去。
+ * 【结果的解读】在 Apple M 系列开发机上，单蝶形 NTT 核 @100 MHz 慢于 liboqs 的
+ * 软件 NTT。这是比较基准的问题而非缺陷：目标平台是无 SIMD 的 Cortex-A53。
+ * 输出中会明确标注这一点，不据此声称加速比。
  */
 #include "pqchsm/accel.h"
 #include "pqchsm/pqc.h"
@@ -66,7 +59,7 @@ static double time_openssl_shake(size_t nblocks, int iters)
 	return t / iters;
 }
 
-/* 我们自己那份（accel 软件桩里的 C 实现），走同样的差分 */
+/* accel 软件桩中的 C 实现，走同样的差分 */
 static double time_our_perm(int iters)
 {
 	uint8_t st[200];
@@ -165,7 +158,7 @@ int main(void)
 		       R[i].n, R[i].np, tk * 1e6, tk / R[i].t * 100);
 	}
 	printf("\n  这是个**下界**：拿 OpenSSL 的 Keccak 当代表，若 liboqs 自己那份更慢，\n");
-	printf("  真实占比只会更高。路线图文献值是 ~55%%，量级上是一致的\n");
+	printf("  真实占比只会更高。文献值是 ~55%%，量级上是一致的\n");
 	printf("  （文献针对的是没有 SIMD 汇编的嵌入式核，本机 arm64 上占比自然更低）。\n");
 
 	printf("\nNTT 的软件占比：**本机量不出可信值，如实记为不可用**\n\n");

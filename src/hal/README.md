@@ -50,5 +50,5 @@ register interface. `tests/unit/test_accel.c` asserts this for both NTT directio
 for the whole SHA3/SHAKE path, and cross-checks the latter against OpenSSL. The same
 requirement will apply to a real hardware transport.
 
-See [docs/design/status-and-roadmap.md](../../docs/design/status-and-roadmap.md) for the
-broader plan.
+See [docs/architecture.md](../../docs/architecture.md) for how this layer fits into the
+rest of the module.

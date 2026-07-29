@@ -1,11 +1,11 @@
-/* slot.c —— 槽位管理器实现（路线图 §7，Phase 5）
+/* slot.c —— 槽位管理器实现
  *
  * 四条贯穿全文件的规矩：
  *   1. 任何状态变化都必须经 slot_fsm_next()，非法转移返回 HSM_ERR_BAD_STATE；
- *   2. 任何元数据变化后立刻重新盖 KMAC 标签；任何读取前先验标签（§7.2）；
+ *   2. 任何元数据变化后立刻重新盖 KMAC 标签；任何读取前先验标签；
  *   3. 明文私钥只在 pqc_* 调用的那一瞬间存在于本文件的栈/堆缓冲里，
  *      用完即 pqc_secure_zero —— 对外接口一律句柄进句柄出；
- *   4. 并发（§7.4）：会话表由 tok->tlock 保护，每个槽位有自己的 lock。
+ *   4. 并发：会话表由 tok->tlock 保护，每个槽位有自己的 lock。
  *      **锁序恒为 tlock → slot->lock，绝不反向**；需要同时改会话与槽位时，
  *      先做完槽位那半、放掉槽位锁，再去拿会话锁。
  */
@@ -146,7 +146,7 @@ static hsm_status_t require_role(hsm_token_t *tok, hsm_session_t sess,
 	if (st != HSM_OK) {
 		return st;
 	}
-	return role == need ? HSM_OK : HSM_ERR_NOT_AUTHORIZED;   /* 默认拒绝（§7.3） */
+	return role == need ? HSM_OK : HSM_ERR_NOT_AUTHORIZED;   /* 默认拒绝 */
 }
 
 static void set_session_role(hsm_token_t *tok, hsm_session_t sess, hsm_role_t role)
@@ -176,7 +176,7 @@ static void drop_sessions_on_slot(hsm_token_t *tok, hsm_slot_id_t slot)
 	pthread_mutex_unlock(&tok->tlock);
 }
 
-/* §7.2：用途互斥，禁止一钥多用 —— 位必须落在该算法种类的允许集合内 */
+/* ：用途互斥，禁止一钥多用 —— 位必须落在该算法种类的允许集合内 */
 static hsm_status_t validate_usage(pqc_alg_t alg, uint32_t usage)
 {
 	const pqc_alg_info_t *info = pqc_alg_info(alg);
@@ -192,7 +192,7 @@ static hsm_status_t validate_usage(pqc_alg_t alg, uint32_t usage)
 /* PIN 验证值 = KMAC256(pin_key, slot_id ‖ role ‖ salt ‖ pin)。
  * 不存明文、不存可离线爆破的哈希：pin_key 是每槽位随机的 32 字节，
  * 且只存在于 KEK/BEK 包裹内部，攻击者拿到密钥库文件也无法离线枚举 PIN。
- * （早先的版本直接用 KDR 派生，结果是跨设备恢复后谁都登录不上 —— 见 persist.c） */
+ * （若直接用 KDR 派生，跨设备恢复后将无法登录 —— 见 persist.c） */
 static int pin_verifier(const uint8_t pin_key[32], uint32_t slot_id, hsm_role_t role,
                         const uint8_t *salt, const char *pin, uint8_t out[VERIFIER_LEN])
 {
@@ -246,7 +246,7 @@ void slot_audit(hsm_token_t *tok, int op, hsm_role_t role,
 	}
 	pthread_mutex_lock(&tok->audit_lock);
 	if (tok->audit) {
-		/* 失败也要落审计（§8.6 明确要求记录 PIN 失败等否定结果）。
+		/* 失败也要落审计。
 		 * detail 只放算法名/标签这类非敏感短文本。 */
 		(void)audit_append(tok->audit, now_secs(), (audit_op_t)op,
 		                   (uint32_t)role, (uint32_t)slot, (uint32_t)result, detail);
@@ -562,7 +562,7 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 		st = HSM_ERR_BAD_STATE;      /* 还没有 PIN 可验 */
 		goto out;
 	}
-	/* 槽位锁定时 User 一律拒绝；SO 仍可登录 —— 否则没人能解锁（§7.3） */
+	/* 槽位锁定时 User 一律拒绝；SO 仍可登录 —— 否则没人能解锁 */
 	if (s->meta.state == SLOT_ST_LOCKED && role == HSM_ROLE_USER) {
 		st = HSM_ERR_PIN_LOCKED;
 		goto out;
@@ -593,10 +593,10 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 			st = slot_reseal(s);
 			goto out;
 		}
-		/* 失败计数持久化在元数据里（并进 KMAC），断电重置绕不过去（§7.3） */
+		/* 失败计数持久化在元数据里（并进 KMAC），断电重置绕不过去 */
 		if (role == HSM_ROLE_SO) {
 			/* SO 失败只计数不锁槽位：锁了就没人能解锁，设备直接变砖。
-			 * SO 凭证的兜底恢复归 §8.4 的 Shamir M-of-N 仪式管。 */
+			 * SO 凭证的兜底恢复归 的 Shamir M-of-N 仪式管。 */
 			s->meta.so_pin_fails++;
 			(void)slot_reseal(s);
 			st = HSM_ERR_PIN_INCORRECT;
@@ -617,7 +617,7 @@ out:
 	if (login_ok) {
 		set_session_role(tok, sess, role);   /* 放掉槽位锁后再动会话表，保持锁序 */
 	}
-	/* 成功/失败/锁定三种结果分别落审计（§8.6） */
+	/* 成功/失败/锁定三种结果分别落审计 */
 	slot_audit(tok, login_ok ? AUDIT_OP_LOGIN
 	                : (st == HSM_ERR_PIN_LOCKED ? AUDIT_OP_LOCKOUT : AUDIT_OP_LOGIN_FAIL),
 	           role, id, st, role == HSM_ROLE_SO ? "SO" : "User");
@@ -659,7 +659,7 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 	}
 
 	/* 一律走种子生成：这样"生成"和"由种子装载"是同一条代码路径，
-	 * §7.6 的种子存储策略才不会成为一条没人走的旁路。 */
+	 * 的种子存储策略才不会成为一条没人走的旁路。 */
 	pqc_status_t cst = pqc_keypair_from_seed(alg, local_seed, local_seed_len, pk, sk);
 	if (cst != PQC_OK) {
 		pqc_secure_zero(local_seed, sizeof(local_seed));
@@ -673,7 +673,7 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 	s->pk_len = info->pk_len;
 
 	if (policy & SLOT_POLICY_SEED_STORAGE) {
-		/* §7.6：只留种子，私钥用时再展开。这里立刻把刚算出的 sk 清掉，
+		/* ：只留种子，私钥用时再展开。这里立刻把刚算出的 sk 清掉，
 		 * 证明后续签名确实是从种子重展开来的，而不是偷偷留了副本。 */
 		memcpy(s->seed, local_seed, local_seed_len);
 		s->seed_len = local_seed_len;
@@ -868,7 +868,7 @@ static hsm_status_t begin_use(slot_t *s, hsm_handle_t h, uint32_t need_usage,
 static hsm_status_t end_use(slot_t *s, uint8_t *tmp, size_t tmp_len, hsm_status_t op_st)
 {
 	if (tmp) {
-		pqc_secure_free(tmp, tmp_len);   /* 重展开的私钥用后即清（§8.7） */
+		pqc_secure_free(tmp, tmp_len);   /* 重展开的私钥用后即清 */
 	}
 	(void)fsm_apply(s, SLOT_EV_USE_END);
 	if (op_st == HSM_OK) {

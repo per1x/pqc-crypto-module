@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Level A：**从 PKCS#11 层驱动**的端到端链
+# **从 PKCS#11 层驱动**的端到端链
 #
 #   [应用面 · PKCS#11]  初始化 token → 生成 ML-DSA 密钥 → 签名 → 导出公钥
 #   [运维面 · admin  ]  备份（M-of-N 分片）→ 整机清零

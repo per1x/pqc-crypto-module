@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# pkcs11-tool 冒烟 + 与 SoftHSMv2 的行为对比（路线图 Phase 9 第 1 项）
+# pkcs11-tool 冒烟 + 与 SoftHSMv2 的行为对比
 #
-# 为什么要跟 SoftHSMv2 比：光看"我们自己不报错"说明不了什么。SoftHSMv2 是
+# 为什么要跟 SoftHSMv2 比：本模块自身不报错并不说明行为正确。SoftHSMv2 是
 # 事实上的 PKCS#11 参考实现，同一条 pkcs11-tool 命令在两边应当得到**同类**的
 # 结果（成功/失败、以及失败时的错误类别）。不同之处必须能解释得出原因。
 #
 # 已知的、可解释的差异（不是 bug）：
-#   1. 机制列表：我们只有 ML-KEM/ML-DSA，SoftHSM 只有 RSA/EC/AES 等传统算法。
-#      OpenSC 0.27 的 CLI 还不认 ML-DSA 密钥类型，所以 --keypairgen 在我们这边
+#   1. 机制列表：本模块只有 ML-KEM/ML-DSA，SoftHSM 只有 RSA/EC/AES 等传统算法。
+#      OpenSC 0.27 的 CLI 还不认 ML-DSA 密钥类型，所以 --keypairgen 在本模块上
 #      走不通 —— PQC 密钥生成由 tests/unit/test_p11.c 直接调 C_GenerateKeyPair 驱动。
-#   2. 重复 --init-token：SoftHSM 允许（重新初始化），我们拒绝（CKR_ACTION_PROHIBITED），
+#   2. 重复 --init-token：SoftHSM 允许（重新初始化），本模块拒绝（CKR_ACTION_PROHIBITED），
 #      因为那等于无声销毁全部密钥，本实现要求先显式 zeroize。
 #
 # 用法：tools/p11_smoke.sh [模块路径]
@@ -101,7 +101,7 @@ if command -v softhsm2-util >/dev/null 2>&1; then
     ck "C_InitPIN"                  ok  S11 --token-label smoke --init-pin --so-pin "$SO_PIN" --pin "$USER_PIN"
     ck "正确 User PIN 登录"          ok  S11 --token-label smoke --login --pin "$USER_PIN" --list-objects
     ck "错误 User PIN 应失败"        err S11 --token-label smoke --login --pin wrongpin1 --list-objects
-    echo "  注：SoftHSM 允许重复 InitToken，我们有意拒绝 —— 见脚本顶部说明"
+    echo "  注：SoftHSM 允许重复 InitToken，本模块有意拒绝 —— 见脚本顶部说明"
   fi
 else
   echo "== SoftHSMv2 对照：未安装（brew install softhsm），跳过 =="

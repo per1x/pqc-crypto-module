@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# libFuzzer 版 fuzz（路线图 §3.9 / 内存安全面）
+# libFuzzer 版 fuzz
 #
 # Apple 的 clang **不带 libFuzzer**（缺 libclang_rt.fuzzer_osx.a），
 # 所以这里用 brew 的 llvm。没装就 SKIP —— ctest 里跑的是不依赖 libFuzzer 的

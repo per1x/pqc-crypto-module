@@ -1,4 +1,4 @@
-# ooc_synth.tcl —— out-of-context 综合，出资源与时序报告（路线图 §5.0 / §5.8）
+# ooc_synth.tcl —— out-of-context 综合，出资源与时序报告
 #
 # ⚠️ **需要 AMD Vivado**（免费版即可）。本仓库的开发机上没有装，所以这个脚本
 #    **未经实机验证** —— 它是照 Vivado 的标准 non-project 流程写的，
@@ -7,9 +7,9 @@
 #      vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top>
 #      # 例：vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xck26-sfvc784-2LV-c butterfly_ct
 #
-# 为什么值得先跑：§5.0 明确说资源占用、时序收敛与 Fmax 估算**不需要板子**，
+# 为什么值得先跑：明确说资源占用、时序收敛与 Fmax 估算**不需要板子**，
 # 只需指定 part。在下单开发板**之前**跑一遍，才知道选的器件够不够用 ——
-# 路线图那句"没有综合报告就买板子，板子只会吃灰"说的就是这件事。
+# 那句"没有综合报告就买板子，板子只会吃灰"说的就是这件事。
 
 set part [lindex $argv 0]
 set top  [lindex $argv 1]
@@ -23,7 +23,7 @@ set rpt  $root/syn/rpt
 file mkdir $rpt
 
 # ---- 读入源码 ----------------------------------------------------------------
-# 只读自研纯 RTL：算法核刻意不依赖任何厂商 IP（§5.3.1），
+# 只读自研纯 RTL：算法核刻意不依赖任何厂商 IP，
 # 所以这里不需要 read_ip，也因此能在 Verilator/Icarus 里跑 cocotb。
 read_verilog -sv [glob $root/rtl/mlkem/*.v]
 read_verilog -sv [glob $root/rtl/keccak/*.v]

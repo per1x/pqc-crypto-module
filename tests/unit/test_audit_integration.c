@@ -1,4 +1,4 @@
-/* 审计与槽位管理器的联动（路线图 §8.6）
+/* 审计与槽位管理器的联动
  *
  * audit.c 自身的哈希链正确性由 test_audit 覆盖；这里验证的是**接线**：
  * 敏感操作是否真的落审计、失败是否也落、以及日志里绝不出现密钥材料。
@@ -91,7 +91,7 @@ int main(void)
 	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_GENERATE, n), 1);
 	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_SIGN, n), 1);
 
-	TCASE("失败与锁定也必须落审计（§8.6 明确要求记录否定结果）");
+	TCASE("失败与锁定也必须落审计");
 	CHECK_EQ_INT(hsm_session_logout(tok, s), HSM_OK);
 	for (uint32_t i = 1; i < HSM_PIN_MAX_FAILS; i++) {
 		CHECK_EQ_INT(hsm_session_login(tok, s, HSM_ROLE_USER, "bad"), HSM_ERR_PIN_INCORRECT);
@@ -120,7 +120,7 @@ int main(void)
 	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_ZEROIZE, n), 1);
 	CHECK_EQ_INT(audit_verify_file(g_log, NULL), 0);
 
-	TCASE("红线：审计日志里搜不到任何密钥材料 / PIN / 验证值（§8.6）");
+	TCASE("红线：审计日志里搜不到任何密钥材料 / PIN / 验证值");
 	{
 		FILE *f = fopen(g_log, "rb");
 		CHECK(f != NULL);

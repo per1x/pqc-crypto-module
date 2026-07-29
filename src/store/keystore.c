@@ -110,7 +110,7 @@ static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
 	if (RAND_bytes(salt, sizeof(salt)) != 1) {
 		return HSM_ERR_CRYPTO;
 	}
-	/* 每次落盘换一把新 KEK ⇒ 顺带完成 §8.1 的 KEK 轮换 */
+	/* 每次落盘换一把新 KEK ⇒ 顺带完成 的 KEK 轮换 */
 	if (pqc_kek_derive(salt, sizeof(salt), kek) != 0 || derive_file_key(salt, fkey) != 0) {
 		return HSM_ERR_CRYPTO;
 	}
@@ -169,7 +169,7 @@ static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
 		goto out;
 	}
 	/* 按"头部 / 每条记录 / 尾部 tag"分次写：既贴近真实写入模式，
-	 * 也让掉电模拟能落在文件中间的多个位置（§5.7.3）。 */
+	 * 也让掉电模拟能落在文件中间的多个位置。 */
 	st = HSM_ERR_CRYPTO;
 	if (ks_write(fd, body, KS_HDR_LEN) != 0) {
 		goto out;
@@ -210,7 +210,7 @@ out:
 	pqc_secure_zero(kek, sizeof(kek));
 	pqc_secure_zero(fkey, sizeof(fkey));
 	pqc_secure_zero(salt, sizeof(salt));
-	/* 每次 save 都换新 KEK，等价于一次 KEK 轮换（§8.1） */
+	/* 每次 save 都换新 KEK，等价于一次 KEK 轮换 */
 	slot_audit(tok, AUDIT_OP_KEK_ROTATE, HSM_ROLE_PUBLIC, 0, st, audit_detail);
 	return st;
 }

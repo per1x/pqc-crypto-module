@@ -50,13 +50,13 @@ struct hsm_token {
 	session_t sessions[MAX_SESSIONS];
 	uint32_t  session_gen;
 
-	/* 审计日志（§8.6）。单独一把锁：审计要 fsync，不该卡住会话表。 */
+	/* 审计日志。单独一把锁：审计要 fsync，不该卡住会话表。 */
 	pthread_mutex_t audit_lock;
 	struct audit_log *audit;
 };
 
 /* 落一条审计。detail 只能放非敏感的短文本（算法名、标签），
- * 绝不能放密钥材料/种子/PIN（§8.6）。在**放掉槽位锁之后**调用。 */
+ * 绝不能放密钥材料/种子/PIN。在**放掉槽位锁之后**调用。 */
 void slot_audit(hsm_token_t *tok, int op, hsm_role_t role,
                 hsm_slot_id_t slot, hsm_status_t result, const char *detail);
 

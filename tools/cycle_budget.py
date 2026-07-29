@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""NTT cycle 预算表（路线图 §5.8.1）
+"""NTT cycle 预算表
 
-§5.8.1 特别指出：这张表**在没有任何硬件、甚至没有 RTL 的情况下就能算出来**。
+特别指出：这张表**在没有任何硬件、甚至没有 RTL 的情况下就能算出来**。
 它决定微架构（几个蝶形单元、几个 BRAM bank），而微架构必须在写 RTL 之前定下来。
 
-算例（路线图正文）：ML-KEM 的 256 点 NTT 做 **7 层**（只到 2 次多项式，不是完整 8 层），
+算例：ML-KEM 的 256 点 NTT 做 **7 层**（只到 2 次多项式，不是完整 8 层），
 每层 128 个蝶形 → 共 896 个蝶形运算。
 
 用法：tools/cycle_budget.py [--fmax 150] [--alg mlkem|mldsa]
@@ -66,7 +66,7 @@ def main() -> int:
     print("  1. 先定端到端目标（比如 KeyGen < 1 ms），反推 NTT 需要多快；")
     print("  2. 从表里挑满足要求的最小并行度 —— 并行度越高，存储端口越难做；")
     print("  3. 把选中的并行度写进 docs/design/uarch.md，再开始写 RTL。")
-    print("  ⚠️ 这里只算了 NTT。若 §5.2 的结论是 Keccak 占比更大，")
+    print("  ⚠️ 这里只算了 NTT。若 的结论是 Keccak 占比更大，")
     print("     那么先做 Keccak 核才是端到端收益更高的选择（见 tools/amdahl.py）。")
     return 0
 

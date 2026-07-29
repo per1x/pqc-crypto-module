@@ -2,7 +2,7 @@
  *
  * 用法：kat_runner <file.kat> [file.kat ...]
  *
- * 路线图 §10.1：整机 KAT 一律用最终版 FIPS 203/204 向量。
+ * ：整机 KAT 一律用最终版 FIPS 203/204 向量。
  * 后端不支持的组由 tools/acvp_to_kat.py 在文件头以 `# SKIPPED:` 显式记录，
  * 这里把它们原样打印出来 —— 不能让"少测了一半"看起来像"全绿"。
  */
@@ -331,8 +331,8 @@ static int run_file(const char *path)
 		} else if (strcmp(op, "sigver") == 0) {
 			run_sigver(&rec, alg, info);
 		} else if (strcmp(op, "keycheck") == 0) {
-			/* liboqs 不暴露独立的公私钥格式校验 API（FIPS 203 §7.2/7.3），
-			 * 这类向量留到 Phase 7 由硬件核的输入校验路径覆盖。 */
+			/* liboqs 不暴露独立的公私钥格式校验 API（FIPS 203 /7.3），
+			 * 这类向量留到 由硬件核的输入校验路径覆盖。 */
 			g_skip++;
 		} else {
 			fprintf(stderr, "  未知 op %s\n", op);

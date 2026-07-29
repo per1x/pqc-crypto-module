@@ -1,8 +1,8 @@
-/* pqchsm/keystore.h —— 密钥库持久化（路线图 §7.5 L2 层 / Phase 5）
+/* pqchsm/keystore.h —— 密钥库持久化
  *
  * 落盘的永远是**密文**：每个槽位的 PIN 材料与密钥材料用 KEK 包裹，
- * 元数据以明文记录存在但进 GCM 的 AAD，因此改元数据一定被检出（§8.2）。
- * 被盗的密钥库文件在没有设备 KDR 的情况下只是一堆密文（§8.3 sealing）。
+ * 元数据以明文记录存在但进 GCM 的 AAD，因此改元数据一定被检出。
+ * 被盗的密钥库文件在没有设备 KDR 的情况下只是一堆密文。
  *
  * 文件格式：
  *   magic "PQCHSMKS"(8) | version u32 | n_slots u32 | kek_salt(16)
@@ -13,12 +13,12 @@
  * 截断文件 —— 这些单看每条记录都是合法的，只有全文件 MAC 能发现。
  *
  * 每次 save 都重新随机 kek_salt ⇒ 每次落盘都是一把新 KEK、全部记录重新包裹。
- * 这顺带把 §8.1 的「KEK 轮换」变成了默认行为，也让 GCM nonce 的复用风险
+ * 这顺带把 的「KEK 轮换」变成了默认行为，也让 GCM nonce 的复用风险
  * 进一步下降（新 KEK = 全新的 nonce 空间）。
  *
  * 原子性：先写 <path>.tmp、fsync、再 rename 覆盖（rename 在 POSIX 上是原子的），
  * 最后 fsync 目录。任何时刻断电，<path> 要么是旧的完整文件、要么是新的完整文件，
- * 绝不会半新半旧（§5.7.3 的掉电一致性要求）。
+ * 绝不会半新半旧。
  */
 #ifndef PQCHSM_KEYSTORE_H
 #define PQCHSM_KEYSTORE_H
@@ -38,7 +38,7 @@ hsm_status_t hsm_keystore_save(hsm_token_t *tok, const char *path);
  * 任何完整性校验失败都返回 HSM_ERR_INTEGRITY，且**不改动 token 的现有内容**。 */
 hsm_status_t hsm_keystore_load(hsm_token_t *tok, const char *path);
 
-/* 显式 KEK 轮换（§8.1）：用一把新的 KEK 重新包裹全部槽位并原子写回。
+/* 显式 KEK 轮换：用一把新的 KEK 重新包裹全部槽位并原子写回。
  *
  * 实现上与 save 相同（每次 save 本来就换新盐、新 KEK），区别在**语义与审计**：
  * 轮换是一个应当被单独记录、单独调度的运维事件，不该混在普通落盘里看不出来。

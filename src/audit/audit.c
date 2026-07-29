@@ -1,4 +1,4 @@
-/* append-only 审计日志（哈希链，路线图 §8.6）
+/* append-only 审计日志（哈希链，）
  *
  * 文件格式、截断检测的原理、以及"纯哈希链防不住谁"的完整分析都写在
  * pqchsm/audit.h 里，这里只讲实现上的取舍。
@@ -155,7 +155,7 @@ static int chain_step(const uint8_t prev[AUDIT_HASH_LEN], const uint8_t *wire,
 	memcpy(buf, prev, AUDIT_HASH_LEN);
 	memcpy(buf + AUDIT_HASH_LEN, wire, AUDIT_WIRE_LEN);
 	int rc = pqc_sha3_256(buf, sizeof(buf), out);
-	/* buf 里按 §8.7 红线不该有密钥材料，但 detail 是外部传进来的字符串，
+	/* buf 里按 红线不该有密钥材料，但 detail 是外部传进来的字符串，
 	 * 用后即清是零成本的好习惯。 */
 	pqc_secure_zero(buf, sizeof(buf));
 	return rc;

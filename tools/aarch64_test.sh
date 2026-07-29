@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# 在真 aarch64 Linux 上从零构建并跑全套回归（路线图 §5.7 的"PS 侧固件先行"）
+# 在真 aarch64 Linux 上从零构建并跑全套回归
 #
 # 【为什么这一步值得做】
 # 这套代码最终要跑在 Zynq 的 Cortex-A 上（aarch64 Linux）。在开发机（macOS/arm64）
 # 上全绿，不代表在目标平台上也全绿：**字节序假设、结构体对齐、long 宽度、
 # glibc 与 BSD libc 的行为差异**，只有换平台才会现形。
-# §5.7 的原话是"PS 侧固件开发先在 PC 或 QEMU 上做"，这一步就是把那句话落地。
+# 的原话是"PS 侧固件开发先在 PC 或 QEMU 上做"，这一步就是把那句话落地。
 #
 # 【为什么用容器而不是 QEMU】
 # 开发机本身就是 arm64，所以 linux/arm64 容器是**原生速度**执行，不是模拟。
 # 比 qemu-aarch64 快一个量级，而且跑的是真 glibc + 真 Linux 系统调用。
-# （§5.2.2 提到的 qemu-aarch64 是给 x86 开发机用的；在 arm64 Mac 上容器更优。）
+# （提到的 qemu-aarch64 是给 x86 开发机用的；在 arm64 Mac 上容器更优。）
 #
 # 用法：tools/aarch64_test.sh
 set -uo pipefail
@@ -19,23 +19,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 command -v docker >/dev/null 2>&1 || { echo "SKIP: 没有 docker/OrbStack"; exit 0; }
 docker info >/dev/null 2>&1 || { echo "SKIP: docker 守护进程没起来"; exit 0; }
 
-# 【为什么要把宿主代理透进容器】
-# 容器**不继承**宿主的 HTTP_PROXY，而且容器里的 127.0.0.1 是它自己，
-# 所以容器里的一切都是彻底直连。这台机器上实测（单跑、无竞争）：
-#
-#     操作                              直连            经宿主代理
-#     ----------------------------      -----------     ----------
-#     curl codeload.github.com          14.2 KB/s       8.4 MB/s     ~590x
-#     apt-get update                    >150s 超时      3s           >50x
-#
-# liboqs 源码包 9.4 MB —— 直连要十几分钟且经常断，正是本脚本"卡住"的根因。
-# 注意 **apt 也一样慢**：一开始我以为只有 GitHub 需要代理、Debian 源直连很快，
-# 于是只给拉 liboqs 那条 curl 加了 --proxy —— 结果卡在 apt-get update 上。
-# 上面那张表就是为了纠正这个错判量的：整个容器都走代理才对。
-#
-# 做法：--add-host 把 host.docker.internal 指到宿主网关，再把 *_proxy 传进去。
-# **只在宿主代理端口确实在监听时才加**，否则原样直连（脚本在没有代理的机器上
-# 照样能跑，不会因为这段而失败）。端口可用 PQCHSM_PROXY_PORT 覆盖。
+# 容器不继承宿主的 HTTP_PROXY，且容器内的 127.0.0.1 指向容器自身，因此在受限
+# 网络下容器里的下载（Debian 源与 liboqs 源码包）都会极慢。这里在宿主代理端口
+# 确实处于监听状态时把它透进容器，否则保持直连 —— 没有代理的机器上脚本照常工作。
+# 代理端口可用 PQCHSM_PROXY_PORT 覆盖。
 PROXY_PORT="${PQCHSM_PROXY_PORT:-6152}"
 PROXY_ARGS=()
 if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$PROXY_PORT" 2>/dev/null; then

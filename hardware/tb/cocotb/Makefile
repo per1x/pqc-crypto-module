@@ -1,6 +1,6 @@
-# cocotb 对拍（路线图 §5.3.3）
+# cocotb 对拍
 #
-# ⚠️ §5.3.1 的坑：**cocotb 不支持 Vivado xsim**（官方支持列表里就没有）。
+# ⚠️ 的坑：**cocotb 不支持 Vivado xsim**（官方支持列表里就没有）。
 # 所以工程分两层：
 #   自研纯 RTL（本目录）      → Icarus/Verilator + cocotb，Python 直接读黄金向量
 #   含 Vivado IP 的顶层       → xsim + SystemVerilog testbench（另建目录）

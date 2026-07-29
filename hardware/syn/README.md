@@ -69,13 +69,12 @@ hardware/syn/
 
 ## Why the constraints are split
 
-There was originally a single `ooc.xdc` containing a virtual clock bound to no port,
-with a comment asserting that everything under `hardware/rtl/mlkem/` was combinational.
-That stopped being true when `ntt_core` was written. Synthesising a clocked module under
-that constraint leaves the `clk` port unconstrained, so no timing path is analysed and
-`report_timing_summary` produces a distorted — and misleadingly good — result.
+A clocked module must be constrained through its real clock port. Under a virtual clock
+bound to no port the `clk` port is unconstrained, no timing path is analysed, and
+`report_timing_summary` produces a distorted — and misleadingly favourable — result.
+Combinational modules, having no clock port, need the opposite treatment.
 
-Modules are now routed to the appropriate constraint file by `ooc_synth.tcl`:
+`ooc_synth.tcl` routes each module to the appropriate constraint file:
 
 | Module | Constraints | Notes |
 |---|---|---|

@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
-"""数出 ML-KEM-768 每次操作到底跑了多少次 Keccak 置换与多少次 NTT
+"""统计 ML-KEM-768 每次操作调用多少次 Keccak 置换与多少次 NTT。
 
-【为什么要有这个脚本 —— 它绕开了 profiling 卡住的地方】
-docs/reports/profiling.md 记了一次失败：本机上的**符号级热点归因做不了**，
-因为 liboqs 0.16 对 ML-KEM/ML-DSA 走手写 aarch64 汇编，没有帧指针可回溯，
-统计采样穿不过去。于是 tools/amdahl.py 一直只能用路线图的**文献占比**
-（SHAKE ~55%、NTT ~30%）跑，不是本项目的实测值。
+热点占比可以拆成「调用次数 × 单次代价 / 总耗时」，两个因子都能不依赖统计采样地
+拿到。这一点很有用，因为 liboqs 在 arm64 上使用手写汇编，没有帧指针可回溯，
+符号级采样归因无法穿透。
 
-采样归因走不通，但还有一条路：**热点占比 = 调用次数 × 单次代价**。
-这两个因子都能不依赖采样地拿到：
+调用次数是确定值：FIPS 203 的算法流程固定。这里复用 hardware/model/ntt_oracle.py
+中那份已逐字节重现 NIST ACVP 向量的 KeyGen/Encaps 实现，把它的哈希后端换成基于
+ref_model.keccak_f1600 的海绵，边执行边计数。唯一的波动来自 SampleNTT 的拒绝
+采样，所以脚本跑多组种子并给出均值与范围。
 
-  · 调用次数：FIPS 203 的算法是确定的。把 hardware/model/ntt_oracle.py 里那份
-    已经**逐字节重现过 NIST ACVP 向量**的 KeyGen/Encaps/Decaps 实现，
-    把它用的 hashlib 换成 ref_model.keccak_f1600 搭的海绵，边跑边计数。
-    数出来的是**精确值**，不是估计 —— 唯一的不确定来自 SampleNTT 的
-    拒绝采样（矩阵 Â 的每个元素平均要多挤 0.x 个块），所以脚本会跑多组
-    种子给出实测的均值与范围。
-  · 单次代价：tools/prim_bench.c 在同一台机器上实测（见该文件）。
+单次代价由 tools/prim_bench.c 在同一台机器上测量。
 
-两者相乘再除以 liboqs 的整体耗时，就得到**本机实测的占比**，
-可以直接喂给 amdahl.py 覆盖文献值。
-
-【这个数的可信度边界，必须说清楚】
-计数是精确的；**单次代价不是**。我们量的是 OpenSSL 的 Keccak 与本项目的
-C 版 NTT，而 liboqs 在 arm64 上用的是它自己的汇编实现，两者常数因子不同。
-所以最终占比是**带偏差的估计**，量级可信、小数点后一位不可信。
-真正的实测占比要在目标平台（Cortex-A53，没有这些 SIMD 汇编）上重做 ——
-那也正是这个数最有用的地方，因为 A53 上软件 Keccak 会比这里慢得多，
-占比只会更高，硬件切分的收益只会更大。
+【结果的可信度边界】计数是精确的，单次代价不是：代价取自 OpenSSL 的 Keccak 与
+本仓库的 C 版 NTT，而 liboqs 使用自己的汇编实现，常数因子不同。因此占比是量级
+可信、末位不可信的估计。目标平台（Cortex-A53，无 SIMD）上软件 Keccak 更慢，
+占比只会更高。
 
 用法：tools/prim_count.py [--trials 8]
 """
@@ -317,7 +305,7 @@ def main() -> int:
     print(f"  KeyGen 置换数 = {pm_kg:.0f}，Encaps 置换数 = {pm_en:.0f}")
     print()
     print("⚠️ 计数是精确的；把它换算成占比时用到的**单次代价是估计**——")
-    print("   我们量的是 OpenSSL 的 Keccak，liboqs 在 arm64 上用自己的汇编。")
+    print("   代价取自 OpenSSL 的 Keccak，而 liboqs 在 arm64 上用自己的汇编。")
     print("   量级可信，小数点后一位不可信。详见本文件头部说明。")
     return 0
 

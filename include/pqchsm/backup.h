@@ -1,4 +1,4 @@
-/* pqchsm/backup.h —— 备份与恢复（路线图 §8.1–8.5，Phase 6）
+/* pqchsm/backup.h —— 备份与恢复
  *
  * 密钥层级：
  *
@@ -9,7 +9,7 @@
  *    └─ KDF ─→ BEK（备份加密密钥）──wrap──→ 备份文件（**不绑定设备**）
  *    └─ Shamir M-of-N ─→ N 份分片，交由不同保管员离线保管
  *
- * 关键区别（§8.3）：密钥库用 KEK，所以拷走文件换台机器打不开（sealing）；
+ * 关键区别：密钥库用 KEK，所以拷走文件换台机器打不开（sealing）；
  * 备份用 RMK，所以**可以**跨设备恢复 —— 代价就是 RMK 的分片必须离线妥善保管。
  * RMK 本身从不落盘、也从不返回给调用方，只以分片形式存在。
  *
@@ -32,7 +32,7 @@ extern "C" {
 /* 给调用方分配分片二维缓冲用的行宽 */
 #define HSM_SHARE_CAP      64
 
-/* 导出备份（§8.2 / §8.4）。需 SO 会话。
+/* 导出备份。需 SO 会话。
  *
  * 现场生成 RMK → 派生 BEK → 逐槽位包裹写文件 → 把 RMK 切成 n 片（阈值 m）
  * 写入 shares（n 行 × share_cap 字节），每行长度回填到 share_lens。
@@ -44,9 +44,9 @@ hsm_status_t hsm_backup_export(hsm_token_t *tok, hsm_session_t sess, const char 
                                uint8_t *shares, size_t share_cap, size_t *share_lens,
                                size_t *n_exported);
 
-/* 恢复仪式（§8.4）。**设备级操作，不需要会话** —— 因为典型场景就是
+/* 恢复仪式。**设备级操作，不需要会话** —— 因为典型场景就是
  * 一台空白的新设备，上面还没有任何 SO 凭证可供登录。
- * Phase 7 起这条路径必须由物理"恢复模式"信号 + SO 现场授权门控。
+ * 起这条路径必须由物理"恢复模式"信号 + SO 现场授权门控。
  *
  * 用 k 份分片重构 RMK → 派生 BEK → 解出备份 → 逐槽位装载。
  * 装载后槽位的元数据标签会用**本机 KDR** 重新盖（自动重新 sealing），

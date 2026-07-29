@@ -140,12 +140,17 @@ transport reports "unsupported" rather than silently substituting software.
 │   └── syn/            Vivado out-of-context synthesis scripts and constraints
 ├── tools/              Vector fetching, benchmarks, profiling, regression scripts
 ├── third_party/        Vendored OASIS PKCS#11 v3.2 headers (unmodified)
-└── docs/
-    ├── design/         Status, roadmap, development log
-    └── reports/        Profiling, RTL review, and other investigation write-ups
+└── docs/               Architecture and PKCS#11 interface reference
 ```
 
-Documents under `docs/` are written in Chinese; this README is the English entry point.
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Layering, key hierarchy, keystore format, audit chain, hardware abstraction, key injection |
+| [docs/pkcs11.md](docs/pkcs11.md) | Mechanisms, object model, vendor attributes, key import, KEM operations, configuration |
+| [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
+| [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
 
 ## Building
 
@@ -229,7 +234,8 @@ under memory pressure.
 **No speedup figure is available.** On the development machine the simulated cores at
 100 MHz are *slower* than liboqs's hand-written NEON assembly. That comparison is not
 meaningful — the target is a Cortex-A53 without SIMD — but it does mean this project
-cannot currently claim a speedup. See [docs/reports/profiling.md](docs/reports/profiling.md).
+cannot state a speedup figure. `./build/pqchsm-prim-bench` prints the measured
+numbers and the reasoning behind them.
 
 **Other known gaps.** The audit module assumes a single writer and does not lock the
 file. Shamir share checksums are unkeyed: they detect corruption, not tampering. SO PIN
@@ -279,13 +285,13 @@ hardware-dependent:
 5. Measured end-to-end speedup on the target platform — the only place a real number
    can come from.
 
-[docs/design/status-and-roadmap.md](docs/design/status-and-roadmap.md) has the detailed
-breakdown.
+Each step replaces a software mode with a hardware one through the register interface
+that already exists, so the layers above are unaffected.
 
 ## License
 
 [Apache-2.0](LICENSE). Chosen over MIT for its explicit patent grant and patent
-retaliation clause (§3); patents are a real exposure in this field and MIT is silent on
+retaliation clause ; patents are a real exposure in this field and MIT is silent on
 them.
 
 The three headers under `third_party/pkcs11-v3.2/` are OASIS documents, included

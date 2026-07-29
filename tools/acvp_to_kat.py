@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ACVP (FIPS 203/204 最终版) JSON → 扁平黄金向量 .kat
 
-路线图 §5.1.3 / §10.1：整机 KAT 一律用最终版 ACVP 向量，不用 round-3 .rsp。
+/ ：整机 KAT 一律用最终版 ACVP 向量，不用 round-3 .rsp。
 
 输出格式（C 侧 60 行即可解析，将来 cocotb / RTL testbench 共用同一批文件）：
 

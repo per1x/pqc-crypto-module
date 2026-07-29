@@ -37,8 +37,8 @@ ML-KEM/ML-DSA over PKCS#11. The findings below are measured, not assumed.
 | **PyKCS11** (SWIG wrapper over the C API) | **works** | used by this demo |
 | python-pkcs11 (high-level) | does not work | mechanisms and attributes are its own enums, with no ML-KEM/ML-DSA entries |
 
-PyKCS11 works but is not turnkey. Three adaptation gaps were encountered; each is
-documented inline in `demo/python/pqchsm_demo.py`:
+PyKCS11 works but is not turnkey. Three adaptation gaps apply; each is handled inline
+in `demo/python/pqchsm_demo.py`:
 
 1. `lib.getMechanismList(slot)` raises `KeyError: 28`. It reverse-looks-up mechanism
    code `0x1C` in its bundled `CKM` dictionary and fails when the entry is absent.

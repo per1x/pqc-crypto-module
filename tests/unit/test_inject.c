@@ -1,4 +1,4 @@
-/* 安全密钥注入（§8.5）
+/* 安全密钥注入
  *
  * 主线：注入端只拿到设备的 ML-KEM 公钥，就能把一把密钥安全灌进设备，
  * 且**链路上只有密文**。判据不是"没报错"，而是：
@@ -236,7 +236,7 @@ int main(void)
 		CHECK_EQ_INT(hsm_inject_blob_len(PQC_ALG_ML_DSA_65, 32), 0);
 	}
 
-	TCASE("制造模式：默认关闭；熔断后不可再打开（§8.5）");
+	TCASE("制造模式：默认关闭；熔断后不可再打开");
 	{
 		hsm_session_t so;
 		CHECK_EQ_INT(hsm_session_open(tok, 2, &so), HSM_OK);

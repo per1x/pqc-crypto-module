@@ -1,4 +1,4 @@
-/* 密钥库持久化测试（路线图 §7.5 / Phase 5 验收项）
+/* 密钥库持久化测试
  *
  * 重点三条：
  *   1. 存→读往返后密钥仍可用（签名结果可被原公钥验证）；
@@ -240,7 +240,7 @@ static void test_tamper(void)
 		CHECK_EQ_INT(hsm_keystore_load(t, g_path), HSM_ERR_INTEGRITY);
 		hsm_token_free(t);
 	}
-	TCASE("换设备（换 KDR）→ 装载失败（§8.3 sealing）");
+	TCASE("换设备（换 KDR）→ 装载失败");
 	{
 		pqc_kdr_set_test_root((const uint8_t *)"other-device", 12);
 		hsm_token_t *t = hsm_token_new(N_SLOTS);

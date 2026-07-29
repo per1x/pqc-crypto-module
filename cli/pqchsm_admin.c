@@ -203,7 +203,7 @@ int main(int argc, char **argv)
 			        hsm_strerror(st));
 			goto out;
 		}
-		/* §8.4：恢复后立刻用本机 KDR 重新 sealing —— 就是存回密钥库 */
+		/* ：恢复后立刻用本机 KDR 重新 sealing —— 就是存回密钥库 */
 		if (hsm_keystore_save(tok, ks) != HSM_OK) {
 			fprintf(stderr, "恢复后落盘失败\n");
 			goto out;

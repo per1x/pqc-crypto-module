@@ -1,10 +1,10 @@
-/* p11_module.c —— PKCS#11 v3.2 前端（路线图 Phase 9 第 1 项）
+/* p11_module.c —— PKCS#11 v3.2 前端
  *
  * 把已有的槽位管理器包装成一个标准 PKCS#11 动态库，用 OpenSC 的 pkcs11-tool
  * 驱动、与 SoftHSMv2 对比行为。
  *
  * 【为什么这一层几乎是"翻译"而不是"实现"】
- * §7 的 slot/token/object/session 模型本来就是照 PKCS#11 设计的，所以映射是一一对应的：
+ * 的 slot/token/object/session 模型本来就是照 PKCS#11 设计的，所以映射是一一对应的：
  *
  *   PKCS#11 slot i        ↔  hsm_slot_id_t i
  *   C_OpenSession         ↔  hsm_session_open
@@ -13,7 +13,7 @@
  *   C_Sign                ↔  hsm_object_sign
  *   C_DestroyObject       ↔  hsm_object_destroy
  *
- * 对象句柄：本项目一槽位一密钥对（§7.6 的 8 KB/槽预算），所以一个已装载的槽位
+ * 对象句柄：本项目一槽位一密钥对，所以一个已装载的槽位
  * 恰好对外呈现两个对象。私钥对象句柄直接用 hsm_handle_t，公钥对象句柄是它
  * 或上最高位——两者可互相推导，不需要额外的对象表。
  *
@@ -54,11 +54,11 @@
 
 /* ---- 厂商自定义属性 --------------------------------------------------------
  * PKCS#11 **没有**"这把密钥可否被 KEK 包裹备份"这个标准属性：
- * CKA_EXTRACTABLE 说的是"可否明文导出"，与我们要表达的完全不是一回事
+ * CKA_EXTRACTABLE 说的是"可否明文导出"，与这里要表达的完全不是一回事
  * （本模块任何情况下都不导出明文私钥）。所以按规范用 CKA_VENDOR_DEFINED 区段。
  *
  * **默认值是"可备份"** —— 一个所有密钥都进不了备份的 token，
- * 会让 §8.4 的整条恢复链对 PKCS#11 应用完全失效。想要"纯 sealed 密钥"
+ * 会让 的整条恢复链对 PKCS#11 应用完全失效。想要"纯 sealed 密钥"
  * （如设备身份钥，设备损坏就该跟着消失）就在模板里显式置 CK_FALSE。 */
 #define CKA_PQCHSM_BACKUPABLE   (CKA_VENDOR_DEFINED | 0x01UL)
 #define CKA_PQCHSM_SEED_STORAGE (CKA_VENDOR_DEFINED | 0x02UL)
@@ -135,7 +135,7 @@ static p11_session_t g_sessions[MAX_P11_SESSIONS];
 /* ---- 会话密钥对象（KEM 共享秘密的落点）---------------------------------
  * C_EncapsulateKey/C_DecapsulateKey 按规范要产出一个**密钥对象句柄**，
  * 而不是把共享秘密直接吐给调用方。本项目的槽位是"一槽一密钥对"的持久结构
- * （§7.6 的 8 KB/槽预算），把一堆临时的 32 B 共享秘密塞进槽位既浪费也不对 ——
+ * ，把一堆临时的 32 B 共享秘密塞进槽位既浪费也不对 ——
  * 它们本就是**会话生命期**的东西。所以另开一张会话对象表：
  *   · 只在内存里，不落盘、不占槽位；
  *   · C_CloseSession / C_Finalize 时连同缓冲一起清零；
@@ -740,8 +740,8 @@ out:
 	return rv;
 }
 
-/* 只关**该槽位**的会话。早先这里把 slotID 忽略了、一律全关 —— 规范里
- * C_CloseAllSessions 明确是按槽位的，别的槽位上的会话不该被牵连。 */
+/* 只关**该槽位**的会话：规范里 C_CloseAllSessions 是按槽位的，
+ * 其他槽位上的会话不应被牵连。 */
 CK_DEFINE_FUNCTION(CK_RV, C_CloseAllSessions)(CK_SLOT_ID slotID)
 {
 	pthread_mutex_lock(&g_lock);
@@ -1498,12 +1498,12 @@ out:
  * 常规 HSM 的 C_CreateObject 允许灌一把明文私钥进去。本项目底下的槽位管理器
  * **根本没有这条通路**：include/pqchsm/slot.h 里不存在任何"把 sk 字节装进槽位"
  * 的入口，只有 hsm_slot_generate（内部生成）与 hsm_slot_load_seed（由种子展开）。
- * 这是 §7.6 的设计结论，不是这一层能绕过的，也不该绕过。
+ * 这是 的设计结论，不是这一层能绕过的，也不该绕过。
  *
  * 于是：
  *   CKA_SEED  → hsm_slot_load_seed，导入成功
  *   CKA_VALUE → CKR_ATTRIBUTE_TYPE_INVALID，并且**如实说明原因**
- *               （想灌明文密钥请走 §8.5 的 hsm_inject_* 注入通道）
+ *               （想灌明文密钥请走 的 hsm_inject_* 注入通道）
  *
  * FIPS 203/204 的密钥本来就由种子完全决定（ML-KEM 64 B 的 d‖z、ML-DSA 32 B 的 ξ），
  * 所以"只收种子"并没有削弱能力 —— 反而少搬了几千字节的敏感数据。
@@ -1576,7 +1576,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_CreateObject)(CK_SESSION_HANDLE hSession,
 
 		if (find_attr(pTemplate, ulCount, CKA_VALUE)) {
 			/* 明文私钥导入：本项目**没有**这条通路，如实拒绝而不是假装成功。
-			 * 要灌密钥请走 §8.5 的注入通道（hsm_inject_build/apply）。 */
+			 * 要灌密钥请走 的注入通道（hsm_inject_build/apply）。 */
 			rv = CKR_ATTRIBUTE_TYPE_INVALID;
 			goto out;
 		}

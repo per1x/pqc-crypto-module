@@ -1,4 +1,4 @@
-/* pqchsm/audit.h —— append-only 审计日志（哈希链，路线图 §8.6）
+/* pqchsm/audit.h —— append-only 审计日志（哈希链，）
  *
  * 记录"谁在什么时候对哪个槽位做了什么、成没成功"，一条一条往后串成哈希链：
  * 任何一条被改动，从那条起后面每一条的哈希都对不上，验证时能直接指出
@@ -59,7 +59,7 @@
  * 本模块的测试里专门留了两条用例（forge_append / truncate_with_header）把这个洞
  * 显式地跑出来，断言 verify 返回 0 —— 与其假装没有，不如让它一直在眼前。
  *
- * 真正的防线是路线图 §8.6 的那一句：**定期用设备 ML-DSA 身份钥对链头签名固化**。
+ * 真正的防线是的那一句：**定期用设备 ML-DSA 身份钥对链头签名固化**。
  * 把 (count, head, 时间) 签出去，送到这台设备改不到的地方（另一台机器/上级系统）。
  * 有了外部锚点，攻击者要抹平就得先伪造签名，那才谈得上不可否认。
  * 本文件**不做**签名固化，它只负责提供随时可被签的链头（audit_head）。
@@ -81,7 +81,7 @@
  *
  * 【并发】本模块假设**单写者**，不做文件锁。多进程同时 append 会互相覆盖。
  *
- * 【红线（§8.7）】本头文件里没有任何可以传入密钥、种子或 PIN 的入口，
+ * 【红线】本头文件里没有任何可以传入密钥、种子或 PIN 的入口，
  * detail 是给人看的短文本，调用方不得往里塞密钥材料。
  */
 #ifndef PQCHSM_AUDIT_H
@@ -124,7 +124,7 @@ int audit_append(audit_log_t *log, uint64_t timestamp, audit_op_t op,
                  uint32_t role, uint32_t slot_id, uint32_t result,
                  const char *detail);
 
-/* 当前链头哈希 —— 这就是 §8.6 里那个"该拿设备身份钥去签"的值。 */
+/* 当前链头哈希 —— 这就是 里那个"该拿设备身份钥去签"的值。 */
 int audit_head(const audit_log_t *log, uint8_t out[AUDIT_HASH_LEN]);
 /* 当前记录条数。log 为 NULL 返回 0。 */
 uint64_t audit_count(const audit_log_t *log);

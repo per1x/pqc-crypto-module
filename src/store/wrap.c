@@ -20,7 +20,7 @@ int pqc_kek_derive(const uint8_t *salt, size_t salt_len, uint8_t kek[PQC_KEK_LEN
 	if (!kek) {
 		return -1;
 	}
-	/* §8.1：KEK 由 KDR 现场派生，不落盘。域分隔串固定为 "storage"。 */
+	/* ：KEK 由 KDR 现场派生，不落盘。域分隔串固定为 "storage"。 */
 	return pqc_kdr_derive("pqc-hsm/storage-kek", salt, salt_len, kek, PQC_KEK_LEN);
 }
 
@@ -124,7 +124,7 @@ int pqc_wrap(const uint8_t *kek, size_t kek_len,
              uint8_t *blob, size_t cap, size_t *blob_len)
 {
 	uint8_t nonce[PQC_WRAP_NONCE_LEN];
-	/* SP 800-38D §8.2.2 RBG 构造：每次现取，无状态 */
+	/* SP 800-38D RBG 构造：每次现取，无状态 */
 	if (RAND_bytes(nonce, PQC_WRAP_NONCE_LEN) != 1) {
 		return -1;
 	}

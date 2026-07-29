@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NTT 的**独立预言机**（RTL 审查报告【建议改】4）
+"""NTT 的**独立预言机**
 
 【要解决的问题】
 原来 cocotb 里写的"三方一致"其实是**两方**：`vectors/rtl/*.hex` 是

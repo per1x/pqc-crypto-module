@@ -1,4 +1,4 @@
-/* KEK 包裹/解包测试（路线图 §8.2） */
+/* KEK 包裹/解包测试 */
 #define _GNU_SOURCE
 #include "testlib.h"
 #include "pqchsm/wrap.h"
@@ -22,7 +22,7 @@ int main(void)
 	CHECK_EQ_INT(pqc_kek_derive(salt, sizeof(salt), kek2), 0);
 	CHECK(memcmp(kek, kek2, PQC_KEK_LEN) != 0);
 	salt[0] = 1;
-	/* 换设备（换 KDR）→ 同盐也派生出不同 KEK，这是 §8.3 sealing 的基础 */
+	/* 换设备（换 KDR）→ 同盐也派生出不同 KEK，这是 sealing 的基础 */
 	pqc_kdr_set_test_root((const uint8_t *)"device-B", 8);
 	CHECK_EQ_INT(pqc_kek_derive(salt, sizeof(salt), kek2), 0);
 	CHECK(memcmp(kek, kek2, PQC_KEK_LEN) != 0);
@@ -74,7 +74,7 @@ int main(void)
 		CHECK_EQ_INT(dup, 0);
 	}
 
-	/* §8.2 红线：nonce 复用是 GCM 的死穴。这里把后果做成可执行的证明 ——
+	/* 红线：nonce 复用是 GCM 的死穴。这里把后果做成可执行的证明 ——
 	 * 同 KEK 同 nonce 加密两条明文，两条密文异或 == 两条明文异或，
 	 * 也就是密钥流被完整抵消掉、明文关系直接泄露。 */
 	TCASE("nonce 复用会泄露明文关系（所以生产路径严禁复用）");

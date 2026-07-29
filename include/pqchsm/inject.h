@@ -1,9 +1,9 @@
-/* pqchsm/inject.h —— 安全密钥注入（路线图 §8.5，Phase 6 第 4 项）
+/* pqchsm/inject.h —— 安全密钥注入
  *
  * 场景：产线或托管方要把一把密钥灌进设备，但**明文密钥不能出现在链路上**，
  * 也不能出现在注入端与设备之间的任何中间环节。
  *
- * 做法（§8.5 那句"用设备的 ML-KEM 公钥封装会话密钥"）：
+ * 做法：
  *
  *   注入端                                   设备
  *   ------                                   ----
@@ -18,12 +18,12 @@
  * 既是被保护的对象，也是保护手段。
  *
  * 【注入的是种子，不是完整私钥】
- * §7.6 的种子存储让这件事变得干净：注入 32/64 B 的种子，设备端自己重展开
+ * 的种子存储让这件事变得干净：注入 32/64 B 的种子，设备端自己重展开
  * 出密钥对。链路上要搬的字节少，且设备可以自行验证展开结果。
  *
  * 【明文注入模式】
- * §8.5 允许"制造模式"下裸灌明文，出厂前用 eFUSE 熔断。这里给的是**桩**：
- * hsm_inject_set_manufacturing_mode() 是一个进程内的开关，Phase 7 换成读
+ * 允许"制造模式"下裸灌明文，出厂前用 eFUSE 熔断。这里给的是**桩**：
+ * hsm_inject_set_manufacturing_mode() 是一个进程内的开关，换成读
  * eFUSE 位。默认关闭，且关闭后本进程内**不可再打开**（模拟熔断的不可逆）。
  */
 #ifndef PQCHSM_INJECT_H
@@ -51,7 +51,7 @@ hsm_status_t hsm_inject_build(pqc_alg_t kem_alg,
  * target_sess            指向要装载的目标槽位（需 User 会话）
  *
  * 目标槽位为空时直接装载；已装载时**要求其策略位带 SLOT_POLICY_INJECTABLE**
- * （§7.2 的"可注入更新"），否则返回 HSM_ERR_POLICY —— 不能靠注入无声顶掉一把
+ * ，否则返回 HSM_ERR_POLICY —— 不能靠注入无声顶掉一把
  * 本来不允许被替换的密钥。 */
 hsm_status_t hsm_inject_apply(hsm_token_t *tok,
                               hsm_session_t kem_sess, hsm_handle_t kem_handle,
@@ -64,7 +64,7 @@ size_t hsm_inject_blob_len(pqc_alg_t kem_alg, size_t seed_len);
 
 /* ---- 制造模式（桩）------------------------------------------------------ */
 /* 打开后允许明文注入。**一旦关闭就不能再打开**（模拟 eFUSE 熔断不可逆）。
- * Phase 7 换成读真实的 eFUSE 位。 */
+ * 换成读真实的 eFUSE 位。 */
 int  hsm_inject_set_manufacturing_mode(int on);
 int  hsm_inject_manufacturing_mode(void);
 

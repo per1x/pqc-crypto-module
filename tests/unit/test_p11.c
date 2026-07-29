@@ -90,7 +90,7 @@ int main(void)
 		}
 		/* 名字写错要明确失败，不能悄悄给默认表 */
 		CKCHECK(get_iface((CK_UTF8CHAR_PTR)"PKCS 12", NULL, &iface, 0), CKR_ARGUMENTS_BAD);
-		/* fork-safe 我们做不到 —— 如实拒绝，不给做不到的承诺 */
+		/* 本模块不保证 fork 安全，因此明确拒绝而不是给出无法兑现的承诺 */
 		CKCHECK(get_iface(NULL, NULL, &iface, CKF_INTERFACE_FORK_SAFE), CKR_FUNCTION_FAILED);
 
 		CK_ULONG ni = 0;
@@ -479,7 +479,7 @@ int main(void)
 
 	TCASE("★ C_CreateObject：由种子导入，与同种子的原生 keypair 逐字节相同");
 	{
-		/* 独立预言机：不比"我们自己导入的结果"，而是拿同一个种子直接喂
+		/* 独立预言机：不比对导入结果自身，而是拿同一个种子直接喂
 		 * liboqs 的 keypair_from_seed，看公钥是不是同一串字节。 */
 		CK_SESSION_HANDLE s4 = 0;
 		/* C_InitToken 要求该槽位上没有打开的会话 —— 所以先 init 再开会话 */

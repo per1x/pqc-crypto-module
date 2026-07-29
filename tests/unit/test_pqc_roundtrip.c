@@ -30,7 +30,7 @@ static void test_kem(pqc_alg_t alg)
 	CHECK_EQ_INT(pqc_decaps(alg, sk, ct, ss_b), PQC_OK);
 	CHECK_EQ_MEM(ss_a, ss_b, info->ss_len);
 
-	/* 种子确定性（§7.6 种子存储的前提） */
+	/* 种子确定性 */
 	uint8_t seed[64];
 	for (size_t i = 0; i < sizeof(seed); i++) {
 		seed[i] = (uint8_t)(i * 7 + 1);

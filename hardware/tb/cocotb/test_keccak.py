@@ -1,8 +1,9 @@
 """cocotb：Keccak-f[1600] 核对拍
 
-【独立性怎么保证 —— 这是本文件的重点】
-NTT 那边踩过的坑是"向量与模型同源，三方一致其实是两方"。Keccak 这里从一开始
-就用**三个互相独立的来源**：
+【独立性怎么保证】
+若黄金向量由本项目的参考模型生成，则"RTL == 向量 == 模型"实际只等价于
+"RTL == 模型"，一份自洽但错误的实现照样能通过。因此这里使用**三个互相独立
+的来源**：
 
   1. **官方公开向量**：全零态经一次 Keccak-f[1600] 的输出，25 个 lane 全都是
      Keccak 团队中间值文档里公开的已知量（首 lane = F1258F7940E1DDE7）。
@@ -187,8 +188,8 @@ async def rtl_shake(dut, msg: bytes, rate: int, suffix: int, outlen: int) -> byt
     out = bytearray()
     while len(out) < outlen:
         # 每轮挤压吐出**整整 rate 字节**（rate 恰好是 8 的整数倍：168=21 lane，136=17 lane）。
-        # 早先这里用 len(out) >= rate 做 break，第二块起就只吐一个 lane —— 
-        # 单块输出（outlen <= rate）时看不出来，多块挤压才暴露。
+        # 注意不能按累计长度提前 break，否则第二块起只会吐出一个 lane；
+        # 单块输出（outlen <= rate）时这个错误不可见，只有多块挤压才会暴露。
         out += b"".join(state[i].to_bytes(8, "little") for i in range(rate // 8))
         if len(out) < outlen:
             await load_state(dut, state)

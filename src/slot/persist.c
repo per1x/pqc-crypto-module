@@ -9,7 +9,7 @@
  *   pin_flags u8 | pin_key(32) | so_salt(16) | so_verifier(32)
  *                | user_salt(16) | user_verifier(32)
  *   pre_lock u32 | key_kind u8 | pk_len u32 | pk | key_len u32 | key
- *   key_kind: 0 = 无密钥, 1 = 完整私钥, 2 = 种子（§7.6）
+ *   key_kind: 0 = 无密钥, 1 = 完整私钥, 2 = 种子
  *
  * 元数据放在包裹外面是有意的：密钥库需要能在不解密的情况下列出槽位状态，
  * 而它进了 AAD，改一个字节就会让解包失败。

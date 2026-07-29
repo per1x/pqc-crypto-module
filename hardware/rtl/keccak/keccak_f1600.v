@@ -63,7 +63,7 @@ module keccak_f1600 (
         end
     endfunction
 
-    // 循环左移。rot == 0 要单独处理：Verilog 里 x << 64 的行为不是我们要的。
+    // 循环左移。rot == 0 要单独处理：Verilog 中 x << 64 不产生所需结果。
     function automatic [63:0] rotl;
         input [63:0] x;
         input integer n;

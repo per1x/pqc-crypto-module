@@ -24,7 +24,7 @@ if(NOT LIBOQS_INCLUDE_DIR OR NOT LIBOQS_LIBRARY)
 endif()
 message(STATUS "liboqs: ${LIBOQS_LIBRARY}")
 
-# ---- Verilator 仿真后端（Level B）------------------------------------------
+# ---- Verilator 仿真后端 -----------------------------------------------------
 # 把 hardware/rtl/mlkem/ntt_core.v 与 hardware/rtl/keccak/keccak_f1600.v 仿真成可被 C 调用的"加速器"，
 # 经 accel_transport_t 接到 pqc_accel.c 的寄存器语义上 —— 与将来真 PL 同一条路径。
 # 没装 verilator 就跳过，accel_transport_verilator() 返回 NULL（如实反映）。
@@ -65,9 +65,9 @@ if(VERILATOR_BIN)
   target_link_libraries(pqchsm-vsim PUBLIC
     ${VOBJ}/libntt_core_lib.a ${VOBJ_K}/libkeccak_f1600_lib.a)
   set_target_properties(pqchsm-vsim PROPERTIES CXX_STANDARD 20)
-  message(STATUS "Verilator: ${VERILATOR_BIN}（Level B 仿真后端已启用）")
+  message(STATUS "Verilator: ${VERILATOR_BIN}（RTL 仿真后端已启用）")
 else()
-  message(STATUS "Verilator: 未找到 —— Level B 仿真后端不编入")
+  message(STATUS "Verilator: 未找到 —— RTL 仿真后端不编入")
 endif()
 
 # ---- 核心库 -----------------------------------------------------------------
@@ -105,7 +105,7 @@ if(VERILATOR_BIN)
   target_link_libraries(pqchsm PUBLIC pqchsm-vsim)
 endif()
 
-# ---- PKCS#11 v3.2 前端（Phase 9）--------------------------------------------
+# ---- PKCS#11 v3.2 前端--------------------------------------------
 # 官方 OASIS 头文件 vendored 在 third_party/，理由见那里的 README。
 add_library(pqchsm-p11 SHARED src/p11/p11_module.c)
 target_include_directories(pqchsm-p11 PRIVATE
@@ -114,7 +114,7 @@ target_include_directories(pqchsm-p11 PRIVATE
 target_link_libraries(pqchsm-p11 PRIVATE pqchsm)
 set_target_properties(pqchsm-p11 PROPERTIES PREFIX "" OUTPUT_NAME "pqchsm-pkcs11")
 
-# ---- 命令接口：daemon 与 CLI（Phase 5 第 3 项）------------------------------
+# ---- 命令接口：daemon 与 CLI------------------------------
 add_executable(pqchsmd cli/pqchsmd.c)
 target_link_libraries(pqchsmd PRIVATE pqchsm)
 add_executable(pqchsm-admin cli/pqchsm_admin.c)
@@ -122,7 +122,7 @@ target_link_libraries(pqchsm-admin PRIVATE pqchsm)
 add_executable(pqchsm-cli cli/pqchsm_cli.c)
 target_link_libraries(pqchsm-cli PRIVATE pqchsm)
 
-# ---- 性能基线与热点采样靶子（§5.2）-----------------------------------------
+# ---- 性能基线与热点采样靶子-----------------------------------------
 add_executable(pqchsm-bench tools/bench.c)
 target_link_libraries(pqchsm-bench PRIVATE pqchsm)
 
@@ -130,7 +130,7 @@ target_link_libraries(pqchsm-bench PRIVATE pqchsm)
 add_executable(pqchsm-prim-bench tools/prim_bench.c)
 target_link_libraries(pqchsm-prim-bench PRIVATE pqchsm)
 
-# ---- fuzz 靶子（§3.9）-------------------------------------------------------
+# ---- fuzz 靶子-------------------------------------------------------
 # 独立驱动版：不依赖 libFuzzer，接进 ctest，跑在 ASan 下。
 # libFuzzer 版另见 tools/fuzz.sh（需要 brew 的 llvm，Apple clang 不带）。
 add_executable(fuzz_standalone tests/fuzz/fuzz_targets.c)
@@ -243,7 +243,7 @@ add_test(NAME p11_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/p11_smoke.sh
 add_test(NAME anchor        COMMAND test_anchor)
 
 # 结构性回归：KDR 铁律是"只进不出"。这条用例扫公共头，确保没人加回读出根密钥的接口。
-# 与 Phase 7 的"地址译码上物理不存在读回路径"是同一句话在软件阶段的实现。
+# 与 的"地址译码上物理不存在读回路径"是同一句话在软件阶段的实现。
 if(Python3_Interpreter_FOUND)
   add_test(NAME kdr_no_readback COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_readback.py

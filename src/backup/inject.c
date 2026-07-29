@@ -133,7 +133,7 @@ hsm_status_t hsm_inject_apply(hsm_token_t *tok,
 		return HSM_ERR_INTEGRITY;
 	}
 
-	/* 目标槽位已装载时，必须显式允许被注入更新（§7.2 的策略位） */
+	/* 目标槽位已装载时，必须显式允许被注入更新 */
 	{
 		hsm_slot_id_t tslot = 0;
 		hsm_role_t role;
@@ -239,7 +239,7 @@ hsm_status_t hsm_inject_plaintext(hsm_token_t *tok, hsm_session_t target_sess,
                                   hsm_handle_t *out)
 {
 	if (!g_mfg_mode) {
-		/* §8.5：明文注入只允许在制造模式下用 */
+		/* ：明文注入只允许在制造模式下用 */
 		return HSM_ERR_POLICY;
 	}
 	return hsm_slot_load_seed(tok, target_sess, key_alg, usage, policy,

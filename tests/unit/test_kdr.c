@@ -1,11 +1,11 @@
-/* KDR provider 抽象与派生层级（§8.1 / §8.3）
+/* KDR provider 抽象与派生层级
  *
  * 重点：
  *   1. **域分隔真的生效** —— 不同 label 在同一盐下必须派生出不同子密钥。
  *      这条不成立的话，"存储 KEK"和"元数据密钥"会是同一个值，
  *      整个密钥层级就塌成一层了。
  *   2. **provider 可替换** —— 换 provider 时上层调用点一行不改，
- *      这是 Phase 7 把根密钥迁到 eFUSE/BBRAM/PUF 的前提。
+ *      这是 把根密钥迁到 eFUSE/BBRAM/PUF 的前提。
  *   3. **根密钥不出模块** —— 接口里没有 getter；结构性回归由 CTest 的
  *      kdr_no_readback 用例扫头文件保证（见 CMakeLists.txt）。
  */

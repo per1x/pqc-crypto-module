@@ -1,4 +1,4 @@
-/* 内部头：槽位元数据序列化与 KMAC 完整性标签（§7.2） */
+/* 内部头：槽位元数据序列化与 KMAC 完整性标签 */
 #ifndef PQCHSM_SLOT_META_H
 #define PQCHSM_SLOT_META_H
 
