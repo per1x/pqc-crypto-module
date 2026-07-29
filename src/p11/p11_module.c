@@ -26,8 +26,11 @@
  * 【范围】
  * 实现的是**能把 pkcs11-tool 常用流程跑通**的子集，其余返回
  * CKR_FUNCTION_NOT_SUPPORTED。未实现的部分见 doc/现状与后续计划.md。
- * 摘要签名（C_SignUpdate/Final）、对象导入（C_CreateObject）、
- * 封装/解封装（C_EncapsulateKey/C_DecapsulateKey）目前未做。
+ *
+ * 【多段签名 / 对象导入 / KEM 封装的三处设计取舍，都写在各自函数上方】
+ *   C_SignUpdate/Final        累积后单次签 —— ML-DSA 本来就不是 hash-then-sign
+ *   C_CreateObject            只收种子，**不收明文私钥**
+ *   C_Encapsulate/Decapsulate 共享秘密落成**会话对象**，不占槽位
  */
 #include "p11_config.h"
 
@@ -66,6 +69,49 @@ static int             g_init;
 static char            g_ks_path[512];
 static CK_ULONG        g_n_slots = DEFAULT_SLOTS;
 
+/* 可增长的字节缓冲 —— 多段签名的累积用 */
+typedef struct {
+	uint8_t *p;
+	size_t   len, cap;
+} p11_buf_t;
+
+static void buf_free(p11_buf_t *b)
+{
+	if (b->p) {
+		pqc_secure_zero(b->p, b->cap);
+		free(b->p);
+	}
+	b->p = NULL;
+	b->len = b->cap = 0;
+}
+
+static int buf_append(p11_buf_t *b, const uint8_t *d, size_t n)
+{
+	if (n == 0) {
+		return 0;
+	}
+	if (b->len + n > b->cap) {
+		size_t cap = b->cap ? b->cap * 2 : 256;
+		while (cap < b->len + n) {
+			cap *= 2;
+		}
+		uint8_t *np = malloc(cap);
+		if (!np) {
+			return -1;
+		}
+		if (b->p) {
+			memcpy(np, b->p, b->len);
+			pqc_secure_zero(b->p, b->cap);
+			free(b->p);
+		}
+		b->p = np;
+		b->cap = cap;
+	}
+	memcpy(b->p + b->len, d, n);
+	b->len += n;
+	return 0;
+}
+
 /* 每个会话的查找游标与运算上下文 */
 typedef struct {
 	hsm_session_t sess;
@@ -79,10 +125,76 @@ typedef struct {
 	/* C_SignInit / C_VerifyInit */
 	int           sign_active, verify_active;
 	CK_OBJECT_HANDLE sign_key, verify_key;
+	/* C_SignUpdate / C_VerifyUpdate 的累积缓冲（理由见 C_SignUpdate 上方） */
+	p11_buf_t     sign_acc, verify_acc;
 } p11_session_t;
 
 #define MAX_P11_SESSIONS 32
 static p11_session_t g_sessions[MAX_P11_SESSIONS];
+
+/* ---- 会话密钥对象（KEM 共享秘密的落点）---------------------------------
+ * C_EncapsulateKey/C_DecapsulateKey 按规范要产出一个**密钥对象句柄**，
+ * 而不是把共享秘密直接吐给调用方。本项目的槽位是"一槽一密钥对"的持久结构
+ * （§7.6 的 8 KB/槽预算），把一堆临时的 32 B 共享秘密塞进槽位既浪费也不对 ——
+ * 它们本就是**会话生命期**的东西。所以另开一张会话对象表：
+ *   · 只在内存里，不落盘、不占槽位；
+ *   · C_CloseSession / C_Finalize 时连同缓冲一起清零；
+ *   · 句柄用 SECRET_BIT 与槽位对象句柄区分开。
+ * 这与 PKCS#11 的 CKA_TOKEN=CK_FALSE（会话对象）语义一致。 */
+#define SECRET_BIT  (1ULL << 62)
+#define MAX_SECRETS 32
+#define SECRET_MAX_LEN 64
+
+typedef struct {
+	int               in_use;
+	CK_SESSION_HANDLE owner;
+	uint8_t           val[SECRET_MAX_LEN];
+	size_t            len;
+	CK_KEY_TYPE       key_type;
+	int               sensitive;
+	int               extractable;
+	char              label[32];
+} p11_secret_t;
+
+static p11_secret_t g_secrets[MAX_SECRETS];
+
+static p11_secret_t *secret_at(CK_OBJECT_HANDLE h)
+{
+	if (!(h & SECRET_BIT)) {
+		return NULL;
+	}
+	CK_ULONG idx = (CK_ULONG)(h & ~SECRET_BIT);
+	if (idx == 0 || idx > MAX_SECRETS) {
+		return NULL;
+	}
+	p11_secret_t *k = &g_secrets[idx - 1];
+	return k->in_use ? k : NULL;
+}
+
+/* 分配一个会话密钥对象；满了返回 NULL */
+static p11_secret_t *secret_alloc(CK_SESSION_HANDLE owner, CK_OBJECT_HANDLE *out)
+{
+	for (int i = 0; i < MAX_SECRETS; i++) {
+		if (!g_secrets[i].in_use) {
+			memset(&g_secrets[i], 0, sizeof(g_secrets[i]));
+			g_secrets[i].in_use = 1;
+			g_secrets[i].owner = owner;
+			*out = SECRET_BIT | (CK_OBJECT_HANDLE)(i + 1);
+			return &g_secrets[i];
+		}
+	}
+	return NULL;
+}
+
+/* 会话结束时清掉它名下的密钥对象 —— 明确清零，不只是标记空闲 */
+static void secrets_drop_owner(CK_SESSION_HANDLE owner)
+{
+	for (int i = 0; i < MAX_SECRETS; i++) {
+		if (g_secrets[i].in_use && (owner == 0 || g_secrets[i].owner == owner)) {
+			pqc_secure_zero(&g_secrets[i], sizeof(g_secrets[i]));
+		}
+	}
+}
 
 /* ---- 小工具 ------------------------------------------------------------- */
 
@@ -263,6 +375,11 @@ CK_DEFINE_FUNCTION(CK_RV, C_Finalize)(CK_VOID_PTR pReserved)
 		persist();
 		hsm_token_free(g_tok);
 		g_tok = NULL;
+		for (int i = 0; i < MAX_P11_SESSIONS; i++) {
+			buf_free(&g_sessions[i].sign_acc);
+			buf_free(&g_sessions[i].verify_acc);
+		}
+		secrets_drop_owner(0);
 		memset(g_sessions, 0, sizeof(g_sessions));
 		g_init = 0;
 	}
@@ -614,19 +731,26 @@ CK_DEFINE_FUNCTION(CK_RV, C_CloseSession)(CK_SESSION_HANDLE hSession)
 		goto out;
 	}
 	(void)hsm_session_close(g_tok, s->sess);
+	buf_free(&s->sign_acc);
+	buf_free(&s->verify_acc);
+	secrets_drop_owner(hSession);
 	memset(s, 0, sizeof(*s));
 out:
 	pthread_mutex_unlock(&g_lock);
 	return rv;
 }
 
+/* 只关**该槽位**的会话。早先这里把 slotID 忽略了、一律全关 —— 规范里
+ * C_CloseAllSessions 明确是按槽位的，别的槽位上的会话不该被牵连。 */
 CK_DEFINE_FUNCTION(CK_RV, C_CloseAllSessions)(CK_SLOT_ID slotID)
 {
-	(void)slotID;
 	pthread_mutex_lock(&g_lock);
 	for (int i = 0; i < MAX_P11_SESSIONS; i++) {
-		if (g_sessions[i].in_use) {
+		if (g_sessions[i].in_use && g_sessions[i].slot == slotID) {
 			(void)hsm_session_close(g_tok, g_sessions[i].sess);
+			buf_free(&g_sessions[i].sign_acc);
+			buf_free(&g_sessions[i].verify_acc);
+			secrets_drop_owner((CK_SESSION_HANDLE)(i + 1));
 			memset(&g_sessions[i], 0, sizeof(p11_session_t));
 		}
 	}
@@ -841,6 +965,15 @@ CK_DEFINE_FUNCTION(CK_RV, C_DestroyObject)(CK_SESSION_HANDLE hSession,
 		rv = CKR_SESSION_HANDLE_INVALID;
 		goto out;
 	}
+	if (hObject & SECRET_BIT) {
+		p11_secret_t *k = secret_at(hObject);
+		if (!k) {
+			rv = CKR_OBJECT_HANDLE_INVALID;
+		} else {
+			pqc_secure_zero(k, sizeof(*k));   /* 清零，不只是标记空闲 */
+		}
+		goto out;
+	}
 	/* 公钥与私钥是同一对，销毁任一即销毁整对 —— 本模型一槽一对 */
 	rv = map_status(hsm_object_destroy(g_tok, s->sess, (hsm_handle_t)(hObject & ~PUB_BIT)));
 	if (rv == CKR_OK) {
@@ -980,6 +1113,75 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetAttributeValue)(CK_SESSION_HANDLE hSession,
 	s = sess_at(hSession);
 	if (!s || !pTemplate) {
 		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	/* 会话密钥对象（KEM 共享秘密）走单独一支 —— 它不在任何槽位里 */
+	if (hObject & SECRET_BIT) {
+		p11_secret_t *k = secret_at(hObject);
+		if (!k) {
+			rv = CKR_OBJECT_HANDLE_INVALID;
+			goto out;
+		}
+		for (CK_ULONG i = 0; i < ulCount; i++) {
+			CK_ATTRIBUTE *a = &pTemplate[i];
+			CK_RV r = CKR_OK;
+			switch (a->type) {
+			case CKA_CLASS: {
+				CK_OBJECT_CLASS c = CKO_SECRET_KEY;
+				r = fill_attr(a, &c, sizeof(c));
+				break;
+			}
+			case CKA_KEY_TYPE:
+				r = fill_attr(a, &k->key_type, sizeof(k->key_type));
+				break;
+			case CKA_VALUE_LEN: {
+				CK_ULONG n = (CK_ULONG)k->len;
+				r = fill_attr(a, &n, sizeof(n));
+				break;
+			}
+			case CKA_LABEL:
+				r = fill_attr(a, k->label, strlen(k->label));
+				break;
+			case CKA_TOKEN: {
+				/* 会话对象，不落盘 */
+				CK_BBOOL b = CK_FALSE;
+				r = fill_attr(a, &b, sizeof(b));
+				break;
+			}
+			case CKA_PRIVATE: {
+				CK_BBOOL b = CK_TRUE;
+				r = fill_attr(a, &b, sizeof(b));
+				break;
+			}
+			case CKA_SENSITIVE: {
+				CK_BBOOL b = k->sensitive ? CK_TRUE : CK_FALSE;
+				r = fill_attr(a, &b, sizeof(b));
+				break;
+			}
+			case CKA_EXTRACTABLE: {
+				CK_BBOOL b = k->extractable ? CK_TRUE : CK_FALSE;
+				r = fill_attr(a, &b, sizeof(b));
+				break;
+			}
+			case CKA_VALUE:
+				/* 默认不可读。要读必须**同时**是 extractable 且非 sensitive ——
+				 * 与 PKCS#11 对 CKR_ATTRIBUTE_SENSITIVE 的规定一致。 */
+				if (!k->extractable || k->sensitive) {
+					a->ulValueLen = CK_UNAVAILABLE_INFORMATION;
+					r = CKR_ATTRIBUTE_SENSITIVE;
+					break;
+				}
+				r = fill_attr(a, k->val, k->len);
+				break;
+			default:
+				a->ulValueLen = CK_UNAVAILABLE_INFORMATION;
+				r = CKR_ATTRIBUTE_TYPE_INVALID;
+				break;
+			}
+			if (r != CKR_OK && rv == CKR_OK) {
+				rv = r;
+			}
+		}
 		goto out;
 	}
 	{
@@ -1227,6 +1429,36 @@ out:
 	return rv;
 }
 
+/* 验签主体：C_Verify 与 C_VerifyFinal 共用。
+ * 调用时 g_lock 已持有；本函数不碰 verify_active（由调用方负责结束操作）。
+ * 验签只用公钥，不需要动私钥。 */
+static CK_RV verify_with_pubkey(p11_session_t *s, CK_OBJECT_HANDLE key,
+                                const CK_BYTE *data, CK_ULONG data_len,
+                                const CK_BYTE *sig, CK_ULONG sig_len)
+{
+	slot_meta_t m;
+	if (hsm_slot_get_meta(g_tok, slot_of_handle(key), &m) != HSM_OK) {
+		return CKR_OBJECT_HANDLE_INVALID;
+	}
+	const pqc_alg_info_t *info = pqc_alg_info(m.alg);
+	if (!info || info->kind != PQC_KIND_SIG) {
+		return CKR_KEY_TYPE_INCONSISTENT;
+	}
+	uint8_t *pk = malloc(info->pk_len);
+	if (!pk) {
+		return CKR_HOST_MEMORY;
+	}
+	size_t plen = 0;
+	if (hsm_object_public_key(g_tok, s->sess, (hsm_handle_t)(key & ~PUB_BIT),
+	                          pk, info->pk_len, &plen) != HSM_OK) {
+		free(pk);
+		return CKR_OBJECT_HANDLE_INVALID;
+	}
+	pqc_status_t vs = pqc_verify(m.alg, pk, data, data_len, NULL, 0, sig, sig_len);
+	free(pk);
+	return (vs == PQC_OK) ? CKR_OK : CKR_SIGNATURE_INVALID;
+}
+
 CK_DEFINE_FUNCTION(CK_RV, C_Verify)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData,
                                     CK_ULONG ulDataLen, CK_BYTE_PTR pSignature,
                                     CK_ULONG ulSignatureLen)
@@ -1247,36 +1479,9 @@ CK_DEFINE_FUNCTION(CK_RV, C_Verify)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pDat
 		rv = CKR_OPERATION_NOT_INITIALIZED;
 		goto out;
 	}
-	{
-		slot_meta_t m;
-		if (hsm_slot_get_meta(g_tok, slot_of_handle(s->verify_key), &m) != HSM_OK) {
-			rv = CKR_OBJECT_HANDLE_INVALID;
-			goto out;
-		}
-		const pqc_alg_info_t *info = pqc_alg_info(m.alg);
-		if (!info || info->kind != PQC_KIND_SIG) {
-			rv = CKR_KEY_TYPE_INCONSISTENT;
-			goto out;
-		}
-		/* 验签用公钥，不需要动私钥 —— 直接取出公钥在本地验 */
-		uint8_t *pk = malloc(info->pk_len);
-		size_t plen = 0;
-		if (!pk) {
-			rv = CKR_HOST_MEMORY;
-			goto out;
-		}
-		hsm_handle_t priv = (hsm_handle_t)(s->verify_key & ~PUB_BIT);
-		if (hsm_object_public_key(g_tok, s->sess, priv, pk, info->pk_len, &plen) != HSM_OK) {
-			free(pk);
-			rv = CKR_OBJECT_HANDLE_INVALID;
-			goto out;
-		}
-		pqc_status_t vs = pqc_verify(m.alg, pk, pData, ulDataLen, NULL, 0,
-		                             pSignature, ulSignatureLen);
-		free(pk);
-		s->verify_active = 0;
-		rv = (vs == PQC_OK) ? CKR_OK : CKR_SIGNATURE_INVALID;
-	}
+	rv = verify_with_pubkey(s, s->verify_key, pData, ulDataLen,
+	                        pSignature, ulSignatureLen);
+	s->verify_active = 0;
 out:
 	pthread_mutex_unlock(&g_lock);
 	return rv;
@@ -1287,7 +1492,505 @@ out:
 
 /* ---- 函数表 ------------------------------------------------------------- */
 
-static CK_FUNCTION_LIST g_function_list;
+/* ---- C_CreateObject（对象导入）------------------------------------------
+ *
+ * 【只收种子，不收明文私钥 —— 这是刻意的】
+ * 常规 HSM 的 C_CreateObject 允许灌一把明文私钥进去。本项目底下的槽位管理器
+ * **根本没有这条通路**：include/pqchsm/slot.h 里不存在任何"把 sk 字节装进槽位"
+ * 的入口，只有 hsm_slot_generate（内部生成）与 hsm_slot_load_seed（由种子展开）。
+ * 这是 §7.6 的设计结论，不是这一层能绕过的，也不该绕过。
+ *
+ * 于是：
+ *   CKA_SEED  → hsm_slot_load_seed，导入成功
+ *   CKA_VALUE → CKR_ATTRIBUTE_TYPE_INVALID，并且**如实说明原因**
+ *               （想灌明文密钥请走 §8.5 的 hsm_inject_* 注入通道）
+ *
+ * FIPS 203/204 的密钥本来就由种子完全决定（ML-KEM 64 B 的 d‖z、ML-DSA 32 B 的 ξ），
+ * 所以"只收种子"并没有削弱能力 —— 反而少搬了几千字节的敏感数据。
+ *
+ * 另外支持 CKO_SECRET_KEY：建一个会话密钥对象。这条主要是给
+ * C_Encapsulate/Decapsulate 的对端使用（比如把对方算出的共享秘密导入进来比对）。
+ */
+CK_DEFINE_FUNCTION(CK_RV, C_CreateObject)(CK_SESSION_HANDLE hSession,
+                                          CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount,
+                                          CK_OBJECT_HANDLE_PTR phObject)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pTemplate || !phObject) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	{
+		CK_ULONG cls = attr_ulong(find_attr(pTemplate, ulCount, CKA_CLASS), (CK_ULONG)-1);
+
+		if (cls == CKO_SECRET_KEY) {
+			const CK_ATTRIBUTE *v = find_attr(pTemplate, ulCount, CKA_VALUE);
+			if (!v || !v->pValue || v->ulValueLen == 0) {
+				rv = CKR_TEMPLATE_INCOMPLETE;
+				goto out;
+			}
+			if (v->ulValueLen > SECRET_MAX_LEN) {
+				rv = CKR_ATTRIBUTE_VALUE_INVALID;
+				goto out;
+			}
+			CK_OBJECT_HANDLE h = 0;
+			p11_secret_t *k = secret_alloc(hSession, &h);
+			if (!k) {
+				rv = CKR_HOST_MEMORY;
+				goto out;
+			}
+			memcpy(k->val, v->pValue, v->ulValueLen);
+			k->len = v->ulValueLen;
+			k->key_type = attr_ulong(find_attr(pTemplate, ulCount, CKA_KEY_TYPE),
+			                         CKK_GENERIC_SECRET);
+			k->sensitive   = attr_bool(pTemplate, ulCount, CKA_SENSITIVE, 1);
+			k->extractable = attr_bool(pTemplate, ulCount, CKA_EXTRACTABLE, 0);
+			{
+				const CK_ATTRIBUTE *lb = find_attr(pTemplate, ulCount, CKA_LABEL);
+				if (lb && lb->pValue) {
+					size_t n = lb->ulValueLen;
+					if (n >= sizeof(k->label)) {
+						n = sizeof(k->label) - 1;
+					}
+					memcpy(k->label, lb->pValue, n);
+				}
+			}
+			*phObject = h;
+			goto out;
+		}
+
+		if (cls != CKO_PRIVATE_KEY) {
+			/* 公钥单独导入没有意义：本模型里公钥是私钥的派生物，
+			 * 一槽一对，导入一个孤立的公钥无处安放。 */
+			rv = (cls == (CK_ULONG)-1) ? CKR_TEMPLATE_INCOMPLETE
+			                           : CKR_ATTRIBUTE_VALUE_INVALID;
+			goto out;
+		}
+
+		if (find_attr(pTemplate, ulCount, CKA_VALUE)) {
+			/* 明文私钥导入：本项目**没有**这条通路，如实拒绝而不是假装成功。
+			 * 要灌密钥请走 §8.5 的注入通道（hsm_inject_build/apply）。 */
+			rv = CKR_ATTRIBUTE_TYPE_INVALID;
+			goto out;
+		}
+
+		const CK_ATTRIBUTE *sd = find_attr(pTemplate, ulCount, CKA_SEED);
+		if (!sd || !sd->pValue) {
+			rv = CKR_TEMPLATE_INCOMPLETE;
+			goto out;
+		}
+		CK_ULONG kt = attr_ulong(find_attr(pTemplate, ulCount, CKA_KEY_TYPE),
+		                         (CK_ULONG)-1);
+		CK_ULONG pset = attr_ulong(find_attr(pTemplate, ulCount, CKA_PARAMETER_SET), 0);
+		CK_MECHANISM_TYPE as_mech = (kt == CKK_ML_KEM) ? CKM_ML_KEM
+		                          : (kt == CKK_ML_DSA) ? CKM_ML_DSA
+		                                               : (CK_MECHANISM_TYPE)-1;
+		if (as_mech == (CK_MECHANISM_TYPE)-1) {
+			rv = (kt == (CK_ULONG)-1) ? CKR_TEMPLATE_INCOMPLETE
+			                          : CKR_ATTRIBUTE_VALUE_INVALID;
+			goto out;
+		}
+		pqc_alg_t alg = alg_from_param(as_mech, pset);
+		if (alg == PQC_ALG_NONE) {
+			rv = (pset == 0) ? CKR_TEMPLATE_INCOMPLETE : CKR_ATTRIBUTE_VALUE_INVALID;
+			goto out;
+		}
+		const pqc_alg_info_t *info = pqc_alg_info(alg);
+		if (sd->ulValueLen != info->seed_len) {
+			rv = CKR_ATTRIBUTE_VALUE_INVALID;
+			goto out;
+		}
+		uint32_t usage = (info->kind == PQC_KIND_SIG)
+		                 ? (uint32_t)KEY_USAGE_SIGN : (uint32_t)KEY_USAGE_DECAP;
+		uint32_t policy = 0;
+		if (attr_bool(pTemplate, ulCount, CKA_PQCHSM_BACKUPABLE, 1)) {
+			policy |= SLOT_POLICY_BACKUPABLE;
+		}
+		if (attr_bool(pTemplate, ulCount, CKA_PQCHSM_SEED_STORAGE, 0)) {
+			policy |= SLOT_POLICY_SEED_STORAGE;
+		}
+		hsm_handle_t h = HSM_INVALID_HANDLE;
+		hsm_status_t st = hsm_slot_load_seed(g_tok, s->sess, alg, usage, policy,
+		                                     (const uint8_t *)sd->pValue,
+		                                     sd->ulValueLen, &h);
+		if (st != HSM_OK) {
+			rv = map_status(st);
+			goto out;
+		}
+		persist();
+		*phObject = (CK_OBJECT_HANDLE)h;
+	}
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+/* ---- 多段签名 / 验签 -----------------------------------------------------
+ *
+ * 【为什么是"先攒起来、最后一次签"，而不是流式摘要】
+ * RSA/ECDSA 那套 C_SignUpdate 之所以能真正流式，是因为它们是 hash-then-sign：
+ * Update 推进摘要状态，Final 只对 32 B 的摘要做一次公钥运算。
+ *
+ * **ML-DSA 不是这个结构**。FIPS 204 里签名要算 μ = H(BytesToBits(tr) ‖ M'),
+ * 而 M' 还带域分隔与 context 前缀；更关键的是拒绝采样循环每次重试都要用到 μ，
+ * 消息不能"边读边扔"。所以 PKCS#11 v3.2 对 CKM_ML_DSA 的多段接口，语义上
+ * 就是"把各段拼起来再整体签一次"。
+ *
+ * 这里如实照此实现：Update 往会话缓冲里追加，Final 调一次 hsm_object_sign。
+ * **不假装流式**——内存占用与消息等长这件事，调用方应该知道。
+ * 真要处理超大消息，正确做法是外部先 SHA3-512 再签摘要（HashML-DSA，
+ * 对应 CKM_HASH_ML_DSA_*，本模块尚未实现，见 doc/现状与后续计划.md）。
+ */
+CK_DEFINE_FUNCTION(CK_RV, C_SignUpdate)(CK_SESSION_HANDLE hSession,
+                                        CK_BYTE_PTR pPart, CK_ULONG ulPartLen)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s) {
+		rv = CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (!s->sign_active) {
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+	if (ulPartLen && !pPart) {
+		rv = CKR_ARGUMENTS_BAD;
+		goto out;
+	}
+	if (buf_append(&s->sign_acc, pPart, ulPartLen) != 0) {
+		buf_free(&s->sign_acc);
+		s->sign_active = 0;
+		rv = CKR_HOST_MEMORY;
+	}
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_SignFinal)(CK_SESSION_HANDLE hSession,
+                                       CK_BYTE_PTR pSignature,
+                                       CK_ULONG_PTR pulSignatureLen)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pulSignatureLen) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (!s->sign_active) {
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+	{
+		slot_meta_t m;
+		if (hsm_slot_get_meta(g_tok, slot_of_handle(s->sign_key), &m) != HSM_OK) {
+			rv = CKR_OBJECT_HANDLE_INVALID;
+			goto out;
+		}
+		const pqc_alg_info_t *info = pqc_alg_info(m.alg);
+		if (!info || info->kind != PQC_KIND_SIG) {
+			rv = CKR_KEY_TYPE_INCONSISTENT;
+			goto out;
+		}
+		/* 只问长度：按规范此时**不能**结束操作 */
+		if (!pSignature) {
+			*pulSignatureLen = (CK_ULONG)info->sig_len;
+			goto out;
+		}
+		if (*pulSignatureLen < info->sig_len) {
+			*pulSignatureLen = (CK_ULONG)info->sig_len;
+			rv = CKR_BUFFER_TOO_SMALL;
+			goto out;
+		}
+		size_t sl = 0;
+		hsm_status_t st = hsm_object_sign(g_tok, s->sess, (hsm_handle_t)s->sign_key,
+		                                  s->sign_acc.p, s->sign_acc.len, NULL, 0,
+		                                  pSignature, *pulSignatureLen, &sl);
+		buf_free(&s->sign_acc);
+		s->sign_active = 0;
+		if (st != HSM_OK) {
+			rv = map_status(st);
+			goto out;
+		}
+		*pulSignatureLen = (CK_ULONG)sl;
+		persist();
+	}
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_VerifyUpdate)(CK_SESSION_HANDLE hSession,
+                                          CK_BYTE_PTR pPart, CK_ULONG ulPartLen)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s) {
+		rv = CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (!s->verify_active) {
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+	if (ulPartLen && !pPart) {
+		rv = CKR_ARGUMENTS_BAD;
+		goto out;
+	}
+	if (buf_append(&s->verify_acc, pPart, ulPartLen) != 0) {
+		buf_free(&s->verify_acc);
+		s->verify_active = 0;
+		rv = CKR_HOST_MEMORY;
+	}
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_VerifyFinal)(CK_SESSION_HANDLE hSession,
+                                         CK_BYTE_PTR pSignature,
+                                         CK_ULONG ulSignatureLen)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pSignature) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (!s->verify_active) {
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+	rv = verify_with_pubkey(s, s->verify_key, s->verify_acc.p, s->verify_acc.len,
+	                        pSignature, ulSignatureLen);
+	buf_free(&s->verify_acc);
+	s->verify_active = 0;
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+/* ---- KEM 封装 / 解封装（PKCS#11 v3.2 新增的两个函数）---------------------
+ *
+ * 【为什么共享秘密要落成"会话对象"而不是直接返回字节】
+ * 规范里这两个函数的出参是 CK_OBJECT_HANDLE：共享秘密应当留在 token 内、
+ * 由后续的 C_DeriveKey / C_Encrypt 使用，而不是穿过边界。本模块照此实现——
+ * 默认 CKA_SENSITIVE=TRUE、CKA_EXTRACTABLE=FALSE，此时读 CKA_VALUE 会拿到
+ * CKR_ATTRIBUTE_SENSITIVE。演示程序若确实要看到共享秘密（比如证明两端一致），
+ * 在模板里显式给 CKA_EXTRACTABLE=TRUE 且 CKA_SENSITIVE=FALSE。
+ *
+ * 落点是会话对象表而不是槽位，理由见 SECRET_BIT 上方那段。
+ */
+CK_DEFINE_FUNCTION(CK_RV, C_EncapsulateKey)(
+	CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism,
+	CK_OBJECT_HANDLE hPublicKey, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+	CK_BYTE_PTR pCiphertext, CK_ULONG_PTR pulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	uint8_t *pk = NULL;
+	uint8_t ss[SECRET_MAX_LEN];
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pMechanism || !pulCiphertextLen) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (pMechanism->mechanism != CKM_ML_KEM) {
+		rv = CKR_MECHANISM_INVALID;
+		goto out;
+	}
+	if (!(hPublicKey & PUB_BIT)) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;   /* 封装要用公钥 */
+		goto out;
+	}
+	{
+		slot_meta_t m;
+		if (hsm_slot_get_meta(g_tok, slot_of_handle(hPublicKey), &m) != HSM_OK) {
+			rv = CKR_OBJECT_HANDLE_INVALID;
+			goto out;
+		}
+		const pqc_alg_info_t *info = pqc_alg_info(m.alg);
+		if (!info || info->kind != PQC_KIND_KEM) {
+			rv = CKR_KEY_TYPE_INCONSISTENT;
+			goto out;
+		}
+		/* 只问长度 */
+		if (!pCiphertext) {
+			*pulCiphertextLen = (CK_ULONG)info->ct_len;
+			goto out;
+		}
+		if (*pulCiphertextLen < info->ct_len) {
+			*pulCiphertextLen = (CK_ULONG)info->ct_len;
+			rv = CKR_BUFFER_TOO_SMALL;
+			goto out;
+		}
+		if (!phKey) {
+			rv = CKR_ARGUMENTS_BAD;
+			goto out;
+		}
+		if (info->ss_len > SECRET_MAX_LEN) {
+			rv = CKR_GENERAL_ERROR;
+			goto out;
+		}
+		pk = malloc(info->pk_len);
+		if (!pk) {
+			rv = CKR_HOST_MEMORY;
+			goto out;
+		}
+		size_t plen = 0;
+		hsm_status_t hst = hsm_object_public_key(g_tok, s->sess,
+		                                         (hsm_handle_t)(hPublicKey & ~PUB_BIT),
+		                                         pk, info->pk_len, &plen);
+		if (hst != HSM_OK) {
+			rv = map_status(hst);
+			goto out;
+		}
+		/* 封装只用公钥 —— 与签名验证一样，本身不需要 token 里的秘密 */
+		if (pqc_encaps(m.alg, pk, pCiphertext, ss) != PQC_OK) {
+			rv = CKR_DEVICE_ERROR;
+			goto out;
+		}
+		CK_OBJECT_HANDLE h = 0;
+		p11_secret_t *k = secret_alloc(hSession, &h);
+		if (!k) {
+			rv = CKR_HOST_MEMORY;
+			goto out;
+		}
+		memcpy(k->val, ss, info->ss_len);
+		k->len = info->ss_len;
+		k->key_type    = attr_ulong(find_attr(pTemplate, ulAttributeCount, CKA_KEY_TYPE),
+		                            CKK_GENERIC_SECRET);
+		k->sensitive   = attr_bool(pTemplate, ulAttributeCount, CKA_SENSITIVE, 1);
+		k->extractable = attr_bool(pTemplate, ulAttributeCount, CKA_EXTRACTABLE, 0);
+		*pulCiphertextLen = (CK_ULONG)info->ct_len;
+		*phKey = h;
+	}
+out:
+	free(pk);
+	pqc_secure_zero(ss, sizeof(ss));
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_DecapsulateKey)(
+	CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism,
+	CK_OBJECT_HANDLE hPrivateKey, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+	CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	uint8_t ss[SECRET_MAX_LEN];
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pMechanism || !pCiphertext || !phKey) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (pMechanism->mechanism != CKM_ML_KEM) {
+		rv = CKR_MECHANISM_INVALID;
+		goto out;
+	}
+	if (hPrivateKey & PUB_BIT) {
+		rv = CKR_KEY_TYPE_INCONSISTENT;   /* 解封装要用私钥 */
+		goto out;
+	}
+	{
+		slot_meta_t m;
+		if (hsm_slot_get_meta(g_tok, slot_of_handle(hPrivateKey), &m) != HSM_OK) {
+			rv = CKR_OBJECT_HANDLE_INVALID;
+			goto out;
+		}
+		const pqc_alg_info_t *info = pqc_alg_info(m.alg);
+		if (!info || info->kind != PQC_KIND_KEM) {
+			rv = CKR_KEY_TYPE_INCONSISTENT;
+			goto out;
+		}
+		if (ulCiphertextLen != info->ct_len) {
+			rv = CKR_ENCRYPTED_DATA_LEN_RANGE;
+			goto out;
+		}
+		size_t sl = 0;
+		hsm_status_t hst = hsm_object_decaps(g_tok, s->sess, (hsm_handle_t)hPrivateKey,
+		                                     pCiphertext, ulCiphertextLen,
+		                                     ss, sizeof(ss), &sl);
+		if (hst != HSM_OK) {
+			rv = map_status(hst);
+			goto out;
+		}
+		CK_OBJECT_HANDLE h = 0;
+		p11_secret_t *k = secret_alloc(hSession, &h);
+		if (!k) {
+			rv = CKR_HOST_MEMORY;
+			goto out;
+		}
+		memcpy(k->val, ss, sl);
+		k->len = sl;
+		k->key_type    = attr_ulong(find_attr(pTemplate, ulAttributeCount, CKA_KEY_TYPE),
+		                            CKK_GENERIC_SECRET);
+		k->sensitive   = attr_bool(pTemplate, ulAttributeCount, CKA_SENSITIVE, 1);
+		k->extractable = attr_bool(pTemplate, ulAttributeCount, CKA_EXTRACTABLE, 0);
+		*phKey = h;
+		persist();   /* use_count 变了 */
+	}
+out:
+	pqc_secure_zero(ss, sizeof(ss));
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+/* ---- 两张函数表 ---------------------------------------------------------
+ * CK_FUNCTION_LIST 是 **2.40 形状**的表：它里面根本没有 C_EncapsulateKey /
+ * C_DecapsulateKey 这两个字段（v3.2 新增的函数只出现在 CK_FUNCTION_LIST_3_2 里）。
+ * 所以只填 C_GetFunctionList 的话，上面刚实现的 KEM 封装接口对调用方是**不可达的**。
+ *
+ * 正确做法是 v3.0 引入的 C_GetInterface / C_GetInterfaceList：
+ *   老应用   → C_GetFunctionList        拿到 2.40 表（本模块仍然完整支持）
+ *   v3.x 应用 → C_GetInterface("PKCS 11") 拿到 3.2 表，里面才有 Encapsulate 等
+ * 两张表指向同一批函数实现，只是字段集合不同。 */
+static CK_FUNCTION_LIST     g_function_list;
+static CK_FUNCTION_LIST_3_2 g_function_list_32;
+static CK_INTERFACE         g_interface;
 static int g_flist_ready;
 
 static void build_function_list(void)
@@ -1325,7 +2028,98 @@ static void build_function_list(void)
 	g_function_list.C_VerifyInit        = C_VerifyInit;
 	g_function_list.C_Verify            = C_Verify;
 	g_function_list.C_GenerateKeyPair   = C_GenerateKeyPair;
+	/* 这四个 2.40 就有，两张表都填 */
+	g_function_list.C_CreateObject      = C_CreateObject;
+	g_function_list.C_SignUpdate        = C_SignUpdate;
+	g_function_list.C_SignFinal         = C_SignFinal;
+	g_function_list.C_VerifyUpdate      = C_VerifyUpdate;
+	g_function_list.C_VerifyFinal       = C_VerifyFinal;
+
+	/* 3.2 表：逐字段复制 2.40 那批，再补 v3.x 独有的。
+	 * 两个 struct 的字段名一致（都由 pkcs11f.h 生成），所以这里是纯搬运。 */
+	memset(&g_function_list_32, 0, sizeof(g_function_list_32));
+	g_function_list_32.version.major = CRYPTOKI_VERSION_MAJOR;
+	g_function_list_32.version.minor = CRYPTOKI_VERSION_MINOR;
+#define COPY_FN(f) g_function_list_32.f = g_function_list.f
+	COPY_FN(C_Initialize);        COPY_FN(C_Finalize);
+	COPY_FN(C_GetInfo);           COPY_FN(C_GetFunctionList);
+	COPY_FN(C_GetSlotList);       COPY_FN(C_GetSlotInfo);
+	COPY_FN(C_GetTokenInfo);      COPY_FN(C_GetMechanismList);
+	COPY_FN(C_GetMechanismInfo);  COPY_FN(C_InitToken);
+	COPY_FN(C_InitPIN);           COPY_FN(C_OpenSession);
+	COPY_FN(C_CloseSession);      COPY_FN(C_CloseAllSessions);
+	COPY_FN(C_GetSessionInfo);    COPY_FN(C_Login);
+	COPY_FN(C_Logout);            COPY_FN(C_CreateObject);
+	COPY_FN(C_DestroyObject);     COPY_FN(C_GetAttributeValue);
+	COPY_FN(C_FindObjectsInit);   COPY_FN(C_FindObjects);
+	COPY_FN(C_FindObjectsFinal);  COPY_FN(C_SignInit);
+	COPY_FN(C_Sign);              COPY_FN(C_SignUpdate);
+	COPY_FN(C_SignFinal);         COPY_FN(C_VerifyInit);
+	COPY_FN(C_Verify);            COPY_FN(C_VerifyUpdate);
+	COPY_FN(C_VerifyFinal);       COPY_FN(C_GenerateKeyPair);
+#undef COPY_FN
+	/* 只有 3.2 表里才有的字段 */
+	g_function_list_32.C_GetInterfaceList = C_GetInterfaceList;
+	g_function_list_32.C_GetInterface     = C_GetInterface;
+	g_function_list_32.C_EncapsulateKey   = C_EncapsulateKey;
+	g_function_list_32.C_DecapsulateKey   = C_DecapsulateKey;
+
+	g_interface.pInterfaceName = (CK_UTF8CHAR_PTR)"PKCS 11";
+	g_interface.pFunctionList  = &g_function_list_32;
+	g_interface.flags          = 0;
+
 	g_flist_ready = 1;
+}
+
+/* C_GetInterfaceList：本模块只暴露一个接口 —— 标准的 "PKCS 11" v3.2 表。 */
+CK_DEFINE_FUNCTION(CK_RV, C_GetInterfaceList)(CK_INTERFACE_PTR pInterfacesList,
+                                              CK_ULONG_PTR pulCount)
+{
+	if (!pulCount) {
+		return CKR_ARGUMENTS_BAD;
+	}
+	build_function_list();
+	if (!pInterfacesList) {
+		*pulCount = 1;
+		return CKR_OK;
+	}
+	if (*pulCount < 1) {
+		*pulCount = 1;
+		return CKR_BUFFER_TOO_SMALL;
+	}
+	pInterfacesList[0] = g_interface;
+	*pulCount = 1;
+	return CKR_OK;
+}
+
+/* C_GetInterface：名字为 NULL 表示"给我默认接口"。
+ * 版本给定时必须精确匹配 —— 宁可让调用方明确失败，也不要给一张它没预期的表。 */
+CK_DEFINE_FUNCTION(CK_RV, C_GetInterface)(CK_UTF8CHAR_PTR pInterfaceName,
+                                          CK_VERSION_PTR pVersion,
+                                          CK_INTERFACE_PTR_PTR ppInterface,
+                                          CK_FLAGS flags)
+{
+	if (!ppInterface) {
+		return CKR_ARGUMENTS_BAD;
+	}
+	build_function_list();
+	if (pInterfaceName && strcmp((const char *)pInterfaceName, "PKCS 11") != 0) {
+		return CKR_ARGUMENTS_BAD;
+	}
+	if (pVersion && (pVersion->major != CRYPTOKI_VERSION_MAJOR ||
+	                 pVersion->minor != CRYPTOKI_VERSION_MINOR)) {
+		return CKR_ARGUMENTS_BAD;
+	}
+	if (flags & ~(CK_FLAGS)CKF_INTERFACE_FORK_SAFE) {
+		return CKR_ARGUMENTS_BAD;
+	}
+	if (flags & CKF_INTERFACE_FORK_SAFE) {
+		/* 本模块不保证 fork 安全（密钥库句柄、pthread 锁都不是）——
+		 * 如实拒绝，不要给一个做不到的承诺。 */
+		return CKR_FUNCTION_FAILED;
+	}
+	*ppInterface = &g_interface;
+	return CKR_OK;
 }
 
 CK_DEFINE_FUNCTION(CK_RV, C_GetFunctionList)(CK_FUNCTION_LIST_PTR_PTR ppFunctionList)

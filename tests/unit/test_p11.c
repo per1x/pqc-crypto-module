@@ -12,10 +12,12 @@
 #include "pqchsm/pqc.h"
 
 #include <dlfcn.h>
+#include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 static CK_FUNCTION_LIST_PTR F;
+static CK_FUNCTION_LIST_3_2_PTR F32;   /* v3.2 表：C_EncapsulateKey 等只在这张表里 */
 static char g_ks[160];
 
 #define CKCHECK(expr, want) do {                                            \
@@ -43,7 +45,7 @@ int main(void)
 	snprintf(g_ks, sizeof(g_ks), "/tmp/pqchsm_p11_%d.ks", (int)getpid());
 	unlink(g_ks);
 	setenv("PQCHSM_KEYSTORE", g_ks, 1);
-	setenv("PQCHSM_SLOTS", "3", 1);
+	setenv("PQCHSM_SLOTS", "4", 1);   /* 0/1/2 给原有用例，3 留给种子导入 */
 
 	TCASE("dlopen 模块并取函数表");
 	void *h = dlopen(PQCHSM_P11_MODULE, RTLD_NOW);
@@ -60,10 +62,43 @@ int main(void)
 	CHECK(F != NULL);
 	CHECK_EQ_INT(F->version.major, 3);
 	CHECK_EQ_INT(F->version.minor, 2);
-	/* 未实现的接口必须是 NULL 表项，而不是填一个返回错误的桩 */
-	CHECK(F->C_CreateObject == NULL);
-	CHECK(F->C_SignUpdate == NULL);
 	CHECK(F->C_GenerateKeyPair != NULL);
+	CHECK(F->C_CreateObject != NULL);
+	CHECK(F->C_SignUpdate != NULL);
+	CHECK(F->C_SignFinal != NULL);
+	/* 未实现的接口仍必须是 NULL 表项，而不是填一个返回错误的桩 */
+	CHECK(F->C_Encrypt == NULL);
+	CHECK(F->C_DeriveKey == NULL);
+
+	TCASE("C_GetInterface：v3.2 表里才有 Encapsulate（2.40 表结构根本没这个字段）");
+	{
+		CK_RV (*get_iface)(CK_UTF8CHAR_PTR, CK_VERSION_PTR,
+		                   CK_INTERFACE_PTR_PTR, CK_FLAGS) = dlsym(h, "C_GetInterface");
+		CHECK(get_iface != NULL);
+		CK_INTERFACE_PTR iface = NULL;
+		CKCHECK(get_iface(NULL, NULL, &iface, 0), CKR_OK);
+		CHECK(iface != NULL);
+		if (iface) {
+			CHECK(strcmp((const char *)iface->pInterfaceName, "PKCS 11") == 0);
+			F32 = (CK_FUNCTION_LIST_3_2_PTR)iface->pFunctionList;
+			CHECK_EQ_INT(F32->version.major, 3);
+			CHECK_EQ_INT(F32->version.minor, 2);
+			CHECK(F32->C_EncapsulateKey != NULL);
+			CHECK(F32->C_DecapsulateKey != NULL);
+			/* 两张表指向同一批实现 */
+			CHECK(F32->C_Sign == F->C_Sign);
+		}
+		/* 名字写错要明确失败，不能悄悄给默认表 */
+		CKCHECK(get_iface((CK_UTF8CHAR_PTR)"PKCS 12", NULL, &iface, 0), CKR_ARGUMENTS_BAD);
+		/* fork-safe 我们做不到 —— 如实拒绝，不给做不到的承诺 */
+		CKCHECK(get_iface(NULL, NULL, &iface, CKF_INTERFACE_FORK_SAFE), CKR_FUNCTION_FAILED);
+
+		CK_ULONG ni = 0;
+		CK_RV (*get_ifl)(CK_INTERFACE_PTR, CK_ULONG_PTR) = dlsym(h, "C_GetInterfaceList");
+		CHECK(get_ifl != NULL);
+		CKCHECK(get_ifl(NULL, &ni), CKR_OK);
+		CHECK_EQ_INT(ni, 1);
+	}
 
 	TCASE("Initialize / GetInfo / 重复 Initialize");
 	CKCHECK(F->C_Initialize(NULL), CKR_OK);
@@ -80,15 +115,15 @@ int main(void)
 	CK_SLOT_ID slots[8];
 	CK_ULONG n = 0;
 	CKCHECK(F->C_GetSlotList(CK_TRUE, NULL, &n), CKR_OK);
-	CHECK_EQ_INT(n, 3);
+	CHECK_EQ_INT(n, 4);
 	{
 		CK_ULONG small = 1;
 		CKCHECK(F->C_GetSlotList(CK_TRUE, slots, &small), CKR_BUFFER_TOO_SMALL);
-		CHECK_EQ_INT(small, 3);
+		CHECK_EQ_INT(small, 4);
 	}
 	n = 8;
 	CKCHECK(F->C_GetSlotList(CK_TRUE, slots, &n), CKR_OK);
-	CHECK_EQ_INT(n, 3);
+	CHECK_EQ_INT(n, 4);
 	CHECK_EQ_INT(slots[0], 0);
 
 	TCASE("机制列表包含 ML-DSA 与 ML-KEM");
@@ -372,6 +407,271 @@ int main(void)
 		CKCHECK(F->C_Sign(s4, msg, sizeof(msg), sig, &siglen), CKR_OK);
 		CHECK_EQ_INT(siglen, 2420);        /* ML-DSA-44 */
 		CKCHECK(F->C_CloseSession(s4), CKR_OK);
+	}
+
+
+	TCASE("★ C_SignUpdate/C_SignFinal：分段与一次性签，结果必须都能验过");
+	{
+		/* ML-DSA 签名带随机 rnd，同一消息两次签出来的字节不同 ——
+		 * 所以这里比的不是"字节相同"，而是**两条路径都得到有效签名**，
+		 * 且由独立的 liboqs 验证（不经过本模块）。 */
+		CK_MECHANISM mech = { CKM_ML_DSA, NULL, 0 };
+		const char *p1 = "multi-part ";
+		const char *p2 = "ML-DSA ";
+		const char *p3 = "message";
+		CK_BYTE whole[64];
+		snprintf((char *)whole, sizeof(whole), "%s%s%s", p1, p2, p3);
+		CK_ULONG whole_len = (CK_ULONG)strlen((char *)whole);
+
+		CK_BYTE sig_multi[8192], sig_once[8192];
+		CK_ULONG lm = sizeof(sig_multi), lo = sizeof(sig_once);
+
+		CKCHECK(F->C_SignInit(sess, &mech, priv), CKR_OK);
+		CKCHECK(F->C_SignUpdate(sess, (CK_BYTE_PTR)p1, (CK_ULONG)strlen(p1)), CKR_OK);
+		CKCHECK(F->C_SignUpdate(sess, (CK_BYTE_PTR)p2, (CK_ULONG)strlen(p2)), CKR_OK);
+		CKCHECK(F->C_SignUpdate(sess, (CK_BYTE_PTR)p3, (CK_ULONG)strlen(p3)), CKR_OK);
+		/* 只问长度：按规范此时不能结束操作 */
+		CK_ULONG probe = 0;
+		CKCHECK(F->C_SignFinal(sess, NULL, &probe), CKR_OK);
+		CHECK_EQ_INT(probe, 3309);        /* ML-DSA-65 */
+		CKCHECK(F->C_SignFinal(sess, sig_multi, &lm), CKR_OK);
+
+		CKCHECK(F->C_SignInit(sess, &mech, priv), CKR_OK);
+		CKCHECK(F->C_Sign(sess, whole, whole_len, sig_once, &lo), CKR_OK);
+		CHECK_EQ_INT(lm, lo);
+
+		/* ★ 独立验证：直接用 liboqs 验，绕开本模块的 C_Verify */
+		CK_ATTRIBUTE pkq = { CKA_VALUE, NULL, 0 };
+		CKCHECK(F->C_GetAttributeValue(sess, pub, &pkq, 1), CKR_OK);
+		uint8_t *mp_pk = malloc(pkq.ulValueLen);
+		pkq.pValue = mp_pk;
+		CKCHECK(F->C_GetAttributeValue(sess, pub, &pkq, 1), CKR_OK);
+		CHECK_EQ_INT(pqc_verify(PQC_ALG_ML_DSA_65, mp_pk, whole, whole_len, NULL, 0,
+		                        sig_multi, lm), PQC_OK);
+		CHECK_EQ_INT(pqc_verify(PQC_ALG_ML_DSA_65, mp_pk, whole, whole_len, NULL, 0,
+		                        sig_once, lo), PQC_OK);
+
+		/* 反证：分段签的签名换一个消息必须验不过（证明上面的断言是活的） */
+		CHECK(pqc_verify(PQC_ALG_ML_DSA_65, mp_pk, (const uint8_t *)"other", 5,
+		                 NULL, 0, sig_multi, lm) != PQC_OK);
+		free(mp_pk);
+
+		TCASE("C_VerifyUpdate/C_VerifyFinal：分段验签，且改一个 bit 必须失败");
+		CKCHECK(F->C_VerifyInit(sess, &mech, pub), CKR_OK);
+		CKCHECK(F->C_VerifyUpdate(sess, (CK_BYTE_PTR)p1, (CK_ULONG)strlen(p1)), CKR_OK);
+		CKCHECK(F->C_VerifyUpdate(sess, (CK_BYTE_PTR)p2, (CK_ULONG)strlen(p2)), CKR_OK);
+		CKCHECK(F->C_VerifyUpdate(sess, (CK_BYTE_PTR)p3, (CK_ULONG)strlen(p3)), CKR_OK);
+		CKCHECK(F->C_VerifyFinal(sess, sig_multi, lm), CKR_OK);
+
+		sig_multi[100] ^= 0x01;
+		CKCHECK(F->C_VerifyInit(sess, &mech, pub), CKR_OK);
+		CKCHECK(F->C_VerifyUpdate(sess, whole, whole_len), CKR_OK);
+		CKCHECK(F->C_VerifyFinal(sess, sig_multi, lm), CKR_SIGNATURE_INVALID);
+		sig_multi[100] ^= 0x01;
+
+		TCASE("多段接口的状态机：没 SignInit 就 Update / Final 必须报未初始化");
+		CKCHECK(F->C_SignUpdate(sess, whole, whole_len), CKR_OPERATION_NOT_INITIALIZED);
+		CK_ULONG dummy = sizeof(sig_multi);
+		CKCHECK(F->C_SignFinal(sess, sig_multi, &dummy), CKR_OPERATION_NOT_INITIALIZED);
+		CKCHECK(F->C_VerifyUpdate(sess, whole, whole_len), CKR_OPERATION_NOT_INITIALIZED);
+		CKCHECK(F->C_VerifyFinal(sess, sig_multi, lm), CKR_OPERATION_NOT_INITIALIZED);
+	}
+
+	TCASE("★ C_CreateObject：由种子导入，与同种子的原生 keypair 逐字节相同");
+	{
+		/* 独立预言机：不比"我们自己导入的结果"，而是拿同一个种子直接喂
+		 * liboqs 的 keypair_from_seed，看公钥是不是同一串字节。 */
+		CK_SESSION_HANDLE s4 = 0;
+		/* C_InitToken 要求该槽位上没有打开的会话 —— 所以先 init 再开会话 */
+		CKCHECK(F->C_InitToken(3, (CK_UTF8CHAR_PTR)"12345678", 8,
+		                       (CK_UTF8CHAR_PTR)"seedtok"), CKR_OK);
+		CKCHECK(F->C_OpenSession(3, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL, NULL, &s4),
+		        CKR_OK);
+		CKCHECK(F->C_Login(s4, CKU_SO, (CK_UTF8CHAR_PTR)"12345678", 8), CKR_OK);
+		CKCHECK(F->C_InitPIN(s4, (CK_UTF8CHAR_PTR)"seedpin1", 8), CKR_OK);
+		CKCHECK(F->C_Logout(s4), CKR_OK);
+		CKCHECK(F->C_Login(s4, CKU_USER, (CK_UTF8CHAR_PTR)"seedpin1", 8), CKR_OK);
+
+		CK_BYTE seed[32];
+		for (int i = 0; i < 32; i++) {
+			seed[i] = (CK_BYTE)(i * 5 + 1);
+		}
+		CK_OBJECT_CLASS cls = CKO_PRIVATE_KEY;
+		CK_KEY_TYPE kt = CKK_ML_DSA;
+		CK_ULONG pset = CKP_ML_DSA_65;
+		CK_ATTRIBUTE tmpl[] = {
+			{ CKA_CLASS, &cls, sizeof(cls) },
+			{ CKA_KEY_TYPE, &kt, sizeof(kt) },
+			{ CKA_PARAMETER_SET, &pset, sizeof(pset) },
+			{ CKA_SEED, seed, sizeof(seed) },
+		};
+		CK_OBJECT_HANDLE imported = 0;
+		CKCHECK(F->C_CreateObject(s4, tmpl, 4, &imported), CKR_OK);
+		CHECK(imported != 0);
+
+		/* ★ 独立预言机：同一种子直接喂 liboqs */
+		const pqc_alg_info_t *di = pqc_alg_info(PQC_ALG_ML_DSA_65);
+		uint8_t *ref_pk = malloc(di->pk_len), *ref_sk = malloc(di->sk_len);
+		CHECK_EQ_INT(pqc_keypair_from_seed(PQC_ALG_ML_DSA_65, seed, sizeof(seed),
+		                                   ref_pk, ref_sk), PQC_OK);
+		CK_ATTRIBUTE gv = { CKA_VALUE, NULL, 0 };
+		CKCHECK(F->C_GetAttributeValue(s4, imported | (1ULL << 63), &gv, 1), CKR_OK);
+		CHECK_EQ_INT(gv.ulValueLen, di->pk_len);
+		uint8_t *got_pk = malloc(gv.ulValueLen);
+		gv.pValue = got_pk;
+		CKCHECK(F->C_GetAttributeValue(s4, imported | (1ULL << 63), &gv, 1), CKR_OK);
+		CHECK_EQ_MEM(got_pk, ref_pk, di->pk_len);
+
+		/* 反证：换一个种子就该不同 —— 证明上面的比较不是恒真 */
+		seed[0] ^= 0xFF;
+		uint8_t *other_pk = malloc(di->pk_len);
+		CHECK_EQ_INT(pqc_keypair_from_seed(PQC_ALG_ML_DSA_65, seed, sizeof(seed),
+		                                   other_pk, ref_sk), PQC_OK);
+		CHECK(memcmp(other_pk, got_pk, di->pk_len) != 0);
+		seed[0] ^= 0xFF;
+		free(ref_pk); free(ref_sk); free(got_pk); free(other_pk);
+
+		TCASE("C_CreateObject：明文私钥导入必须被拒（本项目没有这条通路）");
+		{
+			CK_BYTE fake_sk[64] = { 0 };
+			CK_ATTRIBUTE bad[] = {
+				{ CKA_CLASS, &cls, sizeof(cls) },
+				{ CKA_KEY_TYPE, &kt, sizeof(kt) },
+				{ CKA_PARAMETER_SET, &pset, sizeof(pset) },
+				{ CKA_VALUE, fake_sk, sizeof(fake_sk) },
+			};
+			CK_OBJECT_HANDLE o = 0;
+			CKCHECK(F->C_CreateObject(s4, bad, 4, &o), CKR_ATTRIBUTE_TYPE_INVALID);
+		}
+		TCASE("C_CreateObject：模板缺项与种子长度错误的处理");
+		{
+			CK_OBJECT_HANDLE o = 0;
+			CK_ATTRIBUTE only_cls[] = { { CKA_CLASS, &cls, sizeof(cls) } };
+			CKCHECK(F->C_CreateObject(s4, only_cls, 1, &o), CKR_TEMPLATE_INCOMPLETE);
+			CK_BYTE short_seed[8] = { 0 };
+			CK_ATTRIBUTE bad_len[] = {
+				{ CKA_CLASS, &cls, sizeof(cls) },
+				{ CKA_KEY_TYPE, &kt, sizeof(kt) },
+				{ CKA_PARAMETER_SET, &pset, sizeof(pset) },
+				{ CKA_SEED, short_seed, sizeof(short_seed) },
+			};
+			CKCHECK(F->C_CreateObject(s4, bad_len, 4, &o), CKR_ATTRIBUTE_VALUE_INVALID);
+		}
+		CKCHECK(F->C_CloseAllSessions(2), CKR_OK);
+	}
+
+	TCASE("★ C_EncapsulateKey / C_DecapsulateKey：两端共享秘密必须一致");
+	{
+		/* 槽位 1 上是前面生成的 ML-KEM-768 密钥对 */
+		CK_SESSION_HANDLE sk1 = 0;
+		CKCHECK(F->C_OpenSession(1, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL, NULL, &sk1),
+		        CKR_OK);
+		CKCHECK(F->C_Login(sk1, CKU_USER, (CK_UTF8CHAR_PTR)"1234abcd", 8), CKR_OK);
+		CK_OBJECT_HANDLE fo[8];
+		CK_ULONG fn = 0;
+		CKCHECK(F->C_FindObjectsInit(sk1, NULL, 0), CKR_OK);
+		CKCHECK(F->C_FindObjects(sk1, fo, 8, &fn), CKR_OK);
+		CKCHECK(F->C_FindObjectsFinal(sk1), CKR_OK);
+		CHECK_EQ_INT(fn, 2);
+		CK_OBJECT_HANDLE kpub = fo[0], kpriv = fo[1];
+
+		CK_MECHANISM kmech = { CKM_ML_KEM, NULL, 0 };
+		/* 演示用：显式要求可读，好把两端秘密拿出来比对 */
+		CK_BBOOL yes = CK_TRUE, no = CK_FALSE;
+		CK_ATTRIBUTE readable[] = {
+			{ CKA_EXTRACTABLE, &yes, sizeof(yes) },
+			{ CKA_SENSITIVE, &no, sizeof(no) },
+		};
+
+		/* 只问密文长度 */
+		CK_ULONG ctlen = 0;
+		CK_OBJECT_HANDLE ssA = 0, ssB = 0;
+		CKCHECK(F32->C_EncapsulateKey(sk1, &kmech, kpub, readable, 2,
+		                              NULL, &ctlen, &ssA), CKR_OK);
+		CHECK_EQ_INT(ctlen, 1088);        /* ML-KEM-768 */
+		CK_BYTE ct[2048];
+		ctlen = sizeof(ct);
+		CKCHECK(F32->C_EncapsulateKey(sk1, &kmech, kpub, readable, 2,
+		                              ct, &ctlen, &ssA), CKR_OK);
+		CHECK_EQ_INT(ctlen, 1088);
+		CHECK(ssA != 0);
+
+		CKCHECK(F32->C_DecapsulateKey(sk1, &kmech, kpriv, readable, 2,
+		                              ct, ctlen, &ssB), CKR_OK);
+		CHECK(ssB != 0);
+		CHECK(ssA != ssB);                /* 两个不同的对象 */
+
+		CK_BYTE va[64], vb[64];
+		CK_ATTRIBUTE qa = { CKA_VALUE, va, sizeof(va) };
+		CK_ATTRIBUTE qb = { CKA_VALUE, vb, sizeof(vb) };
+		CKCHECK(F->C_GetAttributeValue(sk1, ssA, &qa, 1), CKR_OK);
+		CKCHECK(F->C_GetAttributeValue(sk1, ssB, &qb, 1), CKR_OK);
+		CHECK_EQ_INT(qa.ulValueLen, 32);
+		CHECK_EQ_INT(qb.ulValueLen, 32);
+		CHECK_EQ_MEM(va, vb, 32);         /* ★ 封装端与解封装端得到同一个共享秘密 */
+
+		/* 反证：改一个 bit 的密文解出来必须不同（ML-KEM 的隐式拒绝会给出
+		 * 一个确定但不同的值 —— 所以这里是"不等"而不是"报错"） */
+		TCASE("反证：篡改密文后解出的共享秘密必须不同（ML-KEM 隐式拒绝）");
+		{
+			ct[5] ^= 0x01;
+			CK_OBJECT_HANDLE ssC = 0;
+			CKCHECK(F32->C_DecapsulateKey(sk1, &kmech, kpriv, readable, 2,
+			                              ct, ctlen, &ssC), CKR_OK);
+			CK_BYTE vc[64];
+			CK_ATTRIBUTE qc = { CKA_VALUE, vc, sizeof(vc) };
+			CKCHECK(F->C_GetAttributeValue(sk1, ssC, &qc, 1), CKR_OK);
+			CHECK(memcmp(vc, va, 32) != 0);
+			ct[5] ^= 0x01;
+			CKCHECK(F->C_DestroyObject(sk1, ssC), CKR_OK);
+		}
+
+		TCASE("共享秘密默认 sensitive：不给 EXTRACTABLE 时 CKA_VALUE 必须拒绝");
+		{
+			CK_OBJECT_HANDLE ssD = 0;
+			CK_ULONG cl = sizeof(ct);
+			CKCHECK(F32->C_EncapsulateKey(sk1, &kmech, kpub, NULL, 0, ct, &cl, &ssD),
+			        CKR_OK);
+			CK_BYTE tmp[64];
+			CK_ATTRIBUTE q = { CKA_VALUE, tmp, sizeof(tmp) };
+			CKCHECK(F->C_GetAttributeValue(sk1, ssD, &q, 1), CKR_ATTRIBUTE_SENSITIVE);
+			CHECK(q.ulValueLen == CK_UNAVAILABLE_INFORMATION);
+			/* 长度这类非敏感属性照样可读 */
+			CK_ULONG vl = 0;
+			CK_ATTRIBUTE q2 = { CKA_VALUE_LEN, &vl, sizeof(vl) };
+			CKCHECK(F->C_GetAttributeValue(sk1, ssD, &q2, 1), CKR_OK);
+			CHECK_EQ_INT(vl, 32);
+			CKCHECK(F->C_DestroyObject(sk1, ssD), CKR_OK);
+		}
+
+		TCASE("封装/解封装的参数校验");
+		{
+			CK_OBJECT_HANDLE o = 0;
+			CK_ULONG cl = sizeof(ct);
+			/* 拿私钥去封装 / 拿公钥去解封装 —— 都该被拒 */
+			CKCHECK(F32->C_EncapsulateKey(sk1, &kmech, kpriv, NULL, 0, ct, &cl, &o),
+			        CKR_KEY_TYPE_INCONSISTENT);
+			CKCHECK(F32->C_DecapsulateKey(sk1, &kmech, kpub, NULL, 0, ct, ctlen, &o),
+			        CKR_KEY_TYPE_INCONSISTENT);
+			/* 机制不对 */
+			CK_MECHANISM wrong = { CKM_ML_DSA, NULL, 0 };
+			CKCHECK(F32->C_EncapsulateKey(sk1, &wrong, kpub, NULL, 0, ct, &cl, &o),
+			        CKR_MECHANISM_INVALID);
+			/* 密文长度不对 */
+			CKCHECK(F32->C_DecapsulateKey(sk1, &kmech, kpriv, NULL, 0, ct, 10, &o),
+			        CKR_ENCRYPTED_DATA_LEN_RANGE);
+		}
+
+		TCASE("会话密钥对象是会话生命期：CloseSession 后句柄失效");
+		{
+			CKCHECK(F->C_CloseSession(sk1), CKR_OK);
+			CK_SESSION_HANDLE s5 = 0;
+			CKCHECK(F->C_OpenSession(1, CKF_SERIAL_SESSION, NULL, NULL, &s5), CKR_OK);
+			CK_BYTE tmp[64];
+			CK_ATTRIBUTE q = { CKA_VALUE, tmp, sizeof(tmp) };
+			CKCHECK(F->C_GetAttributeValue(s5, ssA, &q, 1), CKR_OBJECT_HANDLE_INVALID);
+			CKCHECK(F->C_CloseSession(s5), CKR_OK);
+		}
 	}
 
 	TCASE("C_DestroyObject 后对象消失");
