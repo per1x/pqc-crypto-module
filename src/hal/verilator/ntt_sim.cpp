@@ -95,10 +95,17 @@ int ntt_sim_run(const int16_t *in, int16_t *out, int inverse)
 	tick();
 
 	// 启动并等 done —— 与真 PL 的"写 CTRL.START、轮询 STATUS.DONE"同形
+	//
+	// ⚠️ done 是**电平**（保持到下一次 start），所以必须先确认它被这次 start
+	// 清掉了，再去等它重新拉高；否则上一次残留的 done=1 会让下面的循环
+	// 立刻退出，在变换没做完时就把系数读走。
 	g_dut->inverse = inverse ? 1 : 0;
 	g_dut->start = 1;
-	tick();
+	tick();                       // 这一拍 FSM 吃掉 start 并清 done
 	g_dut->start = 0;
+	if (g_dut->done) {
+		return -1;                // 没被清掉 = 握手协议不对，别装作没事
+	}
 
 	uint64_t cycles = 0;
 	while (!g_dut->done) {

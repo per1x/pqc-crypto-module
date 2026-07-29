@@ -55,13 +55,23 @@ async def load_poly(dut, coeffs):
 
 
 async def run_transform(dut, inverse: int) -> int:
+    """发一次变换命令并等它做完。
+
+    ⚠️ done 是**电平**（保持到下一次 start），所以这里必须先确认它被新命令清掉，
+    再去等它重新拉高。否则上一次残留的 done=1 会让等待循环立刻退出，
+    在变换还没做完时就去读系数 —— 这正是 done 从脉冲改成电平后暴露出来的
+    握手时序问题（脉冲语义下碰巧不会出错）。
+    """
     dut.inverse.value = inverse
     dut.start.value = 1
     await RisingEdge(dut.clk)
     dut.start.value = 0
+    await Timer(1, unit="ns")          # 让这一拍的非阻塞赋值落定
+    assert int(dut.done.value) == 0, "start 之后 done 应当已被清掉"
     cycles = 0
     while int(dut.done.value) != 1:
         await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
         cycles += 1
         assert cycles < 20000, "NTT 超时，检查状态机"
     return cycles
@@ -112,6 +122,46 @@ async def test_ntt_inverse(dut):
         model = invntt(list(coeffs))
         assert got == expect == model, f"第 {idx} 组逆变换不匹配"
     dut._log.info(f"ntt 逆变换 {len(pairs)} 组三方一致")
+
+
+@cocotb.test()
+async def test_done_is_level(dut):
+    """done 必须是**电平**：置位后保持到下一次 start，而不是 1 周期脉冲
+
+    这条直接对应 accel.h 的契约 —— 软件"轮询 STATUS.DONE"，
+    如果 done 只高 1 拍，真实寄存器/AXI 在任意时刻采样就会漏掉。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+    assert int(dut.done.value) == 0, "复位后 done 必须为 0"
+
+    src = [((i * 13) % 3329) - 1664 for i in range(256)]
+    await load_poly(dut, src)
+    await run_transform(dut, 0)
+    assert int(dut.done.value) == 1
+
+    # 空转 50 拍，done 必须一直是 1
+    for _ in range(50):
+        await RisingEdge(dut.clk)
+        assert int(dut.done.value) == 1, "done 掉了 —— 它应当保持到下一次 start"
+
+    # 写系数也不该清掉 done
+    await load_poly(dut, src)
+    assert int(dut.done.value) == 1, "写系数不该清 done"
+
+    # 下一次 start 才清
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    await Timer(1, unit="ns")
+    assert int(dut.done.value) == 0, "start 之后 done 应当被清掉"
+    # 跑完又回到 1
+    cycles = 0
+    while int(dut.done.value) != 1:
+        await RisingEdge(dut.clk)
+        cycles += 1
+        assert cycles < 20000
+    dut._log.info("done 为电平语义：保持到下一次 start 才清")
 
 
 @cocotb.test()

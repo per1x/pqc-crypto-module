@@ -8,6 +8,11 @@
 // 接口刻意做成"写系数 → start → 等 done → 读系数"，与 pqchsm/accel.h 的
 // 寄存器语义对得上，这样 Verilator 仿真出来的核可以直接挂到 accel transport 上。
 //
+// **done 是电平不是脉冲**：置位后一直保持，直到下一次 start（或复位）才清。
+// 原来写成 1 周期脉冲，逐周期轮询的 cocotb / Verilator 桥能抓到，
+// 但 accel.h 的契约是软件"轮询 STATUS.DONE" —— 真实寄存器/AXI 轮询在任意时刻
+// 采样会**漏掉 1 周期脉冲**。将来的 AXI 包装层把它映射成 sticky 的 STATUS.DONE 即可。
+//
 // ⚠️ ML-KEM 的 NTT 只做 **7 层**（到 2 次多项式为止，不是完整 8 层）。
 // 逆变换最后要乘 f = mont^2/128 = 1441，所以 invntt(ntt(x)) ≡ x·2^16 (mod q)，
 // **不是恒等** —— 这一条最容易被当成 bug，见 model/ref_model.py 的说明。
@@ -138,11 +143,12 @@ module ntt_core (
         end else begin
             case (state)
             S_IDLE: begin
-                done <= 1'b0;
+                // 注意：这里**不**无条件清 done —— 它要保持到下一次 start。
                 if (wr_en) begin
                     mem[wr_addr] <= wr_data;
                 end
                 if (start) begin
+                    done  <= 1'b0;      // 新命令开始，清掉上一次的 done
                     inv_r <= inverse;
                     len   <= inverse ? 9'd2 : 9'd128;
                     grp   <= 9'd0;
