@@ -1,0 +1,10 @@
+# SunPKCS11 配置文件模板
+#
+# 用法：把 __MODULE__ 换成实际的 .dylib/.so 路径，然后
+#   Provider p = Security.getProvider("SunPKCS11").configure("这个文件路径");
+#
+# ⚠️ 见 README.md：SunPKCS11 目前只能用它做 KeyStore，
+#    ML-DSA/ML-KEM 的密码运算走不通（机制映射表未适配 v3.2）。
+name = pqchsm
+library = __MODULE__
+slot = 0

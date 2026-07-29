@@ -15,3 +15,4 @@ vectors/rtl/
 .DS_Store
 syn/rpt/
 .fuzz-corpus/
+.venv-p11/

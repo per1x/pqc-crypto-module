@@ -154,6 +154,10 @@ add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
 
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
          ${CMAKE_CURRENT_BINARY_DIR})
+# Python / Java 的 provider demo（缺 PyKCS11 或 JDK22+ 时自动 SKIP）
+add_test(NAME p11_demos COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/demo_p11.sh
+         $<TARGET_FILE:pqchsm-p11>)
+
 add_test(NAME p11_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/p11_smoke.sh
          $<TARGET_FILE:pqchsm-p11>)
 add_test(NAME anchor        COMMAND test_anchor)
