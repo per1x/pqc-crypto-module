@@ -71,6 +71,13 @@ target_link_libraries(pqchsm-cli PRIVATE pqchsm)
 add_executable(pqchsm-bench tools/bench.c)
 target_link_libraries(pqchsm-bench PRIVATE pqchsm)
 
+# ---- fuzz 靶子（§3.9）-------------------------------------------------------
+# 独立驱动版：不依赖 libFuzzer，接进 ctest，跑在 ASan 下。
+# libFuzzer 版另见 tools/fuzz.sh（需要 brew 的 llvm，Apple clang 不带）。
+add_executable(fuzz_standalone tests/fuzz/fuzz_targets.c)
+target_link_libraries(fuzz_standalone PRIVATE pqchsm)
+target_compile_definitions(fuzz_standalone PRIVATE FUZZ_STANDALONE)
+
 # ---- 测试 -------------------------------------------------------------------
 enable_testing()
 
@@ -141,6 +148,8 @@ add_test(NAME p11           COMMAND test_p11)
 
 # pkcs11-tool 冒烟 + SoftHSMv2 行为对比。没装 OpenSC 时脚本自己 SKIP（退出 0）。
 # RTL 对拍（无 cocotb/iverilog 时脚本自己 SKIP）
+add_test(NAME fuzz COMMAND fuzz_standalone 4000)
+
 add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
 
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
