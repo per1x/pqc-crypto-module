@@ -63,6 +63,9 @@
  * 把 (count, head, 时间) 签出去，送到这台设备改不到的地方（另一台机器/上级系统）。
  * 有了外部锚点，攻击者要抹平就得先伪造签名，那才谈得上不可否认。
  * 本文件**不做**签名固化，它只负责提供随时可被签的链头（audit_head）。
+ * 固化本身已实现在 **pqchsm/anchor.h**（ML-DSA 签 (count, head, 时间)），
+ * tests/unit/test_anchor.c 里有一条对照：同一份被整体重写的假日志，
+ * audit_verify_file 返回 0 而锚点校验返回 HSM_ERR_INTEGRITY。
  * 在锚点落地之前，请把本模块的保证理解成"防意外损坏与不完整的篡改"，
  * 而不是"防一个有 root 的对手"。
  *
@@ -131,6 +134,12 @@ uint64_t audit_count(const audit_log_t *log);
  * bad_seq == count 表示"每条记录自身都自洽，但链头与文件头的锚点对不上"，
  * 或"尾部多出了文件头不认的记录"。文件头本身就坏掉时 bad_seq 为 0。 */
 int audit_verify_file(const char *path, uint64_t *bad_seq);
+
+/* 取"前 count 条记录之后"的链哈希 H_count（count == 0 时即创世哈希）。
+ * 供签名固化（pqchsm/anchor.h）比对锚点用：把它与锚点里签过的 head 比，
+ * 就能判断日志的**前 count 条**是否还是当初被签下的那一段。
+ * 文件本身不完整、或记录数不足 count，返回 -1。成功返回 0。 */
+int audit_hash_at(const char *path, uint64_t count, uint8_t out[AUDIT_HASH_LEN]);
 
 /* 读第 seq 条（从 0 开始）到调用方缓冲，用于导出/展示。成功返回 0。
  * 各输出指针都可以单独为 NULL。detail 会补上结尾的 NUL（故需 33 字节）。

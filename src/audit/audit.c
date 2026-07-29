@@ -451,6 +451,49 @@ out:
 }
 
 /* ---- 单条读取 ------------------------------------------------------------ */
+int audit_hash_at(const char *path, uint64_t count, uint8_t out[AUDIT_HASH_LEN])
+{
+	uint8_t hdr[AUDIT_HDR_LEN], rec[AUDIT_REC_LEN];
+	uint64_t have = 0, len = 0;
+	int fd = -1;
+	int rc = -1;
+
+	if (!path || !out) {
+		goto out;
+	}
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		goto out;
+	}
+	if (io_pread(fd, hdr, sizeof(hdr), 0) != 0 || !hdr_ok(hdr)) {
+		goto out;
+	}
+	if (file_len(fd, &len) != 0 || len < AUDIT_HDR_LEN) {
+		goto out;
+	}
+	have = (len - AUDIT_HDR_LEN) / AUDIT_REC_LEN;
+	if (count > have) {
+		goto out;      /* 记录数不够 —— 日志被截短到锚点之下 */
+	}
+	if (count == 0) {
+		rc = genesis_hash(out);
+		goto out;
+	}
+	/* 第 count-1 条记录自带的 H_i 就是 H_count。
+	 * 这里只取值不校验链 —— 链的完整性由 audit_verify_file 负责，
+	 * 锚点校验会把两者一起用（见 anchor.c）。 */
+	if (io_pread(fd, rec, sizeof(rec), (off_t)(AUDIT_HDR_LEN + (count - 1) * AUDIT_REC_LEN)) != 0) {
+		goto out;
+	}
+	memcpy(out, rec + AUDIT_WIRE_LEN, AUDIT_HASH_LEN);
+	rc = 0;
+out:
+	if (fd >= 0) {
+		close(fd);
+	}
+	return rc;
+}
+
 int audit_read(const char *path, uint64_t seq, uint64_t *timestamp, uint32_t *op,
                uint32_t *role, uint32_t *slot_id, uint32_t *result,
                char detail[AUDIT_DETAIL_LEN + 1])
