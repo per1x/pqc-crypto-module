@@ -87,18 +87,29 @@ device — otherwise rewriting the whole file is undetectable.
 
 `accel.h` fixes the register map (`CTRL`, `STATUS`, `MODE`, `PARAM`, `IN_LEN`,
 `OUT_LEN`, `ERRCODE`) before any RTL was written, so interface bugs surface in software
-first. Two cores currently exist in RTL and run under Verilator through that same
-register interface:
+first. That contract is now implemented in hardware as well: `pqc_accel_axi` exposes it
+over AXI4-Lite for control and AXI4-Stream for bulk data, and
+[docs/register-map.md](docs/register-map.md) states the semantics both sides are
+written against — START self-clearing, DONE latched as a level, status registers
+written by hardware and read-only to software.
 
-| Core | Structure | Cycles |
-|---|---|---|
-| `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT | 1153 per transform |
-| `keccak_f1600` | single-round iterative, `round_cnt` over 24 rounds | 24 per permutation |
+The RTL covers the arithmetic of both algorithms plus the bus interface. It is plain
+inferrable Verilog-2001 throughout: no vendor primitive is instantiated anywhere, so
+the same sources target Xilinx, Intel, or Lattice unchanged.
+
+| Group | Cores |
+|---|---|
+| ML-KEM | `ntt_core` (7-layer, 1153 cycles), `mlkem_basemul`, `mlkem_compress`/`decompress`, `mlkem_cbd2`/`cbd3`, `mlkem_rej_pair`/`rej_uniform`, `mlkem_encode12`/`decode12` |
+| ML-DSA | `mldsa_ntt_core` (8-layer, 1025 forward / 1281 inverse), `mldsa_mont_reduce`, `mldsa_reduce32`, `mldsa_caddq`, `mldsa_power2round`, `mldsa_decompose`, `mldsa_make_hint`/`use_hint`, `mldsa_rej_uniform`/`rej_eta` |
+| Keccak | `keccak_f1600` (single-round iterative, 24 cycles) |
+| Bus | `axi4lite_regs`, `pqc_accel_axi` |
+| Noise source | `trng_health` (SP 800-90B repetition-count and adaptive-proportion tests) |
 
 SHA3 and SHAKE are built as a sponge in C on top of the permutation, so the entire
 SHA3/SHAKE path can be run against simulated RTL and compared byte-for-byte with
-OpenSSL. All other accelerator modes fall back to the software stub, and the Verilator
-transport reports "unsupported" rather than silently substituting software.
+OpenSSL. Complete ML-KEM and ML-DSA operations have no hardware implementation; the
+accelerator reports "unsupported" for those modes rather than silently substituting
+software.
 
 ## Features
 
@@ -137,13 +148,13 @@ transport reports "unsupported" rather than silently substituting software.
 ├── tests/              Unit, integration, KAT, and fuzz targets
 ├── demo/               PKCS#11 provider demos (Python, Java)
 ├── hardware/
-│   ├── rtl/            Verilog sources: mlkem/ (NTT), keccak/
-│   ├── tb/cocotb/      cocotb testbenches
+│   ├── rtl/            Verilog sources: mlkem/, mldsa/, keccak/, bus/, trng/
+│   ├── tb/cocotb/      cocotb testbenches and simulation-only top levels
 │   ├── model/          Python reference model, vector export, independent oracles
 │   └── syn/            Vivado out-of-context synthesis scripts and constraints
 ├── tools/              Vector fetching, benchmarks, profiling, regression scripts
 ├── third_party/        Vendored OASIS PKCS#11 v3.2 headers (unmodified)
-└── docs/               Architecture and PKCS#11 interface reference
+└── docs/               Architecture, PKCS#11, register map, algorithms, security policy, testing
 ```
 
 ## Documentation
@@ -153,6 +164,10 @@ transport reports "unsupported" rather than silently substituting software.
 | [architecture.md](docs/architecture.md) · [中文](docs/architecture.zh-CN.md) | Layering, key hierarchy, keystore format, audit chain, hardware abstraction, key injection |
 | [pkcs11.md](docs/pkcs11.md) · [中文](docs/pkcs11.zh-CN.md) | Mechanisms, object model, vendor attributes, key import, KEM operations, configuration |
 | [constant-time.md](docs/constant-time.md) · [中文](docs/constant-time.zh-CN.md) | Constant-time audit scope and method, findings, zeroization checks, what is not claimed, how to reproduce |
+| [register-map.md](docs/register-map.md) · [中文](docs/register-map.zh-CN.md) | The accelerator register contract: address map, behavioural clauses, data plane, operation codes |
+| [algorithms.md](docs/algorithms.md) · [中文](docs/algorithms.zh-CN.md) | Algorithm inventory, parameter sets, key and SSP inventory, validation evidence |
+| [security-policy.md](docs/security-policy.md) · [中文](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 security policy draft, with an explicit gap list |
+| [testing.md](docs/testing.md) · [中文](docs/testing.zh-CN.md) | What is tested, by what means, and how to reproduce every number quoted here |
 | [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
 | [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
 
@@ -255,15 +270,16 @@ PKCS#11 multi-part signing buffers the whole message rather than streaming a dig
 
 | Check | Result |
 |---|---|
-| `ctest` | 43 / 43 |
-| Assertions | ~3700 |
+| `ctest` | 45 / 45 |
+| Assertions | 4059 |
 | NIST ACVP vectors | 390 byte-exact, 60 explicitly skipped |
-| ASan + UBSan | 43 / 43 |
+| ASan + UBSan | 45 / 45 |
 | ThreadSanitizer | 0 races (validated by removing locks: 9 reported) |
 | macOS `leaks` | 0 leaks |
 | libFuzzer | 1.38 M executions, no crashes |
-| aarch64 Linux (GCC 12) | 43 / 43 |
-| cocotb RTL regression | 14 tests across 5 modules |
+| aarch64 Linux (GCC 12) | 45 / 45 |
+| cocotb RTL regression | 78 tests across 10 top levels |
+| RTL lint (Verilator `-Wall` + Icarus) | 31 modules, 0 warnings |
 
 Two habits run throughout the test sources:
 
@@ -289,13 +305,17 @@ Two habits run throughout the test sources:
 Software work that does not require a board is largely complete. What remains is
 hardware-dependent:
 
-1. Full ML-KEM / ML-DSA cores in RTL (sampling, encoding, dataflow), replacing the
-   software stub mode by mode through the existing register interface.
+1. A complete ML-KEM / ML-DSA dataflow in RTL. The arithmetic cores, the samplers, the
+   encoders, and the bus interface all exist; what is missing is the sequencer that
+   chains them into whole operations, replacing the software stub mode by mode through
+   the register interface that is already in place.
 2. Synthesis and timing closure on a target part; the out-of-context scripts in
    `hardware/syn/` are ready but have never been run.
 3. Move the key derivation root into eFUSE/BBRAM/PUF and the security boundary into
    programmable logic.
-4. Ring-oscillator TRNG with SP 800-90B entropy assessment, replacing `RAND_bytes`.
+4. A ring-oscillator noise source feeding `trng_health`, with an SP 800-90B entropy
+   assessment, replacing `RAND_bytes`. The health tests exist and are verified in
+   simulation; the noise source itself does not.
 5. Measured end-to-end speedup on the target platform — the only place a real number
    can come from.
 

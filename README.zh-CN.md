@@ -76,17 +76,25 @@ Zynq 级 SoC 上，由可编程逻辑承载算法核。
 ### 硬件接缝
 
 `accel.h` 在编写任何 RTL 之前就固定了寄存器表（`CTRL`、`STATUS`、`MODE`、`PARAM`、
-`IN_LEN`、`OUT_LEN`、`ERRCODE`），使接口层面的错误在软件阶段就暴露。目前有两个核以
-RTL 实现，并通过同一套寄存器接口在 Verilator 下运行：
+`IN_LEN`、`OUT_LEN`、`ERRCODE`），使接口层面的错误在软件阶段就暴露。这份契约现在
+在硬件侧同样落地：`pqc_accel_axi` 用 AXI4-Lite 承载控制、AXI4-Stream 承载成块数据，
+[docs/register-map.zh-CN.md](docs/register-map.zh-CN.md) 写明了两侧共同遵循的语义
+——START 自清、DONE 电平锁存、状态寄存器由硬件写而软件只读。
 
-| 核 | 结构 | 周期数 |
-|---|---|---|
-| `ntt_core` | 单蝶形单元，ML-KEM 的 7 层 NTT | 1153 / 次变换 |
-| `keccak_f1600` | 单轮迭代，`round_cnt` 走 24 轮 | 24 / 次置换 |
+RTL 覆盖两个算法的算术部分以及总线接口，全部为可推断的纯 Verilog-2001：
+未实例化任何厂商原语，因此同一份源码可原样综合到 Xilinx、Intel 或 Lattice。
+
+| 分组 | 核 |
+|---|---|
+| ML-KEM | `ntt_core`（7 层，1153 周期）、`mlkem_basemul`、`mlkem_compress`/`decompress`、`mlkem_cbd2`/`cbd3`、`mlkem_rej_pair`/`rej_uniform`、`mlkem_encode12`/`decode12` |
+| ML-DSA | `mldsa_ntt_core`（8 层，正 1025 / 逆 1281 周期）、`mldsa_mont_reduce`、`mldsa_reduce32`、`mldsa_caddq`、`mldsa_power2round`、`mldsa_decompose`、`mldsa_make_hint`/`use_hint`、`mldsa_rej_uniform`/`rej_eta` |
+| Keccak | `keccak_f1600`（单轮迭代，24 周期） |
+| 总线 | `axi4lite_regs`、`pqc_accel_axi` |
+| 噪声源 | `trng_health`（SP 800-90B 的重复计数与自适应比例检测） |
 
 SHA3 与 SHAKE 的海绵结构在 C 侧实现、置换交给硬件，因此整条 SHA3/SHAKE 路径都能跑
-在仿真 RTL 上，并与 OpenSSL 逐字节比对。其余加速模式回退到软件桩，且 Verilator
-transport 会明确报"不支持"，而不是悄悄用软件顶替。
+在仿真 RTL 上，并与 OpenSSL 逐字节比对。完整的 ML-KEM 与 ML-DSA 操作没有硬件实现，
+加速器对这些模式明确报"不支持"，而不是悄悄用软件顶替。
 
 ## 特性
 
@@ -123,13 +131,13 @@ transport 会明确报"不支持"，而不是悄悄用软件顶替。
 ├── tests/              单元、集成、KAT 与 fuzz 靶子
 ├── demo/               PKCS#11 provider 演示（Python、Java）
 ├── hardware/
-│   ├── rtl/            Verilog 源码：mlkem/（NTT）、keccak/
-│   ├── tb/cocotb/      cocotb 测试台
+│   ├── rtl/            Verilog 源码：mlkem/、mldsa/、keccak/、bus/、trng/
+│   ├── tb/cocotb/      cocotb 测试台与仅供仿真的汇总顶层
 │   ├── model/          Python 参考模型、向量导出、独立预言机
 │   └── syn/            Vivado out-of-context 综合脚本与约束
 ├── tools/              向量获取、基准测试、剖析、回归脚本
 ├── third_party/        vendored 的 OASIS PKCS#11 v3.2 头文件（未作修改）
-└── docs/               架构与 PKCS#11 接口参考
+└── docs/               架构、PKCS#11、寄存器映射、算法清单、安全策略、测试说明
 ```
 
 ## 文档
@@ -139,6 +147,10 @@ transport 会明确报"不支持"，而不是悄悄用软件顶替。
 | [docs/architecture.zh-CN.md](docs/architecture.zh-CN.md) | 分层、密钥层级、密钥库格式、审计链、硬件抽象、密钥注入 |
 | [docs/pkcs11.zh-CN.md](docs/pkcs11.zh-CN.md) | 机制、对象模型、厂商属性、密钥导入、KEM 操作、配置 |
 | [docs/constant-time.zh-CN.md](docs/constant-time.zh-CN.md) | 常量时间审计的范围与方法、发现、清零检查、不作断言的部分、如何复现 |
+| [docs/register-map.zh-CN.md](docs/register-map.zh-CN.md) | 加速器寄存器契约：地址映射、行为条款、数据面、操作码 |
+| [docs/algorithms.zh-CN.md](docs/algorithms.zh-CN.md) | 算法清单、参数集、密钥与敏感安全参数清单、验证证据 |
+| [docs/security-policy.zh-CN.md](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 安全策略草稿，附显式差距清单 |
+| [docs/testing.zh-CN.md](docs/testing.zh-CN.md) | 测了什么、用什么手段、此处引用的每个数字如何复现 |
 | [hardware/README.md](hardware/README.md) | RTL 模块、验证策略、仿真器选择 |
 | [demo/README.md](demo/README.md) | provider 演示与客户端库兼容性 |
 
@@ -229,15 +241,16 @@ Vivado 脚本已写好但未验证），没有时序收敛、功耗测量、TRNG
 
 | 检查项 | 结果 |
 |---|---|
-| `ctest` | 43 / 43 |
-| 断言总数 | 约 3700 |
+| `ctest` | 45 / 45 |
+| 断言总数 | 4059 |
 | NIST ACVP 向量 | 390 条逐字节通过，60 条显式跳过 |
-| ASan + UBSan | 43 / 43 |
+| ASan + UBSan | 45 / 45 |
 | ThreadSanitizer | 0 竞争（以移除锁作反证：报告 9 处） |
 | macOS `leaks` | 0 泄漏 |
 | libFuzzer | 138 万次执行，无崩溃 |
-| aarch64 Linux（GCC 12） | 43 / 43 |
-| cocotb RTL 回归 | 5 个模块共 14 个测试 |
+| aarch64 Linux（GCC 12） | 45 / 45 |
+| cocotb RTL 回归 | 10 个顶层共 78 个测试 |
+| RTL lint（Verilator `-Wall` + Icarus） | 31 个模块，0 条告警 |
 
 测试源码中贯穿两条做法：
 
@@ -257,12 +270,13 @@ Vivado 脚本已写好但未验证），没有时序收敛、功耗测量、TRNG
 
 不依赖硬件的软件工作已基本完成。余下的部分需要硬件：
 
-1. 用 RTL 实现完整的 ML-KEM / ML-DSA 核（采样、编码、数据流），通过现有寄存器接口逐个
-   模式替换软件桩。
+1. 用 RTL 实现完整的 ML-KEM / ML-DSA 数据流。算术核、采样器、编码器与总线接口都已存在，
+   缺的是把它们串成完整操作的时序控制器，之后通过已经就位的寄存器接口逐个模式替换软件桩。
 2. 在目标器件上完成综合与时序收敛；`hardware/syn/` 中的 out-of-context 脚本已就位但
    从未运行。
 3. 将密钥派生根移入 eFUSE/BBRAM/PUF，并把安全边界移入可编程逻辑。
-4. 用环形振荡器 TRNG 加 SP 800-90B 熵评估替换 `RAND_bytes`。
+4. 用接到 `trng_health` 上的环形振荡器噪声源加 SP 800-90B 熵评估替换 `RAND_bytes`。
+   健康检测已存在并在仿真中验证，噪声源本身尚不存在。
 5. 在目标平台上测得端到端加速比——这是唯一能给出真实数字的地方。
 
 每一步都通过已经存在的寄存器接口，把一个软件模式换成硬件模式，其上各层不受影响。
