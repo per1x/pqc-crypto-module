@@ -14,6 +14,6 @@ RTL           := $(PWD)/../../rtl/mlkem
 MODULE   ?= test_ops
 TOPLEVEL ?= mont_reduce
 
-VERILOG_SOURCES = $(RTL)/mont_reduce.v $(RTL)/butterfly.v
+VERILOG_SOURCES = $(RTL)/mont_reduce.v $(RTL)/butterfly.v $(RTL)/ntt_core.v
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

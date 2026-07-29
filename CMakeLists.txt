@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(pqc-hsm C)
+project(pqc-hsm C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -24,6 +24,35 @@ if(NOT LIBOQS_INCLUDE_DIR OR NOT LIBOQS_LIBRARY)
 endif()
 message(STATUS "liboqs: ${LIBOQS_LIBRARY}")
 
+# ---- Verilator 仿真后端（Level B）------------------------------------------
+# 把 rtl/mlkem/ntt_core.v 仿真成一个可被 C 调用的"加速器"，
+# 经 accel_transport_t 接到 pqc_accel.c 的寄存器语义上 —— 与将来真 PL 同一条路径。
+# 没装 verilator 就跳过，accel_transport_verilator() 返回 NULL（如实反映）。
+find_program(VERILATOR_BIN verilator)
+if(VERILATOR_BIN)
+  execute_process(COMMAND ${VERILATOR_BIN} --getenv VERILATOR_ROOT
+                  OUTPUT_VARIABLE VERILATOR_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE)
+  set(VOBJ ${CMAKE_CURRENT_BINARY_DIR}/verilated)
+  add_custom_command(
+    OUTPUT ${VOBJ}/libntt_core_lib.a ${VOBJ}/Vntt_core.h
+    COMMAND ${VERILATOR_BIN} --cc --build --lib-create ntt_core_lib
+            -Mdir ${VOBJ} -Wno-fatal
+            ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/ntt_core.v
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rtl/mlkem/ntt_core.v
+    COMMENT "Verilating rtl/mlkem/ntt_core.v")
+  add_custom_target(verilate_ntt DEPENDS ${VOBJ}/libntt_core_lib.a)
+
+  add_library(pqchsm-vsim STATIC src/hal/verilator/ntt_sim.cpp)
+  add_dependencies(pqchsm-vsim verilate_ntt)
+  target_include_directories(pqchsm-vsim PRIVATE
+    ${VOBJ} ${VERILATOR_ROOT}/include ${VERILATOR_ROOT}/include/vltstd)
+  target_link_libraries(pqchsm-vsim PUBLIC ${VOBJ}/libntt_core_lib.a)
+  set_target_properties(pqchsm-vsim PROPERTIES CXX_STANDARD 20)
+  message(STATUS "Verilator: ${VERILATOR_BIN}（Level B 仿真后端已启用）")
+else()
+  message(STATUS "Verilator: 未找到 —— Level B 仿真后端不编入")
+endif()
+
 # ---- 核心库 -----------------------------------------------------------------
 add_library(pqchsm
   src/crypto/pqc.c
@@ -31,6 +60,9 @@ add_library(pqchsm
   src/crypto/oqs_rng.c
   src/crypto/kdf.c
   src/crypto/kdr.c
+  src/hal/accel_stub.c
+  src/hal/accel_verilator.c
+  src/hal/pqc_accel.c
   src/proto/proto.c
   src/audit/audit.c
   src/audit/anchor.c
@@ -51,6 +83,10 @@ target_include_directories(pqchsm
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LIBOQS_INCLUDE_DIR}
 )
 target_link_libraries(pqchsm PUBLIC OpenSSL::Crypto Threads::Threads PRIVATE ${LIBOQS_LIBRARY})
+if(VERILATOR_BIN)
+  target_compile_definitions(pqchsm PRIVATE PQCHSM_HAVE_VERILATOR=1)
+  target_link_libraries(pqchsm PUBLIC pqchsm-vsim)
+endif()
 
 # ---- PKCS#11 v3.2 前端（Phase 9）--------------------------------------------
 # 官方 OASIS 头文件 vendored 在 third_party/，理由见那里的 README。
@@ -126,6 +162,7 @@ add_dependencies(test_p11 pqchsm-p11)
 pqchsm_test(test_anchor    tests/unit/test_anchor.c)
 pqchsm_test(test_audit_integration tests/unit/test_audit_integration.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
+pqchsm_test(test_accel     tests/unit/test_accel.c)
 pqchsm_test(test_e2e       tests/integration/test_e2e.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
@@ -158,6 +195,7 @@ add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
          ${CMAKE_CURRENT_BINARY_DIR})
 # Python / Java 的 provider demo（缺 PyKCS11 或 JDK22+ 时自动 SKIP）
+add_test(NAME accel         COMMAND test_accel)
 add_test(NAME e2e           COMMAND test_e2e)
 
 add_test(NAME e2e_p11 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/e2e_p11.sh

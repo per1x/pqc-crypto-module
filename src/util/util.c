@@ -1,6 +1,8 @@
 #include "pqchsm/util.h"
 
 #include <openssl/crypto.h>
+#include <openssl/rand.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -23,6 +25,14 @@ int pqc_ct_equal(const void *a, const void *b, size_t n)
 		diff |= (uint8_t)(x[i] ^ y[i]);
 	}
 	return diff == 0;
+}
+
+int pqc_random_bytes(uint8_t *out, size_t n)
+{
+	if (!out || n == 0 || n > INT_MAX) {
+		return -1;
+	}
+	return RAND_bytes(out, (int)n) == 1 ? 0 : -1;
 }
 
 void *pqc_secure_alloc(size_t n)
