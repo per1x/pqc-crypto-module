@@ -73,6 +73,7 @@ pqchsm_test(test_wrap      tests/unit/test_wrap.c)
 pqchsm_test(test_keystore  tests/unit/test_keystore.c)
 pqchsm_test(test_shamir    tests/unit/test_shamir.c)
 pqchsm_test(test_backup    tests/unit/test_backup.c)
+pqchsm_test(test_zeroize   tests/unit/test_zeroize.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
@@ -89,6 +90,7 @@ add_test(NAME wrap          COMMAND test_wrap)
 add_test(NAME keystore      COMMAND test_keystore)
 add_test(NAME shamir        COMMAND test_shamir)
 add_test(NAME backup        COMMAND test_backup)
+add_test(NAME zeroize       COMMAND test_zeroize)
 
 # 每类 ACVP 向量一个 ctest 用例，失败时一眼看出是哪一类
 foreach(v mlkem_keygen mlkem_encaps mlkem_decaps mldsa_keygen mldsa_siggen mldsa_sigver)
