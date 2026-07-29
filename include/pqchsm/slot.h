@@ -145,6 +145,12 @@ size_t       hsm_token_slot_count(const hsm_token_t *tok);
 hsm_status_t hsm_slot_get_meta(hsm_token_t *tok, hsm_slot_id_t slot, slot_meta_t *out);
 hsm_status_t hsm_slot_get_state(hsm_token_t *tok, hsm_slot_id_t slot, slot_state_t *out);
 
+/* 查询 SO / User PIN 是否已设置。PKCS#11 的 C_GetTokenInfo 需要这两位
+ * （CKF_TOKEN_INITIALIZED / CKF_USER_PIN_INITIALIZED）。
+ * 刻意不放进 slot_meta_t：那会改变元数据的 wire 格式，而这两位在包裹内已经存了。 */
+hsm_status_t hsm_slot_pin_status(hsm_token_t *tok, hsm_slot_id_t slot,
+                                 int *so_pin_set, int *user_pin_set);
+
 /* ---- 初始化与 PIN ------------------------------------------------------- */
 /* 设备级供应操作：UNINIT → EMPTY，同时确立 SO PIN。
  * Phase 7 起需由"制造模式"门控（§8.5），此处先不要求会话。 */

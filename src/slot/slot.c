@@ -354,6 +354,24 @@ hsm_status_t hsm_slot_get_state(hsm_token_t *tok, hsm_slot_id_t id, slot_state_t
 	return st;
 }
 
+hsm_status_t hsm_slot_pin_status(hsm_token_t *tok, hsm_slot_id_t slot,
+                                 int *so_pin_set, int *user_pin_set)
+{
+	slot_t *s = slot_at(tok, slot);
+	if (!s) {
+		return HSM_ERR_BAD_ARG;
+	}
+	SLOCK(s);
+	if (so_pin_set) {
+		*so_pin_set = s->has_so_pin;
+	}
+	if (user_pin_set) {
+		*user_pin_set = s->has_user_pin;
+	}
+	SUNLOCK(s);
+	return HSM_OK;
+}
+
 hsm_status_t hsm_slot_meta_tag(hsm_token_t *tok, hsm_slot_id_t id, uint8_t out[32])
 {
 	slot_t *s = slot_at(tok, id);

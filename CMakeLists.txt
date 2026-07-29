@@ -50,6 +50,15 @@ target_include_directories(pqchsm
 )
 target_link_libraries(pqchsm PUBLIC OpenSSL::Crypto Threads::Threads PRIVATE ${LIBOQS_LIBRARY})
 
+# ---- PKCS#11 v3.2 前端（Phase 9）--------------------------------------------
+# 官方 OASIS 头文件 vendored 在 third_party/，理由见那里的 README。
+add_library(pqchsm-p11 SHARED src/p11/p11_module.c)
+target_include_directories(pqchsm-p11 PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pkcs11-v3.2
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/p11)
+target_link_libraries(pqchsm-p11 PRIVATE pqchsm)
+set_target_properties(pqchsm-p11 PROPERTIES PREFIX "" OUTPUT_NAME "pqchsm-pkcs11")
+
 # ---- 测试 -------------------------------------------------------------------
 enable_testing()
 
@@ -78,6 +87,19 @@ pqchsm_test(test_backup    tests/unit/test_backup.c)
 pqchsm_test(test_zeroize   tests/unit/test_zeroize.c)
 pqchsm_test(test_audit     tests/unit/test_audit.c)
 pqchsm_test(test_kdr       tests/unit/test_kdr.c)
+
+# PKCS#11 测试要 dlopen 真正的 .dylib —— 测的是发布出去的那个库，
+# 包括符号导出与函数表填得对不对；直接链接会绕过这些。
+add_executable(test_p11 tests/unit/test_p11.c)
+target_link_libraries(test_p11 PRIVATE pqchsm)
+target_include_directories(test_p11 PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pkcs11-v3.2
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/p11)
+target_compile_definitions(test_p11 PRIVATE
+  PQCHSM_P11_MODULE="$<TARGET_FILE:pqchsm-p11>")
+add_dependencies(test_p11 pqchsm-p11)
+
 pqchsm_test(test_anchor    tests/unit/test_anchor.c)
 pqchsm_test(test_audit_integration tests/unit/test_audit_integration.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
@@ -99,6 +121,11 @@ add_test(NAME backup        COMMAND test_backup)
 add_test(NAME zeroize       COMMAND test_zeroize)
 add_test(NAME audit         COMMAND test_audit)
 add_test(NAME kdr           COMMAND test_kdr)
+add_test(NAME p11           COMMAND test_p11)
+
+# pkcs11-tool 冒烟 + SoftHSMv2 行为对比。没装 OpenSC 时脚本自己 SKIP（退出 0）。
+add_test(NAME p11_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/p11_smoke.sh
+         $<TARGET_FILE:pqchsm-p11>)
 add_test(NAME anchor        COMMAND test_anchor)
 
 # 结构性回归：KDR 铁律是"只进不出"。这条用例扫公共头，确保没人加回读出根密钥的接口。
