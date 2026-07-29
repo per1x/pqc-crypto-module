@@ -18,12 +18,18 @@
 | 2 | OpenSSL 3（AES-256-GCM 包裹、SHA3/KMAC256 派生与哈希链） | ✅ `brew install openssl@3` |
 | 3 | ACVP 最终版向量（**非 round-3**）→ 扁平化黄金向量 | ✅ `vectors/` |
 | 4 | crypto 后端抽象（liboqs ↔ 未来 FPGA 核可替换） | ✅ `include/pqchsm/pqc.h` |
-| 5 | 槽位管理器 / 密钥库 / 包裹 / 恢复 / 审计 | 🚧 见"下一步" |
+| 5 | 槽位管理器 / 密钥库 / 包裹 / 恢复 / 审计 | ✅ 见 `doc/STATUS.md` |
 
 ### 一键跑通
 
 ```bash
-cmake -S . -B build && cmake --build build -j && ctest --test-dir build --output-on-failure
+./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j && ctest --test-dir build --output-on-failure
+```
+
+消毒器构建（内存/未定义行为/数据竞争）：
+
+```bash
+cmake -S . -B build-asan -DCMAKE_C_FLAGS="-fsanitize=address,undefined" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" && cmake --build build-asan -j && ctest --test-dir build-asan
 ```
 
 ---
@@ -81,13 +87,13 @@ ACVP 是嵌套 JSON，在 C 里解析要引 JSON 库、且没有复用价值。�
 pqc-hsm/
 ├── include/pqchsm/     公共头：pqc.h(算法后端抽象) util.h kat.h
 ├── src/
-│   ├── crypto/         pqc_liboqs.c(后端实现) oqs_rng.c(确定性RNG注入)
+│   ├── crypto/         pqc_liboqs.c(后端) oqs_rng.c(确定性RNG) kdf.c(KMAC/SHA3) kdr.c(根密钥桩)
 │   ├── hal/            (Phase 7) 桩加速器 / AXI mmap —— 与真 PL 二选一
-│   ├── slot/           槽位管理器：slot/token 模型、生命周期状态机、PIN/ACL
-│   ├── store/          密钥库：密文持久化、元数据、原子写
-│   ├── backup/         wrap/unwrap、Shamir M-of-N、恢复仪式
-│   ├── audit/          append-only 哈希链日志
-│   └── util/           hex、安全清零、KAT 解析
+│   ├── slot/           fsm.c(状态机) slot.c(主体) meta.c(元数据KMAC) persist.c(槽位↔密文)
+│   ├── store/          wrap.c(AES-GCM 包裹) keystore.c(密钥库文件、原子写)
+│   ├── backup/         shamir.c(GF(256) 门限) backup.c(RMK→BEK 备份恢复)
+│   ├── audit/          audit.c —— append-only 哈希链日志
+│   └── util/           hex、安全清零/分配、KAT 解析
 ├── tests/
 │   ├── unit/           各模块单测
 │   └── kat/            ACVP 黄金向量回归

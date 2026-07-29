@@ -5,6 +5,8 @@
 #include "pqchsm/util.h"
 #include "pqchsm/wrap.h"
 #include "../slot/persist.h"
+#include "../slot/slot_internal.h"
+#include "pqchsm/audit.h"
 
 #include <fcntl.h>
 #include <openssl/rand.h>
@@ -207,6 +209,8 @@ out:
 	pqc_secure_zero(kek, sizeof(kek));
 	pqc_secure_zero(fkey, sizeof(fkey));
 	pqc_secure_zero(salt, sizeof(salt));
+	/* 每次 save 都换新 KEK，等价于一次 KEK 轮换（§8.1） */
+	slot_audit(tok, AUDIT_OP_KEK_ROTATE, HSM_ROLE_PUBLIC, 0, st, "keystore-save");
 	return st;
 }
 

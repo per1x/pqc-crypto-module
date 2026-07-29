@@ -200,6 +200,13 @@ hsm_status_t hsm_slot_zeroize_forced(hsm_token_t *tok, hsm_slot_id_t slot);
 /* 解锁并重置 User PIN 失败计数；恢复到锁定前的状态。需 SO。 */
 hsm_status_t hsm_slot_unlock(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t slot);
 
+/* ---- 审计（§8.6）-------------------------------------------------------- */
+/* 挂接 append-only 哈希链日志。挂上之后所有敏感操作自动落审计；
+ * log 的生命周期由调用方管理，传 NULL 解除挂接。
+ * 前向声明避免 slot.h 依赖 audit.h。 */
+struct audit_log;
+void hsm_token_attach_audit(hsm_token_t *tok, struct audit_log *log);
+
 /* ---- 测试用内省接口 ----------------------------------------------------- */
 /* 直接驱动状态机（绕过 ACL），供 test_slot_fsm 做全状态 × 全事件穷举。
  * 只在测试里用；正式路径一律走上面的操作函数。 */

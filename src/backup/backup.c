@@ -5,6 +5,8 @@
 #include "pqchsm/util.h"
 #include "pqchsm/wrap.h"
 #include "../slot/persist.h"
+#include "../slot/slot_internal.h"
+#include "pqchsm/audit.h"
 
 #include <fcntl.h>
 #include <openssl/rand.h>
@@ -181,6 +183,8 @@ out:
 	pqc_secure_zero(bek, sizeof(bek));
 	pqc_secure_zero(fkey, sizeof(fkey));
 	pqc_secure_zero(salt, sizeof(salt));
+	/* §8.6：备份导出是最敏感的操作之一，成功失败都要留痕 */
+	slot_audit(tok, AUDIT_OP_BACKUP_EXPORT, HSM_ROLE_SO, 0, st, path);
 	return st;
 }
 
@@ -307,5 +311,7 @@ out:
 	pqc_secure_zero(rmk, sizeof(rmk));
 	pqc_secure_zero(bek, sizeof(bek));
 	pqc_secure_zero(fkey, sizeof(fkey));
+	/* 恢复仪式：谁、何时、恢复了哪个库、成功与否（§8.4 全程审计） */
+	slot_audit(tok, AUDIT_OP_RESTORE, HSM_ROLE_SO, 0, st, path);
 	return st;
 }

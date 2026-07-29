@@ -31,6 +31,7 @@ add_library(pqchsm
   src/crypto/oqs_rng.c
   src/crypto/kdf.c
   src/crypto/kdr.c
+  src/audit/audit.c
   src/backup/shamir.c
   src/backup/backup.c
   src/store/wrap.c
@@ -74,6 +75,7 @@ pqchsm_test(test_keystore  tests/unit/test_keystore.c)
 pqchsm_test(test_shamir    tests/unit/test_shamir.c)
 pqchsm_test(test_backup    tests/unit/test_backup.c)
 pqchsm_test(test_zeroize   tests/unit/test_zeroize.c)
+pqchsm_test(test_audit_integration tests/unit/test_audit_integration.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
@@ -91,6 +93,7 @@ add_test(NAME keystore      COMMAND test_keystore)
 add_test(NAME shamir        COMMAND test_shamir)
 add_test(NAME backup        COMMAND test_backup)
 add_test(NAME zeroize       COMMAND test_zeroize)
+add_test(NAME audit_integration COMMAND test_audit_integration)
 
 # 每类 ACVP 向量一个 ctest 用例，失败时一眼看出是哪一类
 foreach(v mlkem_keygen mlkem_encaps mlkem_decaps mldsa_keygen mldsa_siggen mldsa_sigver)

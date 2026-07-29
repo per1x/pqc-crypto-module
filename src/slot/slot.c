@@ -12,6 +12,7 @@
 #include "pqchsm/slot.h"
 
 #include "slot_internal.h"
+#include "pqchsm/audit.h"
 #include "pqchsm/kdf.h"
 #include "pqchsm/kdr.h"
 #include "pqchsm/util.h"
@@ -227,6 +228,32 @@ static int valid_pin(const char *pin)
 	return n >= HSM_PIN_MIN_LEN && n <= HSM_PIN_MAX_LEN;
 }
 
+void hsm_token_attach_audit(hsm_token_t *tok, struct audit_log *log)
+{
+	if (!tok) {
+		return;
+	}
+	pthread_mutex_lock(&tok->audit_lock);
+	tok->audit = log;
+	pthread_mutex_unlock(&tok->audit_lock);
+}
+
+void slot_audit(hsm_token_t *tok, int op, hsm_role_t role,
+                hsm_slot_id_t slot, hsm_status_t result, const char *detail)
+{
+	if (!tok) {
+		return;
+	}
+	pthread_mutex_lock(&tok->audit_lock);
+	if (tok->audit) {
+		/* 失败也要落审计（§8.6 明确要求记录 PIN 失败等否定结果）。
+		 * detail 只放算法名/标签这类非敏感短文本。 */
+		(void)audit_append(tok->audit, now_secs(), (audit_op_t)op,
+		                   (uint32_t)role, (uint32_t)slot, (uint32_t)result, detail);
+	}
+	pthread_mutex_unlock(&tok->audit_lock);
+}
+
 /* ---- Token 生命周期 ----------------------------------------------------- */
 
 hsm_token_t *hsm_token_new(size_t n_slots)
@@ -244,6 +271,7 @@ hsm_token_t *hsm_token_new(size_t n_slots)
 		return NULL;
 	}
 	pthread_mutex_init(&tok->tlock, NULL);
+	pthread_mutex_init(&tok->audit_lock, NULL);
 	tok->n_slots = n_slots;
 	for (size_t i = 0; i < n_slots; i++) {
 		slot_t *s = &tok->slots[i];
@@ -278,6 +306,7 @@ void hsm_token_free(hsm_token_t *tok)
 		free(tok->slots);
 	}
 	pthread_mutex_destroy(&tok->tlock);
+	pthread_mutex_destroy(&tok->audit_lock);
 	pqc_secure_zero(tok, sizeof(*tok));
 	free(tok);
 }
@@ -392,6 +421,7 @@ hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t id,
 	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
+	slot_audit(tok, AUDIT_OP_INIT_TOKEN, HSM_ROLE_SO, id, st, label);
 	return st;
 }
 
@@ -429,6 +459,7 @@ hsm_status_t hsm_slot_set_user_pin(hsm_token_t *tok, hsm_session_t sess, const c
 	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
+	slot_audit(tok, AUDIT_OP_UNLOCK, HSM_ROLE_SO, id, st, NULL);
 	return st;
 }
 
@@ -568,6 +599,10 @@ out:
 	if (login_ok) {
 		set_session_role(tok, sess, role);   /* 放掉槽位锁后再动会话表，保持锁序 */
 	}
+	/* 成功/失败/锁定三种结果分别落审计（§8.6） */
+	slot_audit(tok, login_ok ? AUDIT_OP_LOGIN
+	                : (st == HSM_ERR_PIN_LOCKED ? AUDIT_OP_LOCKOUT : AUDIT_OP_LOGIN_FAIL),
+	           role, id, st, role == HSM_ROLE_SO ? "SO" : "User");
 	return st;
 }
 
@@ -686,6 +721,11 @@ static hsm_status_t create_object(hsm_token_t *tok, hsm_session_t sess,
 	}
 out:
 	SUNLOCK(s);
+	{
+		const pqc_alg_info_t *ai = pqc_alg_info(alg);
+		slot_audit(tok, ev == SLOT_EV_GENERATE ? AUDIT_OP_GENERATE : AUDIT_OP_LOAD,
+		           HSM_ROLE_USER, id, st, ai ? ai->name : "?");
+	}
 	return st;
 }
 
@@ -862,6 +902,7 @@ hsm_status_t hsm_object_sign(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t 
 		st = end_use(s, tmp, tmp_len, op);
 	}
 	SUNLOCK(s);
+	slot_audit(tok, AUDIT_OP_SIGN, HSM_ROLE_USER, id, st, NULL);
 	return st;
 }
 
@@ -902,6 +943,7 @@ hsm_status_t hsm_object_decaps(hsm_token_t *tok, hsm_session_t sess, hsm_handle_
 		st = end_use(s, tmp, tmp_len, op);
 	}
 	SUNLOCK(s);
+	slot_audit(tok, AUDIT_OP_DECAPS, HSM_ROLE_USER, id, st, NULL);
 	return st;
 }
 
@@ -933,6 +975,7 @@ hsm_status_t hsm_object_destroy(hsm_token_t *tok, hsm_session_t sess, hsm_handle
 	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
+	slot_audit(tok, AUDIT_OP_DESTROY, HSM_ROLE_USER, id, st, NULL);
 	return st;
 }
 
@@ -979,6 +1022,7 @@ hsm_status_t hsm_slot_zeroize(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_
 	if (st == HSM_OK) {
 		drop_sessions_on_slot(tok, id);   /* 清零后登录态一并失效 */
 	}
+	slot_audit(tok, AUDIT_OP_ZEROIZE, HSM_ROLE_SO, id, st, "so");
 	return st;
 }
 
@@ -994,6 +1038,7 @@ hsm_status_t hsm_slot_zeroize_forced(hsm_token_t *tok, hsm_slot_id_t id)
 	if (st == HSM_OK) {
 		drop_sessions_on_slot(tok, id);
 	}
+	slot_audit(tok, AUDIT_OP_ZEROIZE, HSM_ROLE_PUBLIC, id, st, "forced");
 	return st;
 }
 
