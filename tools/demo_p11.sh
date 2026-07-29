@@ -3,6 +3,16 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODULE="${1:-$ROOT/build/pqchsm-pkcs11.dylib}"
+
+# ASan 编出来的 .dylib 没法被普通进程 dlopen：macOS 会以
+# "Sanitizer load violates platform policy" 拒绝加载 asan 运行时。
+# 这不是本项目的问题，也修不了 —— 如实 SKIP，别让它伪装成失败。
+# （C 侧的 test_p11 是**整个进程**都带 ASan 编的，所以它照跑不误。）
+if command -v otool >/dev/null 2>&1 && otool -L "$MODULE" 2>/dev/null | grep -q asan; then
+  echo "SKIP: $MODULE 带 ASan，外部进程无法 dlopen（macOS 平台策略）"
+  exit 0
+fi
+
 [ -f "$MODULE" ] || { echo "SKIP: 没有 $MODULE"; exit 0; }
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT

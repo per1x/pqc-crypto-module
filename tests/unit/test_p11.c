@@ -483,8 +483,11 @@ int main(void)
 		 * liboqs 的 keypair_from_seed，看公钥是不是同一串字节。 */
 		CK_SESSION_HANDLE s4 = 0;
 		/* C_InitToken 要求该槽位上没有打开的会话 —— 所以先 init 再开会话 */
+		/* pLabel 按规范是**定长 32 字节空格填充、不带 NUL** —— 传短字符串
+		 * 会让模块读越界（ASan 抓到过一次）。这里照规范补齐。 */
 		CKCHECK(F->C_InitToken(3, (CK_UTF8CHAR_PTR)"12345678", 8,
-		                       (CK_UTF8CHAR_PTR)"seedtok"), CKR_OK);
+		                       (CK_UTF8CHAR_PTR)"seedtok                         "),
+		        CKR_OK);
 		CKCHECK(F->C_OpenSession(3, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL, NULL, &s4),
 		        CKR_OK);
 		CKCHECK(F->C_Login(s4, CKU_SO, (CK_UTF8CHAR_PTR)"12345678", 8), CKR_OK);
