@@ -13,3 +13,4 @@ vectors/*.kat
 vectors/rtl/
 
 .DS_Store
+syn/rpt/
