@@ -1,3 +1,5 @@
+**English** · [中文](pkcs11.zh-CN.md)
+
 # PKCS#11 interface
 
 The module builds as `pqchsm-pkcs11.dylib` / `.so`, a PKCS#11 v3.2 provider exposing

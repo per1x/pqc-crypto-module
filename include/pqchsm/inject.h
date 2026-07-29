@@ -50,9 +50,8 @@ hsm_status_t hsm_inject_build(pqc_alg_t kem_alg,
  * kem_sess / kem_handle  指向设备的注入钥（需 User 会话，用途含 DECAP）
  * target_sess            指向要装载的目标槽位（需 User 会话）
  *
- * 目标槽位为空时直接装载；已装载时**要求其策略位带 SLOT_POLICY_INJECTABLE**
- * ，否则返回 HSM_ERR_POLICY —— 不能靠注入无声顶掉一把
- * 本来不允许被替换的密钥。 */
+ * 目标槽位为空时直接装载；已装载时**要求其策略位带 SLOT_POLICY_INJECTABLE**，
+ * 否则返回 HSM_ERR_POLICY —— 不能靠注入无声顶掉一把本来不允许被替换的密钥。 */
 hsm_status_t hsm_inject_apply(hsm_token_t *tok,
                               hsm_session_t kem_sess, hsm_handle_t kem_handle,
                               hsm_session_t target_sess,

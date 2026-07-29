@@ -1,3 +1,5 @@
+**English** · [中文](README.zh-CN.md)
+
 # pqc-crypto-module
 
 A post-quantum cryptographic module prototype: key storage, slot management, backup
@@ -147,8 +149,8 @@ transport reports "unsupported" rather than silently substituting software.
 
 | Document | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Layering, key hierarchy, keystore format, audit chain, hardware abstraction, key injection |
-| [docs/pkcs11.md](docs/pkcs11.md) | Mechanisms, object model, vendor attributes, key import, KEM operations, configuration |
+| [architecture.md](docs/architecture.md) · [中文](docs/architecture.zh-CN.md) | Layering, key hierarchy, keystore format, audit chain, hardware abstraction, key injection |
+| [pkcs11.md](docs/pkcs11.md) · [中文](docs/pkcs11.zh-CN.md) | Mechanisms, object model, vendor attributes, key import, KEM operations, configuration |
 | [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
 | [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
 

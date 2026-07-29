@@ -72,7 +72,7 @@ typedef enum {
 /* 纯函数形式的转移表：非法转移返回 SLOT_ST_INVALID。
  * 所有真实操作都必须经过它，这样 test_slot_fsm 的穷举才有意义。
  *
- * 注意 SLOT_EV_SO_UNLOCK：的图画的是"解锁→回已装载"，但若锁定发生在
+ * 注意 SLOT_EV_SO_UNLOCK：直观上是"解锁→回已装载"，但若锁定发生在
  * 空槽位上，回到"已装载"就是在谎报槽位有密钥。因此本实现解锁后**恢复到
  * 锁定前的状态**，该状态由 slot_fsm_unlock_target() 给出。 */
 slot_state_t slot_fsm_next(slot_state_t cur, slot_event_t ev);

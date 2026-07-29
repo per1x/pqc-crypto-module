@@ -1,6 +1,6 @@
 /* pqchsm/wrap.h —— KEK 密钥包裹
  *
- * blob 格式（与 的「版本‖算法ID‖元数据‖nonce‖密文‖tag」对应）：
+ * blob 格式（版本‖算法ID‖元数据‖nonce‖密文‖tag）：
  *
  *   偏移  长度  字段
  *   0     4     magic  "PWRP"
@@ -59,7 +59,7 @@ int pqc_unwrap(const uint8_t *kek, size_t kek_len,
                const uint8_t *blob, size_t blob_len,
                uint8_t *pt, size_t cap, size_t *pt_len);
 
-/* 由 KDR 派生存储主密钥 KEK）。
+/* 由 KDR 派生存储主密钥 KEK。
  * KEK 每次开机现场派生、不落盘；salt 存在密钥库头部。 */
 int pqc_kek_derive(const uint8_t *salt, size_t salt_len, uint8_t kek[PQC_KEK_LEN]);
 

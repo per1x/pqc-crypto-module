@@ -1,3 +1,5 @@
+**English** · [中文](README.zh-CN.md)
+
 # Hardware abstraction layer
 
 This directory implements the seam between the cryptographic core and whatever actually

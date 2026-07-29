@@ -1498,7 +1498,7 @@ out:
  * 常规 HSM 的 C_CreateObject 允许灌一把明文私钥进去。本项目底下的槽位管理器
  * **根本没有这条通路**：include/pqchsm/slot.h 里不存在任何"把 sk 字节装进槽位"
  * 的入口，只有 hsm_slot_generate（内部生成）与 hsm_slot_load_seed（由种子展开）。
- * 这是 的设计结论，不是这一层能绕过的，也不该绕过。
+ * 这是槽位管理器的设计结论，不是这一层能绕过的，也不该绕过。
  *
  * 于是：
  *   CKA_SEED  → hsm_slot_load_seed，导入成功

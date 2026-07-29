@@ -114,7 +114,7 @@ target_include_directories(pqchsm-p11 PRIVATE
 target_link_libraries(pqchsm-p11 PRIVATE pqchsm)
 set_target_properties(pqchsm-p11 PROPERTIES PREFIX "" OUTPUT_NAME "pqchsm-pkcs11")
 
-# ---- 命令接口：daemon 与 CLI------------------------------
+# ---- 命令接口：daemon 与 CLI ------------------------------------------------
 add_executable(pqchsmd cli/pqchsmd.c)
 target_link_libraries(pqchsmd PRIVATE pqchsm)
 add_executable(pqchsm-admin cli/pqchsm_admin.c)
@@ -243,7 +243,7 @@ add_test(NAME p11_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/p11_smoke.sh
 add_test(NAME anchor        COMMAND test_anchor)
 
 # 结构性回归：KDR 铁律是"只进不出"。这条用例扫公共头，确保没人加回读出根密钥的接口。
-# 与 的"地址译码上物理不存在读回路径"是同一句话在软件阶段的实现。
+# 这与硬件上"地址译码层面不存在读回路径"是同一条约束在软件阶段的对应实现。
 if(Python3_Interpreter_FOUND)
   add_test(NAME kdr_no_readback COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_readback.py

@@ -1,3 +1,5 @@
+**English** · [中文](README.zh-CN.md)
+
 # Synthesis
 
 Out-of-context synthesis scripts producing utilisation and timing reports.

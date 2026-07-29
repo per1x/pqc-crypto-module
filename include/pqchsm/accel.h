@@ -1,7 +1,7 @@
 /* pqchsm/accel.h —— 硬件加速器抽象
  *
  * 【这一层解决的问题】
- * 的原话：**先把 AXI 寄存器表定死，然后写一个 C 实现的"假加速器"**，
+ * 做法是：**先把 AXI 寄存器表定死，再写一个 C 实现的"假加速器"**，
  * 它暴露与真 PL 完全相同的寄存器语义（写 CTRL.START → 轮询 STATUS.DONE →
  * 读结果），内部调 liboqs 完成实际运算。真板到手后换成 /dev/mem + mmap 即可，
  * **上层槽位管理器、密钥库、PKCS#11 一行不改**。
@@ -88,7 +88,7 @@ typedef struct accel_transport {
 const accel_transport_t *accel_transport_stub(void);
 
 /* Verilator 仿真：驱动真 RTL。**目前只实现 NTT 与 Keccak-f[1600] 模式**，
- * 其余模式置 ERR —— 完整的 ML-KEM/ML-DSA 核属于–4。
+ * 其余模式置 ERR —— 完整的 ML-KEM/ML-DSA 核属于后续阶段的工作。
  * 没编 Verilator 支持时返回 NULL。 */
 const accel_transport_t *accel_transport_verilator(void);
 

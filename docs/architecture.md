@@ -1,3 +1,5 @@
+**English** · [中文](architecture.zh-CN.md)
+
 # Architecture
 
 This document describes how the module is structured and why the boundaries fall where

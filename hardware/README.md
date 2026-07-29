@@ -1,3 +1,5 @@
+**English** · [中文](README.zh-CN.md)
+
 # Hardware
 
 RTL sources, verification, the reference model that produces golden vectors, and
