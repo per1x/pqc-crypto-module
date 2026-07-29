@@ -6,7 +6,8 @@
  * blob = meta_wire(92 B, 明文) ‖ wrap(KEK, AAD = meta_wire, 秘密载荷)
  *
  * 秘密载荷（明文布局，只在 KEK 包裹内部存在）：
- *   pin_flags u8 | so_salt(16) | so_verifier(32) | user_salt(16) | user_verifier(32)
+ *   pin_flags u8 | pin_key(32) | so_salt(16) | so_verifier(32)
+ *                | user_salt(16) | user_verifier(32)
  *   pre_lock u32 | key_kind u8 | pk_len u32 | pk | key_len u32 | key
  *   key_kind: 0 = 无密钥, 1 = 完整私钥, 2 = 种子（§7.6）
  *
@@ -21,7 +22,7 @@
 
 #include <string.h>
 
-#define PAYLOAD_FIXED (1 + PIN_SALT_LEN + VERIFIER_LEN + PIN_SALT_LEN + VERIFIER_LEN + 4 + 1 + 4 + 4)
+#define PAYLOAD_FIXED (1 + 32 + PIN_SALT_LEN + VERIFIER_LEN + PIN_SALT_LEN + VERIFIER_LEN + 4 + 1 + 4 + 4)
 #define PAYLOAD_MAX   (PAYLOAD_FIXED + 2592 + 4896)   /* 最大公钥 + 最大私钥 */
 
 size_t hsm_slot_blob_max(void)
@@ -65,6 +66,8 @@ hsm_status_t slot_serialize_locked(slot_t *s, const uint8_t *kek, size_t kek_len
 	}
 	uint8_t *p = payload;
 	*p++ = (uint8_t)((s->has_so_pin ? 1 : 0) | (s->has_user_pin ? 2 : 0));
+	/* pin_key 必须跟着走：PIN 验证值由它派生，不带上就没法跨设备恢复登录态 */
+	memcpy(p, s->pin_key, 32);                 p += 32;
 	memcpy(p, s->so_salt, PIN_SALT_LEN);       p += PIN_SALT_LEN;
 	memcpy(p, s->so_verifier, VERIFIER_LEN);   p += VERIFIER_LEN;
 	memcpy(p, s->user_salt, PIN_SALT_LEN);     p += PIN_SALT_LEN;
@@ -141,6 +144,7 @@ hsm_status_t slot_deserialize_locked(slot_t *s, const uint8_t *kek, size_t kek_l
 		const uint8_t *p = payload;
 		const uint8_t *end = payload + payload_len;
 		uint8_t pin_flags = *p++;
+		const uint8_t *pin_key = p;        p += 32;
 		const uint8_t *so_salt = p;        p += PIN_SALT_LEN;
 		const uint8_t *so_ver  = p;        p += VERIFIER_LEN;
 		const uint8_t *user_salt = p;      p += PIN_SALT_LEN;
@@ -211,6 +215,7 @@ hsm_status_t slot_deserialize_locked(slot_t *s, const uint8_t *kek, size_t kek_l
 			s->seed_len = key_len;
 			s->has_seed = 1;
 		}
+		memcpy(s->pin_key, pin_key, 32);
 		s->has_so_pin   = (pin_flags & 1) ? 1 : 0;
 		s->has_user_pin = (pin_flags & 2) ? 1 : 0;
 		memcpy(s->so_salt, so_salt, PIN_SALT_LEN);

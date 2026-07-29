@@ -12,6 +12,7 @@
 #include "pqchsm/slot.h"
 
 #include "slot_internal.h"
+#include "pqchsm/kdf.h"
 #include "pqchsm/kdr.h"
 #include "pqchsm/util.h"
 
@@ -94,6 +95,7 @@ void slot_wipe_key_material(slot_t *s)
 
 void slot_wipe_pins(slot_t *s)
 {
+	pqc_secure_zero(s->pin_key, sizeof(s->pin_key));
 	pqc_secure_zero(s->so_salt, sizeof(s->so_salt));
 	pqc_secure_zero(s->so_verifier, sizeof(s->so_verifier));
 	pqc_secure_zero(s->user_salt, sizeof(s->user_salt));
@@ -186,10 +188,12 @@ static hsm_status_t validate_usage(pqc_alg_t alg, uint32_t usage)
 	return (usage & ~allowed) ? HSM_ERR_USAGE_DENIED : HSM_OK;
 }
 
-/* PIN 验证值 = KDF(KDR, slot_id ‖ role ‖ salt ‖ pin)。
- * 不存明文、不存可离线爆破的哈希 —— 没有 KDR 就无法离线枚举 PIN。 */
-static int pin_verifier(uint32_t slot_id, hsm_role_t role, const uint8_t *salt,
-                        const char *pin, uint8_t out[VERIFIER_LEN])
+/* PIN 验证值 = KMAC256(pin_key, slot_id ‖ role ‖ salt ‖ pin)。
+ * 不存明文、不存可离线爆破的哈希：pin_key 是每槽位随机的 32 字节，
+ * 且只存在于 KEK/BEK 包裹内部，攻击者拿到密钥库文件也无法离线枚举 PIN。
+ * （早先的版本直接用 KDR 派生，结果是跨设备恢复后谁都登录不上 —— 见 persist.c） */
+static int pin_verifier(const uint8_t pin_key[32], uint32_t slot_id, hsm_role_t role,
+                        const uint8_t *salt, const char *pin, uint8_t out[VERIFIER_LEN])
 {
 	uint8_t buf[4 + 4 + PIN_SALT_LEN + HSM_PIN_MAX_LEN];
 	size_t pin_len = strlen(pin);
@@ -209,7 +213,7 @@ static int pin_verifier(uint32_t slot_id, hsm_role_t role, const uint8_t *salt,
 	memcpy(buf + n, pin, pin_len);
 	n += pin_len;
 
-	int rc = pqc_kdr_derive("pqc-hsm/pin-verifier", buf, n, out, VERIFIER_LEN);
+	int rc = pqc_kmac256(pin_key, 32, buf, n, "pqc-hsm/pin-verifier", out, VERIFIER_LEN);
 	pqc_secure_zero(buf, sizeof(buf));
 	return rc;
 }
@@ -370,8 +374,11 @@ hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t id,
 	if (st != HSM_OK) {
 		goto out;
 	}
-	if (RAND_bytes(s->so_salt, PIN_SALT_LEN) != 1 ||
-	    pin_verifier(s->meta.slot_id, HSM_ROLE_SO, s->so_salt, so_pin, s->so_verifier) != 0) {
+	/* init_token 时给这个槽位生成一把全新的 PIN 密钥 */
+	if (RAND_bytes(s->pin_key, sizeof(s->pin_key)) != 1 ||
+	    RAND_bytes(s->so_salt, PIN_SALT_LEN) != 1 ||
+	    pin_verifier(s->pin_key, s->meta.slot_id, HSM_ROLE_SO, s->so_salt,
+	                 so_pin, s->so_verifier) != 0) {
 		st = HSM_ERR_CRYPTO;
 		goto out;
 	}
@@ -412,7 +419,7 @@ hsm_status_t hsm_slot_set_user_pin(hsm_token_t *tok, hsm_session_t sess, const c
 		goto out;
 	}
 	if (RAND_bytes(s->user_salt, PIN_SALT_LEN) != 1 ||
-	    pin_verifier(s->meta.slot_id, HSM_ROLE_USER, s->user_salt, user_pin,
+	    pin_verifier(s->pin_key, s->meta.slot_id, HSM_ROLE_USER, s->user_salt, user_pin,
 	                 s->user_verifier) != 0) {
 		st = HSM_ERR_CRYPTO;
 		goto out;
@@ -520,7 +527,7 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 			goto out;
 		}
 		uint8_t got[VERIFIER_LEN];
-		if (pin_verifier(s->meta.slot_id, role, salt, pin, got) != 0) {
+		if (pin_verifier(s->pin_key, s->meta.slot_id, role, salt, pin, got) != 0) {
 			st = HSM_ERR_CRYPTO;
 			goto out;
 		}

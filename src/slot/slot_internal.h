@@ -29,6 +29,11 @@ typedef struct {
 	uint8_t      meta_tag[SLOT_META_TAG_LEN];
 	slot_state_t pre_lock;
 
+	/* 每槽位一把随机 PIN 密钥：PIN 验证值由它派生，而不是直接由 KDR 派生。
+	 * 原因见 persist.c ——  KDR 派生的验证值无法跨设备恢复，会让恢复到新设备的
+	 * token 永远登录不上。pin_key 本身放在 KEK/BEK 包裹内，因此离线拿到
+	 * 密钥库文件的攻击者仍然无法爆破 PIN。 */
+	uint8_t pin_key[32];
 	uint8_t so_salt[PIN_SALT_LEN],   so_verifier[VERIFIER_LEN];
 	uint8_t user_salt[PIN_SALT_LEN], user_verifier[VERIFIER_LEN];
 	int     has_so_pin, has_user_pin;
