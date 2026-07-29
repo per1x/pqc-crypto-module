@@ -1,21 +1,38 @@
 # cocotb 对拍
 #
-# ⚠️ 注意：**cocotb 不支持 Vivado xsim**（官方支持列表里没有它）。
-# 所以工程分两层：
-#   自研纯 RTL（本目录）      → Icarus/Verilator + cocotb，Python 直接读黄金向量
-#   含 Vivado IP 的顶层       → xsim + SystemVerilog testbench（另建目录）
+# cocotb 不支持 Vivado xsim（官方支持列表里没有它），所以工程分两层：
+#   厂商中立的纯 RTL（本目录）  → Icarus/Verilator + cocotb，Python 直接读黄金向量
+#   含厂商 IP 的顶层            → 该厂商自己的仿真器与 SystemVerilog testbench
 # 这个分层的副作用是好的：它强迫算法核写成不依赖厂商 IP 的纯 RTL。
 
 SIM           ?= icarus
 TOPLEVEL_LANG ?= verilog
-RTL           := $(PWD)/../../rtl/mlkem
+RTL_MLKEM     := $(PWD)/../../rtl/mlkem
+RTL_MLDSA     := $(PWD)/../../rtl/mldsa
 RTL_KECCAK    := $(PWD)/../../rtl/keccak
+RTL_BUS       := $(PWD)/../../rtl/bus
+RTL_TRNG      := $(PWD)/../../rtl/trng
 
 # 用法：make MODULE=test_ops TOPLEVEL=mont_reduce
 MODULE   ?= test_ops
 TOPLEVEL ?= mont_reduce
 
-VERILOG_SOURCES = $(RTL)/mont_reduce.v $(RTL)/butterfly.v $(RTL)/ntt_core.v \
-                  $(RTL_KECCAK)/keccak_f1600.v
+VERILOG_SOURCES = \
+  $(RTL_MLKEM)/mont_reduce.v \
+  $(RTL_MLKEM)/butterfly.v \
+  $(RTL_MLKEM)/ntt_core.v \
+  $(RTL_MLKEM)/basemul.v \
+  $(RTL_MLKEM)/compress.v \
+  $(RTL_MLKEM)/sample.v \
+  $(RTL_MLKEM)/pack.v \
+  $(RTL_KECCAK)/keccak_f1600.v \
+  $(PWD)/tb_mlkem_units.v
+
+# 参数化模块（例如 mlkem_compress 的 D）用 PARAM_D 传进来，
+# 由 Icarus 的 -P 覆盖顶层参数，RTL 里不留仅供测试的分支。
+ifneq ($(PARAM_D),)
+COMPILE_ARGS += -P$(TOPLEVEL).D=$(PARAM_D)
+export PARAM_D
+endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

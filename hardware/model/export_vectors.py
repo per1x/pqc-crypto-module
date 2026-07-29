@@ -24,8 +24,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from ref_model import (  # noqa: E402
-    MONT, Q, ZETAS, barrett_reduce, ct_butterfly, gs_butterfly, invntt,
-    keccak_f1600, montgomery_reduce, ntt, shake128, shake256,
+    MONT, Q, ZETAS, barrett_reduce, basemul, cbd2, cbd3, compress,
+    ct_butterfly, decompress, encode12, gs_butterfly, invntt, keccak_f1600,
+    montgomery_reduce, ntt, rej_pair, shake128, shake256,
 )
 
 OUT = Path(__file__).resolve().parents[2] / "vectors" / "rtl"
@@ -96,6 +97,87 @@ def export_ntt(rng: random.Random) -> None:
         print(f"  {p.name}: 20 组")
 
 
+def export_basemul(rng: random.Random) -> None:
+    p = OUT / "basemul.hex"
+    with p.open("w") as f:
+        header(f, "NTT 域基乘：(a0+a1x)(b0+b1x) mod (x²−ζ)，Montgomery 域",
+               "a0 a1 b0 b1 zeta r0 r1（均 16bit 有符号）", "同上")
+        for _ in range(1000):
+            a0 = rng.randrange(-Q, Q)
+            a1 = rng.randrange(-Q, Q)
+            b0 = rng.randrange(-Q, Q)
+            b1 = rng.randrange(-Q, Q)
+            z = ZETAS[rng.randrange(len(ZETAS))]
+            r0, r1 = basemul(a0, a1, b0, b1, z)
+            f.write(" ".join(u16(x) for x in (a0, a1, b0, b1, z, r0, r1)) + "\n")
+    print(f"  {p.name}: 1000 条")
+
+
+def export_compress() -> None:
+    """压缩/解压：输入域只有 q 种取值，直接穷举导出而不是抽样"""
+    p = OUT / "compress.hex"
+    with p.open("w") as f:
+        header(f, "Compress_d / Decompress_d（FIPS 203 §4.2.1）",
+               "c d in out：c=0 表示压缩（in 为 [0,q) 的系数），c=1 表示解压",
+               "d 为 2 位十六进制，in/out 均为 4 位十六进制无符号")
+        for d in (1, 4, 5, 10, 11):
+            for x in range(Q):
+                f.write(f"00 {d:02x} {x:04x} {compress(x, d):04x}\n")
+            for y in range(1 << d):
+                f.write(f"01 {d:02x} {y:04x} {decompress(y, d):04x}\n")
+    print(f"  {p.name}: {5 * Q + (2 + 16 + 32 + 1024 + 2048)} 条（穷举）")
+
+
+def export_cbd(rng: random.Random) -> None:
+    p = OUT / "cbd.hex"
+    with p.open("w") as f:
+        header(f, "中心二项分布采样（FIPS 203 Alg 8）",
+               "eta rand coeffs…：eta=2 时 rand 为 8 位十六进制、8 个系数；"
+               "eta=3 时 rand 为 6 位十六进制、4 个系数",
+               "rand 的最低字节对应字节流里最低地址那一字节；系数为 16bit 有符号")
+        for _ in range(500):
+            v = rng.getrandbits(32)
+            f.write(f"02 {v:08x} " + " ".join(u16(x) for x in cbd2(v)) + "\n")
+        for _ in range(500):
+            v = rng.getrandbits(24)
+            f.write(f"03 {v:06x} " + " ".join(u16(x) for x in cbd3(v)) + "\n")
+    print(f"  {p.name}: 1000 条")
+
+
+def export_rej(rng: random.Random) -> None:
+    p = OUT / "rej_pair.hex"
+    with p.open("w") as f:
+        header(f, "SampleNTT 的取候选一步（FIPS 203 Alg 7）",
+               "bytes d1 d2 ok1 ok2：3 字节 → 两个 12 位候选与是否 < q",
+               "bytes 为 6 位十六进制，最低字节对应最低地址；d 为 3 位十六进制")
+        # 覆盖边界：让候选正好落在 q−1 / q / q+1 上
+        cases = []
+        for target in (0, 1, Q - 1, Q, Q + 1, 0xFFF):
+            cases.append(bytes([target & 0xFF, (target >> 8) & 0x0F, 0x00]))
+            cases.append(bytes([0x00, (target & 0x0F) << 4, target >> 4]))
+        cases += [bytes(rng.randrange(256) for _ in range(3)) for _ in range(500)]
+        for b in cases:
+            d1, d2 = rej_pair(b[0], b[1], b[2])
+            v = b[0] | (b[1] << 8) | (b[2] << 16)
+            f.write(f"{v:06x} {d1:03x} {d2:03x} "
+                    f"{1 if d1 < Q else 0} {1 if d2 < Q else 0}\n")
+    print(f"  {p.name}: {len(cases)} 条")
+
+
+def export_encode12(rng: random.Random) -> None:
+    p = OUT / "encode12.hex"
+    with p.open("w") as f:
+        header(f, "ByteEncode12 / ByteDecode12：两个系数 ↔ 3 字节",
+               "c0 c1 bytes：c0/c1 为 16bit 有符号，bytes 为 6 位十六进制",
+               "bytes 的最低字节对应最低地址那一字节")
+        for _ in range(1000):
+            c0 = rng.randrange(-Q, Q)
+            c1 = rng.randrange(-Q, Q)
+            b0, b1, b2 = encode12(c0, c1)
+            f.write(f"{u16(c0)} {u16(c1)} {b0 | (b1 << 8) | (b2 << 16):06x}\n")
+    print(f"  {p.name}: 1000 条")
+
+
 def export_keccak(rng: random.Random) -> None:
     p = OUT / "keccak_perm.hex"
     with p.open("w") as f:
@@ -160,6 +242,11 @@ def main() -> int:
     export_barrett(rng)
     export_butterfly(rng)
     export_ntt(rng)
+    export_basemul(rng)
+    export_compress()
+    export_cbd(rng)
+    export_rej(rng)
+    export_encode12(rng)
     export_keccak(rng)
     export_shake(rng)
     cross_check()

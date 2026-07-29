@@ -109,6 +109,74 @@ def invntt(poly: list[int]) -> list[int]:
     return [fqmul(x, F) for x in a]
 
 
+def basemul(a0: int, a1: int, b0: int, b1: int, zeta: int) -> tuple[int, int]:
+    """NTT 域基乘：(a0 + a1·x)(b0 + b1·x) mod (x² − ζ)，全程 Montgomery 域
+
+    ML-KEM 的 NTT 只做 7 层，变换结果是 128 个一次多项式，所以"逐点乘"
+    实际是每对系数在 Z_q[x]/(x² ∓ ζ) 上的乘法。
+    """
+    r0 = fqmul(fqmul(a1, b1), zeta) + fqmul(a0, b0)
+    r1 = fqmul(a0, b1) + fqmul(a1, b0)
+    return r0, r1
+
+
+def compress(x: int, d: int) -> int:
+    """Compress_d：把系数从 [0, q) 压到 [0, 2^d)
+
+    整数形式 floor(((x << d) + q/2) / q)，与 FIPS 203 的
+    round(2^d/q · x) mod 2^d 等价（等价性由 mlkem_oracle.py 穷举验证）。
+    """
+    u = x % Q
+    return (((u << d) + Q // 2) // Q) & ((1 << d) - 1)
+
+
+def decompress(y: int, d: int) -> int:
+    """Decompress_d：把 [0, 2^d) 的值还原回 [0, q)"""
+    return (Q * y + (1 << (d - 1))) >> d
+
+
+def cbd2(rand: int) -> list[int]:
+    """η = 2 的中心二项分布采样：4 字节 → 8 个系数（位并行写法）"""
+    mask = 0x55555555
+    d = (rand & mask) + ((rand >> 1) & mask)
+    out = []
+    for i in range(8):
+        a = (d >> (4 * i)) & 3
+        b = (d >> (4 * i + 2)) & 3
+        out.append(a - b)
+    return out
+
+
+def cbd3(rand: int) -> list[int]:
+    """η = 3 的中心二项分布采样：3 字节 → 4 个系数（位并行写法）"""
+    mask = 0x00249249
+    d = (rand & mask) + ((rand >> 1) & mask) + ((rand >> 2) & mask)
+    out = []
+    for i in range(4):
+        a = (d >> (6 * i)) & 7
+        b = (d >> (6 * i + 3)) & 7
+        out.append(a - b)
+    return out
+
+
+def rej_pair(b0: int, b1: int, b2: int) -> tuple[int, int]:
+    """SampleNTT 的取候选一步：3 字节 → 两个 12 位候选（是否小于 q 由调用方判）"""
+    d1 = b0 | ((b1 & 0x0F) << 8)
+    d2 = (b1 >> 4) | (b2 << 4)
+    return d1, d2
+
+
+def encode12(c0: int, c1: int) -> tuple[int, int, int]:
+    """ByteEncode12：两个系数（先折回 [0, q)）打进 3 个字节"""
+    t0, t1 = c0 % Q, c1 % Q
+    return (t0 & 0xFF, ((t0 >> 8) | (t1 << 4)) & 0xFF, (t1 >> 4) & 0xFF)
+
+
+def decode12(b0: int, b1: int, b2: int) -> tuple[int, int]:
+    """ByteDecode12：3 个字节还原两个 12 位系数"""
+    return (b0 | ((b1 & 0x0F) << 8), (b1 >> 4) | (b2 << 4))
+
+
 def keccak_f1600(state: list[int]) -> list[int]:
     """Keccak-f[1600]，输入输出都是 25 个 64-bit lane。
 
