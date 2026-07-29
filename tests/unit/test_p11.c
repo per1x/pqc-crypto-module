@@ -329,6 +329,51 @@ int main(void)
 		CKCHECK(F->C_CloseSession(s2), CKR_OK);
 	}
 
+	TCASE("厂商属性：默认可备份，模板可关掉");
+	{
+		#define CKA_PQCHSM_BACKUPABLE   (CKA_VENDOR_DEFINED | 0x01UL)
+		#define CKA_PQCHSM_SEED_STORAGE (CKA_VENDOR_DEFINED | 0x02UL)
+		CK_BBOOL b = CK_FALSE;
+		CK_ATTRIBUTE q = { CKA_PQCHSM_BACKUPABLE, &b, sizeof(b) };
+		CKCHECK(F->C_GetAttributeValue(sess, priv, &q, 1), CKR_OK);
+		CHECK_EQ_INT(b, CK_TRUE);          /* 默认可备份 */
+		q.type = CKA_PQCHSM_SEED_STORAGE;
+		CKCHECK(F->C_GetAttributeValue(sess, priv, &q, 1), CKR_OK);
+		CHECK_EQ_INT(b, CK_FALSE);         /* 默认不用种子存储 */
+
+		/* 换个槽位显式关掉备份 + 打开种子存储 */
+		CK_SESSION_HANDLE s4 = 0;
+		CKCHECK(F->C_OpenSession(2, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL, NULL, &s4),
+		        CKR_OK);
+		CKCHECK(F->C_InitToken(2, (CK_UTF8CHAR_PTR)"12345678", 8, NULL), CKR_OK);
+		CKCHECK(F->C_Login(s4, CKU_SO, (CK_UTF8CHAR_PTR)"12345678", 8), CKR_OK);
+		CKCHECK(F->C_InitPIN(s4, (CK_UTF8CHAR_PTR)"1234abcd", 8), CKR_OK);
+		CKCHECK(F->C_Logout(s4), CKR_OK);
+		CKCHECK(F->C_Login(s4, CKU_USER, (CK_UTF8CHAR_PTR)"1234abcd", 8), CKR_OK);
+		CK_ULONG ps = CKP_ML_DSA_44;
+		CK_BBOOL no = CK_FALSE, yes = CK_TRUE;
+		CK_ATTRIBUTE t4[3] = {
+			mk_ulong(CKA_PARAMETER_SET, &ps),
+			{ CKA_PQCHSM_BACKUPABLE, &no, sizeof(no) },
+			{ CKA_PQCHSM_SEED_STORAGE, &yes, sizeof(yes) },
+		};
+		CK_MECHANISM m4 = { CKM_ML_DSA_KEY_PAIR_GEN, NULL, 0 };
+		CK_OBJECT_HANDLE p4 = 0, v4 = 0;
+		CKCHECK(F->C_GenerateKeyPair(s4, &m4, t4, 3, NULL, 0, &p4, &v4), CKR_OK);
+		q.type = CKA_PQCHSM_BACKUPABLE;
+		CKCHECK(F->C_GetAttributeValue(s4, v4, &q, 1), CKR_OK);
+		CHECK_EQ_INT(b, CK_FALSE);         /* 被模板关掉了 */
+		q.type = CKA_PQCHSM_SEED_STORAGE;
+		CKCHECK(F->C_GetAttributeValue(s4, v4, &q, 1), CKR_OK);
+		CHECK_EQ_INT(b, CK_TRUE);
+		/* 种子存储的密钥照样能签名（用时重展开） */
+		CKCHECK(F->C_SignInit(s4, &(CK_MECHANISM){ CKM_ML_DSA, NULL, 0 }, v4), CKR_OK);
+		siglen = sizeof(sig);
+		CKCHECK(F->C_Sign(s4, msg, sizeof(msg), sig, &siglen), CKR_OK);
+		CHECK_EQ_INT(siglen, 2420);        /* ML-DSA-44 */
+		CKCHECK(F->C_CloseSession(s4), CKR_OK);
+	}
+
 	TCASE("C_DestroyObject 后对象消失");
 	{
 		CKCHECK(F->C_DestroyObject(sess, priv), CKR_OK);

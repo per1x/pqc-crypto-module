@@ -49,6 +49,17 @@
 /* 公钥对象句柄 = 私钥句柄 | 最高位 */
 #define PUB_BIT (1ULL << 63)
 
+/* ---- 厂商自定义属性 --------------------------------------------------------
+ * PKCS#11 **没有**"这把密钥可否被 KEK 包裹备份"这个标准属性：
+ * CKA_EXTRACTABLE 说的是"可否明文导出"，与我们要表达的完全不是一回事
+ * （本模块任何情况下都不导出明文私钥）。所以按规范用 CKA_VENDOR_DEFINED 区段。
+ *
+ * **默认值是"可备份"** —— 一个所有密钥都进不了备份的 token，
+ * 会让 §8.4 的整条恢复链对 PKCS#11 应用完全失效。想要"纯 sealed 密钥"
+ * （如设备身份钥，设备损坏就该跟着消失）就在模板里显式置 CK_FALSE。 */
+#define CKA_PQCHSM_BACKUPABLE   (CKA_VENDOR_DEFINED | 0x01UL)
+#define CKA_PQCHSM_SEED_STORAGE (CKA_VENDOR_DEFINED | 0x02UL)
+
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static hsm_token_t    *g_tok;
 static int             g_init;
@@ -729,6 +740,16 @@ static const CK_ATTRIBUTE *find_attr(CK_ATTRIBUTE_PTR t, CK_ULONG n, CK_ATTRIBUT
 	return NULL;
 }
 
+/* 读模板里的 CK_BBOOL；缺省时返回 dflt */
+static int attr_bool(CK_ATTRIBUTE_PTR t, CK_ULONG n, CK_ATTRIBUTE_TYPE type, int dflt)
+{
+	const CK_ATTRIBUTE *a = find_attr(t, n, type);
+	if (!a || !a->pValue || a->ulValueLen != sizeof(CK_BBOOL)) {
+		return dflt;
+	}
+	return *(CK_BBOOL *)a->pValue != CK_FALSE;
+}
+
 static CK_ULONG attr_ulong(const CK_ATTRIBUTE *a, CK_ULONG dflt)
 {
 	if (!a || !a->pValue || a->ulValueLen != sizeof(CK_ULONG)) {
@@ -773,8 +794,25 @@ CK_DEFINE_FUNCTION(CK_RV, C_GenerateKeyPair)(
 		uint32_t usage = (info->kind == PQC_KIND_SIG)
 		                 ? (uint32_t)KEY_USAGE_SIGN : (uint32_t)KEY_USAGE_DECAP;
 
+		/* 策略位：两个厂商属性都可以放在公钥或私钥模板里 */
+		uint32_t policy = 0;
+		int backupable = attr_bool(pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
+		                           CKA_PQCHSM_BACKUPABLE,
+		                           attr_bool(pPublicKeyTemplate, ulPublicKeyAttributeCount,
+		                                     CKA_PQCHSM_BACKUPABLE, 1));
+		int seed_storage = attr_bool(pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
+		                             CKA_PQCHSM_SEED_STORAGE,
+		                             attr_bool(pPublicKeyTemplate, ulPublicKeyAttributeCount,
+		                                       CKA_PQCHSM_SEED_STORAGE, 0));
+		if (backupable) {
+			policy |= SLOT_POLICY_BACKUPABLE;
+		}
+		if (seed_storage) {
+			policy |= SLOT_POLICY_SEED_STORAGE;
+		}
+
 		hsm_handle_t h = HSM_INVALID_HANDLE;
-		hsm_status_t st = hsm_slot_generate(g_tok, s->sess, alg, usage, 0, &h);
+		hsm_status_t st = hsm_slot_generate(g_tok, s->sess, alg, usage, policy, &h);
 		if (st != HSM_OK) {
 			rv = map_status(st);
 			goto out;
@@ -1022,6 +1060,16 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetAttributeValue)(CK_SESSION_HANDLE hSession,
 			}
 			case CKA_ENCAPSULATE: {
 				CK_BBOOL b = (is_pub && (m.usage & KEY_USAGE_DECAP)) ? CK_TRUE : CK_FALSE;
+				r = fill_attr(a, &b, sizeof(b));
+				break;
+			}
+			case CKA_PQCHSM_BACKUPABLE: {
+				CK_BBOOL b = (m.policy & SLOT_POLICY_BACKUPABLE) ? CK_TRUE : CK_FALSE;
+				r = fill_attr(a, &b, sizeof(b));
+				break;
+			}
+			case CKA_PQCHSM_SEED_STORAGE: {
+				CK_BBOOL b = (m.policy & SLOT_POLICY_SEED_STORAGE) ? CK_TRUE : CK_FALSE;
 				r = fill_attr(a, &b, sizeof(b));
 				break;
 			}

@@ -64,6 +64,8 @@ set_target_properties(pqchsm-p11 PROPERTIES PREFIX "" OUTPUT_NAME "pqchsm-pkcs11
 # ---- 命令接口：daemon 与 CLI（Phase 5 第 3 项）------------------------------
 add_executable(pqchsmd cli/pqchsmd.c)
 target_link_libraries(pqchsmd PRIVATE pqchsm)
+add_executable(pqchsm-admin cli/pqchsm_admin.c)
+target_link_libraries(pqchsm-admin PRIVATE pqchsm)
 add_executable(pqchsm-cli cli/pqchsm_cli.c)
 target_link_libraries(pqchsm-cli PRIVATE pqchsm)
 
@@ -124,6 +126,7 @@ add_dependencies(test_p11 pqchsm-p11)
 pqchsm_test(test_anchor    tests/unit/test_anchor.c)
 pqchsm_test(test_audit_integration tests/unit/test_audit_integration.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
+pqchsm_test(test_e2e       tests/integration/test_e2e.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
 add_test(NAME util          COMMAND test_util)
@@ -155,6 +158,11 @@ add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
          ${CMAKE_CURRENT_BINARY_DIR})
 # Python / Java 的 provider demo（缺 PyKCS11 或 JDK22+ 时自动 SKIP）
+add_test(NAME e2e           COMMAND test_e2e)
+
+add_test(NAME e2e_p11 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/e2e_p11.sh
+         $<TARGET_FILE:pqchsm-p11>)
+
 add_test(NAME p11_demos COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/demo_p11.sh
          $<TARGET_FILE:pqchsm-p11>)
 
