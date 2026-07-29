@@ -25,8 +25,15 @@ VERILOG_SOURCES = \
   $(RTL_MLKEM)/compress.v \
   $(RTL_MLKEM)/sample.v \
   $(RTL_MLKEM)/pack.v \
+  $(RTL_MLDSA)/mont_reduce.v \
+  $(RTL_MLDSA)/reduce.v \
+  $(RTL_MLDSA)/butterfly.v \
+  $(RTL_MLDSA)/ntt_core.v \
+  $(RTL_MLDSA)/rounding.v \
+  $(RTL_MLDSA)/sample.v \
   $(RTL_KECCAK)/keccak_f1600.v \
-  $(PWD)/tb_mlkem_units.v
+  $(PWD)/tb_mlkem_units.v \
+  $(PWD)/tb_mldsa_units.v
 
 # 参数化模块（例如 mlkem_compress 的 D）用 PARAM_D 传进来，
 # 由 Icarus 的 -P 覆盖顶层参数，RTL 里不留仅供测试的分支。

@@ -10,6 +10,8 @@ hardware/
 ├── rtl/
 │   ├── mlkem/      mont_reduce.v、butterfly.v、ntt_core.v、basemul.v、
 │   │               compress.v、sample.v、pack.v
+│   ├── mldsa/      mont_reduce.v、reduce.v、butterfly.v、ntt_core.v、
+│   │               rounding.v、sample.v
 │   └── keccak/     keccak_f1600.v
 ├── tb/cocotb/      cocotb 测试台、仅供仿真的汇总顶层、Makefile
 ├── model/          Python 参考模型、向量导出、独立预言机
@@ -32,7 +34,21 @@ hardware/
 | `mlkem_rej_pair` | 组合逻辑，取候选 | — |
 | `mlkem_rej_uniform` | 收集器，每周期吃一组 3 字节 | 约 430 / 个多项式 |
 | `mlkem_encode12`、`mlkem_decode12` | 组合逻辑 | — |
+| `mldsa_mont_reduce`、`mldsa_reduce32`、`mldsa_caddq` | 组合逻辑 | — |
+| `mldsa_butterfly_ct`、`mldsa_butterfly_gs` | 组合逻辑 | — |
+| `mldsa_ntt_core` | 单蝶形单元，ML-DSA 的完整 8 层 NTT | 正 1025 / 逆 1281 |
+| `mldsa_power2round`、`mldsa_decompose` | 组合逻辑，参数集由 `MODE` 选 | — |
+| `mldsa_make_hint`、`mldsa_use_hint` | 组合逻辑，参数集由 `MODE` 选 | — |
+| `mldsa_rej_uniform`、`mldsa_rej_eta` | 组合逻辑 | — |
+| `mldsa_rej_uniform_buf` | 收集器，每周期吃一组 3 字节 | 约 340 / 个多项式 |
 | `keccak_f1600` | 单轮迭代，`round_cnt` 走 24 轮 | 24 / 次置换 |
+
+ML-KEM 与 ML-DSA 是两套不同的算术：模数不同（3329 对 8380417）、Montgomery 基不同
+（2¹⁶ 对 2³²）、系数位宽不同，所以两组模块彼此独立、不共用任何东西。ML-DSA 的 NTT 做满
+8 层，因此变换域里的乘法就是逐点标量乘，而不像 ML-KEM 停在 7 层之后还要做 2×2 的基乘。
+
+`mldsa_decompose` 与 `mldsa_reduce32` 同样用"乘倒数再右移"代替对常数的除法。两个 `MODE`
+在测试台里并排例化、同时比对，因此只在一个参数集里写错的常数不会蒙混过关。
 
 `mlkem_compress` 把对 `q` 的除法换成乘 `ceil(2^33/q)` 再右移。两者在整个输入域上相等，
 而输入域只有 3329 个取值，因此测试台是**穷举**验证这一替换，而不是抽样。
@@ -52,7 +68,8 @@ cocotb 对拍，也被 C 测试套件覆盖。
 ```bash
 ./tools/rtl_sim.sh                        # 完整 cocotb 回归，Icarus Verilog
 python3 hardware/model/ntt_oracle.py      # 两道独立的 NTT 预言机
-python3 hardware/model/mlkem_oracle.py    # 数据通路其余算子的预言机
+python3 hardware/model/mlkem_oracle.py    # ML-KEM 数据通路其余算子的预言机
+python3 hardware/model/mldsa_oracle.py    # ML-DSA 数据通路的预言机
 ```
 
 C 侧构建同样会 verilate 两个核，并断言仿真 RTL 与软件桩逐字节一致
@@ -80,6 +97,15 @@ C 侧构建同样会 verilate 两个核，并断言仿真 RTL 与软件桩逐字
 - **数据通路整体预言机**——用 `rej_pair`、`cbd2`、`cbd3`、`basemul`、`encode12` 重建
   ML-KEM 密钥生成，逐字节重现 NIST ACVP 的 `ek`/`dk`。这把上述每个算子都钉到标准化后
   的算法上，而不只是钉到一组自洽的公式上。
+- **ML-DSA NTT 预言机**——同样的 schoolbook 负循环卷积论证，环换成 `q = 8380417` 的
+  `Z_q[x]/(x^256+1)`。ML-DSA 的变换做满 8 层，所以判据是
+  `invntt(ntt(a)∘ntt(b)) == schoolbook(a, b)`，中间是普通的逐点乘。
+- **高低位拆分与提示位预言机**——`Power2Round` 与 `Decompose` 对着各自的分解式与取值
+  范围，在整个系数域的代表元上验证；提示位则对着 FIPS 204 真正依赖的那条性质：
+  对任意 `|e| ≤ γ₂` 的扰动，`UseHint(r+e, MakeHint(r₀+e, r₁)) == r₁`。
+- **ML-DSA 数据通路整体预言机**——用 `rej_uniform_coeff`、`rej_eta_coeff`、`ntt`、
+  `invntt_tomont`、`montgomery_reduce`、`power2round` 重建 ML-DSA 密钥生成，
+  逐字节重现 NIST ACVP 的 `pk`/`sk`。
 - **Keccak 预言机 1**——公开的全零输入 Keccak-f[1600] 置换输出，以常量硬编码，不由本
   仓库任何代码生成。
 - **Keccak 预言机 2**——在 RTL 核**之上**搭出 SHAKE128/256 与 SHA3-256 的海绵结构，

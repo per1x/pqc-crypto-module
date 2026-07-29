@@ -23,6 +23,22 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from mldsa_model import GAMMA2_32, GAMMA2_88  # noqa: E402
+from mldsa_model import Q as DQ  # noqa: E402
+from mldsa_model import ZETAS as MLDSA_ZETAS  # noqa: E402
+from mldsa_model import caddq as mldsa_caddq  # noqa: E402
+from mldsa_model import ct_butterfly as mldsa_ct_butterfly  # noqa: E402
+from mldsa_model import decompose as mldsa_decompose  # noqa: E402
+from mldsa_model import gs_butterfly as mldsa_gs_butterfly  # noqa: E402
+from mldsa_model import invntt_tomont as mldsa_invntt  # noqa: E402
+from mldsa_model import make_hint as mldsa_make_hint  # noqa: E402
+from mldsa_model import montgomery_reduce as mldsa_montgomery_reduce  # noqa: E402
+from mldsa_model import ntt as mldsa_ntt  # noqa: E402
+from mldsa_model import power2round as mldsa_power2round  # noqa: E402
+from mldsa_model import reduce32 as mldsa_reduce32  # noqa: E402
+from mldsa_model import rej_eta_coeff as mldsa_rej_eta_coeff  # noqa: E402
+from mldsa_model import rej_uniform_coeff as mldsa_rej_uniform_coeff  # noqa: E402
+from mldsa_model import use_hint as mldsa_use_hint  # noqa: E402
 from ref_model import (  # noqa: E402
     MONT, Q, ZETAS, barrett_reduce, basemul, cbd2, cbd3, compress,
     ct_butterfly, decompress, encode12, gs_butterfly, invntt, keccak_f1600,
@@ -178,6 +194,131 @@ def export_encode12(rng: random.Random) -> None:
     print(f"  {p.name}: 1000 条")
 
 
+# ---------------------------------------------------------------- ML-DSA
+
+def u32(x: int) -> str:
+    """有符号 32 位 → 8 位十六进制（二进制补码）"""
+    return f"{x & 0xFFFFFFFF:08x}"
+
+
+def u64(x: int) -> str:
+    return f"{x & 0xFFFFFFFFFFFFFFFF:016x}"
+
+
+def export_mldsa_ops(rng: random.Random) -> None:
+    p = OUT / "mldsa_ops.hex"
+    with p.open("w") as f:
+        header(f, "ML-DSA 的 L0 算子（q = 8380417）",
+               "op a out：op=00 为 Montgomery 约减（a 为 64bit），"
+               "op=01 为 reduce32，op=02 为 caddq（a 为 32bit）",
+               "均为大端十六进制字面量，无字节序问题")
+        for _ in range(1000):
+            a = rng.randrange(-DQ * (1 << 31), DQ * (1 << 31))
+            f.write(f"00 {u64(a)} {u32(mldsa_montgomery_reduce(a))}\n")
+        # reduce32 的定义域是 |a| ≤ 2³¹ − 2²² − 1，向量只取定义域内的值，
+        # 这样"结果与输入同余"这类性质断言才成立
+        lim = (1 << 31) - (1 << 22) - 1
+        for _ in range(1000):
+            a = rng.randrange(-lim, lim + 1)
+            f.write(f"01 {u32(a)} {u32(mldsa_reduce32(a))}\n")
+        for _ in range(1000):
+            a = rng.randrange(-DQ, DQ)
+            f.write(f"02 {u32(a)} {u32(mldsa_caddq(a))}\n")
+    print(f"  {p.name}: 3000 条")
+
+
+def export_mldsa_butterfly(rng: random.Random) -> None:
+    p = OUT / "mldsa_butterfly.hex"
+    with p.open("w") as f:
+        header(f, "ML-DSA 的 CT / GS 蝶形",
+               "kind a b zeta a_out b_out：kind=00 为 CT，01 为 GS（均 32bit 有符号）",
+               "同上")
+        for kind, fn in (("00", mldsa_ct_butterfly), ("01", mldsa_gs_butterfly)):
+            for _ in range(500):
+                a = rng.randrange(-DQ, DQ)
+                b = rng.randrange(-DQ, DQ)
+                z = MLDSA_ZETAS[rng.randrange(1, 256)]
+                ao, bo = fn(a, b, z)
+                f.write(f"{kind} " + " ".join(u32(x) for x in (a, b, z, ao, bo)) + "\n")
+    print(f"  {p.name}: 1000 条")
+
+
+def export_mldsa_ntt(rng: random.Random) -> None:
+    for name, fn in (("mldsa_ntt.hex", mldsa_ntt), ("mldsa_invntt.hex", mldsa_invntt)):
+        p = OUT / name
+        with p.open("w") as f:
+            kind = "前向 NTT（完整 8 层）" if "inv" not in name else "逆 NTT（含 f 缩放）"
+            header(f, f"ML-DSA 256 点 {kind}",
+                   "一行 = 一组：256 个输入系数，空格分隔；下一行 = 256 个输出系数",
+                   "系数按下标 0..255 顺序；每个 32bit 有符号，十六进制")
+            for _ in range(10):
+                poly = [rng.randrange(-DQ // 2, DQ // 2) for _ in range(256)]
+                out = fn(list(poly))
+                f.write(" ".join(u32(x) for x in poly) + "\n")
+                f.write(" ".join(u32(x) for x in out) + "\n")
+        print(f"  {p.name}: 10 组")
+
+
+def export_mldsa_rounding(rng: random.Random) -> None:
+    p = OUT / "mldsa_rounding.hex"
+    with p.open("w") as f:
+        header(f, "ML-DSA 的高低位拆分（Power2Round / Decompose）",
+               "a p2r_a0 p2r_a1 d88_a0 d88_a1 d32_a0 d32_a1",
+               "a 落在 [0, q)；a0 为 32bit 有符号，a1 为 32bit 无符号")
+        cases = [0, 1, 2, 4095, 4096, 8191, 8192, DQ - 1, DQ - 2,
+                 GAMMA2_88, 2 * GAMMA2_88, GAMMA2_32, 2 * GAMMA2_32,
+                 43 * 2 * GAMMA2_88, 15 * 2 * GAMMA2_32]
+        cases += [rng.randrange(DQ) for _ in range(2000)]
+        for a in cases:
+            p0, p1 = mldsa_power2round(a)
+            c0, c1 = mldsa_decompose(a, GAMMA2_88)
+            e0, e1 = mldsa_decompose(a, GAMMA2_32)
+            f.write(" ".join(u32(x) for x in (a, p0, p1, c0, c1, e0, e1)) + "\n")
+    print(f"  {p.name}: {len(cases)} 条")
+
+
+def export_mldsa_hint(rng: random.Random) -> None:
+    p = OUT / "mldsa_hint.hex"
+    with p.open("w") as f:
+        header(f, "ML-DSA 的提示位（MakeHint / UseHint）",
+               "mode a e hint a1：mode=00 为 γ₂=(q−1)/88，01 为 (q−1)/32；"
+               "e 为施加在低位上的扰动；a1 为 UseHint(a+e, hint) 的结果",
+               "a、e 为 32bit（e 有符号）")
+        n = 0
+        for mode, gamma2 in (("00", GAMMA2_88), ("01", GAMMA2_32)):
+            for _ in range(500):
+                a = rng.randrange(DQ)
+                e = rng.randrange(-gamma2, gamma2 + 1)
+                a0, a1 = mldsa_decompose(a, gamma2)
+                h = mldsa_make_hint(a0 + e, a1, gamma2)
+                used = mldsa_use_hint((a + e) % DQ, h, gamma2)
+                f.write(f"{mode} " + " ".join(u32(x) for x in (a, e))
+                        + f" {h} {u32(used)}\n")
+                n += 1
+    print(f"  {p.name}: {n} 条")
+
+
+def export_mldsa_sample(rng: random.Random) -> None:
+    p = OUT / "mldsa_sample.hex"
+    with p.open("w") as f:
+        header(f, "ML-DSA 的两类拒绝采样",
+               "kind …：kind=00 为均匀采样（bytes cand ok），"
+               "kind=01 为有界采样（eta nibble coeff ok）",
+               "bytes 为 6 位十六进制，最低字节对应最低地址")
+        cases = []
+        for target in (0, 1, DQ - 1, DQ, DQ + 1, 0x7FFFFF):
+            cases.append(target & 0xFFFFFF)
+        cases += [rng.getrandbits(24) for _ in range(500)]
+        for v in cases:
+            cand, ok = mldsa_rej_uniform_coeff(v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
+            f.write(f"00 {v:06x} {cand:06x} {ok}\n")
+        for eta in (2, 4):
+            for nib in range(16):
+                c, ok = mldsa_rej_eta_coeff(nib, eta)
+                f.write(f"01 {eta:02x} {nib:x} {u32(c)} {ok}\n")
+    print(f"  {p.name}: {len(cases) + 32} 条")
+
+
 def export_keccak(rng: random.Random) -> None:
     p = OUT / "keccak_perm.hex"
     with p.open("w") as f:
@@ -247,6 +388,12 @@ def main() -> int:
     export_cbd(rng)
     export_rej(rng)
     export_encode12(rng)
+    export_mldsa_ops(rng)
+    export_mldsa_butterfly(rng)
+    export_mldsa_ntt(rng)
+    export_mldsa_rounding(rng)
+    export_mldsa_hint(rng)
+    export_mldsa_sample(rng)
     export_keccak(rng)
     export_shake(rng)
     cross_check()

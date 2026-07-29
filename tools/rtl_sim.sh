@@ -57,6 +57,11 @@ for d in 1 4 5 10 11; do
   run test_decompress mlkem_decompress "$d"
 done
 echo
+echo "  ML-DSA 算子与数据通路"
+run test_mldsa_units tb_mldsa_units
+run test_mldsa_ntt   mldsa_ntt_core
+
+echo
 echo "  Keccak"
 run test_keccak      keccak_f1600
 
