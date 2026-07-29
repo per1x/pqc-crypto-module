@@ -21,9 +21,10 @@ Zynq 级 SoC 上，由可编程逻辑承载算法核。
   管理器与 PKCS#11 前端全部基于不透明句柄工作，因此今后收紧安全边界不会影响任何
   调用方。
 - **硬件接缝从第一天起就存在。** 密码运算经过一层 vtable（`pqc_backend_t`），其下
-  是 AXI 风格的寄存器接口（`accel_transport_t`）。三种 transport 以完全相同的方式
-  实现该接口：软件桩、Verilator 仿真的 RTL 后端，以及在有硬件之后的 `/dev/mem` +
-  `mmap`。在它们之间切换不会改变接缝之上的任何代码。
+  是 AXI 风格的寄存器接口（`accel_transport_t`）。四种 transport 以完全相同的方式
+  实现该接口：软件桩、Verilator 仿真的 RTL 后端、经真实 AXI4-Lite 与 AXI4-Stream
+  事务驱动同一批 RTL 的后端，以及在有硬件之后的 `/dev/mem` + `mmap`。
+  在它们之间切换不会改变接缝之上的任何代码。
 
 运行路径上的每一次密码运算都由 [liboqs](https://github.com/open-quantum-safe/liboqs)
 或 OpenSSL 完成，没有自行实现的生产用原语。仓库中确实存在手写的 NTT 与 Keccak 实现
@@ -51,12 +52,12 @@ Zynq 级 SoC 上，由可编程逻辑承载算法核。
                                                │
                              accel_transport_t (include/pqchsm/accel.h)
                                                │
-                       ┌───────────────────────┼───────────────────┐
-                    软件桩                 Verilator RTL          mmap
-                  (accel_stub.c)      (accel_verilator.c)        (未来)
-                                               │
-                                     hardware/rtl: ntt_core,
-                                                   keccak_f1600
+            ┌──────────────┬───────────┴───────────┬──────────────┐
+          软件桩       Verilator RTL         AXI over RTL        mmap
+     (accel_stub.c) (accel_verilator.c)     (accel_axi.c)   (accel_mmap.c)
+                            │                     │
+                    hardware/rtl 算法核   hardware/rtl/bus/pqc_accel_axi
+                                          （AXI4-Lite + AXI4-Stream）
 ```
 
 ### 密钥层级

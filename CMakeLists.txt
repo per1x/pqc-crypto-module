@@ -25,9 +25,12 @@ endif()
 message(STATUS "liboqs: ${LIBOQS_LIBRARY}")
 
 # ---- Verilator 仿真后端 -----------------------------------------------------
-# 把 hardware/rtl/mlkem/ntt_core.v 与 hardware/rtl/keccak/keccak_f1600.v 仿真成可被 C 调用的"加速器"，
-# 经 accel_transport_t 接到 pqc_accel.c 的寄存器语义上 —— 与将来真 PL 同一条路径。
-# 没装 verilator 就跳过，accel_transport_verilator() 返回 NULL（如实反映）。
+# 把 hardware/rtl/ 下的算法核仿真成可被 C 调用的"加速器"，经 accel_transport_t
+# 接到 pqc_accel.c 的寄存器语义上 —— 与将来真 PL 同一条路径。
+# 一共编出三个仿真目标：
+#   ntt_core / keccak_f1600  直接握手算法核的私有端口
+#   pqc_accel_axi            经 AXI4-Lite 控制面与 AXI4-Stream 数据面驱动同一批核
+# 没装 verilator 就跳过，对应的 accel_transport_*() 返回 NULL（如实反映）。
 find_program(VERILATOR_BIN verilator)
 if(VERILATOR_BIN)
   execute_process(COMMAND ${VERILATOR_BIN} --getenv VERILATOR_ROOT
@@ -56,14 +59,32 @@ if(VERILATOR_BIN)
     COMMENT "Verilating hardware/rtl/keccak/keccak_f1600.v")
   add_custom_target(verilate_keccak DEPENDS ${VOBJ_K}/libkeccak_f1600_lib.a)
 
+  set(VOBJ_AXI ${CMAKE_CURRENT_BINARY_DIR}/verilated-axi)
+  set(AXI_RTL
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/mont_reduce.v
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/butterfly.v
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/ntt_core.v
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/keccak/keccak_f1600.v
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/bus/axi4lite_regs.v
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/bus/pqc_accel_axi.v)
+  add_custom_command(
+    OUTPUT ${VOBJ_AXI}/libpqc_accel_axi_lib.a ${VOBJ_AXI}/Vpqc_accel_axi.h
+    COMMAND ${VERILATOR_BIN} --cc --build --lib-create pqc_accel_axi_lib
+            --top-module pqc_accel_axi -Mdir ${VOBJ_AXI} -Wno-fatal ${AXI_RTL}
+    DEPENDS ${AXI_RTL}
+    COMMENT "Verilating hardware/rtl/bus/pqc_accel_axi.v")
+  add_custom_target(verilate_axi DEPENDS ${VOBJ_AXI}/libpqc_accel_axi_lib.a)
+
   add_library(pqchsm-vsim STATIC
     src/hal/verilator/ntt_sim.cpp
-    src/hal/verilator/keccak_sim.cpp)
-  add_dependencies(pqchsm-vsim verilate_ntt verilate_keccak)
+    src/hal/verilator/keccak_sim.cpp
+    src/hal/verilator/axi_sim.cpp)
+  add_dependencies(pqchsm-vsim verilate_ntt verilate_keccak verilate_axi)
   target_include_directories(pqchsm-vsim PRIVATE
-    ${VOBJ} ${VOBJ_K} ${VERILATOR_ROOT}/include ${VERILATOR_ROOT}/include/vltstd)
+    ${VOBJ} ${VOBJ_K} ${VOBJ_AXI} ${VERILATOR_ROOT}/include ${VERILATOR_ROOT}/include/vltstd)
   target_link_libraries(pqchsm-vsim PUBLIC
-    ${VOBJ}/libntt_core_lib.a ${VOBJ_K}/libkeccak_f1600_lib.a)
+    ${VOBJ}/libntt_core_lib.a ${VOBJ_K}/libkeccak_f1600_lib.a
+    ${VOBJ_AXI}/libpqc_accel_axi_lib.a)
   set_target_properties(pqchsm-vsim PROPERTIES CXX_STANDARD 20)
   message(STATUS "Verilator: ${VERILATOR_BIN}（RTL 仿真后端已启用）")
 else()
@@ -79,6 +100,8 @@ add_library(pqchsm
   src/crypto/kdr.c
   src/hal/accel_stub.c
   src/hal/accel_verilator.c
+  src/hal/accel_axi.c
+  src/hal/accel_mmap.c
   src/hal/pqc_accel.c
   src/proto/proto.c
   src/audit/audit.c
@@ -197,6 +220,7 @@ pqchsm_test(test_anchor    tests/unit/test_anchor.c)
 pqchsm_test(test_audit_integration tests/unit/test_audit_integration.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
 pqchsm_test(test_accel     tests/unit/test_accel.c)
+pqchsm_test(test_accel_axi tests/unit/test_accel_axi.c)
 pqchsm_test(test_e2e       tests/integration/test_e2e.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
@@ -244,6 +268,7 @@ add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
          ${CMAKE_CURRENT_BINARY_DIR})
 # Python / Java 的 provider demo（缺 PyKCS11 或 JDK22+ 时自动 SKIP）
 add_test(NAME accel         COMMAND test_accel)
+add_test(NAME accel_axi     COMMAND test_accel_axi)
 add_test(NAME e2e           COMMAND test_e2e)
 
 add_test(NAME e2e_p11 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/e2e_p11.sh

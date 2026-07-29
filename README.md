@@ -26,9 +26,10 @@ Two consequences of that goal explain most of the design:
   opaque handles, so tightening the boundary later does not change any caller.
 - **The hardware seam exists from day one.** Cryptographic operations go through a
   vtable (`pqc_backend_t`) and, below it, an AXI-style register interface
-  (`accel_transport_t`). Three transports implement that interface identically: a
-  software stub, a Verilator-simulated RTL backend, and — once there is a board —
-  `/dev/mem` + `mmap`. Swapping between them changes nothing above the seam.
+  (`accel_transport_t`). Four transports implement that interface identically: a
+  software stub, a Verilator-simulated RTL backend, the same RTL driven over real
+  AXI4-Lite and AXI4-Stream transactions, and — once there is a board — `/dev/mem` +
+  `mmap`. Swapping between them changes nothing above the seam.
 
 Every cryptographic operation on the live path uses
 [liboqs](https://github.com/open-quantum-safe/liboqs) or OpenSSL; no primitive is
@@ -58,12 +59,12 @@ NIST ACVP vectors.
                                                │
                              accel_transport_t (include/pqchsm/accel.h)
                                                │
-                       ┌───────────────────────┼───────────────────┐
-                  software stub          Verilator RTL           mmap
-                  (accel_stub.c)      (accel_verilator.c)       (future)
-                                               │
-                                     hardware/rtl: ntt_core,
-                                                   keccak_f1600
+            ┌──────────────┬───────────┴───────────┬──────────────┐
+      software stub   Verilator RTL          AXI over RTL        mmap
+     (accel_stub.c) (accel_verilator.c)     (accel_axi.c)   (accel_mmap.c)
+                            │                     │
+                   hardware/rtl cores    hardware/rtl/bus/pqc_accel_axi
+                                          (AXI4-Lite + AXI4-Stream)
 ```
 
 ### Key hierarchy

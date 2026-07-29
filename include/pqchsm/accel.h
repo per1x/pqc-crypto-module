@@ -8,12 +8,15 @@
  *
  * 直接收益：接口约定的 bug 在无板阶段就清光了，板上联调只剩真正的硬件问题。
  *
- * 【三种 transport】
- *   stub       软件桩，内部调 liboqs                    —— 现在就能跑，全套测试通过
- *   verilator  驱动 Verilator 仿真出来的真 RTL          —— 已实现 NTT + Keccak 模式
- *   mmap       /dev/mem + mmap 打真 PL                  —— +，待板子
+ * 【四种 transport】
+ *   stub       软件桩，内部调 liboqs                —— 全套模式可用
+ *   verilator  直接握手仿真出来的算法核端口        —— NTT 与 Keccak 模式
+ *   axi        经 AXI4-Lite/AXI4-Stream 驱动同一批核 —— NTT 与 Keccak 模式
+ *   mmap       /dev/mem + mmap 打真 PL             —— 需要板子上的物理地址
  *
- * 三者实现同一张 accel_transport_t，pqc_accel.c 之上完全不区分。
+ * 四者实现同一张 accel_transport_t，pqc_accel.c 之上完全不区分。
+ * axi 与 mmap 走的是同一份寄存器映射契约（docs/register-map.md），
+ * 区别只在事务怎么发出去。
  *
  * 【寄存器表】
  *   偏移  名字      读写  说明
@@ -87,10 +90,20 @@ typedef struct accel_transport {
 /* 软件桩：内部调 liboqs，暴露与真 PL 相同的寄存器语义 */
 const accel_transport_t *accel_transport_stub(void);
 
-/* Verilator 仿真：驱动真 RTL。**目前只实现 NTT 与 Keccak-f[1600] 模式**，
- * 其余模式置 ERR —— 完整的 ML-KEM/ML-DSA 核属于后续阶段的工作。
+/* Verilator 仿真：直接握手算法核的端口。**只实现 NTT 与 Keccak-f[1600] 模式**，
+ * 其余模式置 ERR —— RTL 侧没有完整的 ML-KEM/ML-DSA 核。
  * 没编 Verilator 支持时返回 NULL。 */
 const accel_transport_t *accel_transport_verilator(void);
+
+/* Verilator 仿真：经 AXI4-Lite 控制面与 AXI4-Stream 数据面驱动 pqc_accel_axi。
+ * 与 verilator transport 跑的是同一批算法核，区别在于要走完整的总线事务，
+ * 因此它同时验证 docs/register-map.md 那份契约在软件侧成立。
+ * 没编 Verilator 支持时返回 NULL。 */
+const accel_transport_t *accel_transport_axi(void);
+
+/* /dev/mem + mmap 打真 PL。寄存器组与数据窗口的物理基址由构建时的
+ * PQCHSM_ACCEL_MMAP_BASE / PQCHSM_ACCEL_MMAP_BUF 给出；未定义时返回 NULL。 */
+const accel_transport_t *accel_transport_mmap(void);
 
 /* 选择当前 transport；NULL 恢复默认（stub） */
 void                     accel_set_transport(const accel_transport_t *t);
@@ -121,6 +134,10 @@ int accel_keccak_f1600(const uint8_t state_in[200], uint8_t state_out[200]);
  * 没编 Verilator 支持时返回 0。无板阶段的硬件侧性能数据就是从这里来的。 */
 uint64_t accel_verilator_last_cycles(void);
 uint64_t accel_verilator_keccak_cycles(void);
+
+/* 上一条经 axi 后端执行的命令，从 START 到首次看到 DONE 用了多少周期。
+ * 这是软件视角的时延，包含轮询本身占用的总线周期。 */
+uint64_t accel_axi_last_cycles(void);
 
 int accel_shake(int rate, uint8_t suffix,
                 const uint8_t *msg, size_t msg_len,
