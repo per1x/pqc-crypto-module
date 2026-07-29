@@ -71,6 +71,10 @@ echo
 echo "  总线接口"
 run test_axi         pqc_accel_axi
 
+echo
+echo "  噪声源健康检测"
+run test_trng_health tb_trng_health
+
 rm -rf sim_build results.xml
 echo
 if [ "$fail" -eq 0 ]; then
