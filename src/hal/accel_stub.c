@@ -133,7 +133,7 @@ static void keccak_f1600_sw(uint64_t A[25])
 		{ 0, 36,  3, 41, 18 }, { 1, 44, 10, 45,  2 }, { 62, 6, 43, 15, 61 },
 		{ 28, 55, 25, 21, 56 }, { 27, 20, 39,  8, 14 },
 	};
-	for (int rnd = 0; rnd < 24; rnd++) {
+	for (int round = 0; round < 24; round++) {
 		uint64_t C[5], D[5], B[25];
 		for (int x = 0; x < 5; x++) {
 			C[x] = A[x] ^ A[x + 5] ^ A[x + 10] ^ A[x + 15] ^ A[x + 20];
@@ -160,7 +160,7 @@ static void keccak_f1600_sw(uint64_t A[25])
 				             ^ ((~B[((x + 1) % 5) + 5 * y]) & B[((x + 2) % 5) + 5 * y]);
 			}
 		}
-		A[0] ^= RC[rnd];
+		A[0] ^= RC[round];
 	}
 }
 
@@ -260,6 +260,8 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 		                   ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 		p += 4;
 		if (ctx_len > 255 || (size_t)(p - g_buf) + ctx_len > in_len) {
+			/* sk 已经拷进本地缓冲了：任何提前返回都得先把它抹掉 */
+			pqc_secure_zero(sk, sizeof(sk));
 			set_err(1);
 			return;
 		}
@@ -271,13 +273,16 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 		size_t sig_len = info->sig_len;
 		const pqc_backend_t *sw = pqc_backend_liboqs();
 		/* rnd 全 0 视为"让后端自取 TRNG"，与 pqc_sign(rnd=NULL) 语义一致：
-		 * 寄存器接口里没法传 NULL，只能约定一个哨兵。 */
-		int all_zero = 1;
+		 * 寄存器接口里没法传 NULL，只能约定一个哨兵。
+		 *
+		 * 哨兵判定必须无分支。rnd 是签名随机化输入，属于秘密数据；
+		 * 逐字节 `if (rnd[z])` 会把"哪一个字节先非零"泄漏成时序差异。
+		 * 按位或起来再比一次，循环次数固定，没有数据相关跳转。 */
+		uint8_t rnd_or = 0;
 		for (int z = 0; z < 32; z++) {
-			if (rnd[z]) {
-				all_zero = 0;
-			}
+			rnd_or |= rnd[z];
 		}
+		int all_zero = (rnd_or == 0);
 		pqc_status_t st = sw->sign(alg, sk, msg, msg_len, ctx_len ? ctx : NULL, ctx_len,
 		                           all_zero ? NULL : rnd, g_buf, &sig_len);
 		pqc_secure_zero(sk, sizeof(sk));

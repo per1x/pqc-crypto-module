@@ -89,6 +89,9 @@ const uint8_t *tlv_find(const uint8_t *p, size_t n, uint16_t tag, size_t *out_le
 		if (l > n - off - 6) {
 			return NULL;          /* 长度越界 = 畸形帧 */
 		}
+		/* tag 在这里是 TLV 的类型字段，不是 MAC 或摘要。帧结构在解析阶段
+		 * 本来就是攻击者可见的。
+		 * 常量时间：判据是公开的协议标签，与任何密钥材料无关 */
 		if (t == tag) {
 			if (out_len) {
 				*out_len = l;

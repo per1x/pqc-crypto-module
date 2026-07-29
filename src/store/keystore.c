@@ -110,8 +110,12 @@ static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
 	if (RAND_bytes(salt, sizeof(salt)) != 1) {
 		return HSM_ERR_CRYPTO;
 	}
-	/* 每次落盘换一把新 KEK ⇒ 顺带完成 的 KEK 轮换 */
+	/* 每次落盘换一把新 KEK，等价于一次 KEK 轮换 */
 	if (pqc_kek_derive(salt, sizeof(salt), kek) != 0 || derive_file_key(salt, fkey) != 0) {
+		/* 派生可能在中途失败，缓冲里已经有半截密钥了 —— 不能就这么返回 */
+		pqc_secure_zero(kek, sizeof(kek));
+		pqc_secure_zero(fkey, sizeof(fkey));
+		pqc_secure_zero(salt, sizeof(salt));
 		return HSM_ERR_CRYPTO;
 	}
 
@@ -146,6 +150,8 @@ static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
 		body_len += blob_len;
 	}
 
+	/* 真正要抹掉的是算出这个标签的 fkey，在 out: 里做。
+	 * 无需清零：tag 是随文件一起落盘的全文件 MAC，本身就是公开值 */
 	uint8_t tag[KS_TAG_LEN];
 	if (pqc_kmac256(fkey, sizeof(fkey), body, body_len, "pqc-hsm/keystore",
 	                tag, sizeof(tag)) != 0) {
@@ -282,6 +288,7 @@ hsm_status_t hsm_keystore_load(hsm_token_t *tok, const char *path)
 		}
 		/* 先验全文件 MAC：记录删除/调换/截断都在这一步被拦住 */
 		size_t body_len = (size_t)fsz - KS_TAG_LEN;
+		/* 无需清零：want 是重算出来的全文件 MAC，与文件尾那份逐字节相同，是公开值 */
 		uint8_t want[KS_TAG_LEN];
 		if (pqc_kmac256(fkey, sizeof(fkey), buf, body_len, "pqc-hsm/keystore",
 		                want, sizeof(want)) != 0) {

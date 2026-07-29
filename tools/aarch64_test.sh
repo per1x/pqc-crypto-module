@@ -79,7 +79,14 @@ rm -rf /work/pqc-hsm/build /work/pqc-hsm/build-asan /work/pqc-hsm/build-tsan /wo
 cmake -S /work/pqc-hsm -B /work/pqc-hsm/b -GNinja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_PREFIX_PATH=/work/oqs > /dev/null
-ninja -C /work/pqc-hsm/b 2>&1 | grep -iE "warning|error" | head -20 || true
+# 构建失败必须当场停住。管道加 || true 会把失败吞掉，让后面的 ctest 报一堆
+# "Not Run"，真正的原因反而看不见。
+if ! ninja -C /work/pqc-hsm/b > /work/build.log 2>&1; then
+  echo "构建失败："
+  grep -iE "error" /work/build.log | head -30
+  exit 1
+fi
+grep -iE "warning" /work/build.log | head -20 || true
 echo "构建完成"
 
 echo "=== 全套回归 ==="

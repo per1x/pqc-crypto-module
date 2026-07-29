@@ -384,6 +384,7 @@ uint64_t audit_count(const audit_log_t *log)
 int audit_verify_file(const char *path, uint64_t *bad_seq)
 {
 	uint8_t hdr[AUDIT_HDR_LEN], rec[AUDIT_REC_LEN];
+	/* 无需清零：审计链的哈希覆盖的是非敏感记录，且随文件与锚点一起对外发布 */
 	uint8_t cur[AUDIT_HASH_LEN], want[AUDIT_HASH_LEN];
 	uint64_t count = 0, len = 0, have = 0, bad = 0, seq = 0;
 	int fd = -1;
@@ -499,6 +500,7 @@ int audit_read(const char *path, uint64_t seq, uint64_t *timestamp, uint32_t *op
                char detail[AUDIT_DETAIL_LEN + 1])
 {
 	uint8_t hdr[AUDIT_HDR_LEN], rec[AUDIT_REC_LEN];
+	/* 无需清零：审计链的哈希覆盖的是非敏感记录，且随文件与锚点一起对外发布 */
 	uint8_t prev[AUDIT_HASH_LEN], want[AUDIT_HASH_LEN];
 	uint64_t count = 0;
 	int fd = -1;

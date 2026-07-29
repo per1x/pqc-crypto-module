@@ -124,6 +124,7 @@ typedef struct {
 	CK_ULONG      found_pos;
 	/* C_SignInit / C_VerifyInit */
 	int           sign_active, verify_active;
+	/* 无需清零：这两个是对象句柄（槽位号 + 代数），密钥材料始终留在槽位里 */
 	CK_OBJECT_HANDLE sign_key, verify_key;
 	/* C_SignUpdate / C_VerifyUpdate 的累积缓冲（理由见 C_SignUpdate 上方） */
 	p11_buf_t     sign_acc, verify_acc;
@@ -1006,7 +1007,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_FindObjectsInit)(CK_SESSION_HANDLE hSession,
 	{
 		/* 只支持按 CKA_CLASS 过滤；其余属性忽略（在文档里说明） */
 		const CK_ATTRIBUTE *cls = find_attr(pTemplate, ulCount, CKA_CLASS);
-		CK_ULONG want = attr_ulong(cls, (CK_ULONG)-1);
+		CK_ULONG want_class = attr_ulong(cls, (CK_ULONG)-1);
 
 		s->n_found = 0;
 		s->found_pos = 0;
@@ -1014,10 +1015,10 @@ CK_DEFINE_FUNCTION(CK_RV, C_FindObjectsInit)(CK_SESSION_HANDLE hSession,
 		{
 			CK_OBJECT_HANDLE priv = priv_handle((hsm_slot_id_t)s->slot);
 			if (priv) {
-				if (want == (CK_ULONG)-1 || want == CKO_PUBLIC_KEY) {
+				if (want_class == (CK_ULONG)-1 || want_class == CKO_PUBLIC_KEY) {
 					s->found[s->n_found++] = priv | PUB_BIT;
 				}
-				if (want == (CK_ULONG)-1 || want == CKO_PRIVATE_KEY) {
+				if (want_class == (CK_ULONG)-1 || want_class == CKO_PRIVATE_KEY) {
 					s->found[s->n_found++] = priv;
 				}
 			}

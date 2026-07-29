@@ -85,6 +85,7 @@ out:
 
 int slot_meta_verify(const slot_meta_t *m, const uint8_t tag[SLOT_META_TAG_LEN])
 {
+	/* 无需清零：want 是重算出来的元数据标签，与 slot_t.meta_tag 一同落盘，是公开值 */
 	uint8_t want[SLOT_META_TAG_LEN];
 	if (!m || !tag || slot_meta_seal(m, want) != 0) {
 		return -1;

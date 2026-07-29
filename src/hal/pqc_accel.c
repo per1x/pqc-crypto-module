@@ -112,6 +112,7 @@ static pqc_status_t ac_keypair(pqc_alg_t alg, uint8_t *pk, uint8_t *sk)
 	/* 真 PL 上种子由片内 TRNG 出；这里从软件随机源取，语义相同 */
 	uint8_t seed[64];
 	if (pqc_random_bytes(seed, info->seed_len) != 0) {
+		pqc_secure_zero(seed, sizeof(seed));
 		return PQC_ERR_BACKEND;
 	}
 	pqc_status_t st = ac_keypair_from_seed(alg, seed, info->seed_len, pk, sk);

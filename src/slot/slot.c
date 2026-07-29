@@ -384,17 +384,17 @@ hsm_status_t hsm_slot_meta_tag(hsm_token_t *tok, hsm_slot_id_t id, uint8_t out[3
 	return HSM_OK;
 }
 
-hsm_status_t hsm_slot_force_state(hsm_token_t *tok, hsm_slot_id_t id, slot_state_t want)
+hsm_status_t hsm_slot_force_state(hsm_token_t *tok, hsm_slot_id_t id, slot_state_t want_state)
 {
 	slot_t *s = slot_at(tok, id);
 	if (!s) {
 		return HSM_ERR_BAD_ARG;
 	}
-	if (want < 0 || want >= SLOT_ST__COUNT) {
+	if (want_state < 0 || want_state >= SLOT_ST__COUNT) {
 		return HSM_ERR_BAD_ARG;
 	}
 	SLOCK(s);
-	s->meta.state = want;
+	s->meta.state = want_state;
 	hsm_status_t st = slot_reseal(s);
 	SUNLOCK(s);
 	return st;
@@ -653,6 +653,7 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 		}
 		memcpy(local_seed, seed, seed_len);
 	} else if (RAND_bytes(local_seed, (int)local_seed_len) != 1) {
+		pqc_secure_zero(local_seed, sizeof(local_seed));
 		pqc_secure_free(pk, info->pk_len);
 		pqc_secure_free(sk, info->sk_len);
 		return HSM_ERR_CRYPTO;

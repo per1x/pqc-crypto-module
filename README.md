@@ -151,6 +151,7 @@ transport reports "unsupported" rather than silently substituting software.
 |---|---|
 | [architecture.md](docs/architecture.md) · [中文](docs/architecture.zh-CN.md) | Layering, key hierarchy, keystore format, audit chain, hardware abstraction, key injection |
 | [pkcs11.md](docs/pkcs11.md) · [中文](docs/pkcs11.zh-CN.md) | Mechanisms, object model, vendor attributes, key import, KEM operations, configuration |
+| [constant-time.md](docs/constant-time.md) · [中文](docs/constant-time.zh-CN.md) | Constant-time audit scope and method, findings, zeroization checks, what is not claimed, how to reproduce |
 | [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
 | [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
 
@@ -178,6 +179,8 @@ rather than failing.
 ### Additional checks
 
 ```bash
+python3 tools/ct_audit.py      # constant-time source audit (--self-test for the controls)
+python3 tools/check_zeroize.py # zeroization structure check (--self-test for the controls)
 ./tools/rtl_sim.sh          # cocotb regression (Icarus Verilog)
 ./tools/aarch64_test.sh     # full rebuild and regression in an aarch64 Linux container
 ./tools/fuzz.sh             # libFuzzer targets (requires LLVM clang)
@@ -217,6 +220,8 @@ not do.
 during operations. Callers only ever see handles, and buffers are zeroed and `mlock`-ed
 where possible, but nothing here defends against an attacker who can read the process
 address space. Moving the boundary into hardware is future work.
+[constant-time.md](docs/constant-time.md) records what the constant-time and
+zeroization audits cover and, more usefully, what they do not.
 
 **The key derivation root is a stub.** `src/crypto/kdr.c` contains a fixed 32-byte
 constant whose literal text reads `PQC-HSM STUB KDR -- NOT SECRET!!`. On a real device
@@ -249,14 +254,14 @@ PKCS#11 multi-part signing buffers the whole message rather than streaming a dig
 
 | Check | Result |
 |---|---|
-| `ctest` | 38 / 38 |
+| `ctest` | 43 / 43 |
 | Assertions | ~3700 |
 | NIST ACVP vectors | 390 byte-exact, 60 explicitly skipped |
-| ASan + UBSan | 38 / 38 |
+| ASan + UBSan | 43 / 43 |
 | ThreadSanitizer | 0 races (validated by removing locks: 9 reported) |
 | macOS `leaks` | 0 leaks |
 | libFuzzer | 1.38 M executions, no crashes |
-| aarch64 Linux (GCC 12) | 38 / 38 |
+| aarch64 Linux (GCC 12) | 43 / 43 |
 | cocotb RTL regression | 14 tests across 5 modules |
 
 Two habits run throughout the test sources:
@@ -267,10 +272,16 @@ Two habits run throughout the test sources:
   twiddle table, and by reconstructing ML-KEM key generation and reproducing ACVP
   `ek`/`dk` byte-for-byte. Keccak is checked against the published all-zero permutation
   vector and against `hashlib`/OpenSSL.
+- **Structural checks over habits.** Properties that no functional test can see —
+  the key derivation root having no read-back interface, no secret-dependent branch or
+  index in `src/`, every key-material field wiped by its destructor — are expressed as
+  scanners wired into `ctest`, each of which self-tests on synthetic samples before it
+  is allowed to report a clean scan. See [constant-time.md](docs/constant-time.md).
 - **Negative controls.** Assertions are validated by breaking something and confirming
   the test fails — perturbing a twiddle factor, dropping an NTT layer, flipping a bit in
   a Keccak round constant, removing a lock under TSan, adding a fake key-readback
-  function.
+  function, timing a deliberately early-returning comparison, probing a stack frame
+  that was never wiped.
 
 ## Roadmap
 

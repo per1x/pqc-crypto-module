@@ -1,14 +1,23 @@
-/* zeroize 验证与 红线检查
+/* zeroize 的结构性验证
  *
- * 这个测试**直接窥视槽位的私有结构**（include slot_internal.h），因为
- * "清零真的落到内存上了吗"这件事从公共 API 是看不出来的 —— 而这正是
- * / 要求验证的东西。这类测试写不出来，就是选 C 而不是
- * Python 的直接理由（Python 里 bytes 不可变、到处是副本，无从断言）。
+ * 这个测试**直接窥视槽位的私有结构**（include slot_internal.h）：清零到底有
+ * 没有落到内存上，从公共 API 是看不出来的。能写出这类断言，本身就是这一层
+ * 选 C 而不是托管语言的理由 —— 托管语言里字节序列不可变、副本到处都是，
+ * 根本无从断言"那块内存现在是什么"。
  *
- * 界限（诚实说明）：本测试能证明"结构体内的秘密字段被清零"和
- * "落盘文件里搜不到明文密钥"。它**不能**证明堆上已释放的页、CPU 寄存器、
- * swap 分区里没有残留 —— 那属于 的"断电即失"与介质残留验证，
- * 必须有板子才能做。
+ * 五组检查：
+ *   1. 结构体覆盖   槽位清零后，除了少数非秘密字段，整个结构体逐字节为 0；
+ *                   写成"挖掉已知非秘密字段，剩下的必须全 0"，这样将来新增
+ *                   字段而忘了清零会在这里当场暴露，而不是逐点断言漏掉它
+ *   2. 状态无关     从任意状态进入清零，结果都一样干净
+ *   3. 落盘无明文   密钥库文件与备份文件里搜不到私钥 / PIN 密钥 / 验证值
+ *   4. 不被优化掉   在 -O2 下确认 pqc_secure_zero 那条存储没有被死存储消除，
+ *                   带反证：同一套探针必须能抓到"根本没清"的情形
+ *   5. 释放后无残留 pqc_secure_free 归还的内存里搜不到原内容，同样带反证
+ *
+ * 界限（诚实说明）：本测试能证明的是进程地址空间内的残留。它**不能**证明
+ * CPU 寄存器、已换出的页、swap 分区或掉电后的 DRAM 里没有残留 —— 那需要板子
+ * 和物理手段，不属于软件阶段。
  */
 #include "testlib.h"
 #include "pqchsm/backup.h"
@@ -18,6 +27,7 @@
 
 #include "../../src/slot/slot_internal.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -262,11 +272,211 @@ static void test_secure_alloc(void)
 	pqc_secure_free(NULL, 0);   /* 不应崩溃 */
 }
 
+/* ---- 结构性覆盖：清零后整个结构体只剩非秘密字段 ------------------------- */
+
+/* 清零之后仍然允许非 0 的字段。除此之外的每一个字节都必须是 0 ——
+ * 包括将来新增的字段，这正是这条检查与逐点断言的区别。 */
+static void punch_public_fields(uint8_t *shadow, const slot_t *s)
+{
+	const uint8_t *base = (const uint8_t *)s;
+	struct { const void *at; size_t n; } keep[] = {
+		{ &s->lock,     sizeof(s->lock) },      /* 互斥量：运行期状态 */
+		{ &s->meta,     sizeof(s->meta) },      /* 元数据：清零后复位并重新盖章 */
+		{ &s->meta_tag, sizeof(s->meta_tag) },  /* 元数据标签：随之重算 */
+		{ &s->pre_lock, sizeof(s->pre_lock) },  /* 解锁目标状态：非秘密 */
+	};
+	for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++) {
+		size_t off = (size_t)((const uint8_t *)keep[i].at - base);
+		memset(shadow + off, 0, keep[i].n);
+	}
+}
+
+static void test_struct_fully_wiped(void)
+{
+	TCASE("结构性：清零后除已知非秘密字段外，slot_t 逐字节为 0");
+	uint8_t probe[48];
+	hsm_token_t *tok = fixture(probe, sizeof(probe), 0);
+	CHECK(tok != NULL);
+	slot_t *s = &tok->slots[0];
+
+	uint8_t *shadow = malloc(sizeof(slot_t));
+	CHECK(shadow != NULL);
+
+	/* 先确认这条检查在"没清零"时确实会响 —— 否则清零后的全 0 说明不了任何事 */
+	memcpy(shadow, s, sizeof(slot_t));
+	punch_public_fields(shadow, s);
+	CHECK(!all_zero(shadow, sizeof(slot_t)));
+
+	CHECK_EQ_INT(hsm_slot_zeroize_forced(tok, 0), HSM_OK);
+
+	memcpy(shadow, s, sizeof(slot_t));
+	punch_public_fields(shadow, s);
+	CHECK(all_zero(shadow, sizeof(slot_t)));
+
+	free(shadow);
+	hsm_token_free(tok);
+}
+
+/* ---- 不被优化掉：-O2 下的死存储消除探针 --------------------------------- */
+
+/* 哨兵：16 字节，随机内容不太可能撞上 */
+static const uint8_t SENTINEL[16] = {
+	0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15,
+	0xf3, 0x9c, 0xc0, 0x60, 0x5c, 0xed, 0xc8, 0x34,
+};
+
+#define FRAME_LEN 512
+
+enum { WIPE_NONE, WIPE_MEMSET, WIPE_SECURE };
+
+/* volatile：编译器不能假设这个指针之后没人读，也不能把它优化掉 */
+static uint8_t *volatile g_frame;
+
+/* 在自己的栈帧里放满哨兵，按 mode 决定怎么"清零"，然后把那段栈的地址留出来。
+ * 返回后这个帧就死了 —— 里面还剩什么，正是这条检查要看的。 */
+__attribute__((noinline))
+static void leave_sentinel_on_stack(int mode)
+{
+	uint8_t buf[FRAME_LEN];
+	for (size_t i = 0; i + sizeof(SENTINEL) <= FRAME_LEN; i += sizeof(SENTINEL)) {
+		memcpy(buf + i, SENTINEL, sizeof(SENTINEL));
+	}
+	/* 把一个即将失效的栈地址留出来正是本检查的手段，不是笔误。
+	 * GCC 12 起会就此告警，这里定点关掉。 */
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdangling-pointer"
+#endif
+	g_frame = buf;
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 12
+#pragma GCC diagnostic pop
+#endif
+	if (mode == WIPE_SECURE) {
+		pqc_secure_zero(buf, sizeof(buf));
+	} else if (mode == WIPE_MEMSET) {
+		memset(buf, 0, sizeof(buf));
+	}
+	/* buf 之后不再被读取。编译器有充分理由消除上面那条清零 ——
+	 * pqc_secure_zero 不能被消除，普通 memset 可以。 */
+}
+
+/* 把刚死掉的那个帧原样抄一份。抄的过程必须在调用方自己的帧里内联完成：
+ * 中途只要再调用一个函数，新帧就会盖在要检查的那段栈上。 */
+#define SNAPSHOT_DEAD_FRAME(dst)                                            \
+	do {                                                                \
+		volatile uint8_t *_src = g_frame;                           \
+		for (size_t _i = 0; _i < FRAME_LEN; _i++) {                 \
+			(dst)[_i] = _src[_i];                               \
+		}                                                           \
+	} while (0)
+
+static void test_secure_zero_not_elided(void)
+{
+	uint8_t after_none[FRAME_LEN], after_memset[FRAME_LEN], after_secure[FRAME_LEN];
+
+	leave_sentinel_on_stack(WIPE_NONE);
+	SNAPSHOT_DEAD_FRAME(after_none);
+	leave_sentinel_on_stack(WIPE_MEMSET);
+	SNAPSHOT_DEAD_FRAME(after_memset);
+	leave_sentinel_on_stack(WIPE_SECURE);
+	SNAPSHOT_DEAD_FRAME(after_secure);
+
+	int hits_none = mem_contains(after_none, FRAME_LEN, SENTINEL, sizeof(SENTINEL));
+	int hits_memset = mem_contains(after_memset, FRAME_LEN, SENTINEL, sizeof(SENTINEL));
+	int hits_secure = mem_contains(after_secure, FRAME_LEN, SENTINEL, sizeof(SENTINEL));
+
+	/* 反证：完全不清零时探针必须看得见哨兵。看不见就说明探针根本没读到那段栈，
+	 * 后面"清零后看不见"这个结论也就一文不值。 */
+	TCASE("反证：不清零时栈上残留必须被探针抓到");
+	CHECK(hits_none == 1);
+
+	TCASE("pqc_secure_zero 的清零不会被死存储消除（本 TU 编在 -O2）");
+	CHECK(hits_secure == 0);
+
+	/* 普通 memset 到一个即将失效的栈缓冲是一条死存储，编译器有权消除它。
+	 * 消不消除取决于编译器与版本，所以这里只如实报告观察结果，不作为判据 ——
+	 * 判据是上面那条反证。 */
+	printf("    观察：普通 memset 那条清零%s（栈上%s哨兵）\n",
+	       hits_memset ? "被编译器消除了" : "未被消除",
+	       hits_memset ? "仍能找到" : "已找不到");
+}
+
+/* ---- 释放后无残留 -------------------------------------------------------- */
+#define POOL_N   32
+#define BLOCK_N  1024
+/* 哨兵写在偏移 64 处：分配器会把空闲链表指针写进块首那几个字节 */
+#define SENT_AT  64
+
+/* 申请一批块、写入哨兵、全部释放，再用**普通 malloc** 申请同样一批，
+ * 看哨兵还在不在。两种分配器走的是同一套访问模式，唯一的差别就是释放路径，
+ * 所以两次观察可比。
+ *
+ * 不按"释放前后地址是否相同"来判断：小块分配器会在释放时与相邻空闲块合并再
+ * 重新切分，地址对不上是常态，那样判会把结论建在分配器实现细节上。 */
+static int residue_visible_after_free(int secure)
+{
+	uint8_t *blocks[POOL_N];
+	for (int i = 0; i < POOL_N; i++) {
+		blocks[i] = secure ? pqc_secure_alloc(BLOCK_N) : malloc(BLOCK_N);
+		if (!blocks[i]) {
+			return -1;
+		}
+		memcpy(blocks[i] + SENT_AT, SENTINEL, sizeof(SENTINEL));
+		if (!mem_contains(blocks[i], BLOCK_N, SENTINEL, sizeof(SENTINEL))) {
+			return -1;      /* 哨兵没写进去，后面的观察无从谈起 */
+		}
+	}
+	for (int i = 0; i < POOL_N; i++) {
+		if (secure) {
+			pqc_secure_free(blocks[i], BLOCK_N);
+		} else {
+			free(blocks[i]);
+		}
+	}
+
+	int found = 0;
+	uint8_t *again[POOL_N];
+	for (int i = 0; i < POOL_N; i++) {
+		again[i] = malloc(BLOCK_N);
+		if (again[i] && mem_contains(again[i], BLOCK_N, SENTINEL, sizeof(SENTINEL))) {
+			found = 1;
+		}
+	}
+	for (int i = 0; i < POOL_N; i++) {
+		free(again[i]);
+	}
+	return found;
+}
+
+static void test_no_residue_after_free(void)
+{
+	/* 反证：普通 malloc/free 之后，原内容必须还能在归还的内存里找到。
+	 * 找不到就说明分配器在释放时自己就把块内容清了（macOS 的 libmalloc、
+	 * ASan 的隔离区都是这样），这套观察手段在当前平台没有分辨力；
+	 * 此时下面那条结论也无从建立，如实跳过而不是记成通过。 */
+	int control = residue_visible_after_free(0);
+	CHECK(control >= 0);
+	if (control != 1) {
+		printf("    分配器在释放时即清除块内容，观察手段无分辨力，"
+		       "跳过释放后残留观察\n");
+		return;
+	}
+
+	TCASE("反证：普通 malloc/free 之后原内容仍能在归还的内存里找到");
+	CHECK_EQ_INT(control, 1);
+
+	TCASE("pqc_secure_free 释放的内存里搜不到原内容");
+	CHECK_EQ_INT(residue_visible_after_free(1), 0);
+}
+
 int main(void)
 {
 	test_struct_wiped();
+	test_struct_fully_wiped();
 	test_zeroize_from_every_state();
 	test_no_plaintext_on_disk();
 	test_secure_alloc();
+	test_secure_zero_not_elided();
+	test_no_residue_after_free();
 	return test_report("test_zeroize");
 }

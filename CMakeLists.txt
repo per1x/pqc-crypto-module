@@ -163,6 +163,19 @@ pqchsm_test(test_keystore  tests/unit/test_keystore.c)
 pqchsm_test(test_shamir    tests/unit/test_shamir.c)
 pqchsm_test(test_backup    tests/unit/test_backup.c)
 pqchsm_test(test_zeroize   tests/unit/test_zeroize.c)
+# 清零是否真的落到内存上，是个只有在优化开着时才有意义的问题：库本身怎么编都
+# 不影响 OPENSSL_cleanse，会被消除的是**调用方**那条死存储。所以这个 TU 单独
+# 开 -O2，让编译器有动机去消除它。
+target_compile_options(test_zeroize PRIVATE -O2)
+
+# 常量时间原语的统计式验证（dudect 思路的 Welch t 检验，带反证与空对照）
+pqchsm_test(test_ct_timing tests/unit/test_ct_timing.c)
+# Welch 检验要开方。glibc 把数学函数放在单独的 libm 里，必须显式链；
+# macOS 的 libSystem 自带，find_library 找不到时也不该报错。
+find_library(LIBM_LIBRARY m)
+if(LIBM_LIBRARY)
+  target_link_libraries(test_ct_timing PRIVATE ${LIBM_LIBRARY})
+endif()
 pqchsm_test(test_audit     tests/unit/test_audit.c)
 pqchsm_test(test_kdr       tests/unit/test_kdr.c)
 pqchsm_test(test_proto     tests/unit/test_proto.c)
@@ -201,6 +214,7 @@ add_test(NAME keystore      COMMAND test_keystore)
 add_test(NAME shamir        COMMAND test_shamir)
 add_test(NAME backup        COMMAND test_backup)
 add_test(NAME zeroize       COMMAND test_zeroize)
+add_test(NAME ct_timing     COMMAND test_ct_timing)
 add_test(NAME audit         COMMAND test_audit)
 add_test(NAME kdr           COMMAND test_kdr)
 add_test(NAME proto         COMMAND test_proto)
@@ -248,6 +262,20 @@ if(Python3_Interpreter_FOUND)
   add_test(NAME kdr_no_readback COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_readback.py
     ${CMAKE_CURRENT_SOURCE_DIR}/include/pqchsm/kdr.h)
+
+  # 常量时间源码审计：秘密相关的分支 / 下标 / 除法 / 非常量时间比较。
+  # 先跑自检（合成样本上验证四条规则确有区分能力），再扫真实源码 ——
+  # 顺序不能反：一个扫不出东西的扫描器，扫出"没问题"毫无意义。见 docs/constant-time.md。
+  add_test(NAME ct_audit_self_test COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/ct_audit.py --self-test)
+  add_test(NAME ct_audit COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/ct_audit.py)
+
+  # zeroize 结构性检查：密钥结构体的销毁覆盖 + 局部密钥缓冲的返回路径
+  add_test(NAME zeroize_check_self_test COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_zeroize.py --self-test)
+  add_test(NAME zeroize_check COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_zeroize.py)
 endif()
 add_test(NAME audit_integration COMMAND test_audit_integration)
 

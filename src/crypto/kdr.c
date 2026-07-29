@@ -95,6 +95,8 @@ void pqc_kdr_set_test_root(const uint8_t *seed, size_t seed_len)
 	/* 把任意长度的测试种子压成 32 字节，保证不同种子 = 不同"设备" */
 	uint8_t root[PQC_KDR_LEN];
 	if (pqc_kdf(seed, seed_len, NULL, 0, "pqc-hsm/test-device-root", root, sizeof(root)) != 0) {
+		/* 失败也可能已经写进去半截，照样要抹掉 */
+		pqc_secure_zero(root, sizeof(root));
 		return;
 	}
 	memcpy(g_root, root, PQC_KDR_LEN);

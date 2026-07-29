@@ -137,6 +137,7 @@ transport 会明确报"不支持"，而不是悄悄用软件顶替。
 |---|---|
 | [docs/architecture.zh-CN.md](docs/architecture.zh-CN.md) | 分层、密钥层级、密钥库格式、审计链、硬件抽象、密钥注入 |
 | [docs/pkcs11.zh-CN.md](docs/pkcs11.zh-CN.md) | 机制、对象模型、厂商属性、密钥导入、KEM 操作、配置 |
+| [docs/constant-time.zh-CN.md](docs/constant-time.zh-CN.md) | 常量时间审计的范围与方法、发现、清零检查、不作断言的部分、如何复现 |
 | [hardware/README.md](hardware/README.md) | RTL 模块、验证策略、仿真器选择 |
 | [demo/README.md](demo/README.md) | provider 演示与客户端库兼容性 |
 
@@ -163,6 +164,8 @@ ctest --test-dir build --output-on-failure
 ### 补充检查
 
 ```bash
+python3 tools/ct_audit.py      # 常量时间源码审计（--self-test 跑规则自检）
+python3 tools/check_zeroize.py # zeroize 结构性检查（--self-test 跑规则自检）
 ./tools/rtl_sim.sh          # cocotb 回归（Icarus Verilog）
 ./tools/aarch64_test.sh     # 在 aarch64 Linux 容器中从零构建并回归
 ./tools/fuzz.sh             # libFuzzer 靶子（需要 LLVM clang）
@@ -197,7 +200,8 @@ java --enable-native-access=ALL-UNNAMED demo/java/PqcHsmDemo.java \
 
 **安全边界是软件。** 运算期间明文密钥材料存在于进程内存中。调用方始终只看到句柄，
 缓冲区会被清零并尽可能 `mlock`，但这一切都无法抵御能读取进程地址空间的攻击者。把
-边界移入硬件是后续工作。
+边界移入硬件是后续工作。常量时间与清零审计覆盖了什么、以及更要紧的、**没有**覆盖
+什么，记在 [constant-time.zh-CN.md](docs/constant-time.zh-CN.md)。
 
 **密钥派生根是桩。** `src/crypto/kdr.c` 中是一个固定的 32 字节常量，其字面内容为
 `PQC-HSM STUB KDR -- NOT SECRET!!`。在真实设备上，该值来自 eFUSE、BBRAM 或 PUF，且
@@ -224,14 +228,14 @@ Vivado 脚本已写好但未验证），没有时序收敛、功耗测量、TRNG
 
 | 检查项 | 结果 |
 |---|---|
-| `ctest` | 38 / 38 |
+| `ctest` | 43 / 43 |
 | 断言总数 | 约 3700 |
 | NIST ACVP 向量 | 390 条逐字节通过，60 条显式跳过 |
-| ASan + UBSan | 38 / 38 |
+| ASan + UBSan | 43 / 43 |
 | ThreadSanitizer | 0 竞争（以移除锁作反证：报告 9 处） |
 | macOS `leaks` | 0 泄漏 |
 | libFuzzer | 138 万次执行，无崩溃 |
-| aarch64 Linux（GCC 12） | 38 / 38 |
+| aarch64 Linux（GCC 12） | 43 / 43 |
 | cocotb RTL 回归 | 5 个模块共 14 个测试 |
 
 测试源码中贯穿两条做法：
@@ -240,8 +244,13 @@ Vivado 脚本已写好但未验证），没有时序收敛、功耗测量、TRNG
   OpenSSL 以及另一份独立的 Keccak；NTT 对照完全不触碰旋转因子表的 schoolbook 负循环
   卷积，并通过重建 ML-KEM 密钥生成、逐字节重现 ACVP 的 `ek`/`dk` 来验证；Keccak 对照
   公开的全零置换向量以及 `hashlib`/OpenSSL。
+- **把纪律写成结构性检查。** 功能测试看不见的性质 —— 密钥派生根没有读出接口、`src/`
+  里没有秘密相关的分支与下标、每个密钥字段都在销毁函数里被清零 —— 都写成接进 `ctest`
+  的扫描器，而且每个扫描器都要先在合成样本上自检通过，才允许报告"扫描干净"。
+  参见 [constant-time.zh-CN.md](docs/constant-time.zh-CN.md)。
 - **反证。** 通过刻意破坏并确认测试失败来验证断言本身有效——扰动一个旋转因子、丢掉一层
-  NTT、翻转 Keccak 轮常数的一个比特、在 TSan 下移除一把锁、加入一个假的密钥读回函数。
+  NTT、翻转 Keccak 轮常数的一个比特、在 TSan 下移除一把锁、加入一个假的密钥读回函数、
+  对一个刻意提前退出的比较做同样的时序检验、探测一个根本没清零的栈帧。
 
 ## 路线图
 

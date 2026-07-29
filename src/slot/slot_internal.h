@@ -26,6 +26,8 @@ typedef struct {
 typedef struct {
 	pthread_mutex_t lock;
 	slot_meta_t  meta;
+	/* zeroize 会把元数据复位并重新盖一次章，槽位在清空之后仍然是可验完整性的。
+	 * 无需清零：meta_tag 是覆盖非敏感元数据的 KMAC 标签，随密钥库一同落盘 */
 	uint8_t      meta_tag[SLOT_META_TAG_LEN];
 	slot_state_t pre_lock;
 
