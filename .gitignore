@@ -1,5 +1,6 @@
 build/
 build-asan/
+build-tsan/
 compile_commands.json
 
 # 向量是可复现的派生物（tools/fetch_vectors.sh 钉死了 ACVP commit），

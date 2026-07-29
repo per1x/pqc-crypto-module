@@ -15,6 +15,7 @@ add_compile_options(-Wall -Wextra -Wshadow -Wvla -Wpointer-arith -Wwrite-strings
 # liboqs：PQC 算法（最终版 FIPS 203/204）。见 README「技术栈选择理由」。
 # OpenSSL 3：AES-256-GCM 包裹、SHA3/KMAC256、安全清零。
 find_package(OpenSSL 3.0 REQUIRED)
+find_package(Threads REQUIRED)
 
 find_path(LIBOQS_INCLUDE_DIR oqs/oqs.h HINTS /opt/homebrew/opt/liboqs/include /usr/local/include)
 find_library(LIBOQS_LIBRARY NAMES oqs HINTS /opt/homebrew/opt/liboqs/lib /usr/local/lib)
@@ -40,7 +41,7 @@ target_include_directories(pqchsm
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LIBOQS_INCLUDE_DIR}
 )
-target_link_libraries(pqchsm PUBLIC OpenSSL::Crypto PRIVATE ${LIBOQS_LIBRARY})
+target_link_libraries(pqchsm PUBLIC OpenSSL::Crypto Threads::Threads PRIVATE ${LIBOQS_LIBRARY})
 
 # ---- 测试 -------------------------------------------------------------------
 enable_testing()
@@ -63,6 +64,7 @@ pqchsm_test(test_kdf       tests/unit/test_kdf.c)
 pqchsm_test(test_slot_fsm  tests/unit/test_slot_fsm.c)
 pqchsm_test(test_slot_meta tests/unit/test_slot_meta.c)
 pqchsm_test(test_slot      tests/unit/test_slot.c)
+pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
 add_test(NAME util          COMMAND test_util)
@@ -73,6 +75,7 @@ add_test(NAME kdf           COMMAND test_kdf)
 add_test(NAME slot_fsm      COMMAND test_slot_fsm)
 add_test(NAME slot_meta     COMMAND test_slot_meta)
 add_test(NAME slot          COMMAND test_slot)
+add_test(NAME slot_concurrent COMMAND test_slot_concurrent)
 
 # 每类 ACVP 向量一个 ctest 用例，失败时一眼看出是哪一类
 foreach(v mlkem_keygen mlkem_encaps mlkem_decaps mldsa_keygen mldsa_siggen mldsa_sigver)
