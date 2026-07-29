@@ -1,0 +1,66 @@
+// RTL 静态检查的豁免表（Verilator 配置文件）
+//
+// 策略：RTL 以 `-Wall` 过 lint，一条告警都不留。真正的问题就地改掉；
+// 只有"告警描述的现象确实存在、但它正是设计意图"的条目才写进本文件，
+// 且必须逐条给出理由。豁免按文件与信号名精确匹配，因此**新出现**的同类
+// 告警不会被顺带遮住 —— 那正是本文件存在的意义。
+//
+// 用法见 tools/rtl_lint.sh。
+
+`verilator_config
+
+// ---- DECLFILENAME：文件名与模块名不一致 ----
+//
+// 本工程按功能分文件，一个文件里放同一类的若干模块：butterfly.v 里是 CT 与 GS
+// 两种蝶形，sample.v 里是两类采样器，rounding.v 里是高低位拆分与提示位的四个
+// 模块。若改成"一模块一文件"，只会得到十几个二十行的文件与同样多的重复文件头。
+// 模块名本身带 mlkem_ / mldsa_ 前缀，不存在命名冲突。
+lint_off -rule DECLFILENAME -file "*/hardware/rtl/*"
+
+// ---- UNUSEDSIGNAL：中间量的部分比特未被使用 ----
+//
+// 定点数据通路里"丢掉一部分比特"是构造本身：算术右移 N 位等价于取高位段，
+// 掩码等价于取低位段，中间量必须先算全宽再截取。这类告警在本工程里全部属于
+// 这种情况，且每一处的截取位置都由穷举或大批量向量对拍钉住。
+// 逐条列出，而不是整目录关掉。
+
+// Montgomery 约减：差值算满 32/64 位，结果取高半段（等价于算术右移）
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/mont_reduce.v" -match "*'diff'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/mont_reduce.v" -match "*'diff'*"
+
+// Barrett 约减：乘积右移 26 位后只用低 16 位
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/butterfly.v" -match "*'shifted'*"
+
+// 压缩：折回 [0,q) 的中间量只取低 12 位；乘倒数的积只取高位段；商只取低 D 位
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'norm'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'prod'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'quot'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'num'*"
+
+// 12 位编码：折回 [0,q) 的中间量只取低 12 位
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/pack.v" -match "*'n0'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/pack.v" -match "*'n1'*"
+
+// NTT 核：下标加法算满 9 位以便判断组边界，寻址只用低 8 位
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/ntt_core.v" -match "*'j_hi'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/ntt_core.v" -match "*'j_hi'*"
+
+// 高低位拆分：舍入后的中间量与乘倒数的积都只取其中一段
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'t'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'a1t_full'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'scaled'*"
+
+// 采样：均匀采样按定义丢掉候选的最高位（t & 0x7FFFFF）；
+//       有界采样的乘法只取高位段（205·t >> 10）
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/sample.v" -match "*'bytes_in'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/sample.v" -match "*'scaled'*"
+
+// AXI4-Lite：地址译码只看 [4:2]，高位与字节内偏移按设计忽略
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/axi4lite_regs.v" -match "*'wr_addr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/axi4lite_regs.v" -match "*'ar_addr'*"
+
+// ---- PINCONNECTEMPTY：有意留空的例化端口 ----
+//
+// PARAM 寄存器属于软件侧的寄存器契约（可读可写），但加速器顶层实现的三个操作码
+// 都不按参数集分支，因此该输出有意不接。留空是显式的，不是漏接。
+lint_off -rule PINCONNECTEMPTY -file "*/hardware/rtl/bus/pqc_accel_axi.v" -match "*'param'*"

@@ -81,7 +81,7 @@ module pqc_accel_axi #(
 
     // ---- 寄存器组 ----
     wire        start, soft_reset;
-    wire [31:0] mode, param, in_len;
+    wire [31:0] mode, in_len;
     reg         done_set, err_set, out_we;
     reg  [31:0] out_len_r, errcode_r;
     reg         busy;
@@ -99,7 +99,9 @@ module pqc_accel_axi #(
         .s_axi_rdata(s_axi_rdata), .s_axi_rresp(s_axi_rresp),
         .s_axi_rvalid(s_axi_rvalid), .s_axi_rready(s_axi_rready),
         .start(start), .soft_reset(soft_reset),
-        .mode(mode), .param(param), .in_len(in_len),
+        // PARAM 属于寄存器契约的一部分（软件可读写），但本层实现的三个操作码
+        // 都不按参数集分支，因此不接出来。
+        .mode(mode), .param(), .in_len(in_len),
         .done_set(done_set), .busy(busy), .err_set(err_set),
         .out_len_in(out_len_r), .errcode_in(errcode_r), .out_we(out_we));
 
