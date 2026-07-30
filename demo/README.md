@@ -21,10 +21,19 @@ python3 -m venv .venv-p11 && ./.venv-p11/bin/pip install -q PyKCS11
 
 ```bash
 cmake --build build --target pqchsm-p11
-"$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home/bin/java" \
+PQCHSM_KEYSTORE=$(mktemp -d)/keystore.bin \
+  "$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home/bin/java" \
   --enable-native-access=ALL-UNNAMED \
-  demo/java/PqcHsmDemo.java "$PWD/build/pqchsm-pkcs11.dylib"
+  demo/java/PqcHsmDemo.java
 ```
+
+This demo starts from `C_InitToken`, so it needs a keystore that has not been
+initialised yet — hence the fresh `PQCHSM_KEYSTORE`. Run against an existing one
+it reports 18 passed, 12 failed. The Python demo creates its own temporary
+keystore and does not have this property. The module path may be passed as the
+first argument; without it, `build/` is probed for `.so` and `.dylib` according to
+platform. On a system without a UTF-8 locale, add `LANG=C.UTF-8` or the Chinese
+output renders as `?`.
 
 ## Compatibility with higher-level frameworks
 

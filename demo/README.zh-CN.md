@@ -20,10 +20,17 @@ python3 -m venv .venv-p11 && ./.venv-p11/bin/pip install -q PyKCS11
 
 ```bash
 cmake --build build --target pqchsm-p11
-"$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home/bin/java" \
+PQCHSM_KEYSTORE=$(mktemp -d)/keystore.bin \
+  "$(brew --prefix openjdk)/libexec/openjdk.jdk/Contents/Home/bin/java" \
   --enable-native-access=ALL-UNNAMED \
-  demo/java/PqcHsmDemo.java "$PWD/build/pqchsm-pkcs11.dylib"
+  demo/java/PqcHsmDemo.java
 ```
+
+这个演示从 `C_InitToken` 开始，需要一个尚未初始化的密钥库，因此每次给一个新的
+`PQCHSM_KEYSTORE`。对着已经初始化过的密钥库跑会得到"通过 18，失败 12"。
+Python 演示自己建临时密钥库，没有这个问题。模块路径可以作为第一个参数传入；
+不传则在 `build/` 下按平台探测 `.so` 与 `.dylib`。系统没有 UTF-8 locale 时
+要加 `LANG=C.UTF-8`，否则中文输出显示成 `?`。
 
 ## 与高层框架的兼容性
 

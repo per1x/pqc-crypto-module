@@ -168,6 +168,7 @@ software.
 | [algorithms.md](docs/algorithms.md) · [中文](docs/algorithms.zh-CN.md) | Algorithm inventory, parameter sets, key and SSP inventory, validation evidence |
 | [security-policy.md](docs/security-policy.md) · [中文](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 security policy draft, with an explicit gap list |
 | [testing.md](docs/testing.md) · [中文](docs/testing.zh-CN.md) | What is tested, by what means, and how to reproduce every number quoted here |
+| [deployment.md](docs/deployment.md) · [中文](docs/deployment.zh-CN.md) | Deployment on an intranet Linux host, including obtaining every dependency offline |
 | [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
 | [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
 

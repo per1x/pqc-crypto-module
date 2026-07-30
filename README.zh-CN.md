@@ -151,6 +151,7 @@ SHA3 与 SHAKE 的海绵结构在 C 侧实现、置换交给硬件，因此整�
 | [docs/algorithms.zh-CN.md](docs/algorithms.zh-CN.md) | 算法清单、参数集、密钥与敏感安全参数清单、验证证据 |
 | [docs/security-policy.zh-CN.md](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 安全策略草稿，附显式差距清单 |
 | [docs/testing.zh-CN.md](docs/testing.zh-CN.md) | 测了什么、用什么手段、此处引用的每个数字如何复现 |
+| [docs/deployment.zh-CN.md](docs/deployment.zh-CN.md) | 内网 Linux 部署，含离线获取全部依赖的做法 |
 | [hardware/README.md](hardware/README.md) | RTL 模块、验证策略、仿真器选择 |
 | [demo/README.md](demo/README.md) | provider 演示与客户端库兼容性 |
 
