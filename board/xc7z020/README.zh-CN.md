@@ -46,7 +46,7 @@ board/xc7z020/
 ## 交付配置里有什么
 
 只有 Keccak-f[1600] 核。ML-KEM 的 NTT 核放不进 XC7Z020，依据是实测的
-58350 LUT（器件容量 53200）——完整的论证、代价评估与"要放回来该怎么做"见
+58008 LUT（器件容量 53200）——完整的论证、代价评估与"要放回来该怎么做"见
 [docs/resource-budget.zh-CN.md](docs/resource-budget.zh-CN.md)。
 
 信任根、PUF、安全启动、eFUSE 这一套**本期不做**。选 XC7Z020 就意味着密钥派生根

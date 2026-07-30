@@ -85,9 +85,13 @@ measure() { # measure <显示名> <顶层> [chparam]
 }
 
 # 交付配置：不含 NTT 核。取舍的依据就在下面两行数字里。
-measure "pqc_accel_zynq（交付配置）" pqc_accel_zynq "chparam -set INCLUDE_NTT 0 pqc_accel_axi"
+#
+# 【参数要覆盖在顶层上】pqc_accel_zynq 把自己的 INCLUDE_NTT 显式传给
+# pqc_accel_axi，因此改 pqc_accel_axi 的默认值不起作用 —— 顶层的实参会盖掉它。
+# 两个配置都显式指定，不依赖任何一方的默认值。
+measure "pqc_accel_zynq（交付配置）" pqc_accel_zynq "chparam -set INCLUDE_NTT 0 pqc_accel_zynq"
 SHIP_LUT=$LAST_LUT; SHIP_FF=$LAST_FF; SHIP_DSP=$LAST_DSP; SHIP_BRAM=$LAST_BRAM
-measure "pqc_accel_zynq（含 NTT）"   pqc_accel_zynq
+measure "pqc_accel_zynq（含 NTT）"   pqc_accel_zynq "chparam -set INCLUDE_NTT 1 pqc_accel_zynq"
 FULL_LUT=$LAST_LUT
 
 for top in ntt_core keccak_f1600 mldsa_ntt_core \

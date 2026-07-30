@@ -10,8 +10,8 @@ measured, not estimated:
 
 | Configuration | LUT | Share of 53200 | Verdict |
 |---|---|---|---|
-| Keccak + bus (delivered) | 18307 | 34.4% | fits, with room to spare |
-| Keccak + NTT + bus | 58350 | 109.7% | **does not fit** |
+| Keccak + bus (delivered) | 18278 | 34.4% | fits, with room to spare |
+| Keccak + NTT + bus | 58008 | 109.0% | **does not fit** |
 
 The numbers come from `board/xc7z020/tools/resource_budget.sh` and can be
 regenerated. That script also enforces the budget: it exits non-zero if the
@@ -36,8 +36,8 @@ Yosys synthesised to 7-series cells (`synth_xilinx -family xc7 -flatten`):
 
 | Module | LUT | FF | DSP | BRAM36 | MUXF7/8 |
 |---|---|---|---|---|---|
-| pqc_accel_zynq (delivered) | 18307 | 6071 | 0 | 0 | 844 |
-| pqc_accel_zynq (with NTT) | 58350 | 10271 | 13 | 0 | 23184 |
+| pqc_accel_zynq (delivered) | 18278 | 6071 | 0 | 0 | 784 |
+| pqc_accel_zynq (with NTT) | 58008 | 10271 | 13 | 0 | 23096 |
 | ntt_core (ML-KEM, 7 layers) | 23228 | 4146 | 13 | 0 | 13182 |
 | keccak_f1600 | 5864 | 1607 | 0 | 0 | 149 |
 | mldsa_ntt_core (8 layers) | 45659 | 8242 | 31 | 0 | 26584 |
@@ -107,9 +107,13 @@ To include the NTT again:
 vivado -mode batch -source board/xc7z020/vivado/create_project.tcl -tclargs -with-ntt
 ```
 
-The flag is passed through to `INCLUDE_NTT` on `pqc_accel_axi`. On XC7Z020 this
-overflows the device; it is meaningful only on a larger part such as XC7Z035 or
-XC7Z045.
+The flag sets `INCLUDE_NTT` on the board wrapper `pqc_accel_zynq`, which passes it
+down to `pqc_accel_axi`. Overriding the parameter on `pqc_accel_axi` alone has no
+effect — the wrapper's actual argument wins. `resource_budget.sh` overrides it on
+the wrapper for exactly this reason; the earlier version overrode the inner module
+and silently measured the same design twice, which the script's own consistency
+check caught. On XC7Z020 the flag overflows the device; it is meaningful only on a
+larger part such as XC7Z035 or XC7Z045.
 
 ## Clock and timing
 

@@ -51,7 +51,7 @@ issued.
 ## What the delivered configuration contains
 
 The Keccak-f[1600] core only. The ML-KEM NTT core does not fit in an XC7Z020: it
-measures 58350 LUT against a capacity of 53200. The full argument, what excluding
+measures 58008 LUT against a capacity of 53200. The full argument, what excluding
 it costs, and what it would take to include it are in
 [docs/resource-budget.md](docs/resource-budget.md).
 
