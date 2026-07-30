@@ -13,9 +13,10 @@
  *   C_Sign                ↔  hsm_object_sign
  *   C_DestroyObject       ↔  hsm_object_destroy
  *
- * 对象句柄：本项目一槽位一密钥对，所以一个已装载的槽位
- * 恰好对外呈现两个对象。私钥对象句柄直接用 hsm_handle_t，公钥对象句柄是它
- * 或上最高位——两者可互相推导，不需要额外的对象表。
+ * 对象句柄：本项目一槽位一密钥对，所以一个已装载的槽位恰好对外呈现两个对象。
+ * 句柄由槽位号与 generation 直接编出，公钥句柄只比私钥句柄多一个标志位，
+ * 两者可互相推导，不需要额外的对象表。编码本身见下方 P11_IDX_BITS 那段
+ * ——它必须限制在 32 位以内，因为 CK_ULONG 在 32 位 ABI 上只有 4 字节。
  *
  * 【进程模型】
  * pkcs11-tool 每条命令都是一个新进程，所以状态必须落盘才有意义：
@@ -49,8 +50,25 @@
 #define P11_MODEL        "pqc-hsm-sw"
 #define DEFAULT_SLOTS    4
 
-/* 公钥对象句柄 = 私钥句柄 | 最高位 */
-#define PUB_BIT (1ULL << 63)
+/* ---- 对象句柄编码 ---------------------------------------------------------
+ * CK_OBJECT_HANDLE 就是 CK_ULONG，而 CK_ULONG 的定义是 unsigned long：
+ * 在 x86_64 / aarch64 上是 8 字节，在 armv7l（Zynq-7000 的 Cortex-A9）上只有
+ * 4 字节。所以句柄编码必须整体落在 32 位以内 —— 不能把核心层的 64 位
+ * hsm_handle_t（generation << 32 | slot+1）原样透给 PKCS#11 调用方。
+ *
+ *   bit 31      公钥对象
+ *   bit 30      会话密钥对象（KEM 共享秘密，不占槽位）
+ *   bits 12-29  槽位 generation 的低 18 位
+ *   bits 0-11   索引：槽位对象为 slot+1，会话密钥对象为对象表下标+1
+ *
+ * generation 只带低 18 位：它在句柄里的唯一作用是让密钥重生成后的旧句柄失效，
+ * 而完整值随时能从槽位元数据读回。代价是同一槽位重生成 2^18 次之后，
+ * 旧句柄的这 18 位会重新对上；核心层仍然做完整的 64 位比较，
+ * 这里的截断只影响本模块自己的前置检查。 */
+#define P11_IDX_BITS   12
+#define P11_IDX_MASK   ((CK_OBJECT_HANDLE)((1u << P11_IDX_BITS) - 1u))
+#define P11_GEN_MASK   ((CK_OBJECT_HANDLE)0x3ffffu)
+#define PUB_BIT        ((CK_OBJECT_HANDLE)1u << 31)
 
 /* ---- 厂商自定义属性 --------------------------------------------------------
  * PKCS#11 **没有**"这把密钥可否被 KEK 包裹备份"这个标准属性：
@@ -142,7 +160,7 @@ static p11_session_t g_sessions[MAX_P11_SESSIONS];
  *   · C_CloseSession / C_Finalize 时连同缓冲一起清零；
  *   · 句柄用 SECRET_BIT 与槽位对象句柄区分开。
  * 这与 PKCS#11 的 CKA_TOKEN=CK_FALSE（会话对象）语义一致。 */
-#define SECRET_BIT  (1ULL << 62)
+#define SECRET_BIT  ((CK_OBJECT_HANDLE)1u << 30)
 #define MAX_SECRETS 32
 #define SECRET_MAX_LEN 64
 
@@ -164,7 +182,7 @@ static p11_secret_t *secret_at(CK_OBJECT_HANDLE h)
 	if (!(h & SECRET_BIT)) {
 		return NULL;
 	}
-	CK_ULONG idx = (CK_ULONG)(h & ~SECRET_BIT);
+	CK_ULONG idx = (CK_ULONG)(h & P11_IDX_MASK);
 	if (idx == 0 || idx > MAX_SECRETS) {
 		return NULL;
 	}
@@ -292,7 +310,7 @@ static p11_session_t *sess_at(CK_SESSION_HANDLE h)
 
 static hsm_slot_id_t slot_of_handle(CK_OBJECT_HANDLE h)
 {
-	return (hsm_slot_id_t)(((h & ~PUB_BIT) & 0xffffffffu) - 1);
+	return (hsm_slot_id_t)((h & P11_IDX_MASK) - 1u);
 }
 
 /* 由槽位当前 generation 推出私钥对象句柄；未装载返回 0 */
@@ -305,7 +323,43 @@ static CK_OBJECT_HANDLE priv_handle(hsm_slot_id_t slot)
 	if (m.state != SLOT_ST_LOADED && m.state != SLOT_ST_IN_USE) {
 		return 0;
 	}
-	return ((CK_OBJECT_HANDLE)m.generation << 32) | (CK_OBJECT_HANDLE)(slot + 1);
+	return ((CK_OBJECT_HANDLE)(m.generation & P11_GEN_MASK) << P11_IDX_BITS)
+	       | (CK_OBJECT_HANDLE)(slot + 1);
+}
+
+/* 核心句柄 → P11 对象句柄（私钥形态）。编不出来时返回 0。 */
+static CK_OBJECT_HANDLE p11_handle_of_core(hsm_handle_t core)
+{
+	if (core == HSM_INVALID_HANDLE) {
+		return 0;
+	}
+	CK_OBJECT_HANDLE idx = (CK_OBJECT_HANDLE)(core & 0xffffffffu);
+	if (idx == 0 || idx > P11_IDX_MASK) {
+		return 0;
+	}
+	CK_OBJECT_HANDLE gen = (CK_OBJECT_HANDLE)((core >> 32) & P11_GEN_MASK);
+	return (gen << P11_IDX_BITS) | idx;
+}
+
+/* P11 对象句柄 → 核心句柄。索引越界、generation 已过期、或者传进来的是
+ * 会话密钥对象（不在槽位里）时返回 HSM_INVALID_HANDLE。 */
+static hsm_handle_t core_handle_of(CK_OBJECT_HANDLE h)
+{
+	if (h & SECRET_BIT) {
+		return HSM_INVALID_HANDLE;
+	}
+	CK_OBJECT_HANDLE idx = h & P11_IDX_MASK;
+	if (idx == 0) {
+		return HSM_INVALID_HANDLE;
+	}
+	slot_meta_t m;
+	if (hsm_slot_get_meta(g_tok, (hsm_slot_id_t)(idx - 1u), &m) != HSM_OK) {
+		return HSM_INVALID_HANDLE;
+	}
+	if (((h >> P11_IDX_BITS) & P11_GEN_MASK) != (m.generation & P11_GEN_MASK)) {
+		return HSM_INVALID_HANDLE;
+	}
+	return ((hsm_handle_t)m.generation << 32) | (hsm_handle_t)idx;
 }
 
 /* ---- 通用接口 ----------------------------------------------------------- */
@@ -943,8 +997,13 @@ CK_DEFINE_FUNCTION(CK_RV, C_GenerateKeyPair)(
 			goto out;
 		}
 		persist();
-		*phPrivateKey = (CK_OBJECT_HANDLE)h;
-		*phPublicKey  = (CK_OBJECT_HANDLE)h | PUB_BIT;
+		CK_OBJECT_HANDLE ph = p11_handle_of_core(h);
+		if (ph == 0) {
+			rv = CKR_GENERAL_ERROR;
+			goto out;
+		}
+		*phPrivateKey = ph;
+		*phPublicKey  = ph | PUB_BIT;
 	}
 out:
 	pthread_mutex_unlock(&g_lock);
@@ -976,7 +1035,12 @@ CK_DEFINE_FUNCTION(CK_RV, C_DestroyObject)(CK_SESSION_HANDLE hSession,
 		goto out;
 	}
 	/* 公钥与私钥是同一对，销毁任一即销毁整对 —— 本模型一槽一对 */
-	rv = map_status(hsm_object_destroy(g_tok, s->sess, (hsm_handle_t)(hObject & ~PUB_BIT)));
+	hsm_handle_t core = core_handle_of(hObject);
+	if (core == HSM_INVALID_HANDLE) {
+		rv = CKR_OBJECT_HANDLE_INVALID;
+		goto out;
+	}
+	rv = map_status(hsm_object_destroy(g_tok, s->sess, core));
 	if (rv == CKR_OK) {
 		persist();
 	}
@@ -1187,7 +1251,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetAttributeValue)(CK_SESSION_HANDLE hSession,
 	}
 	{
 		int is_pub = (hObject & PUB_BIT) != 0;
-		hsm_handle_t priv = (hsm_handle_t)(hObject & ~PUB_BIT);
+		hsm_handle_t priv = core_handle_of(hObject);
 		slot_meta_t m;
 		if (hsm_slot_get_meta(g_tok, slot_of_handle(hObject), &m) != HSM_OK) {
 			rv = CKR_OBJECT_HANDLE_INVALID;
@@ -1388,7 +1452,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_Sign)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData,
 			goto out;
 		}
 		size_t sl = 0;
-		hsm_status_t st = hsm_object_sign(g_tok, s->sess, (hsm_handle_t)s->sign_key,
+		hsm_status_t st = hsm_object_sign(g_tok, s->sess, core_handle_of(s->sign_key),
 		                                  pData, ulDataLen, NULL, 0,
 		                                  pSignature, *pulSignatureLen, &sl);
 		if (st != HSM_OK) {
@@ -1450,7 +1514,7 @@ static CK_RV verify_with_pubkey(p11_session_t *s, CK_OBJECT_HANDLE key,
 		return CKR_HOST_MEMORY;
 	}
 	size_t plen = 0;
-	if (hsm_object_public_key(g_tok, s->sess, (hsm_handle_t)(key & ~PUB_BIT),
+	if (hsm_object_public_key(g_tok, s->sess, core_handle_of(key),
 	                          pk, info->pk_len, &plen) != HSM_OK) {
 		free(pk);
 		return CKR_OBJECT_HANDLE_INVALID;
@@ -1626,7 +1690,11 @@ CK_DEFINE_FUNCTION(CK_RV, C_CreateObject)(CK_SESSION_HANDLE hSession,
 			goto out;
 		}
 		persist();
-		*phObject = (CK_OBJECT_HANDLE)h;
+		*phObject = p11_handle_of_core(h);
+		if (*phObject == 0) {
+			rv = CKR_GENERAL_ERROR;
+			goto out;
+		}
 	}
 out:
 	pthread_mutex_unlock(&g_lock);
@@ -1724,7 +1792,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_SignFinal)(CK_SESSION_HANDLE hSession,
 			goto out;
 		}
 		size_t sl = 0;
-		hsm_status_t st = hsm_object_sign(g_tok, s->sess, (hsm_handle_t)s->sign_key,
+		hsm_status_t st = hsm_object_sign(g_tok, s->sess, core_handle_of(s->sign_key),
 		                                  s->sign_acc.p, s->sign_acc.len, NULL, 0,
 		                                  pSignature, *pulSignatureLen, &sl);
 		buf_free(&s->sign_acc);
@@ -1877,7 +1945,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_EncapsulateKey)(
 		}
 		size_t plen = 0;
 		hsm_status_t hst = hsm_object_public_key(g_tok, s->sess,
-		                                         (hsm_handle_t)(hPublicKey & ~PUB_BIT),
+		                                         core_handle_of(hPublicKey),
 		                                         pk, info->pk_len, &plen);
 		if (hst != HSM_OK) {
 			rv = map_status(hst);
@@ -1952,7 +2020,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_DecapsulateKey)(
 			goto out;
 		}
 		size_t sl = 0;
-		hsm_status_t hst = hsm_object_decaps(g_tok, s->sess, (hsm_handle_t)hPrivateKey,
+		hsm_status_t hst = hsm_object_decaps(g_tok, s->sess, core_handle_of(hPrivateKey),
 		                                     pCiphertext, ulCiphertextLen,
 		                                     ss, sizeof(ss), &sl);
 		if (hst != HSM_OK) {

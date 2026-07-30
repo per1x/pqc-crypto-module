@@ -24,12 +24,15 @@ static const char *g_case = "";
 	}                                                                   \
 } while (0)
 
+/* 比较用 long long 而不是 long：long 在 32 位 ABI（armv7l）上只有 4 字节，
+ * 拿它去接 uint64_t 的句柄、计数器、时间戳会被截断，于是"高 32 位不同、
+ * 低 32 位相同"的两个值会被判成相等 —— 断言变成假通过。 */
 #define CHECK_EQ_INT(a, b) do {                                             \
-	long _a = (long)(a), _b = (long)(b);                                \
+	long long _a = (long long)(a), _b = (long long)(b);                 \
 	g_checks++;                                                         \
 	if (_a != _b) {                                                     \
 		g_fails++;                                                  \
-		fprintf(stderr, "FAIL %s:%d [%s] %s == %s (%ld vs %ld)\n",  \
+		fprintf(stderr, "FAIL %s:%d [%s] %s == %s (%lld vs %lld)\n", \
 		        __FILE__, __LINE__, g_case, #a, #b, _a, _b);        \
 	}                                                                   \
 } while (0)
