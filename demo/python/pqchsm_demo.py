@@ -111,10 +111,18 @@ def check(cond: bool, what: str) -> None:
 def main() -> int:
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.abspath(os.path.join(here, "..", ".."))
-    module = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        root, "build", "pqchsm-pkcs11.dylib")
+    # 共享库后缀随平台变：Linux 是 .so，macOS 是 .dylib。默认路径两个都试，
+    # 免得在另一个平台上得到"找不到模块"却看不出是后缀不对。
+    if len(sys.argv) > 1:
+        module = sys.argv[1]
+    else:
+        candidates = [os.path.join(root, "build", "pqchsm-pkcs11" + ext)
+                      for ext in (".so", ".dylib")]
+        module = next((c for c in candidates if os.path.exists(c)), candidates[0])
     if not os.path.exists(module):
         print(f"找不到模块 {module} —— 先 cmake --build build --target pqchsm-p11")
+        print("（Linux 上是 build/pqchsm-pkcs11.so，macOS 上是 .dylib；"
+              "也可以把路径作为第一个参数传进来）")
         return 2
 
     # 每次跑用独立密钥库，避免与别的 demo 互相影响

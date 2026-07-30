@@ -88,9 +88,20 @@ public class PqcHsmDemo {
 
     static long attrLen(MemorySegment arr, int idx) { return arr.get(L, idx * 24L + 16); }
 
+    /* 共享库后缀随平台变：Linux 是 .so，macOS 是 .dylib。默认路径两个都试，
+     * 免得在另一个平台上得到一个只说"找不到"的异常。 */
+    static String defaultModulePath() {
+        String base = System.getProperty("user.dir") + "/build/pqchsm-pkcs11";
+        for (String ext : new String[] { ".so", ".dylib" }) {
+            if (java.nio.file.Files.exists(Path.of(base + ext))) {
+                return base + ext;
+            }
+        }
+        return base + ".so";
+    }
+
     public static void main(String[] argv) throws Throwable {
-        String modulePath = argv.length > 0 ? argv[0]
-                : System.getProperty("user.dir") + "/build/pqchsm-pkcs11.dylib";
+        String modulePath = argv.length > 0 ? argv[0] : defaultModulePath();
         System.out.println("模块 : " + modulePath);
         System.out.println();
 
