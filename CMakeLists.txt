@@ -161,6 +161,17 @@ add_executable(fuzz_standalone tests/fuzz/fuzz_targets.c)
 target_link_libraries(fuzz_standalone PRIVATE pqchsm)
 target_compile_definitions(fuzz_standalone PRIVATE FUZZ_STANDALONE)
 
+# ---- XC7Z020 板级后端（board/xc7z020 分支专属）-----------------------------
+# 真实 MMIO 后端本身与平台无关，只有映射那一层是 Linux 专属；注入映射在任何
+# 平台上都能用，因此它的测试在开发机上也跑得起来。
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/board/xc7z020/src/accel_zynq.c)
+  add_library(pqchsm-zynq STATIC board/xc7z020/src/accel_zynq.c)
+  target_include_directories(pqchsm-zynq PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/board/xc7z020/include)
+  target_link_libraries(pqchsm-zynq PUBLIC pqchsm)
+  message(STATUS "板级后端：board/xc7z020（XC7Z020 / Zynq-7000）")
+endif()
+
 # ---- 测试 -------------------------------------------------------------------
 enable_testing()
 
@@ -224,6 +235,14 @@ pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
 pqchsm_test(test_accel     tests/unit/test_accel.c)
 pqchsm_test(test_accel_axi tests/unit/test_accel_axi.c)
 pqchsm_test(test_e2e       tests/integration/test_e2e.c)
+
+# 板级 MMIO 后端的时序验证：映射换成内存，另起一个线程扮演硬件
+if(TARGET pqchsm-zynq)
+  add_executable(test_accel_zynq board/xc7z020/tests/test_accel_zynq.c)
+  target_link_libraries(test_accel_zynq PRIVATE pqchsm-zynq Threads::Threads)
+  target_include_directories(test_accel_zynq PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests ${LIBOQS_INCLUDE_DIR})
+endif()
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
 add_test(NAME util          COMMAND test_util)
@@ -272,6 +291,9 @@ add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
 # Python / Java 的 provider demo（缺 PyKCS11 或 JDK22+ 时自动 SKIP）
 add_test(NAME accel         COMMAND test_accel)
 add_test(NAME accel_axi     COMMAND test_accel_axi)
+if(TARGET test_accel_zynq)
+  add_test(NAME accel_zynq   COMMAND test_accel_zynq)
+endif()
 add_test(NAME e2e           COMMAND test_e2e)
 
 add_test(NAME e2e_p11 COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/e2e_p11.sh

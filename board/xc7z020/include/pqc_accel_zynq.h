@@ -63,7 +63,9 @@ extern "C" {
 #define DMA_CR_RESET     (1u << 2)
 #define DMA_SR_HALTED    (1u << 0)
 #define DMA_SR_IDLE      (1u << 1)
+#define DMA_SR_IOC       (1u << 12)  /* 传输完成，写 1 清除 */
 #define DMA_SR_ERR_MASK  0x770u      /* 各类错误位 */
+#define DMA_CR_IOC_EN    (1u << 12)  /* 允许置位 IOC */
 
 /* ---- 映射方式 ---- */
 typedef enum {
