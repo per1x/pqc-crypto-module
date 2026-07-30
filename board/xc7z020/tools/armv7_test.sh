@@ -139,7 +139,9 @@ fi
 echo "--- 与宽度相关的告警（应为空）---"
 grep -iE "shift-count-overflow|shift-overflow|format=|format-overflow|int-to-pointer|pointer-to-int" \
      /work/build.log | head -20 || true
-grep -icE "warning" /work/build.log | sed "s/^/告警总数：/"
+# grep -c 在计数为 0 时返回 1，配上 set -e 与 pipefail 会让"没有告警"这个
+# 好结果反而中止脚本。这里显式吞掉退出码。
+{ grep -icE "warning" /work/build.log || true; } | sed "s/^/告警总数：/"
 file /work/pqc-hsm/b/test_p11 | head -1
 echo "构建完成"
 
