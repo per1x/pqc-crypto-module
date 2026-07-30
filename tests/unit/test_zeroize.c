@@ -406,14 +406,30 @@ static void test_secure_zero_not_elided(void)
 #define BLOCK_N  1024
 /* 哨兵写在偏移 64 处：分配器会把空闲链表指针写进块首那几个字节 */
 #define SENT_AT  64
+#define SENT_LEN 16
+
+/* 两次观察各用一个哨兵，理由见 residue_visible_after_free 的说明 */
+static const uint8_t SENT_CONTROL[SENT_LEN] = {
+	0xA5, 0x5A, 0xC3, 0x3C, 0x96, 0x69, 0x0F, 0xF0,
+	0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+};
+static const uint8_t SENT_SECURE[SENT_LEN] = {
+	0x5A, 0xA5, 0x3C, 0xC3, 0x69, 0x96, 0xF0, 0x0F,
+	0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+};
 
 /* 申请一批块、写入哨兵、全部释放，再用**普通 malloc** 申请同样一批，
  * 看哨兵还在不在。两种分配器走的是同一套访问模式，唯一的差别就是释放路径，
  * 所以两次观察可比。
  *
  * 不按"释放前后地址是否相同"来判断：小块分配器会在释放时与相邻空闲块合并再
- * 重新切分，地址对不上是常态，那样判会把结论建在分配器实现细节上。 */
-static int residue_visible_after_free(int secure)
+ * 重新切分，地址对不上是常态，那样判会把结论建在分配器实现细节上。
+ *
+ * 【每次观察用各自的哨兵】反证与被测两次调用共用一个堆。反证跑在前面，
+ * 它留下的、含哨兵的空闲块可能正好被后一次的 malloc 拿到 —— 那样被测这一次
+ * 会"看到哨兵"，而残留其实来自反证而不是 pqc_secure_free。哨兵取值不同就
+ * 不存在这种混淆。 */
+static int residue_visible_after_free(int secure, const uint8_t *sentinel)
 {
 	uint8_t *blocks[POOL_N];
 	for (int i = 0; i < POOL_N; i++) {
@@ -421,8 +437,8 @@ static int residue_visible_after_free(int secure)
 		if (!blocks[i]) {
 			return -1;
 		}
-		memcpy(blocks[i] + SENT_AT, SENTINEL, sizeof(SENTINEL));
-		if (!mem_contains(blocks[i], BLOCK_N, SENTINEL, sizeof(SENTINEL))) {
+		memcpy(blocks[i] + SENT_AT, sentinel, SENT_LEN);
+		if (!mem_contains(blocks[i], BLOCK_N, sentinel, SENT_LEN)) {
 			return -1;      /* 哨兵没写进去，后面的观察无从谈起 */
 		}
 	}
@@ -438,7 +454,7 @@ static int residue_visible_after_free(int secure)
 	uint8_t *again[POOL_N];
 	for (int i = 0; i < POOL_N; i++) {
 		again[i] = malloc(BLOCK_N);
-		if (again[i] && mem_contains(again[i], BLOCK_N, SENTINEL, sizeof(SENTINEL))) {
+		if (again[i] && mem_contains(again[i], BLOCK_N, sentinel, SENT_LEN)) {
 			found = 1;
 		}
 	}
@@ -454,7 +470,7 @@ static void test_no_residue_after_free(void)
 	 * 找不到就说明分配器在释放时自己就把块内容清了（macOS 的 libmalloc、
 	 * ASan 的隔离区都是这样），这套观察手段在当前平台没有分辨力；
 	 * 此时下面那条结论也无从建立，如实跳过而不是记成通过。 */
-	int control = residue_visible_after_free(0);
+	int control = residue_visible_after_free(0, SENT_CONTROL);
 	CHECK(control >= 0);
 	if (control != 1) {
 		printf("    分配器在释放时即清除块内容，观察手段无分辨力，"
@@ -466,7 +482,7 @@ static void test_no_residue_after_free(void)
 	CHECK_EQ_INT(control, 1);
 
 	TCASE("pqc_secure_free 释放的内存里搜不到原内容");
-	CHECK_EQ_INT(residue_visible_after_free(1), 0);
+	CHECK_EQ_INT(residue_visible_after_free(1, SENT_SECURE), 0);
 }
 
 int main(void)
