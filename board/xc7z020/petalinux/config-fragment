@@ -1,0 +1,69 @@
+# config-fragment —— PetaLinux 工程配置与内核配置需要打开的项
+#
+# 文件分成两段，由下面的 marker 行分隔，**两段进不同的地方**：
+#
+#   # ---- 工程配置（project-spec/configs/config）----
+#       petalinux-config 的顶层配置。追加到 <project>/project-spec/configs/config
+#       之后跑 petalinux-config --silentconfig 让它生效。
+#
+#   # ---- 内核配置（linux-xlnx 的 .cfg）----
+#       内核 Kconfig。写成
+#       project-spec/meta-user/recipes-kernel/linux/linux-xlnx/pqc-uio.cfg
+#       并在同目录的 linux-xlnx_%.bbappend 里用 SRC_URI 引入。
+#
+# 具体命令见本目录 README。**两段都需要在装有 PetaLinux 的机器上应用**，
+# 本仓库的开发机上没有 PetaLinux，这些配置项从未被任何工具解析过。
+#
+# 【符号名要核对】PetaLinux 各版本之间改过配置符号的名字。应用之前在
+# petalinux-config 的界面里按 "/" 搜一下同名条目确认存在；找不到就以界面里的
+# 实际符号为准，不要照抄。
+
+# ---- 工程配置（project-spec/configs/config）----
+
+# 自动生成的 bootargs 里没有 UIO 的模块参数，必须换成手写的一行。
+# 【不要凭空写这一行】先在 petalinux-config 里看 AUTO 生成的内容长什么样
+# （典型形式包含 earlycon、console=ttyPS0,115200、root=、rootwait），
+# 以那一行为基础，只追加下面两项：
+#
+#   uio_pdrv_genirq.of_id=generic-uio
+#       把 "generic-uio" 加进 uio_pdrv_genirq 的 of 匹配表。缺了它，
+#       system-user.dtsi 里的节点写得再对，/dev/uioN 也不会出现。
+#       这是**模块参数走内核命令行**的写法，只有驱动编进内核（=y）时才生效；
+#       编成模块（=m）的话要改成 /etc/modprobe.d/ 下的 options 行。
+#       下面的内核配置段因此把它设为 =y。
+#
+#   cma=32M
+#       CMA 的大小。PYNQ 那条路径用 pynq.allocate 从 CMA 拿缓冲，
+#       C 那条路径用设备树里的保留段、不碰 CMA。两条路径可能装在同一个镜像上，
+#       所以 CMA 留一份。加速器一次命令最多 512 字节输入 + 512 字节输出，
+#       32 MiB 是给 PYNQ 与其它 overlay 的余量，不是这个加速器的需要。
+CONFIG_SUBSYSTEM_BOOTARGS_AUTO=n
+CONFIG_SUBSYSTEM_USER_CMDLINE="earlycon console=ttyPS0,115200 clk_ignore_unused root=/dev/mmcblk0p2 rw rootwait uio_pdrv_genirq.of_id=generic-uio cma=32M"
+
+# 从 SD 卡启动，rootfs 放在第二个分区。这一组是最容易在板上换的形态：
+# 改一个文件重新拷进 SD 卡就能再试一次，不需要重新打包镜像。
+CONFIG_SUBSYSTEM_ROOTFS_EXT4=y
+CONFIG_SUBSYSTEM_SDROOT_DEV="/dev/mmcblk0p2"
+
+# ---- 内核配置（linux-xlnx 的 .cfg）----
+
+# UIO 框架与 generic-uio 的 platform 驱动。两个都必须是 =y 而不是 =m：
+# 上面 bootargs 里的 uio_pdrv_genirq.of_id= 是内核命令行形式的模块参数，
+# 只对编进内核的驱动生效。
+CONFIG_UIO=y
+CONFIG_UIO_PDRV_GENIRQ=y
+
+# CMA。DMA_CMA 是 dma_alloc_coherent 走 CMA 的开关，PYNQ 的 allocate 依赖它。
+# CMA_SIZE_MBYTES 是编译期默认值，会被 bootargs 里的 cma= 覆盖；两处都给，
+# 是为了在有人删掉 bootargs 的 cma= 之后仍然有一段可用的 CMA。
+CONFIG_CMA=y
+CONFIG_DMA_CMA=y
+CONFIG_CMA_SIZE_MBYTES=32
+
+# 不要让 xilinx_dma 绑上 axi_dma_0。system-user.dtsi 已经把 compatible 覆盖成
+# generic-uio，正常情况下 xilinx_dma 不会匹配上；这里把它一起关掉是第二道防线 ——
+# 一旦设备树覆盖失效，内核驱动与用户态会同时操作同一个 DMA，而且不报错，
+# 只表现为传输偶发地不完成，是最难查的一类故障。
+# 【如果镜像里还有别的 IP 需要 dmaengine，就不要关这一项】改为只依赖设备树覆盖，
+# 并在上板后用 ls /sys/bus/platform/drivers/xilinx-vdma/ 确认 axi_dma_0 没被绑走。
+# CONFIG_XILINX_DMA is not set

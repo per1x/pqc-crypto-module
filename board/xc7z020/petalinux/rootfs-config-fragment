@@ -1,0 +1,43 @@
+# rootfs-config-fragment —— rootfs 里要装的包
+#
+# 追加到 <project>/project-spec/configs/rootfs_config，之后跑
+# petalinux-config -c rootfs --silentconfig。命令见本目录 README。
+# **需要在装有 PetaLinux 的机器上应用**：本仓库的开发机上没有 PetaLinux，
+# 这些包名从未被 bitbake 解析过。
+#
+# 【包名要核对】包名取决于 PetaLinux 底下那一版 Yocto 的 recipe 命名，各版本之间
+# 改过（最典型的是 openssl 相关包的拆分方式）。应用之前在
+# petalinux-config -c rootfs 的界面里按 "/" 搜一下确认；搜不到就以界面里的实际
+# 名字为准，不要照抄。
+#
+# 【为什么只列运行时依赖】固件本身不在 rootfs 里编译，它在开发机上交叉编译，
+# 编译产物拷进 rootfs（做法见 README）。所以这里要的是**运行时**要有的共享库，
+# 不是构建工具链。
+
+# OpenSSL 3。顶层 CMakeLists.txt 写的是 find_package(OpenSSL 3.0 REQUIRED)，
+# 用于 AES-256-GCM 包裹、SHA3/KMAC256 与安全清零，是硬要求。
+# 【版本约束】1.1.1 不行 —— 3.0 才有的接口在 src/crypto/ 里用到了。
+# PetaLinux 自带的 OpenSSL 版本由它底下的 Yocto 分支决定，必须核对：
+#     bitbake -e openssl | grep "^PV="
+# 自带的是 1.1.1 时只有两条路：换更新的 PetaLinux，或者自己在
+# meta-user 下加一份 openssl 3 的 recipe。这一步没有捷径。
+CONFIG_openssl=y
+
+# liboqs 不在这里。它没有 Yocto recipe，与固件一起交叉编译，
+# 编出来的 .so 拷进 rootfs（做法见 README）。
+
+# pthread 与 libgcc 由 glibc/gcc-runtime 提供，任何 PetaLinux rootfs 都自带，
+# 不需要在这里点。
+
+# 上板调试用的最小集合。都不是运行固件所必需的，但第一次上电时缺哪个都很别扭：
+#   openssh-sshd  从网络进板子，比串口贴代码方便
+#   e2fsprogs     检查 ext4 的 rootfs
+#   i2c-tools     核对板级外设是否在位
+CONFIG_openssh-sshd=y
+CONFIG_e2fsprogs=y
+CONFIG_i2c-tools=y
+
+# Python 3。只有需要在同一个镜像上跑 PYNQ 那条路径时才要 —— 但 PYNQ 本身不是
+# PetaLinux 的包，PYNQ 走的是官方的 PYNQ SD 卡镜像，与 PetaLinux 镜像是两张卡。
+# 在 PetaLinux 镜像里点 python3 的唯一用途是跑仓库里的辅助脚本。
+CONFIG_python3=y

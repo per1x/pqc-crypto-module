@@ -1,0 +1,106 @@
+/*
+ * system-user.dtsi —— PetaLinux 工程的用户设备树片段
+ *
+ * 放置位置（在装有 PetaLinux 的机器上）：
+ *     <project>/project-spec/meta-user/recipes-bsp/device-tree/files/system-user.dtsi
+ * 该文件由 PetaLinux 的 device-tree 配方默认引入，不需要另写 bbappend。
+ *
+ * 这个片段做两件事：
+ *   1. 把 PL 里两个外设的地址段绑给 generic-uio，好让用户态自己映射寄存器；
+ *   2. 保留一段物理连续内存给 AXI-DMA 的输入输出缓冲。
+ *
+ * 【为什么绑 generic-uio 而不是用现成的内核驱动】
+ * 加速器没有内核驱动 —— 它的寄存器契约在 docs/register-map.md 里，用户态照着
+ * 读写就行，为一个轮询式的协处理器写内核模块只是把同样的时序搬进内核态。
+ * axi_dma_0 有内核驱动（xilinx_dma / dmaengine），但这里也绑给 UIO，
+ * 因为 board/xc7z020/src/accel_zynq.c 直接操作 DMA 的寄存器：simple mode 下
+ * 一次命令就是一段连续缓冲，走 dmaengine 要先把它包成描述符再拆回来，
+ * 而且两套东西不能同时管同一个 DMA —— 内核驱动一旦绑上，用户态的写就会与它冲突。
+ *
+ * 【必须的内核启动参数】uio_pdrv_genirq 默认不认 "generic-uio"，要靠模块参数
+ * 把它加进匹配表：
+ *     uio_pdrv_genirq.of_id=generic-uio
+ * 缺了它，节点在设备树里写得再对，/dev/uioN 也不会出现。参数在
+ * board/xc7z020/petalinux/config-fragment 的 bootargs 里给出。
+ *
+ * 【中断】本设计全程轮询 STATUS.DONE，不依赖中断，所以下面的节点没有
+ * interrupts 属性。若手上内核的 uio_pdrv_genirq 在缺少 interrupts 时拒绝 probe
+ * （各版本行为不同，需按手上镜像核对：dmesg 里会有 probe 失败的记录），
+ * 就把 PL 的中断接到 PS 的 IRQ_F2P（create_project.tcl 里 PCW_IRQ_F2P_INTR
+ * 已经打开）并在对应节点补上 interrupt-parent 与 interrupts。
+ */
+
+/include/ "system-conf.dtsi"
+
+/ {
+	/*
+	 * DMA 缓冲：AXI-DMA 看到的是物理地址，因此缓冲必须物理连续，而且它的物理
+	 * 地址要能在用户态拿到。把地址写死在设备树里是最省事的办法 —— 编译期就固定，
+	 * 与 include/pqc_accel_zynq.h 里的 PQC_ZYNQ_DMA_BUF_PHYS 一一对应。
+	 *
+	 * 【no-map 的作用】它让内核完全不为这一段建立映射。不加 no-map 的话这段物理
+	 * 内存同时挂在内核的线性映射里（可缓存），而用户态又通过 /dev/mem + O_SYNC
+	 * 把它映射成 device 属性 —— 同一段物理内存有两种互不兼容的缓存属性，
+	 * 在 ARM 上属于未定义行为，表现是间歇性的数据错乱。
+	 *
+	 * 【地址按参考板的 DDR 容量定】默认取 0x1F000000，落在 512 MiB DDR
+	 * （0x00000000–0x1FFFFFFF）的最后 16 MiB 内 —— 本移植的参考板 PYNQ-Z2 按板卡
+	 * 资料就是 512 MiB。1 GiB 的板子可以改用下面注释里那一组，但反过来不行：
+	 * 0x3E000000 在 512 MiB 的板子上根本不存在，内核会拒绝，或者保留出一段
+	 * 没有背后存储的地址，写进去无声无息、DMA 读回来是垃圾。
+	 * 上板前先核对手上板子的容量：
+	 *     cat /proc/meminfo        # MemTotal
+	 *     dmesg | grep -i memory
+	 * 改了这里就要同步改 PQC_ZYNQ_DMA_BUF_PHYS —— 两处对不上时 DMA 会往一段
+	 * 不属于缓冲的物理地址搬数据。
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* 512 MiB DDR 的板子（PYNQ-Z2 等）—— 默认 */
+		pqc_dma_buf: pqc-dma-buf@1f000000 {
+			reg = <0x1f000000 0x10000>;   /* 64 KiB：前 32 KiB 输入，后 32 KiB 输出 */
+			no-map;
+		};
+
+		/* 1 GiB DDR 的板子改用这一组，同时把 PQC_ZYNQ_DMA_BUF_PHYS
+		 * 定义成 0x3E000000：
+		 *
+		 * pqc_dma_buf: pqc-dma-buf@3e000000 {
+		 *     reg = <0x3e000000 0x10000>;
+		 *     no-map;
+		 * };
+		 */
+	};
+};
+
+/*
+ * 下面两个节点是对 PL 生成的节点做覆盖，不是新建节点。
+ *
+ * 【标签名必须核对】pqc_accel_0 与 axi_dma_0 这两个标签由 PetaLinux 从 .xsa 生成
+ * 的 pl.dtsi 提供，名字取自 block design 里的实例名（见 create_project.tcl）。
+ * 生成结果在：
+ *     <project>/components/plnx_workspace/device-tree/device-tree/pl.dtsi
+ * 标签对不上时构建会直接失败并指出未定义的 label，改成那个文件里的实际标签即可。
+ *
+ * 覆盖之后 /sys/class/uio/uioN/maps/map0/addr 会给出每段的物理地址。
+ * accel_zynq.c 按物理地址反查设备号，而不是按名字匹配 —— 名字取决于设备树怎么写，
+ * 地址是硬件事实。
+ */
+
+&pqc_accel_0 {
+	compatible = "generic-uio";
+	status = "okay";
+};
+
+&axi_dma_0 {
+	/*
+	 * 覆盖掉生成节点里的 "xlnx,axi-dma-1.00.a"。不覆盖的话 xilinx_dma 会绑上来，
+	 * 之后用户态对 DMA 寄存器的写会与内核驱动的状态机打架，而且这种冲突不报错，
+	 * 只是传输偶发地不完成。
+	 */
+	compatible = "generic-uio";
+	status = "okay";
+};

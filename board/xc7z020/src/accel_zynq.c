@@ -109,10 +109,14 @@ static int uio_find_by_phys(uint32_t phys, char *dev, size_t dev_len)
 		if (!f) {
 			continue;
 		}
-		unsigned long addr = 0;
-		int ok = (fscanf(f, "%lx", &addr) == 1);
+		/* 用 unsigned long long 而不是 unsigned long 去接：long 的宽度随 ABI 变
+		 * （目标板 armv7l 上 4 字节，开发机 aarch64 上 8 字节），同一段 sysfs
+		 * 文本在两边的溢出行为会不一样。固定成 64 位再回落到 uint32_t 比较，
+		 * 开 LPAE 的内核给出超过 4 GiB 的地址时也只是匹配不上，不会读出错值。 */
+		unsigned long long addr = 0;
+		int ok = (fscanf(f, "%llx", &addr) == 1);
 		fclose(f);
-		if (ok && (uint32_t)addr == phys) {
+		if (ok && addr == (unsigned long long)phys) {
 			snprintf(dev, dev_len, "/dev/%s", e->d_name);
 			found = 0;
 			break;

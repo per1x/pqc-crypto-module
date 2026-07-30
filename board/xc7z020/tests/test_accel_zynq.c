@@ -26,7 +26,10 @@
 
 #define BUF_SPAN 0x1000u          /* 4 KiB：输入输出各 2 KiB，够 NTT 的 512 字节 */
 #define BUF_HALF (BUF_SPAN / 2)
-#define TEST_BUF_PHYS 0x3E000000u
+/* 测试里的"物理地址"只是假映射的键，与真实板子无关，因此刻意取一个与
+ * PQC_ZYNQ_DMA_BUF_PHYS 不同的值：这样若驱动误用了头文件里的默认值而不是
+ * 配置里传进来的地址，测试会立刻失败。 */
+#define TEST_BUF_PHYS 0x2A000000u
 
 #define REG_VERSION 0x1Cu
 #define VERSION_CONST 0x00010000u

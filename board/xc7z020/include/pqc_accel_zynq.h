@@ -40,10 +40,16 @@ extern "C" {
 #define PQC_ZYNQ_DMA_BASE    0x40400000u   /* AXI-DMA 寄存器组 */
 #define PQC_ZYNQ_DMA_SPAN    0x00010000u
 
-/* DMA 缓冲的物理地址与大小。默认值对应 petalinux/system-user.dtsi 里
- * 保留的那一段；换成别的保留段时两边一起改。 */
+/* DMA 缓冲的物理地址与大小。默认值对应 petalinux/system-user.dtsi 里保留的那一段，
+ * 换成别的保留段时两边一起改。
+ *
+ * 【默认值按参考板的 DDR 容量定】PYNQ-Z2 只有 512 MiB DDR，物理地址到
+ * 0x1FFF_FFFF 为止，因此默认取 0x1F00_0000（最后 16 MiB 内）。
+ * 1 GiB DDR 的板子（部分 AX7020 等）可以改到 0x3E00_0000，但那个地址在 512 MiB
+ * 的板子上**根本不存在**：写进去无声无息，DMA 读回来的是垃圾。
+ * 上板前先确认容量：`cat /proc/meminfo | head -1` 或看 U-Boot 的启动信息。 */
 #ifndef PQC_ZYNQ_DMA_BUF_PHYS
-#define PQC_ZYNQ_DMA_BUF_PHYS 0x3E000000u
+#define PQC_ZYNQ_DMA_BUF_PHYS 0x1F000000u
 #endif
 #ifndef PQC_ZYNQ_DMA_BUF_SPAN
 #define PQC_ZYNQ_DMA_BUF_SPAN 0x00010000u   /* 64 KiB，输入输出各占一半 */
