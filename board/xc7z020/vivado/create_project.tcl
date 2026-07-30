@@ -32,6 +32,9 @@ set repo_root  [file normalize $script_dir/../../..]
 set opt_board  "pynq_z2"
 set opt_outdir "$repo_root/build-vivado"
 set opt_part   "xc7z020clg400-1"
+# XC7Z020 上默认不含 NTT 核：资源实测与取舍见
+# board/xc7z020/docs/resource-budget.md。器件更大时用 -with-ntt 打开。
+set opt_with_ntt 0
 
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
@@ -39,6 +42,7 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
         -board  { incr i; set opt_board  [lindex $argv $i] }
         -outdir { incr i; set opt_outdir [lindex $argv $i] }
         -part   { incr i; set opt_part   [lindex $argv $i] }
+        -with-ntt { set opt_with_ntt 1 }
         default { puts "忽略未知参数：$a" }
     }
 }
@@ -50,6 +54,7 @@ puts "工程名   : $proj_name"
 puts "器件     : $opt_part"
 puts "目标板   : $opt_board"
 puts "输出目录 : $opt_outdir"
+puts "NTT 核   : [expr {$opt_with_ntt ? {包含} : {不包含（面积所限）}}]"
 
 file mkdir $opt_outdir
 create_project $proj_name $opt_outdir/$proj_name -part $opt_part -force
@@ -134,6 +139,7 @@ set rst [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_ps7_100M
 # 加速器：作为 RTL 模块直接加进 BD。端口名按 AXI 命名约定写好，
 # Vivado 据此推断出 S_AXI / S_AXIS / M_AXIS 三个接口并关联到 aclk。
 set accel [create_bd_cell -type module -reference pqc_accel_zynq pqc_accel_0]
+set_property CONFIG.INCLUDE_NTT $opt_with_ntt $accel
 
 # AXI-DMA：simple mode（不开 scatter-gather），数据宽度 32 位，与流接口一致
 set dma [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma axi_dma_0]

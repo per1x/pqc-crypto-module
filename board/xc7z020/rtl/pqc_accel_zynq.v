@@ -19,7 +19,13 @@
 //     轮询 STATUS，这里顺带把读回的值截下来点灯，与软件看到的是同一份数据。
 `default_nettype none
 
-module pqc_accel_zynq (
+module pqc_accel_zynq #(
+    // 透传给 pqc_accel_axi。XC7Z020 上默认关掉 NTT 核：它的系数存储一周期要写
+    // 两个地址，没有 RAM 原语能承担，只能落成触发器加多路选择器，
+    // 实测约 23000 个 LUT，与 Keccak 核一起放不进 53200 个 LUT 的器件。
+    // 依据与取舍见 board/xc7z020/docs/resource-budget.md。
+    parameter integer INCLUDE_NTT = 0
+) (
     input  wire        aclk,
     input  wire        aresetn,
 
@@ -70,7 +76,7 @@ module pqc_accel_zynq (
     assign s_axi_rvalid = s_axi_rvalid_i;
     assign s_axi_rdata  = s_axi_rdata_i;
 
-    pqc_accel_axi u_accel (
+    pqc_accel_axi #(.INCLUDE_NTT(INCLUDE_NTT)) u_accel (
         .clk(aclk),
         .rst_n(aresetn),
 

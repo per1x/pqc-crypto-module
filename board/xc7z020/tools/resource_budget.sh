@@ -31,20 +31,28 @@ BRAM36_TOTAL=140
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 
-# 统计一个顶层：输出 "LUT FF DSP BRAM36"
+# 统计一个顶层：输出 "LUT FF DSP BRAM36 LUTRAM MUXF CARRY4"
+# 第二个参数是可选的顶层参数覆盖，例如 "-chparam INCLUDE_NTT 0"
 synth_one() {
   local top="$1"
+  local chparam="${2:-}"
   yosys -p "read_verilog $RTL $BOARD_RTL
-    synth_xilinx -family xc7 -top $top
+    $chparam
+    synth_xilinx -family xc7 -flatten -top $top
     stat
   " >"$LOG" 2>&1 || { echo "FAIL"; return; }
-  # stat 的格式是「计数 单元名」，且只统计顶层那一段。
+  # 综合时加 -flatten：层次一展平就只剩一个模块、一份单元清单，
+  # 不必去猜 `=== design hierarchy ===` 那一段的分组方式（它把顶层自身的单元与
+  # 子模块的单元分成两段列出，段的边界随层数变化，解析起来很脆）。
+  #
   # INV 计进 LUT：Vivado 会把它实现成一个 LUT1。
-  # IBUF/OBUF 是把叶子模块单独当顶层综合才产生的，真实设计里这些端口在片内，
+  # IBUF/OBUF/BUFG 只在把模块单独当顶层综合时才产生，真实设计里这些端口在片内，
   # 因此不计入。
-  awk '
-    /^=== / { inblock = ($2 == top) }
-    inblock && /^ +[0-9]+ +[A-Z0-9_$]+$/ {
+  awk -v top="$top" '
+    $0 == "=== " top " ===" { if (!seen) { inblock = 1; seen = 1; next } }
+    inblock && /^$/ { if (started) inblock = 0 }
+    inblock && /^[ \t]+[0-9]+[ \t]+[A-Z][A-Z0-9_$]*$/ {
+      started = 1
       n = $1; name = $2
       if (name ~ /^LUT[1-6]$/ || name == "LUT6_2" || name == "INV") lut += n
       else if (name ~ /^FD[RSCP]E?$/ || name ~ /^FD[RSCP]E_1$/) ff += n
@@ -56,35 +64,62 @@ synth_one() {
       else if (name == "CARRY4") carry += n
     }
     END { printf "%d %d %d %d %d %d %d\n", lut, ff, dsp, bram, lutram, muxf, carry }
-  ' top="$top" "$LOG"
+  ' "$LOG"
 }
 
 pct() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f%%", 100*a/b }'; }
 
 echo "XC7Z020 资源预算（Yosys 综合到 7 系列单元，非 Vivado 实现结果）"
 echo
-printf '%-22s %8s %8s %6s %7s %8s\n' "模块" "LUT" "FF" "DSP" "BRAM36" "LUTRAM"
-printf '%-22s %8s %8s %6s %7s %8s\n' "----------------------" "--------" "--------" "------" "-------" "--------"
+printf '%-22s %8s %8s %6s %7s %8s %8s\n' "模块" "LUT" "FF" "DSP" "BRAM36" "MUXF" "CARRY4"
+printf '%-22s %8s %8s %6s %7s %8s %8s\n' "----------------------" "--------" "--------" "------" "-------" "--------" "--------"
 
-for top in pqc_accel_zynq pqc_accel_axi ntt_core keccak_f1600 mldsa_ntt_core \
-           mlkem_rej_uniform mldsa_rej_uniform_buf trng_health axi4lite_regs; do
-  read -r lut ff dsp bram lutram muxf carry <<<"$(synth_one "$top")"
+measure() { # measure <显示名> <顶层> [chparam]
+  read -r lut ff dsp bram lutram muxf carry <<<"$(synth_one "$2" "${3:-}")"
   if [ "$lut" = "FAIL" ]; then
-    printf '%-22s %8s\n' "$top" "综合失败"
-    continue
+    printf '%-26s %8s\n' "$1" "综合失败"
+    return 1
   fi
-  printf '%-22s %8s %8s %6s %7s %8s\n' "$top" "$lut" "$ff" "$dsp" "$bram" "$lutram"
-  if [ "$top" = "pqc_accel_zynq" ]; then
-    TOP_LUT=$lut; TOP_FF=$ff; TOP_DSP=$dsp; TOP_BRAM=$bram
-  fi
+  printf '%-26s %8s %8s %6s %7s %8s %8s\n' "$1" "$lut" "$ff" "$dsp" "$bram" "$muxf" "$carry"
+  LAST_LUT=$lut; LAST_FF=$ff; LAST_DSP=$dsp; LAST_BRAM=$bram
+}
+
+# 交付配置：不含 NTT 核。取舍的依据就在下面两行数字里。
+measure "pqc_accel_zynq（交付配置）" pqc_accel_zynq "chparam -set INCLUDE_NTT 0 pqc_accel_axi"
+SHIP_LUT=$LAST_LUT; SHIP_FF=$LAST_FF; SHIP_DSP=$LAST_DSP; SHIP_BRAM=$LAST_BRAM
+measure "pqc_accel_zynq（含 NTT）"   pqc_accel_zynq
+FULL_LUT=$LAST_LUT
+
+for top in ntt_core keccak_f1600 mldsa_ntt_core \
+           mlkem_rej_uniform mldsa_rej_uniform_buf trng_health axi4lite_regs; do
+  measure "$top" "$top"
 done
 
 echo
-echo "顶层占 XC7Z020 的比例（不含 PS7、AXI 互联与 AXI-DMA，那些由 Vivado 的 IP 提供）"
-printf '  LUT     %8s / %-8s  %s\n' "$TOP_LUT"  "$LUT_TOTAL"    "$(pct "$TOP_LUT" "$LUT_TOTAL")"
-printf '  FF      %8s / %-8s  %s\n' "$TOP_FF"   "$FF_TOTAL"     "$(pct "$TOP_FF" "$FF_TOTAL")"
-printf '  DSP48E1 %8s / %-8s  %s\n' "$TOP_DSP"  "$DSP_TOTAL"    "$(pct "$TOP_DSP" "$DSP_TOTAL")"
-printf '  BRAM36  %8s / %-8s  %s\n' "$TOP_BRAM" "$BRAM36_TOTAL" "$(pct "$TOP_BRAM" "$BRAM36_TOTAL")"
+echo "交付配置占 XC7Z020 的比例（不含 PS7、AXI 互联与 AXI-DMA，那些由 Vivado 的 IP 提供）"
+printf '  LUT     %8s / %-8s  %s\n' "$SHIP_LUT"  "$LUT_TOTAL"    "$(pct "$SHIP_LUT" "$LUT_TOTAL")"
+printf '  FF      %8s / %-8s  %s\n' "$SHIP_FF"   "$FF_TOTAL"     "$(pct "$SHIP_FF" "$FF_TOTAL")"
+printf '  DSP48E1 %8s / %-8s  %s\n' "$SHIP_DSP"  "$DSP_TOTAL"    "$(pct "$SHIP_DSP" "$DSP_TOTAL")"
+printf '  BRAM36  %8s / %-8s  %s\n' "$SHIP_BRAM" "$BRAM36_TOTAL" "$(pct "$SHIP_BRAM" "$BRAM36_TOTAL")"
 echo
 echo "AXI-DMA 与互联另计，按 Xilinx 的典型值：axi_dma（simple mode，32 位）"
 echo "约 1200 LUT / 1600 FF，AXI 互联每个从口约 400 LUT。"
+echo
+
+# 预算是要能失败的检查，不是一段说明文字。
+# 上限取器件容量的 70%：留给 AXI-DMA、互联与布线拥塞的余量。
+LIMIT=$((LUT_TOTAL * 70 / 100))
+rc=0
+if [ "$SHIP_LUT" -gt "$LIMIT" ]; then
+  echo "✗ 交付配置 $SHIP_LUT LUT 超出预算上限 $LIMIT（器件容量的 70%）"
+  rc=1
+else
+  echo "✓ 交付配置 $SHIP_LUT LUT 在预算上限 $LIMIT 之内（器件容量的 70%）"
+fi
+if [ "$FULL_LUT" -le "$LUT_TOTAL" ]; then
+  echo "⚠ 含 NTT 的配置只用了 $FULL_LUT LUT，已不超出 $LUT_TOTAL —— "
+  echo "  裁掉 NTT 的理由可能已经不成立，重新评估 docs/resource-budget.md 的结论"
+else
+  echo "✓ 含 NTT 的配置 $FULL_LUT LUT 超出器件容量 $LUT_TOTAL，裁掉它的理由成立"
+fi
+exit $rc

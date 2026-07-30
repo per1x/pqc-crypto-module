@@ -20,10 +20,24 @@
 //   9      Keccak-f[1600]  IN_LEN 必须为 200（25 个 64 位 lane）
 // 其余操作码置 STATUS.ERR 并把 ERRCODE 设为 3（该模式未实现）——
 // 明确报错而不是悄悄回落到别的实现。
+//
+// INCLUDE_NTT 置 0 时不例化 NTT 核，操作码 7/8 与未实现的模式同样返回
+// ERRCODE=3。用于面积受限的器件，取舍见该参数的说明。
 `default_nettype none
 
 module pqc_accel_axi #(
-    parameter [31:0] VERSION = 32'h0001_0000
+    parameter [31:0] VERSION = 32'h0001_0000,
+    // 是否包含 ML-KEM 的 NTT 核。
+    //
+    // 【为什么要能关掉】ntt_core 的系数存储每周期要写**两个**地址（蝶形的两个
+    // 输出），没有任何 FPGA 的 RAM 原语支持一周期两次写，因此它只能落成触发器
+    // 加多路选择器：按 Yosys 综合到 7 系列单元的估算约 23000 个 LUT，
+    // 与 Keccak 核加总线一起放进 XC7Z020 会超出 53200 个 LUT 的容量。
+    //
+    // 关掉之后操作码 7/8 与其它未实现的模式同样返回 ERRCODE=3，
+    // 契约上没有新增第二种"不支持"的表达方式。
+    // 要重新放进去，先按多 bank 组织改写系数存储，让每个 bank 一周期只写一次。
+    parameter integer INCLUDE_NTT = 1
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -133,11 +147,24 @@ module pqc_accel_axi #(
     wire signed [15:0] ntt_rd_data;
     wire               ntt_done;
 
-    ntt_core u_ntt (
-        .clk(clk), .rst_n(core_rst_n),
-        .start(ntt_start), .inverse(ntt_inverse), .done(ntt_done),
-        .wr_en(ntt_wr_en), .wr_addr(ntt_wr_addr), .wr_data(ntt_wr_data),
-        .rd_addr(ntt_rd_addr), .rd_data(ntt_rd_data));
+    generate
+        if (INCLUDE_NTT != 0) begin : g_ntt
+            ntt_core u_ntt (
+                .clk(clk), .rst_n(core_rst_n),
+                .start(ntt_start), .inverse(ntt_inverse), .done(ntt_done),
+                .wr_en(ntt_wr_en), .wr_addr(ntt_wr_addr), .wr_data(ntt_wr_data),
+                .rd_addr(ntt_rd_addr), .rd_data(ntt_rd_data));
+        end else begin : g_no_ntt
+            // 不包含 NTT 核时把接口端接死。cmd_ok 已经拒掉了操作码 7/8，
+            // 因此 is_ntt 恒为 0，装载与回写里的 NTT 分支会被综合工具整体消掉。
+            assign ntt_done    = 1'b0;
+            assign ntt_rd_data = 16'sd0;
+            // 状态机里驱动 NTT 核的那几个寄存器此时无人接收。显式吸收掉，
+            // 表明这是配置带来的结果而不是漏接。
+            wire unused_ntt = &{1'b0, ntt_inverse, ntt_wr_en,
+                                ntt_wr_addr, ntt_wr_data, ntt_rd_addr};
+        end
+    endgenerate
 
     reg          kec_start, kec_wr_en;
     reg  [4:0]   kec_wr_addr;
@@ -167,7 +194,8 @@ module pqc_accel_axi #(
     reg [15:0] lo_lat;                    // 半字暂存（NTT 结果回写用）
     reg [31:0] lane_lo;                   // 低 32 位暂存（Keccak 装载用）
 
-    wire mode_ntt    = (mode == MODE_NTT_FWD) || (mode == MODE_NTT_INV);
+    wire mode_ntt    = (INCLUDE_NTT != 0)
+                    && ((mode == MODE_NTT_FWD) || (mode == MODE_NTT_INV));
     wire mode_keccak = (mode == MODE_KECCAK);
     wire cmd_ok      = (mode_ntt && (in_len == 32'd512))
                     || (mode_keccak && (in_len == 32'd200));

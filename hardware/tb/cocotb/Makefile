@@ -46,4 +46,11 @@ COMPILE_ARGS += -P$(TOPLEVEL).D=$(PARAM_D)
 export PARAM_D
 endif
 
+# 同样的机制用于加速器顶层的 INCLUDE_NTT：面积受限的器件上要能把 NTT 核关掉，
+# 而关掉之后"操作码 7/8 变成未实现"这条行为必须被测到。
+ifneq ($(PARAM_INCLUDE_NTT),)
+COMPILE_ARGS += -P$(TOPLEVEL).INCLUDE_NTT=$(PARAM_INCLUDE_NTT)
+export PARAM_INCLUDE_NTT
+endif
+
 include $(shell cocotb-config --makefiles)/Makefile.sim

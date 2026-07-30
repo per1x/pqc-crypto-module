@@ -14,6 +14,7 @@
 
 BFM 是手写的：不依赖任何第三方 AXI 库，与 RTL 一样保持零外部依赖。
 """
+import os
 import random
 
 import cocotb
@@ -45,6 +46,10 @@ MODE_NTT_INV = 8
 MODE_KECCAK  = 9
 
 VERSION_CONST = 0x0001_0000
+
+# INCLUDE_NTT 为 0 时顶层不含 NTT 核，操作码 7/8 与未实现的模式一样返回
+# ERRCODE=3。测试据此切换预期，而不是在两种配置下各写一份用例。
+INCLUDE_NTT = int(os.environ.get("PARAM_INCLUDE_NTT", "1"))
 
 
 # ---------------------------------------------------------------- BFM
@@ -291,7 +296,11 @@ async def test_unsupported_mode(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
-    for mode, in_len in ((1, 64), (5, 128), (MODE_KECCAK, 199), (MODE_NTT_FWD, 500)):
+    cases = [(1, 64), (5, 128), (MODE_KECCAK, 199)]
+    cases.append((MODE_NTT_FWD, 500))          # 长度不符，两种配置下都该报错
+    if not INCLUDE_NTT:
+        cases += [(MODE_NTT_FWD, 512), (MODE_NTT_INV, 512)]
+    for mode, in_len in cases:
         await axil_write(dut, REG_MODE, mode)
         await axil_write(dut, REG_IN_LEN, in_len)
         await axil_write(dut, REG_CTRL, CTRL_START)
@@ -355,7 +364,7 @@ async def test_keccak_with_gaps(dut):
     dut._log.info("输入输出流的空拍不影响结果")
 
 
-@cocotb.test()
+@cocotb.test(skip=(INCLUDE_NTT == 0))
 async def test_ntt_datapath(dut):
     """NTT 正变换走完整的 AXI 路径，与参考模型逐系数比对"""
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
@@ -384,9 +393,12 @@ async def test_ntt_datapath(dut):
     dut._log.info("NTT 经 AXI4-Lite + AXI4-Stream 与参考模型逐系数一致")
 
 
-@cocotb.test()
+@cocotb.test(skip=(INCLUDE_NTT == 0))
 async def test_busy_blocks_input(dut):
-    """运算进行中输入流不接收：BUSY 期间 TREADY 必须落下"""
+    """运算进行中输入流不接收：BUSY 期间 TREADY 必须落下
+
+    用 NTT 命令来观察 BUSY：它有一千多个周期的运算时间，轮询窗口足够宽。
+    """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
