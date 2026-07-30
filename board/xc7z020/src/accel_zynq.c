@@ -102,9 +102,15 @@ static int uio_find_by_phys(uint32_t phys, char *dev, size_t dev_len)
 		if (strncmp(e->d_name, "uio", 3) != 0) {
 			continue;
 		}
-		char path[256];
-		snprintf(path, sizeof(path),
-		         "/sys/class/uio/%s/maps/map0/addr", e->d_name);
+		/* d_name 在 Linux 上最长 255 字节，加上固定前缀后可能超过一个 256 字节的
+		 * 缓冲。缓冲按最坏情况开够，编译器就不必再警告可能截断 —— 截断在这里
+		 * 不是良性的：路径被截掉尾部会打开到另一个文件上。 */
+		char path[320];
+		int n = snprintf(path, sizeof(path),
+		                 "/sys/class/uio/%s/maps/map0/addr", e->d_name);
+		if (n < 0 || (size_t)n >= sizeof(path)) {
+			continue;
+		}
 		FILE *f = fopen(path, "r");
 		if (!f) {
 			continue;

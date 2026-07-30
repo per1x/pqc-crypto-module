@@ -16,6 +16,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+/* 公钥对象句柄 = 私钥句柄 | 该标志位，与 src/p11/p11_module.c 里的 PUB_BIT 一致。
+ * 必须落在 32 位内：CK_OBJECT_HANDLE 就是 CK_ULONG，在 armv7l 上只有 4 字节，
+ * 写成 1ULL << 63 在那里会被赋值截断成 0，于是公钥句柄退化成私钥句柄。 */
+#define P11_TEST_PUB_BIT ((CK_OBJECT_HANDLE)1u << 31)
+
 static CK_FUNCTION_LIST_PTR F;
 static CK_FUNCTION_LIST_3_2_PTR F32;   /* v3.2 表：C_EncapsulateKey 等只在这张表里 */
 static char g_ks[160];
@@ -518,11 +523,11 @@ int main(void)
 		CHECK_EQ_INT(pqc_keypair_from_seed(PQC_ALG_ML_DSA_65, seed, sizeof(seed),
 		                                   ref_pk, ref_sk), PQC_OK);
 		CK_ATTRIBUTE gv = { CKA_VALUE, NULL, 0 };
-		CKCHECK(F->C_GetAttributeValue(s4, imported | (1ULL << 63), &gv, 1), CKR_OK);
+		CKCHECK(F->C_GetAttributeValue(s4, imported | P11_TEST_PUB_BIT, &gv, 1), CKR_OK);
 		CHECK_EQ_INT(gv.ulValueLen, di->pk_len);
 		uint8_t *got_pk = malloc(gv.ulValueLen);
 		gv.pValue = got_pk;
-		CKCHECK(F->C_GetAttributeValue(s4, imported | (1ULL << 63), &gv, 1), CKR_OK);
+		CKCHECK(F->C_GetAttributeValue(s4, imported | P11_TEST_PUB_BIT, &gv, 1), CKR_OK);
 		CHECK_EQ_MEM(got_pk, ref_pk, di->pk_len);
 
 		/* 反证：换一个种子就该不同 —— 证明上面的比较不是恒真 */

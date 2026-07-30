@@ -11,6 +11,33 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wshadow -Wvla -Wpointer-arith -Wwrite-strings)
 
+# ---- 32 位目标上的类型宽度 --------------------------------------------------
+# Zynq-7000 的 Cortex-A9 是 ILP32（armv7l）。在那里 glibc 默认给出的
+# off_t 与 time_t 都只有 4 字节，带来两个具体后果：
+#   · off_t 是 32 位有符号 —— 物理地址 ≥ 0x80000000 转成 off_t 会变负数，
+#     mmap 直接 EINVAL；审计日志也被 2 GiB 卡住。
+#   · time_t 是 32 位有符号 —— 2038-01-19 之后 time() 返回负值，
+#     审计记录与槽位元数据里的时间戳会变成一个巨大的无意义数。
+# 两个宏都必须对整个工程一致生效，否则跨 TU 传递这些类型时 ABI 会不匹配，
+# 所以放在这里而不是某个 .c 文件里。64 位平台上二者是空操作。
+# _TIME_BITS 需要 glibc 2.34 以上，因此先编译探测再决定加不加。
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  add_compile_definitions(_FILE_OFFSET_BITS=64)
+  include(CheckCSourceCompiles)
+  set(CMAKE_REQUIRED_DEFINITIONS -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64)
+  check_c_source_compiles("
+    #include <time.h>
+    _Static_assert(sizeof(time_t) == 8, \"time_t 仍是 32 位\");
+    int main(void) { return 0; }
+  " PQCHSM_HAVE_TIME_BITS_64)
+  unset(CMAKE_REQUIRED_DEFINITIONS)
+  if(PQCHSM_HAVE_TIME_BITS_64)
+    add_compile_definitions(_TIME_BITS=64)
+  else()
+    message(WARNING "32 位目标上的 C 库不支持 64 位 time_t —— 时间戳在 2038 年后会溢出")
+  endif()
+endif()
+
 # ---- 依赖 -------------------------------------------------------------------
 # liboqs：PQC 算法（最终版 FIPS 203/204）。见 README「技术栈选择理由」。
 # OpenSSL 3：AES-256-GCM 包裹、SHA3/KMAC256、安全清零。

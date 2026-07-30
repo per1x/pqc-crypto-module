@@ -127,7 +127,7 @@ cmake -S /work/pqc-hsm -B /work/pqc-hsm/b -GNinja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_PREFIX_PATH=/work/oqs > /work/cmake.log 2>&1 \
   || { echo "配置失败："; tail -25 /work/cmake.log; exit 1; }
-grep -E "liboqs:|OpenSSL|time_t" /work/cmake.log || true
+grep -E "liboqs:|OpenSSL|TIME_BITS" /work/cmake.log || true
 # 构建失败必须当场停住。管道加 || true 会把失败吞掉，让后面的 ctest 报一堆
 # "Not Run"，真正的原因反而看不见。
 if ! ninja -C /work/pqc-hsm/b > /work/build.log 2>&1; then
