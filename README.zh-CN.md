@@ -152,6 +152,7 @@ SHA3 与 SHAKE 的海绵结构在 C 侧实现、置换交给硬件，因此整�
 | [docs/security-policy.zh-CN.md](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 安全策略草稿，附显式差距清单 |
 | [docs/testing.zh-CN.md](docs/testing.zh-CN.md) | 测了什么、用什么手段、此处引用的每个数字如何复现 |
 | [docs/deployment.zh-CN.md](docs/deployment.zh-CN.md) | 内网 Linux 部署，含离线获取全部依赖的做法 |
+| [docs/zynq-port.zh-CN.md](docs/zynq-port.zh-CN.md) | 移植到 Zynq UltraScale+ MPSoC：阶段划分、软件边界到硅片边界的映射、不可逆步骤 |
 | [hardware/README.md](hardware/README.md) | RTL 模块、验证策略、仿真器选择 |
 | [demo/README.md](demo/README.md) | provider 演示与客户端库兼容性 |
 

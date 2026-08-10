@@ -169,6 +169,7 @@ software.
 | [security-policy.md](docs/security-policy.md) · [中文](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 security policy draft, with an explicit gap list |
 | [testing.md](docs/testing.md) · [中文](docs/testing.zh-CN.md) | What is tested, by what means, and how to reproduce every number quoted here |
 | [deployment.md](docs/deployment.md) · [中文](docs/deployment.zh-CN.md) | Deployment on an intranet Linux host, including obtaining every dependency offline |
+| [zynq-port.zh-CN.md](docs/zynq-port.zh-CN.md) (中文) | Porting to a Zynq UltraScale+ MPSoC: staging and dependencies, mapping the software boundary onto silicon, irreversible steps |
 | [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
 | [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
 
