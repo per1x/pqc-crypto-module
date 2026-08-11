@@ -23,3 +23,8 @@ vectors/
 .fuzz-corpus/
 
 .DS_Store
+
+# TEE build outputs
+tee/ta/out/
+tee/tests/run_tests
+tee/tests/interop_test
