@@ -140,20 +140,28 @@ static void test_kat(void)
 
     for (k = 0; k < sizeof MLKEM_EN / sizeof MLKEM_EN[0]; k++) {
         const mlkem_en_vec *v = &MLKEM_EN[k];
-        memcpy(inbuf, v->ek, v->ek_len);
-        memcpy(inbuf + v->ek_len, v->m, 32);
-        rc = mlkem_run(1, v->pset, inbuf, v->ek_len + 32, outbuf, sizeof outbuf, &n);
+        /* ⚠️ 顺序是 **m 在前、ek 在后**。RTL 里 mlkem_axi 把输入流的前 32 字节
+         * 吃进 seed_a 当 m（ek_valid 的条件是 fp >= 32），第一版写反了，
+         * 结果 K 和 c 全错 —— 而 KeyGen(d‖z) 和 Decaps(dk‖c) 碰巧写对了，
+         * 于是"六条 Encaps 全错、其余全对"，这个形状本身就指向输入构造。*/
+        memcpy(inbuf, v->m, 32);
+        memcpy(inbuf + 32, v->ek, v->ek_len);
+        rc = mlkem_run(1, v->pset, inbuf, 32 + v->ek_len, outbuf, sizeof outbuf, &n);
         if (rc) { bad("%s Encaps tc%d：rc=%d", MLKEM_SET_NAME[v->pset], v->tc, rc); continue; }
         if (n != 32 + v->c_len) {
             bad("%s Encaps tc%d：输出 %zu 字节", MLKEM_SET_NAME[v->pset], v->tc, n);
             continue;
         }
-        if (memcmp(outbuf, v->k, 32)) {
-            bad("%s Encaps tc%d：K 不符", MLKEM_SET_NAME[v->pset], v->tc);
-            hexdiff("K", outbuf, v->k, 32);
-        } else if (memcmp(outbuf + 32, v->c, v->c_len)) {
-            bad("%s Encaps tc%d：c 不符", MLKEM_SET_NAME[v->pset], v->tc);
-            hexdiff("c", outbuf + 32, v->c, v->c_len);
+        /* K 和 c **都报**，不是 else-if。只报第一个不符的话，看到的是
+         * "K 错"，而 K 与 c 同时错才说明是输入构造的问题；分别错则说明
+         * 是输出解释的问题。两种成因要能一眼分开。*/
+        if (memcmp(outbuf, v->k, 32) || memcmp(outbuf + 32, v->c, v->c_len)) {
+            int kbad = memcmp(outbuf, v->k, 32) != 0;
+            int cbad = memcmp(outbuf + 32, v->c, v->c_len) != 0;
+            bad("%s Encaps tc%d：%s%s%s不符", MLKEM_SET_NAME[v->pset], v->tc,
+                kbad ? "K" : "", (kbad && cbad) ? " 与 " : "", cbad ? "c" : "");
+            if (kbad) hexdiff("K", outbuf, v->k, 32);
+            if (cbad) hexdiff("c", outbuf + 32, v->c, v->c_len);
         } else {
             ok("%s Encaps tc%d：K 32 + c %u 字节逐字节一致",
                MLKEM_SET_NAME[v->pset], v->tc, v->c_len);
@@ -212,8 +220,8 @@ static void test_perf(void)
 
         memcpy(inbuf, kg->d, 32); memcpy(inbuf + 32, kg->z, 32);
         a = bench(0, p, inbuf, 64, iters);
-        memcpy(inbuf, en->ek, en->ek_len); memcpy(inbuf + en->ek_len, en->m, 32);
-        b = bench(1, p, inbuf, en->ek_len + 32, iters);
+        memcpy(inbuf, en->m, 32); memcpy(inbuf + 32, en->ek, en->ek_len);
+        b = bench(1, p, inbuf, 32 + en->ek_len, iters);
         memcpy(inbuf, de->dk, de->dk_len); memcpy(inbuf + de->dk_len, de->c, de->c_len);
         c = bench(2, p, inbuf, de->dk_len + de->c_len, iters);
 
