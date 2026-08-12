@@ -9,6 +9,8 @@
 #   ③ 撤负载后结温回落，占空比**跟着降回来**（迟滞会让它慢一点，这是对的）；
 #   ④ forced_full 在正常温区应当是 0；若一直是 1，说明 SYSMON 没读到数，
 #      风扇被兜底摁在满速 —— 那是安全的，但温控没工作。
+#   ⑤ **code 必须在抖。**上一版就栽在这里：数值合理、风扇听着也对，
+#      但那个数五分钟一个比特没变。stuck=1 就是新加的卡死检测报警。
 #
 # ============================================================================
 # 【为什么同时记 PS 侧 AMS 的温度】
@@ -42,11 +44,12 @@ sample() {
     step=$(( (0x$st >> 24) & 7 ))
     forced=$(( (0x$st >> 27) & 1 ))
     tmo=$(( (0x$st >> 28) & 1 ))
+    stuck=$(( (0x$st >> 29) & 1 ))
     myc10=$(( 0x$tc & 0xFFFF ))
     psraw=$(cat $AMS/in_temp0_ps_temp_raw 2>/dev/null || echo 0)
     plraw=$(cat $AMS/in_temp2_pl_temp_raw 2>/dev/null || echo 0)
     up=$(cut -d' ' -f1 /proc/uptime)
-    echo "$up $1 duty=$duty step=$step forced=$forced tmo=$tmo mineC10=$myc10 code=$code psC10=$(ams_c10 $psraw) plC10=$(ams_c10 $plraw) plraw=$plraw" >> $OUT
+    echo "$up $1 duty=$duty step=$step forced=$forced tmo=$tmo stuck=$stuck mineC10=$myc10 code=$code psC10=$(ams_c10 $psraw) plC10=$(ams_c10 $plraw) plraw=$plraw" >> $OUT
     sync
 }
 
@@ -59,6 +62,30 @@ sleep 3
 
 echo "--- 风扇观测口 VERSION（应当是 0x00010000）---"
 $D/rdreg 0x80050000
+
+# ============================================================================
+# 【先把 SYSMON 自己的寄存器读出来 —— 这一步决定后面的数据可不可信】
+# ============================================================================
+# 上一版温度码是个死值（32.5°C 纹丝不动），而当时没有任何办法从软件侧看
+# SYSMON 的配置和状态，只能猜。现在 0x10/0x14 是 DRP 读窗口：
+# 写一个 DRP 地址，再读回 16 位数据。
+#
+# 最关键的是 0x20 / 0x24（最高温 / 最低温记录）：
+#   · 复位值分别是 0x0000 和 0xFFFF；
+#   · ADC 只要转换过一次，它们就会变成真实温度附近的值。
+# 所以这两个数是"ADC 到底有没有在工作"的**直接证据**，不经过我的换算、
+# 不经过我的状态机、也不看数值合不合理。
+drp() {
+    busybox devmem 0x80050010 32 $1 >/dev/null 2>&1
+    sleep 1
+    v=$($D/rdreg 0x80050014 2>/dev/null | sed -n 's/^0x[0-9a-f]* = 0x\([0-9a-f]*\)$/\1/p')
+    echo "  DRP[$1] = 0x${v}"
+}
+echo "--- SYSMON 寄存器直读 ---"
+echo "  （0x3F 标志 / 0x40-0x42 配置 / 0x00 温度 / 0x20 最高温 / 0x24 最低温）"
+for a in 0x3F 0x40 0x41 0x42 0x00 0x20 0x24; do drp $a; done
+echo "  判读：0x20 若仍是 0x0000、0x24 若仍是 0xFFFF，则 ADC 一次都没转换过"
+
 echo "--- 密码从机 VERSION（确认这一版没把别的弄坏）---"
 for a in 0x80000020 0x80010000 0x80020000 0x80030000; do $D/rdreg $a; done
 
