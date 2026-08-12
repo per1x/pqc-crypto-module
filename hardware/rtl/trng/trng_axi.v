@@ -57,9 +57,9 @@ module trng_axi #(
     parameter integer NUM_RO          = 8,
     parameter integer RO_STAGES_0     = 13,
     parameter integer DECIM           = 8,
-    parameter integer RCT_CUTOFF      = 41,
+    parameter integer RCT_CUTOFF      = 47,    // 实测 H=0.871234，见 trng_health.v
     parameter integer APT_WINDOW      = 1024,
-    parameter integer APT_CUTOFF      = 793,
+    parameter integer APT_CUTOFF      = 672,
     parameter integer STARTUP_SAMPLES = 1024,
     parameter integer RATE_LANES      = 17,
     parameter integer ABSORB_BLOCKS   = 1,

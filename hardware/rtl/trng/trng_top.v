@@ -32,9 +32,9 @@ module trng_top #(
     parameter integer NUM_RO          = 8,     // 环振条数
     parameter integer RO_STAGES_0     = 13,    // 第 0 条的级数，之后每条 +2
     parameter integer DECIM           = 8,     // 采样抽取比
-    parameter integer RCT_CUTOFF      = 41,    // 见 trng_health_model.py（H=0.5）
+    parameter integer RCT_CUTOFF      = 47,    // 实测 H=0.871234、α=2⁻⁴⁰，见 trng_health.v
     parameter integer APT_WINDOW      = 1024,
-    parameter integer APT_CUTOFF      = 793,
+    parameter integer APT_CUTOFF      = 672,   // 同上；旧值 793 在实测熵下永不触发
     parameter integer STARTUP_SAMPLES = 1024,  // SP 800-90B §4.3
     parameter integer RATE_LANES      = 17,    // 调理器 rate（1088 bit）
     parameter integer ABSORB_BLOCKS   = 1,
