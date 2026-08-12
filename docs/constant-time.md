@@ -35,7 +35,7 @@ The excluded items are excluded for different reasons, stated honestly:
   assembly, source-level auditing would not be meaningful in any case.
 - **`hardware/`** is register-transfer logic, where the relevant question is cycle
   counts, not instruction timing. `ntt_core` and `keccak_f1600` both run a fixed number
-  of cycles per transform (1153 and 24 respectively), independent of the data — but that
+  of cycles per transform (2305 and 24 respectively), independent of the data — but that
   is verified by the cocotb regression, not by these tools.
 - **`cli/` and `tests/`** do not hold long-lived key material; the daemon passes PINs
   straight through to the slot manager and wipes its stack buffers.

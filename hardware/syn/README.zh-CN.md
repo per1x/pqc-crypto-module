@@ -76,8 +76,14 @@ hardware/syn/
 | `ntt_core`、`keccak_f1600`、`sha3_core`、`pqc_accel_axi` | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]`、I/O delay、`rst_n` false path |
 | `mont_reduce`、`butterfly_ct`、`butterfly_gs` | `ooc_comb.xdc` | 虚拟时钟，组合路径延迟 |
 
-**为什么是 100 MHz 而不是 150 MHz。** 单周期蝶形中含两级串行乘法（`zeta·b`，以及
-Montgomery 约减内部的 `m·Q`），再加模约减与一次异步 LUTRAM 读。6.667 ns 偏紧；在
-100 MHz 拿到可信的正 WNS，比在 150 MHz 得到一个乐观的失败更有价值。要达到 150 MHz，
-只需给蝶形打一拍——在 Montgomery 输出后插入寄存器——代价是每蝶形两个周期，这仍在
-`cycle_budget.py` 的预算之内。
+**为什么是 100 MHz 而不是 150 MHz。** 蝶形中含两级串行乘法（`zeta·b`，以及
+Montgomery 约减内部的 `m·Q`），再加模约减。6.667 ns 偏紧；在 100 MHz 拿到可信的正
+WNS，比在 150 MHz 得到一个乐观的失败更有价值。
+
+S3（系数搬进真双口 BRAM）之后的实测：`ntt_core` 单独收敛，WNS `+0.077 ns`；
+`pqc_accel_axi` 整个顶层差 `-0.047 ns`（6190 条路径里 2 条不过，Fmax 99.5 MHz）。
+关键路径就是上面那条蝶形乘法链，只是操作数改由 BRAM 输出提供 ——
+9.693 ns 里有 0.998 ns 是 BRAM 的 clk→out。两条修法：打开 BRAM 的可选输出寄存器
+（`DO_REG=1`，Vivado 在综合日志里自己提示了），代价是所有读路径再加一拍延迟；
+或者给蝶形打一拍——在 Montgomery 输出后插入寄存器——代价是每蝶形多一个周期。
+两条都还没做：99.5 MHz 对"放不放得下"没有区别，而 S4 拼装时这块本来就要重做时序。

@@ -83,9 +83,17 @@ Combinational modules, having no clock port, need the opposite treatment.
 | `ntt_core`, `keccak_f1600`, `sha3_core`, `pqc_accel_axi` | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]`, I/O delay, `rst_n` false path |
 | `mont_reduce`, `butterfly_ct`, `butterfly_gs` | `ooc_comb.xdc` | virtual clock, combinational path delay |
 
-**Why 100 MHz rather than 150 MHz.** The single-cycle butterfly contains two serial
-multiplications (`zeta·b`, and `m·Q` inside the Montgomery reduction) plus a modular
-reduction plus an asynchronous LUTRAM read. 6.667 ns is tight; a credible positive WNS
-at 100 MHz is more useful than an optimistic failure at 150. Reaching 150 MHz is a
-matter of pipelining the butterfly — a register after the Montgomery output — at the
-cost of two cycles per butterfly, which still fits the budget in `cycle_budget.py`.
+**Why 100 MHz rather than 150 MHz.** The butterfly contains two serial multiplications
+(`zeta·b`, and `m·Q` inside the Montgomery reduction) plus a modular reduction. 6.667 ns
+is tight; a credible positive WNS at 100 MHz is more useful than an optimistic failure
+at 150.
+
+Measured after S3 (coefficients moved into a true dual-port BRAM): `ntt_core` alone
+closes with WNS `+0.077 ns`; the whole `pqc_accel_axi` top misses by `-0.047 ns`
+(2 endpoints out of 6190, Fmax 99.5 MHz). The critical path is that same butterfly
+multiplication chain, now fed by the BRAM output — of its 9.693 ns, 0.998 ns is the
+BRAM clock-to-out. Two ways to close it: enable the BRAM optional output register
+(`DO_REG=1`, which Vivado suggests in the synthesis log) at the cost of one more cycle
+of read latency everywhere, or pipeline the butterfly itself — a register after the
+Montgomery output — at the cost of one more cycle per butterfly. Neither is done yet:
+99.5 MHz makes no difference to "does it fit", and S4 has to re-time this area anyway.

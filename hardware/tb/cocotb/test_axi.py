@@ -117,12 +117,16 @@ async def axil_read(dut, addr):
     raise AssertionError(f"读 {addr:#04x} 超时")
 
 
-async def axis_send(dut, words, gap=0):
-    """AXI4-Stream 送一个包，最后一拍带 TLAST"""
+async def axis_send(dut, words, gap=0, tlast=True):
+    """AXI4-Stream 送一个包，最后一拍带 TLAST
+
+    tlast=False 用来模拟"软件漏了 TLAST"（传输被截断、DMA 描述符写错等）：
+    数据照样按顺序落在偏移 0 起的缓冲区里，但写指针停在包尾而不归零。
+    """
     for i, w in enumerate(words):
         dut.s_axis_tdata.value = w
         dut.s_axis_tvalid.value = 1
-        dut.s_axis_tlast.value = 1 if i == len(words) - 1 else 0
+        dut.s_axis_tlast.value = 1 if (tlast and i == len(words) - 1) else 0
         for _ in range(200):
             await ReadOnly()
             ready = int(dut.s_axis_tready.value)
@@ -366,6 +370,39 @@ async def test_keccak_with_gaps(dut):
     want = b"".join(x.to_bytes(8, "little") for x in keccak_f1600(lanes))
     assert dense == want, "结果与参考模型不一致"
     dut._log.info("输入输出流的空拍不影响结果")
+
+
+@cocotb.test()
+async def test_load_start_is_independent_of_write_pointer(dut):
+    """漏了 TLAST 之后再发命令：装载仍必须从缓冲区偏移 0 开始
+
+    缓冲区改成 BRAM 之后读有一拍延迟，装载前必须先把地址 0 发出去等一拍
+    （S_LOAD_PRE）。少了这一拍，第一个字读到的是"上一拍碰巧摆在地址口上的
+    那个地址"—— 也就是输入流的写指针。正常收包时写指针在 TLAST 之后归零，
+    于是恰好等于 0，错误被掩盖；一旦软件漏发 TLAST，写指针停在包尾，
+    第一个字就会读错，而命令照样报 DONE、不报错。
+
+    这条用例把写指针钉在非 0 的位置来暴露那条依赖：数据本身仍完整落在
+    偏移 0 起的 50 个字里，结果就必须与带 TLAST 时逐字节相同。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    state = bytes((i * 11 + 3) & 0xFF for i in range(200))
+    words = words_from_state(state)
+    lanes = [int.from_bytes(state[8 * i:8 * i + 8], "little") for i in range(25)]
+    want = b"".join(x.to_bytes(8, "little") for x in keccak_f1600(lanes))
+
+    await axis_send(dut, words, tlast=False)      # 写指针停在 50
+    await axil_write(dut, REG_MODE, MODE_KECCAK)
+    await axil_write(dut, REG_IN_LEN, 200)
+    await axil_write(dut, REG_CTRL, CTRL_START)
+    st = await poll_done(dut)
+    assert not (st & ST_ERR), "Keccak 命令返回了错误"
+    got = b"".join(w.to_bytes(4, "little")
+                   for w in await axis_recv(dut))
+    assert got == want, "写指针非 0 时装载读错了缓冲区起点"
+    dut._log.info("装载起点与输入流写指针无关")
 
 
 # ---------------------------------------------------------------- 模式 10：SHAKE

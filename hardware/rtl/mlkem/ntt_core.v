@@ -1,12 +1,22 @@
-// ntt_core —— ML-KEM 的 256 点 NTT / INTT 核（首版：1 蝶形/周期）
+// ntt_core —— ML-KEM 的 256 点 NTT / INTT 核（BRAM 版：2 周期一个蝶形）
 //
-// 这是一版**行为级但结构清晰**的实现：每周期做一个蝶形，系数放在一块
-// 256×16 的寄存器阵列里。按 tools/cycle_budget.py 的表，1 蝶形并行约
-// 910 cycles @150MHz ≈ 6.1 µs —— 与的算例一致。
-// 提高并行度（4/8 蝶形）需要把系数拆成多个 bank，那是下一步的事。
+// 系数放在一块 256×16 的**真双口 BRAM**（common/ram_dp.v）里，一个蝶形拆成
+// 两拍：S_RD 发地址、S_WB 拿数算完写回。896 个蝶形 + 256 个缩放，
+// 约 2×896 + 2×256 ≈ 2300 cycles @100MHz ≈ 23 µs。原型验证够用。
+//
+// 为什么从"1 蝶形/周期的寄存器阵列"改成这样：那一版综合出来
+//     CLB LUTs 28494 (40.38%)   Block RAM Tile 0
+// 一颗 ZU3EG 四成的 LUT 全花在 4 个读地址的 256:1 选择器和 256 个寄存器的
+// 写译码上（组合读写不出 BRAM，理由见 common/ram_dp.v 的注释）。S4 要在同一颗
+// 片子上放下整个 ML-KEM 核，这四成必须拿回来。慢一倍换回四成面积，值。
 //
 // 接口刻意做成"写系数 → start → 等 done → 读系数"，与 pqchsm/accel.h 的
 // 寄存器语义对得上，这样 Verilator 仿真出来的核可以直接挂到 accel transport 上。
+//
+// ⚠️ **读口现在是同步读，有一拍延迟**（BRAM 没有组合读口）：
+// 给出 rd_addr 之后要等一个上升沿，rd_data 才是那个地址的内容。
+// 调用方（hardware/rtl/bus/pqc_accel_axi.v 的 S_STORE、tb 与 ntt_sim.cpp）
+// 都按这个时序改过了。写口仍是同拍生效。
 //
 // **done 是电平不是脉冲**：置位后一直保持，直到下一次 start（或复位）才清。
 // accel.h 的契约是软件"轮询 STATUS.DONE"，而真实寄存器/AXI 轮询在任意时刻采样
@@ -26,12 +36,12 @@ module ntt_core (
     input  wire               inverse,    // 0 = 正变换，1 = 逆变换
     output reg                done,
 
-    // 系数写口（done 之后 / start 之前用）
+    // 系数写口（done 之后 / start 之前用，同拍生效）
     input  wire               wr_en,
     input  wire  [7:0]        wr_addr,
     input  wire signed [15:0] wr_data,
 
-    // 系数读口（组合读）
+    // 系数读口（**同步读，一拍延迟**）
     input  wire  [7:0]        rd_addr,
     output wire signed [15:0] rd_data
 );
@@ -77,15 +87,11 @@ module ntt_core (
         zetas[124]=16'sd958; zetas[125]=-16'sd1460;zetas[126]=16'sd1522;zetas[127]=16'sd1628;
     end
 
-    // ---- 系数存储 ----
-    reg signed [15:0] mem [0:255];
-    assign rd_data = mem[rd_addr];
-
-    // ---- 组合算子：例化 mont_reduce / butterfly_*，核里不内联重写 ----
-    // 同一段数学只保留一处实现：cocotb 独立测的就是核里真正跑的那份，
-    // 也不会出现两份实现改一处忘另一处而漂移的情况。
-    // ---- 状态机 ----
-    localparam S_IDLE = 3'd0, S_RUN = 3'd1, S_SCALE = 3'd2, S_DONE = 3'd3;
+    // ---- 状态机的控制寄存器（要在存储例化之前声明：端口 mux 用得到）----
+    // 一个蝶形两拍：S_RD 发地址 → S_WB 收数、算、写回并推进下标。
+    // 缩放同理拆成 S_SC_RD / S_SC_WB。
+    localparam S_IDLE  = 3'd0, S_RD    = 3'd1, S_WB  = 3'd2,
+               S_SC_RD = 3'd3, S_SC_WB = 3'd4, S_DONE = 3'd5;
 
     reg [2:0] state;
     reg [8:0] len;        // 128..2（正）或 2..128（逆）
@@ -96,8 +102,32 @@ module ntt_core (
     reg [8:0] scale_i;
 
     wire [8:0] j_hi = j + len;
-    wire signed [15:0] a_val = mem[j[7:0]];
-    wire signed [15:0] b_val = mem[j_hi[7:0]];
+
+    // ---- 系数存储：一块真双口 BRAM ----
+    // A 口：空闲时接外部写口，蝶形时管 mem[j]，缩放时管 mem[scale_i]；
+    // B 口：空闲时接外部读口，蝶形时管 mem[j+len]。
+    // 蝶形的两个地址恒不相等（len ≥ 2），不会触发 ram_dp 的同址写断言。
+    reg         pa_we,  pb_we;
+    reg  [7:0]  pa_addr, pb_addr;
+    reg  signed [15:0] pa_din, pb_din;
+    wire signed [15:0] pa_dout, pb_dout;
+
+    ram_dp #(.DW(16), .AW(8)) u_mem (
+        .clk    (clk),
+        .a_we   (pa_we),  .a_addr(pa_addr), .a_din(pa_din), .a_dout(pa_dout),
+        .b_we   (pb_we),  .b_addr(pb_addr), .b_din(pb_din), .b_dout(pb_dout)
+    );
+
+    assign rd_data = pb_dout;
+
+    // ---- 组合算子：例化 mont_reduce / butterfly_*，核里不内联重写 ----
+    // 同一段数学只保留一处实现：cocotb 独立测的就是核里真正跑的那份，
+    // 也不会出现两份实现改一处忘另一处而漂移的情况。
+    // 操作数直接来自 BRAM 的输出寄存器 —— 这条路径现在是
+    // BRAM 输出寄存器 → 蝶形（一次乘法 + Montgomery 归约）→ BRAM 输入，
+    // 比原来"256:1 选择器 → 蝶形 → 写译码"短得多。
+    wire signed [15:0] a_val = pa_dout;
+    wire signed [15:0] b_val = pb_dout;
     wire signed [15:0] zeta  = zetas[k[6:0]];
 
     // CT（正）与 GS（逆）两种蝶形 —— 直接例化 butterfly.v 里的模块
@@ -105,14 +135,55 @@ module ntt_core (
     butterfly_ct u_bf_ct (.a(a_val), .b(b_val), .zeta(zeta), .a_out(ct_a), .b_out(ct_b));
     butterfly_gs u_bf_gs (.a(a_val), .b(b_val), .zeta(zeta), .a_out(gs_a), .b_out(gs_b));
 
-    // S_SCALE 用：正变换末尾统一 Barrett 归约，逆变换末尾乘 f = mont^2/128
-    wire signed [15:0] scale_in = mem[scale_i[7:0]];
+    // S_SC_WB 用：正变换末尾统一 Barrett 归约，逆变换末尾乘 f = mont^2/128。
+    // 缩放只用 A 口，所以取的是 pa_dout。
+    wire signed [15:0] scale_in = pa_dout;
     wire signed [15:0] scale_barr;
     barrett_reduce u_scale_barr (.a(scale_in), .r(scale_barr));
     wire signed [31:0] finv_prod =
         $signed({{16{FINV[15]}}, FINV}) * $signed({{16{scale_in[15]}}, scale_in});
     wire signed [15:0] scale_mont;
     mont_reduce u_scale_mont (.a(finv_prod), .t_out(scale_mont));
+
+    // ---- 两个 BRAM 口的归属：完全由状态决定 ----
+    always @(*) begin
+        pa_we   = 1'b0;
+        pa_addr = 8'd0;
+        pa_din  = 16'sd0;
+        pb_we   = 1'b0;
+        pb_addr = 8'd0;
+        pb_din  = 16'sd0;
+        case (state)
+        S_IDLE: begin
+            // 空闲时两个口借给外部：A 写、B 读。
+            // 调用方的用法是"写完一整块再读"，不会出现同址读写，
+            // 所以这里不管 BRAM 的读写冲突语义。
+            pa_we   = wr_en;
+            pa_addr = wr_addr;
+            pa_din  = wr_data;
+            pb_addr = rd_addr;
+        end
+        S_RD: begin
+            pa_addr = j[7:0];
+            pb_addr = j_hi[7:0];
+        end
+        S_WB: begin
+            pa_we   = 1'b1;
+            pa_addr = j[7:0];
+            pa_din  = inv_r ? gs_a : ct_a;
+            pb_we   = 1'b1;
+            pb_addr = j_hi[7:0];
+            pb_din  = inv_r ? gs_b : ct_b;
+        end
+        S_SC_RD: pa_addr = scale_i[7:0];
+        S_SC_WB: begin
+            pa_we   = 1'b1;
+            pa_addr = scale_i[7:0];
+            pa_din  = inv_r ? scale_mont : scale_barr;
+        end
+        default: ;
+        endcase
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -131,9 +202,7 @@ module ntt_core (
             case (state)
             S_IDLE: begin
                 // 注意：这里**不**无条件清 done —— 它要保持到下一次 start。
-                if (wr_en) begin
-                    mem[wr_addr] <= wr_data;
-                end
+                // 系数写入由上面的端口 mux 直接落到 BRAM 的 A 口，这里不用管。
                 if (start) begin
                     done  <= 1'b0;      // 新命令开始，清掉上一次的 done
                     inv_r <= inverse;
@@ -141,19 +210,17 @@ module ntt_core (
                     grp   <= 9'd0;
                     j     <= 9'd0;
                     k     <= inverse ? 8'd127 : 8'd1;
-                    state <= S_RUN;
+                    state <= S_RD;
                 end
             end
 
-            S_RUN: begin
-                // 一个周期一个蝶形
-                if (inv_r) begin
-                    mem[j[7:0]]    <= gs_a;
-                    mem[j_hi[7:0]] <= gs_b;
-                end else begin
-                    mem[j[7:0]]    <= ct_a;
-                    mem[j_hi[7:0]] <= ct_b;
-                end
+            // 第一拍：地址已经由 mux 发给 BRAM，等一个沿把 mem[j] / mem[j+len]
+            // 装进输出寄存器，下一拍才能用。这里除了换状态没别的事。
+            S_RD: state <= S_WB;
+
+            S_WB: begin
+                // 第二拍：蝶形结果由 mux 写回两个地址，这里只推进下标。
+                state <= S_RD;
 
                 if (j + 1 < grp + len) begin
                     j <= j + 1;
@@ -168,7 +235,7 @@ module ntt_core (
                         if (inv_r) begin
                             if (len == 9'd128) begin
                                 scale_i <= 9'd0;
-                                state   <= S_SCALE;
+                                state   <= S_SC_RD;
                             end else begin
                                 len <= len << 1;
                                 grp <= 9'd0;
@@ -177,7 +244,7 @@ module ntt_core (
                         end else begin
                             if (len == 9'd2) begin
                                 scale_i <= 9'd0;
-                                state   <= S_SCALE;
+                                state   <= S_SC_RD;
                             end else begin
                                 len <= len >> 1;
                                 grp <= 9'd0;
@@ -188,13 +255,17 @@ module ntt_core (
                 end
             end
 
-            S_SCALE: begin
-                // 正变换：最后统一 Barrett 归约；逆变换：乘 f
-                mem[scale_i[7:0]] <= inv_r ? scale_mont : scale_barr;
+            // 缩放也是两拍：读一个系数，算完写回同一地址。
+            S_SC_RD: state <= S_SC_WB;
+
+            S_SC_WB: begin
+                // 正变换：最后统一 Barrett 归约；逆变换：乘 f。
+                // 写回同样由端口 mux 完成，这里只推进下标。
                 if (scale_i == 9'd255) begin
                     state <= S_DONE;
                 end else begin
                     scale_i <= scale_i + 1;
+                    state   <= S_SC_RD;
                 end
             end
 

@@ -12,12 +12,14 @@ RTL_MLDSA     := $(PWD)/../../rtl/mldsa
 RTL_KECCAK    := $(PWD)/../../rtl/keccak
 RTL_BUS       := $(PWD)/../../rtl/bus
 RTL_TRNG      := $(PWD)/../../rtl/trng
+RTL_COMMON    := $(PWD)/../../rtl/common
 
 # 用法：make MODULE=test_ops TOPLEVEL=mont_reduce
 MODULE   ?= test_ops
 TOPLEVEL ?= mont_reduce
 
 VERILOG_SOURCES = \
+  $(RTL_COMMON)/ram_dp.v \
   $(RTL_MLKEM)/mont_reduce.v \
   $(RTL_MLKEM)/butterfly.v \
   $(RTL_MLKEM)/ntt_core.v \

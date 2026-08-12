@@ -95,7 +95,11 @@ module pqc_accel_axi #(
     // 这块缓冲区实测占约 30000 LUT，比 ntt_core 还多，是本模块吃掉 88.89% 片子
     // 的两个大头之一（另一个是 ntt_core 的系数寄存器阵列）。
     //
-    // 正确的修法是改成同步读的单口 BRAM 结构 —— 记在 S3，见 docs/fpga-进展.md。
+    // S3 已经改成一块真双口 BRAM（common/ram_dp.v）：
+    //   A 口 —— 输入流写入、装载读出、结果写回，按状态分时复用；
+    //   B 口 —— 输出流只读。
+    // 代价是读口全部变成同步读，所以下面每条读路径都要"地址提前一拍"，
+    // 模式 10 的挤压也从"按字节读-改-写"改成"攒满一个字再整字写"。
     localparam integer BUF_WORDS = 128;
     localparam integer BUF_AW    = 7;
 
@@ -114,9 +118,19 @@ module pqc_accel_axi #(
                      S_SHK_ABS   = 4'd7,
                      S_SHK_FLUSH = 4'd8,
                      S_SHK_SQ    = 4'd9,
-                     S_SHK_WIPE  = 4'd10;
+                     S_SHK_WIPE  = 4'd10,
+                     S_NTT_PRE   = 4'd11,   // 等 ntt_core 的同步读延迟那一拍
+                     S_LOAD_PRE  = 4'd12;   // 等缓冲区 BRAM 的同步读延迟那一拍
 
-    reg [31:0] bufmem [0:BUF_WORDS-1];
+    // ---- 数据缓冲区的两个 BRAM 端口 ----
+    // 端口归属完全由状态决定，见下面那个 always @(*) 的 mux。
+    reg  [BUF_AW-1:0] bufa_addr;
+    reg               bufa_we;
+    reg  [31:0]       bufa_din;
+    wire [31:0]       bufa_dout;
+    wire [BUF_AW-1:0] bufb_addr;
+    wire [31:0]       bufb_dout;
+
     reg [8:0]  wr_ptr;                     // 输入流写指针（按字）
     reg [8:0]  rd_ptr;                     // 输出流读指针（按字）
     reg [8:0]  out_words;                  // 本次结果的字数
@@ -172,8 +186,7 @@ module pqc_accel_axi #(
     // 也因此挤压的结果覆盖掉输入消息是安全的。
     wire [BUF_AW-1:0] byte_widx   = cnt[BUF_AW+1:2];
     wire [4:0]        byte_sh     = {cnt[1:0], 3'b000};
-    wire [31:0]       byte_word   = bufmem[byte_widx];
-    wire [7:0]        shk_in_byte = byte_word[byte_sh +: 8];
+    wire [7:0]        shk_in_byte = bufa_dout[byte_sh +: 8];
 
     reg                ntt_start, ntt_inverse, ntt_wr_en;
     reg  [7:0]         ntt_wr_addr;
@@ -228,8 +241,17 @@ module pqc_accel_axi #(
     // ---- 数据面握手 ----
     assign s_axis_tready = !busy;
     assign m_axis_tvalid = (out_words != 9'd0) && (rd_ptr < out_words);
-    assign m_axis_tdata  = bufmem[rd_ptr[BUF_AW-1:0]];
     assign m_axis_tlast  = m_axis_tvalid && (rd_ptr == out_words - 9'd1);
+
+    // 输出流读的是 B 口，同步读。标准的"读超前一拍"写法：地址永远给
+    // **下一拍的** rd_ptr，于是本拍 bufb_dout 恰好是本拍 rd_ptr 指的那个字。
+    // 没有握手时 rd_ptr_nxt == rd_ptr，B 口就一直重读同一个字，
+    // 所以命令做完、TVALID 刚拉起来的那一拍数据也是对的。
+    wire [8:0] rd_ptr_nxt = (m_axis_tvalid && m_axis_tready)
+                          ? (m_axis_tlast ? 9'd0 : (rd_ptr + 9'd1))
+                          : rd_ptr;
+    assign bufb_addr    = rd_ptr_nxt[BUF_AW-1:0];
+    assign m_axis_tdata = bufb_dout;
 
     // ---- 命令状态机 ----
     // 缓冲区只在这一个 always 块里被写：输入流、结果回写共用同一组端口，
@@ -258,10 +280,83 @@ module pqc_accel_axi #(
 
 
     wire [BUF_AW-1:0] widx_half = cnt[7:1];               // NTT：两系数一字
-    wire [31:0] load_word = bufmem[widx_half];
-    wire [15:0] load_half = cnt[0] ? load_word[31:16] : load_word[15:0];
+    wire [15:0] load_half = cnt[0] ? bufa_dout[31:16] : bufa_dout[15:0];
     wire [BUF_AW-1:0] widx_lane = cnt[6:0];               // Keccak：一字一次
     wire        kick_busy = ntt_start || kec_start;
+
+    // ---- 模式 10 挤压：攒满一个 32 位字再整字写回 ----
+    // 原来是"按字节读-改-写"：同一拍既读 bufmem[byte_widx] 又写回去。
+    // BRAM 做不到这件事（读要一拍延迟），而且那条读路径本身就是把缓冲区
+    // 摊成 LUT 选择树的原因之一。改成字节攒进 sq_acc、够 4 个（或到输出末尾）
+    // 才写一次，读口直接消失。
+    // 副作用是好的：最后那个不满 4 字节的字，多出来的字节现在是 0，
+    // 而不是残留的输入消息字节。
+    reg [31:0] sq_acc;
+    wire [31:0] sq_next = ((cnt[1:0] == 2'd0) ? 32'd0 : sq_acc)
+                        | ({24'd0, shk_out_data} << byte_sh);
+    wire        sq_flush = (cnt[1:0] == 2'd3) || ((cnt + 10'd1) == shk_outlen);
+
+    wire [9:0]  cnt_p1 = cnt + 10'd1;      // 下一拍的计数器（读地址提前一拍用）
+
+    ram_dp #(.DW(32), .AW(BUF_AW)) u_buf (
+        .clk    (clk),
+        .a_we   (bufa_we), .a_addr(bufa_addr), .a_din(bufa_din), .a_dout(bufa_dout),
+        .b_we   (1'b0),    .b_addr(bufb_addr), .b_din(32'd0),    .b_dout(bufb_dout)
+    );
+
+    // ---- A 口的归属：完全由状态决定 ----
+    // 读路径一律"地址提前一拍"：本状态里给出的地址，下一拍才在 bufa_dout 上。
+    // 所以 S_LOAD / S_SHK_ABS 里给的是**下一拍要用**的地址，
+    // 进入这两个状态之前分别由 S_LOAD_PRE / S_SHK_KICK 把第 0 个地址先发出去。
+    //
+    // A 口与 B 口读同一个地址时，Xilinx BRAM 的"跨口读写冲突"是未定义行为。
+    // 这里不会碰上：B 口在 out_words 非零之前一直停在字 0，而各条写回路径
+    // 设置 out_words 的那一拍写的都不是字 0。
+    always @(*) begin
+        bufa_we   = 1'b0;
+        bufa_addr = {BUF_AW{1'b0}};
+        bufa_din  = 32'd0;
+        case (state)
+        S_IDLE: begin
+            // 输入流写入。命令一开跑 s_axis_tready 就落，与下面几条路不会撞。
+            bufa_we   = s_axis_tvalid && s_axis_tready
+                        && (wr_ptr < BUF_WORDS[8:0]);
+            bufa_addr = wr_ptr[BUF_AW-1:0];
+            bufa_din  = s_axis_tdata;
+        end
+
+        S_LOAD_PRE: bufa_addr = {BUF_AW{1'b0}};
+
+        // 装载：NTT 两个系数一个字（下一拍要 (cnt+1)>>1），
+        //       Keccak 一个字一拍（下一拍要 cnt+1）。
+        S_LOAD: bufa_addr = is_ntt ? cnt_p1[7:1] : cnt_p1[6:0];
+
+        S_STORE: begin
+            if (is_ntt) begin
+                bufa_we   = cnt[0];
+                bufa_addr = widx_half;
+                bufa_din  = {ntt_rd_data, lo_lat};
+            end else begin
+                bufa_we   = 1'b1;
+                bufa_addr = cnt[BUF_AW-1:0];
+                bufa_din  = cnt[0] ? kec_rd_data[63:32] : kec_rd_data[31:0];
+            end
+        end
+
+        S_SHK_KICK: bufa_addr = {BUF_AW{1'b0}};
+
+        // 吸收：cnt 只在握上手的那一拍前进，地址跟着"下一拍的 cnt"走。
+        S_SHK_ABS: bufa_addr = shk_in_ready ? cnt_p1[8:2] : cnt[8:2];
+
+        S_SHK_SQ: begin
+            bufa_we   = shk_out_valid && (cnt != shk_outlen) && sq_flush;
+            bufa_addr = byte_widx;
+            bufa_din  = sq_next;
+        end
+
+        default: ;
+        endcase
+    end
 
     // 异步复位分支里只允许出现 rst_n 本身：把 soft_reset 一起写进去，
     // 会让综合工具看到一个不在敏感表里的复位条件，行为与仿真不一致。
@@ -293,6 +388,7 @@ module pqc_accel_axi #(
             kec_rd_addr <= 5'd0;
             lo_lat      <= 16'd0;
             lane_lo     <= 32'd0;
+            sq_acc      <= 32'd0;
             shk_start   <= 1'b0;
             shk_flush   <= 1'b0;
             shk_zeroize <= 1'b0;
@@ -326,6 +422,7 @@ module pqc_accel_axi #(
             kec_rd_addr <= 5'd0;
             lo_lat      <= 16'd0;
             lane_lo     <= 32'd0;
+            sq_acc      <= 32'd0;
             shk_start   <= 1'b0;
             shk_flush   <= 1'b0;
             shk_zeroize <= 1'b0;
@@ -347,10 +444,8 @@ module pqc_accel_axi #(
 
             // 输入流：命令进行中不接收。超出缓冲区的拍照常握手但丢弃，
             // 否则写指针回绕会把包首已经收好的字覆盖掉。
+            // （写进 BRAM 那一步由上面的 A 口 mux 做，这里只推指针。）
             if (s_axis_tvalid && s_axis_tready) begin
-                if (wr_ptr < BUF_WORDS[8:0]) begin
-                    bufmem[wr_ptr[BUF_AW-1:0]] <= s_axis_tdata;
-                end
                 wr_ptr <= s_axis_tlast ? 9'd0 : (wr_ptr + 9'd1);
             end
 
@@ -387,10 +482,14 @@ module pqc_accel_axi #(
                         shk_suffix  <= p_suffix;
                         shk_msglen  <= in_len[9:0];
                         shk_outlen  <= p_outlen[9:0];
-                        state       <= mode_shake ? S_SHK_KICK : S_LOAD;
+                        state       <= mode_shake ? S_SHK_KICK : S_LOAD_PRE;
                     end
                 end
             end
+
+            // 缓冲区是 BRAM，读有一拍延迟：这一拍把字 0 的地址发出去，
+            // 下一拍进 S_LOAD 时 bufa_dout 才是字 0。
+            S_LOAD_PRE: state <= S_LOAD;
 
             S_LOAD: begin
                 if (is_ntt) begin
@@ -407,11 +506,11 @@ module pqc_accel_axi #(
                 end else begin
                     // 两个字拼一个 64 位 lane
                     if (!cnt[0]) begin
-                        lane_lo <= bufmem[widx_lane];
+                        lane_lo <= bufa_dout;
                     end else begin
                         kec_wr_en   <= 1'b1;
                         kec_wr_addr <= cnt[5:1];
-                        kec_wr_data <= {bufmem[widx_lane], lane_lo};
+                        kec_wr_data <= {bufa_dout, lane_lo};
                     end
                     if (cnt == 10'd49) begin
                         cnt   <= 10'd0;
@@ -439,18 +538,29 @@ module pqc_accel_axi #(
                     cnt         <= 10'd0;
                     ntt_rd_addr <= 8'd0;
                     kec_rd_addr <= 5'd0;
-                    state       <= S_STORE;
+                    // ntt_core 的系数存储是 BRAM，读口有一拍延迟：地址 0 这一拍
+                    // 发出去，下一拍 rd_data 才是 mem[0]。多插一个空拍把这一拍等掉，
+                    // 之后 S_STORE 里"地址提前一拍"的流水就自然对齐了。
+                    // keccak 那边是寄存器阵列的组合读，不需要这一拍。
+                    state       <= is_ntt ? S_NTT_PRE : S_STORE;
                 end
+            end
+
+            S_NTT_PRE: begin
+                ntt_rd_addr <= 8'd1;
+                state       <= S_STORE;
             end
 
             S_STORE: begin
                 if (is_ntt) begin
-                    // 组合读，地址提前一拍给出
-                    ntt_rd_addr <= cnt[7:0] + 8'd1;
+                    // 同步读要**提前两拍**给地址：地址寄存器本身占一拍
+                    // （本拍写的值下一拍才出现在核的 rd_addr 上），
+                    // BRAM 的输出寄存器再占一拍。所以 cnt = c 这一拍拿到的是
+                    // mem[c]，而寄存器里已经填到 c+2 了。
+                    ntt_rd_addr <= cnt[7:0] + 8'd2;
+                    // 奇数拍凑齐一个字，由 A 口 mux 写回，这里只存低半字
                     if (!cnt[0]) begin
                         lo_lat <= ntt_rd_data;
-                    end else begin
-                        bufmem[widx_half] <= {ntt_rd_data, lo_lat};
                     end
                     if (cnt == 10'd255) begin
                         out_len_r <= 32'd512;
@@ -461,8 +571,7 @@ module pqc_accel_axi #(
                     end
                 end else begin
                     kec_rd_addr <= cnt[5:1] + {4'd0, cnt[0]};
-                    bufmem[cnt[BUF_AW-1:0]] <=
-                        cnt[0] ? kec_rd_data[63:32] : kec_rd_data[31:0];
+                    // 结果字由 A 口 mux 写回
                     if (cnt == 10'd49) begin
                         out_len_r <= 32'd200;
                         out_words <= 9'd50;
@@ -507,8 +616,9 @@ module pqc_accel_axi #(
                 end
             end
 
-            // 挤压。结果按字节读-改-写进缓冲区；消息此时已经全部吸收完，
-            // 覆盖掉它是安全的，也顺带把明文消息从缓冲区里抹掉。
+            // 挤压。结果按字节攒进 sq_acc，凑满一个 32 位字才整字写回缓冲区；
+            // 消息此时已经全部吸收完，覆盖掉它是安全的，也顺带把明文消息
+            // 从缓冲区里抹掉。
             S_SHK_SQ: begin
                 if (cnt == shk_outlen) begin
                     out_len_r <= {22'd0, shk_outlen};
@@ -518,10 +628,10 @@ module pqc_accel_axi #(
                     shk_zeroize <= 1'b1;
                     state       <= S_SHK_WIPE;
                 end else if (shk_out_valid) begin
-                    bufmem[byte_widx] <=
-                        (byte_word & ~(32'h0000_00FF << byte_sh))
-                        | ({24'd0, shk_out_data} << byte_sh);
-                    cnt <= cnt + 10'd1;
+                    // 字节攒进 sq_acc；攒满一个字（或到输出末尾）时
+                    // 由 A 口 mux 整字写回，见上面的 sq_flush。
+                    sq_acc <= sq_next;
+                    cnt    <= cnt + 10'd1;
                 end
             end
 

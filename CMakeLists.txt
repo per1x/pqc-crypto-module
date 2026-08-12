@@ -41,12 +41,14 @@ if(VERILATOR_BIN)
     OUTPUT ${VOBJ}/libntt_core_lib.a ${VOBJ}/Vntt_core.h
     COMMAND ${VERILATOR_BIN} --cc --build --lib-create ntt_core_lib
             --top-module ntt_core -Mdir ${VOBJ} -Wno-fatal
+            ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/common/ram_dp.v
             ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/mont_reduce.v
             ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/butterfly.v
             ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/ntt_core.v
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/ntt_core.v
             ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/butterfly.v
             ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/mont_reduce.v
+            ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/common/ram_dp.v
     COMMENT "Verilating hardware/rtl/mlkem/ntt_core.v")
   add_custom_target(verilate_ntt DEPENDS ${VOBJ}/libntt_core_lib.a)
 
@@ -61,6 +63,7 @@ if(VERILATOR_BIN)
 
   set(VOBJ_AXI ${CMAKE_CURRENT_BINARY_DIR}/verilated-axi)
   set(AXI_RTL
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/common/ram_dp.v
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/mont_reduce.v
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/butterfly.v
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/ntt_core.v

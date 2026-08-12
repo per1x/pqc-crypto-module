@@ -87,9 +87,16 @@ async def run_transform(dut, inverse: int) -> int:
 
 
 async def read_poly(dut):
+    """读口是**同步读**：地址给出后要等一个上升沿，rd_data 才是那个地址的内容。
+
+    系数存储从寄存器阵列换成 BRAM 之后组合读就没了（BRAM 没有组合读口），
+    这里的一拍延迟不是测试的将就，而是硬件真实时序 —— 软件侧
+    （pqc_accel_axi 的 S_STORE、ntt_sim.cpp）也照同一时序改过。
+    """
     out = []
     for i in range(256):
         dut.rd_addr.value = i
+        await RisingEdge(dut.clk)
         await Timer(1, unit="ns")
         out.append(s16(int(dut.rd_data.value)))
     return out

@@ -28,7 +28,7 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 |---|---|---|
 | `mont_reduce`, `barrett_reduce` | combinational | — |
 | `butterfly_ct`, `butterfly_gs` | combinational | — |
-| `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT, instantiates the above | 1153 per transform |
+| `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT, coefficients in a true dual-port BRAM (`ram_dp`), instantiates the above | 2305 per transform (2 cycles per butterfly) |
 | `mlkem_basemul` | combinational, five Montgomery multiplies | — |
 | `mlkem_compress`, `mlkem_decompress` | combinational, parameterised by `D` | — |
 | `mlkem_cbd2`, `mlkem_cbd3` | combinational, bit-parallel binomial sampling | — |
@@ -43,6 +43,7 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `mldsa_rej_uniform`, `mldsa_rej_eta` | combinational | — |
 | `mldsa_rej_uniform_buf` | collector, one 3-byte group per cycle | ~340 per polynomial |
 | `keccak_f1600` | single-round iterative, `round_cnt` over 24 rounds | 24 per permutation |
+| `ram_dp` | parameterised true dual-port synchronous RAM, inferred as block RAM | 1 cycle read latency |
 | `axi4lite_regs` | AXI4-Lite slave, control and status registers | — |
 | `pqc_accel_axi` | accelerator top level: AXI4-Lite + AXI4-Stream + cores | — |
 
@@ -63,11 +64,16 @@ the testbench verifies the substitution **exhaustively** rather than by sampling
 
 `pqc_accel_axi`'s data buffer is sized to the largest operation the hardware actually
 implements — 512 bytes for the NTT — rather than to `ACCEL_BUF_MAX`, which is the
-software-side bound of 16 KiB. The buffer has two read ports and a write port, so no
-synthesis tool can map it to block RAM; at 16 KiB it becomes 131072 flip-flops, more
-than an XC7Z020 has in total. Sizing it to what the implemented operation codes need
-brings it to 4096 bits. `tools/rtl_synth_check.sh` reports every memory that gets
-spread into registers for exactly this reason.
+software-side bound of 16 KiB. At 16 KiB the buffer would be 131072 bits; sizing it to
+what the implemented operation codes need brings it to 4096 bits.
+
+It used to be a plain register array with several combinational read ports, and that was
+measured, not assumed: Vivado mapped it to `LUT as Memory = 0` and spread it across
+roughly 30000 LUTs of multiplexer tree. It is now one `ram_dp` block RAM (port A shared
+between stream-in, load and write-back; port B dedicated to stream-out), which is what
+took the accelerator top level from 88.89% of the device down to 6.76%.
+`tools/rtl_synth_check.sh` reports every memory that gets spread into registers for
+exactly this reason.
 
 `ByteEncode_d` for `d < 12` is omitted deliberately: packing coefficients that already
 fit in `d` bits is pure wiring, with no logic to get wrong. Only the 12-bit path, which
@@ -76,7 +82,7 @@ additionally folds signed coefficients back into `[0, q)`, exists as a module.
 `keccak_f1600` is deliberately **not** a 24-round unrolled design. Unrolling multiplies
 the round logic by 24 for no benefit at the call rates involved: 24 cycles at 100 MHz is
 240 ns per permutation, and an ML-KEM-768 key generation needs 43 of them — about 1000
-cycles in total, against roughly 6900 for the NTTs. The bottleneck is elsewhere.
+cycles in total, against roughly 13800 for the NTTs. The bottleneck is elsewhere.
 
 `pqc_accel_axi` is the accelerator as a system would see it: AXI4-Lite for the control
 and status registers, AXI4-Stream for bulk data, and the algorithm cores underneath. The

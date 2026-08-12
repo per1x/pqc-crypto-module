@@ -25,6 +25,7 @@ file mkdir $rpt
 # ---- 读入源码 ----------------------------------------------------------------
 # 只读自研纯 RTL：算法核刻意不依赖任何厂商 IP，
 # 所以这里不需要 read_ip，也因此能在 Verilator/Icarus 里跑 cocotb。
+read_verilog -sv [glob $root/rtl/common/*.v]
 read_verilog -sv [glob $root/rtl/mlkem/*.v]
 read_verilog -sv [glob $root/rtl/keccak/*.v]
 read_verilog -sv [glob $root/rtl/bus/*.v]

@@ -117,9 +117,13 @@ int ntt_sim_run(const int16_t *in, int16_t *out, int inverse)
 	g_last_cycles = cycles;
 
 	// 读回
+	//
+	// ⚠️ 系数存储是 BRAM，读口**同步**：给出 rd_addr 之后要走一个时钟沿，
+	// rd_data 才是那个地址的内容。所以是 tick() 而不是 eval()。
+	// （eval() 只重算组合逻辑，原来那版寄存器阵列是组合读才够用。）
 	for (int i = 0; i < 256; i++) {
 		g_dut->rd_addr = static_cast<uint8_t>(i);
-		g_dut->eval();
+		tick();
 		out[i] = static_cast<int16_t>(g_dut->rd_data);
 	}
 	return 0;
