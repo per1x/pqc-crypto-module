@@ -65,6 +65,29 @@ limits the reachable range.
 | 7 | NTT, forward | 512 | 512 |
 | 8 | NTT, inverse | 512 | 512 |
 | 9 | Keccak-f[1600] | 200 | 200 |
+| 10 | SHAKE / SHA3 (full sponge) | 0…512 | 1…512 |
+
+Code 10 is the only one that uses `PARAM`. It packs three fields:
+
+| Bits | Field | Values |
+|---|---|---|
+| `[7:0]` | Domain-separation suffix | `0x1F` SHAKE, `0x06` SHA3 |
+| `[15:8]` | Rate in bytes | 168 / 136 / 72; must be a multiple of 8 |
+| `[31:16]` | Requested output length in bytes | 1…512 |
+
+Putting the output length in `PARAM` rather than adding a register keeps this
+table fixed. `PARAM` is the "parameter set" field and no hardware opcode had used
+it before.
+
+Codes 9 and 10 share one `keccak_f1600`: mode 10 drives the sponge in `sha3_core`,
+mode 9 borrows the permutation underneath it through a passthrough port that is
+live only while the sponge is idle. Only one command runs at a time, so there is
+no contention — and a second permutation core would cost roughly 3500 LUTs.
+
+Mode 10 wipes the sponge before reporting `DONE`. Squeezing has no natural end
+(SHAKE output length is arbitrary, so the core cannot know when the consumer has
+read enough), which means the sponge would otherwise never return to idle and
+never lend the permutation out again.
 
 Any other code, or a length that does not match the code, completes with `ERR`
 set and `ERRCODE = 3` ("mode not implemented"). Reporting the failure is

@@ -58,6 +58,13 @@ async def reset(dut):
     dut.out_ready.value = 0
     dut.rate_bytes.value = 136
     dut.suffix.value = 0x1F
+    # 直通口必须显式驱动：Icarus 里没接的输入是 z，
+    # 空闲态的写口直接取 ext_wr_en，一个 z 就能让整块状态变成 x
+    dut.ext_start.value = 0
+    dut.ext_wr_en.value = 0
+    dut.ext_wr_addr.value = 0
+    dut.ext_wr_data.value = 0
+    dut.ext_rd_addr.value = 0
     for _ in range(5):
         await RisingEdge(dut.clk)
     dut.rst_n.value = 1
@@ -258,6 +265,117 @@ async def test_zeroize_clears_sponge(dut):
     got = await run_hash(dut, "shake256", b"after zeroize", 32)
     exp = golden("shake256", b"after zeroize", 32)
     assert got == exp, f"zeroize 之后海绵不干净：{got.hex()} != {exp.hex()}"
+
+
+# Keccak 官方中间值文档公开的"全零态经一次置换"结果。
+# **硬编码常量，不由本项目任何代码生成** —— 与 test_keccak.py 用的是同一份
+# 独立来源。直通口只要能把这 25 个 lane 算对，就说明借出去的置换核没被海绵
+# 逻辑干扰。
+ALL_ZERO_PERMUTED = [
+    0xF1258F7940E1DDE7, 0x84D5CCF933C0478A, 0xD598261EA65AA9EE,
+    0xBD1547306F80494D, 0x8B284E056253D057, 0xFF97A42D7F8E6FD4,
+    0x90FEE5A0A44647C4, 0x8C5BDA0CD6192E76, 0xAD30A6F71B19059C,
+    0x30935AB7D08FFC64, 0xEB5AA93F2317D635, 0xA9A6E6260D712103,
+    0x81A57C16DBCF555F, 0x43B831CD0347C826, 0x01F22F1A11A5569F,
+    0x05E5635A21D9AE61, 0x64BEFEF28CC970F2, 0x613670957BC46611,
+    0xB87C5A554FD00ECB, 0x8C3EE88A1CCF32C8, 0x940C7922AE3A2614,
+    0x1841F924A2C509E4, 0x16F53526E70465C2, 0x75F644E97F30A13B,
+    0xEAF1FF7B5CECA249,
+]
+
+
+async def ext_permute(dut, lanes):
+    """经直通口装 25 个 lane、踢一次置换、读回来。上层（pqc_accel_axi）
+    实现 ACCEL_MODE_KECCAK_F1600 走的就是这条路。"""
+    for i, v in enumerate(lanes):
+        dut.ext_wr_en.value = 1
+        dut.ext_wr_addr.value = i
+        dut.ext_wr_data.value = v
+        await RisingEdge(dut.clk)
+    dut.ext_wr_en.value = 0
+
+    dut.ext_start.value = 1
+    await RisingEdge(dut.clk)
+    dut.ext_start.value = 0
+    # 踢的那一拍 ext_done 上还挂着上一次的电平，必须跳过 —— 与上层
+    # pqc_accel_axi 的 kick_busy 是同一条纪律
+    await RisingEdge(dut.clk)
+    for _ in range(200):
+        await Timer(1, unit="ns")
+        if dut.ext_done.value == 1:
+            break
+        await RisingEdge(dut.clk)
+    else:
+        raise AssertionError("直通置换没完成")
+
+    out = []
+    for i in range(25):
+        dut.ext_rd_addr.value = i
+        await Timer(1, unit="ns")
+        out.append(int(dut.ext_rd_data.value))
+    return out
+
+
+@cocotb.test()
+async def test_ext_passthrough(dut):
+    """空闲时把置换核借给上层，算出来的必须是官方向量。
+
+    这条口存在的唯一理由是**不要第二个置换核**：上层同时要裸置换和 SHAKE，
+    各占一个的话光这块就 ~7000 LUT。"""
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset(dut)
+
+    got = await ext_permute(dut, [0] * 25)
+    assert got == ALL_ZERO_PERMUTED, f"直通置换错：lane0={got[0]:016x}"
+
+    # 借完之后海绵自己还能正常用（借出去不该留下痕迹 —— 除了状态里那 25 个
+    # lane，而 start 本来就会清）
+    d = await run_hash(dut, "sha3-256", b"after passthrough", 32)
+    assert d == golden("sha3-256", b"after passthrough", 32)
+
+
+@cocotb.test()
+async def test_ext_read_blocked_while_busy(dut):
+    """海绵在跑的时候，直通读口必须回 0，不能透出中间状态。
+
+    这是"状态不出密码边界"的实际落点：ext_rd_data 若无条件接出置换核的读口，
+    上层在挤压途中读一下就拿到了海绵的内部 lane。而挤压中的海绵状态在 ML-KEM
+    里就是 ρ/σ 展开的上下文 —— 那正是不该让普通世界看见的东西。
+    """
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset(dut)
+
+    rate, suffix = PARAMS["shake256"]
+    dut.rate_bytes.value = rate
+    dut.suffix.value = suffix
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+
+    # 灌一整块非零消息，海绵状态必然非零
+    for i in range(rate):
+        await wait_in_ready(dut, f"泄漏测试第 {i} 字节")
+        dut.in_valid.value = 1
+        dut.in_data.value = 0x5A
+        await RisingEdge(dut.clk)
+        dut.in_valid.value = 0
+
+    # 在 busy 期间扫一遍所有 lane，必须全 0
+    seen_busy = 0
+    for _ in range(80):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        if dut.busy.value != 1:
+            continue
+        seen_busy += 1
+        for lane in range(25):
+            dut.ext_rd_addr.value = lane
+            await Timer(1, unit="ns")
+            assert int(dut.ext_rd_data.value) == 0, (
+                f"busy 期间直通读口漏出 lane{lane}="
+                f"{int(dut.ext_rd_data.value):016x}"
+            )
+    assert seen_busy > 0, "整段窗口里核心都不 busy，这条用例没测到东西"
 
 
 @cocotb.test()

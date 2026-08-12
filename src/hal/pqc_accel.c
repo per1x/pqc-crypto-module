@@ -33,15 +33,15 @@ const accel_transport_t *accel_get_transport(void)
 
 /* 一次完整的命令握手：写模式 → 送输入 → START → 等 DONE → 查 ERR。
  * 真 PL 上 START 之后是等中断或轮询 STATUS，这里的形状与之完全一致。 */
-static pqc_status_t run(uint32_t mode, pqc_alg_t alg,
-                        const uint8_t *in, size_t in_len, uint32_t *out_len)
+static pqc_status_t run_param(uint32_t mode, uint32_t param,
+                              const uint8_t *in, size_t in_len, uint32_t *out_len)
 {
 	const accel_transport_t *t = accel_get_transport();
 	if (!t || in_len > ACCEL_BUF_MAX) {
 		return PQC_ERR_BAD_ARG;
 	}
 	t->write_reg(ACCEL_REG_MODE, mode);
-	t->write_reg(ACCEL_REG_PARAM, (uint32_t)alg);
+	t->write_reg(ACCEL_REG_PARAM, param);
 	t->write_reg(ACCEL_REG_IN_LEN, (uint32_t)in_len);
 	if (in_len) {
 		t->write_data(0, in, in_len);
@@ -69,6 +69,13 @@ static pqc_status_t run(uint32_t mode, pqc_alg_t alg,
 		*out_len = t->read_reg(ACCEL_REG_OUT_LEN);
 	}
 	return PQC_OK;
+}
+
+/* 绝大多数操作码的 PARAM 就是参数集本身 */
+static pqc_status_t run(uint32_t mode, pqc_alg_t alg,
+                        const uint8_t *in, size_t in_len, uint32_t *out_len)
+{
+	return run_param(mode, (uint32_t)alg, in, in_len, out_len);
 }
 
 static void put_u32le(uint8_t *p, uint32_t v)
@@ -292,9 +299,36 @@ int accel_keccak_f1600(const uint8_t state_in[200], uint8_t state_out[200])
 	return 0;
 }
 
-/* SHAKE / SHA3：置换交给"硬件"，海绵在这里做（分工理由见 accel.h）。
+/* 整条海绵委托给 PL（模式 10）。
  *
- * 这条路径把 padding（pad10*1 + 域分隔后缀）、rate、lane 小端序、
+ * 成功返回 0；该 transport 没实现模式 10 时返回 1（调用方退回软件海绵）；
+ * 真出错返回 -1。**把"没实现"与"出错"分开**是有意的：前者要静默回落，
+ * 后者绝不能被回落盖住 —— 一块坏了的加速器如果每次都被软件兜住，
+ * 就再也没人会发现它坏了。 */
+static int shake_in_pl(int rate, uint8_t suffix,
+                       const uint8_t *msg, size_t msg_len,
+                       uint8_t *out, size_t out_len)
+{
+	if (out_len == 0 || msg_len > ACCEL_SHAKE_MAX || out_len > ACCEL_SHAKE_MAX) {
+		return 1;
+	}
+	uint32_t olen = 0;
+	uint32_t param = ACCEL_SHAKE_PARAM((uint32_t)rate, suffix, (uint32_t)out_len);
+	pqc_status_t st = run_param(ACCEL_MODE_SHAKE, param, msg, msg_len, &olen);
+	if (st == PQC_ERR_UNSUPPORTED) {
+		return 1;
+	}
+	if (st != PQC_OK || olen != out_len) {
+		return -1;
+	}
+	accel_get_transport()->read_data(0, out, out_len);
+	return 0;
+}
+
+/* SHAKE / SHA3。优先整条委托给 PL，退不回来才在 C 侧做 framing。
+ * 两条路的分工与回落理由见 accel.h。
+ *
+ * C 侧这条路径把 padding（pad10*1 + 域分隔后缀）、rate、lane 小端序、
  * 多块吸收与多块挤压全都串起来 —— 换句话说，它验的不只是置换本身。
  * 正确性由 tests/unit/test_accel.c 对 OpenSSL 的逐字节比对钉住。 */
 int accel_shake(int rate, uint8_t suffix,
@@ -303,6 +337,10 @@ int accel_shake(int rate, uint8_t suffix,
 {
 	if (rate <= 0 || rate > 200 || rate % 8 != 0 || (!msg && msg_len) || !out) {
 		return -1;
+	}
+	int hw = shake_in_pl(rate, suffix, msg, msg_len, out, out_len);
+	if (hw <= 0) {
+		return hw;               /* 0 = 硬件算完了；-1 = 硬件真出错 */
 	}
 	uint8_t state[200];
 	memset(state, 0, sizeof(state));

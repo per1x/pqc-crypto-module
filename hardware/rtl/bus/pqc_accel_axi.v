@@ -18,8 +18,26 @@
 // 【支持的操作码】
 //   7 / 8  NTT 正/逆变换   IN_LEN 必须为 512（256 个 16 位系数）
 //   9      Keccak-f[1600]  IN_LEN 必须为 200（25 个 64 位 lane）
+//   10     SHAKE / SHA3    IN_LEN = 消息字节数；PARAM 见下
 // 其余操作码置 STATUS.ERR 并把 ERRCODE 设为 3（该模式未实现）——
 // 明确报错而不是悄悄回落到别的实现。
+//
+// 【模式 10 的 PARAM 编码】
+//   [7:0]   域分隔后缀：SHAKE=0x1F，SHA3=0x06
+//   [15:8]  rate 字节数：SHAKE128=168，SHAKE256/SHA3-256=136，SHA3-512=72
+//   [31:16] 请求的输出字节数
+// 输出长度放 PARAM 而不是另加寄存器，是为了不动 docs/register-map.md 那张
+// 已经定死的表 —— PARAM 本来就是"参数集"字段，本层此前没用过它。
+//
+// 模式 9 与模式 10 **共用同一个 keccak_f1600**：模式 10 用 sha3_core 的海绵，
+// 模式 9 走 sha3_core 的直通口借用它底下的置换核。一次只有一条命令在跑，
+// 所以不存在争用；而各占一个置换核要多花约 3500 LUT，ZU3EG 上还得留给 S4 的
+// ML-KEM 核。
+//
+// 【模式 10 结束时会擦海绵】命令收尾会给 sha3_core 打一拍 zeroize 并等它清完，
+// 理由有两条：一是海绵挤压完不会自己回空闲（SHAKE 输出长度任意，核心不知道
+// 上层何时读够），不擦的话直通口就一直借不出去，下一条模式 9 命令会挂死；
+// 二是留在 lane 里的挤压状态本来也不该跨命令存活。
 `default_nettype none
 
 module pqc_accel_axi #(
@@ -61,27 +79,42 @@ module pqc_accel_axi #(
 );
     // 【缓冲区按已实现的操作码定尺寸，而不是照抄软件侧的上界】
     // accel.h 的 ACCEL_BUF_MAX 是 16 KiB，那是软件侧要容纳完整 ML-KEM/ML-DSA
-    // 输入的上界；本层只实现 NTT（512 字节）与 Keccak（200 字节），因此硬件
-    // 缓冲区取 512 字节 = 128 个 32 位字就够。
+    // 输入的上界；本层实现的操作码里输入最大的是 NTT（512 字节），因此硬件
+    // 缓冲区取 512 字节 = 128 个 32 位字。模式 10 的消息与摘要也按这个上限
+    // 卡（各 ≤512 字节）—— 超出的由软件侧退回 C 侧海绵，见 accel_shake()。
     //
     // 这不是省资源的小优化：这块存储是双读口（输出流一路、装载一路）加写口，
     // 综合工具无法把它映射成块 RAM，只能摊成寄存器或分布式 RAM。按 16 KiB 写
     // 就是 131072 个触发器 —— 超过 XC7Z020 全片 106400 个触发器，根本放不下。
-    // 按实际需要的 128 字定尺寸后是 4096 位，映射成分布式 RAM 只占几十个 LUT。
-    // 今后若增加输入更大的操作码，这里要一并改成同步读的单口结构。
+    //
+    // ⚠️ 这里原来写着"按 128 字定尺寸后映射成分布式 RAM 只占几十个 LUT"。
+    // **实测不成立。** 在 xazu3eg-sfvc784-1-i 上把本模块整个综合 + 布线之后，
+    // 报告里 LUT as Memory = 0 —— Vivado 一个单元都没映射成分布式 RAM，
+    // 全摊成了组合选择树（F7 Muxes 5434 / F8 Muxes 2462）。原因是读口不止一个，
+    // 且模式 10 还要按**字节**读写，粒度对不上 LUTRAM 的端口结构。
+    // 这块缓冲区实测占约 30000 LUT，比 ntt_core 还多，是本模块吃掉 88.89% 片子
+    // 的两个大头之一（另一个是 ntt_core 的系数寄存器阵列）。
+    //
+    // 正确的修法是改成同步读的单口 BRAM 结构 —— 记在 S3，见 docs/fpga-进展.md。
     localparam integer BUF_WORDS = 128;
     localparam integer BUF_AW    = 7;
 
     localparam [31:0] MODE_NTT_FWD = 32'd7;
     localparam [31:0] MODE_NTT_INV = 32'd8;
     localparam [31:0] MODE_KECCAK  = 32'd9;
+    localparam [31:0] MODE_SHAKE   = 32'd10;
 
-    localparam [2:0] S_IDLE  = 3'd0,
-                     S_LOAD  = 3'd1,
-                     S_KICK  = 3'd2,
-                     S_WAIT  = 3'd3,
-                     S_STORE = 3'd4,
-                     S_FIN   = 3'd5;
+    localparam [3:0] S_IDLE      = 4'd0,
+                     S_LOAD      = 4'd1,
+                     S_KICK      = 4'd2,
+                     S_WAIT      = 4'd3,
+                     S_STORE     = 4'd4,
+                     S_FIN       = 4'd5,
+                     S_SHK_KICK  = 4'd6,
+                     S_SHK_ABS   = 4'd7,
+                     S_SHK_FLUSH = 4'd8,
+                     S_SHK_SQ    = 4'd9,
+                     S_SHK_WIPE  = 4'd10;
 
     reg [31:0] bufmem [0:BUF_WORDS-1];
     reg [8:0]  wr_ptr;                     // 输入流写指针（按字）
@@ -90,7 +123,7 @@ module pqc_accel_axi #(
 
     // ---- 寄存器组 ----
     wire        start, soft_reset;
-    wire [31:0] mode, in_len;
+    wire [31:0] mode, in_len, param_w;
     reg         done_set, err_set, out_we;
     reg  [31:0] out_len_r, errcode_r;
     reg         busy;
@@ -108,9 +141,9 @@ module pqc_accel_axi #(
         .s_axi_rdata(s_axi_rdata), .s_axi_rresp(s_axi_rresp),
         .s_axi_rvalid(s_axi_rvalid), .s_axi_rready(s_axi_rready),
         .start(start), .soft_reset(soft_reset),
-        // PARAM 属于寄存器契约的一部分（软件可读写），但本层实现的三个操作码
-        // 都不按参数集分支，因此不接出来。
-        .mode(mode), .param(), .in_len(in_len),
+        // PARAM 在 NTT / Keccak 三个操作码下不用（它们不按参数集分支），
+        // 模式 10 拿它当 {输出长度, rate, suffix} 用。
+        .mode(mode), .param(param_w), .in_len(in_len),
         .done_set(done_set), .busy(busy), .err_set(err_set),
         .out_len_in(out_len_r), .errcode_in(errcode_r), .out_we(out_we));
 
@@ -126,6 +159,22 @@ module pqc_accel_axi #(
         end
     end
 
+    // 状态机的状态与计数器提前声明：模式 10 的握手线（in_valid / out_ready）
+    // 由它们组合出来，而这两根线要接到下面的核例化上。
+    reg [3:0]  state;
+    reg [9:0]  cnt;
+    reg        is_ntt;
+    reg [15:0] lo_lat;                    // 半字暂存（NTT 结果回写用）
+    reg [31:0] lane_lo;                   // 低 32 位暂存（Keccak 装载用）
+
+    // 缓冲区的按字节取用（模式 10）。cnt 既当吸收下标又当挤压下标 ——
+    // 消息全部吸收完才开始挤压，两个阶段不重叠，所以能共用一个计数器，
+    // 也因此挤压的结果覆盖掉输入消息是安全的。
+    wire [BUF_AW-1:0] byte_widx   = cnt[BUF_AW+1:2];
+    wire [4:0]        byte_sh     = {cnt[1:0], 3'b000};
+    wire [31:0]       byte_word   = bufmem[byte_widx];
+    wire [7:0]        shk_in_byte = byte_word[byte_sh +: 8];
+
     reg                ntt_start, ntt_inverse, ntt_wr_en;
     reg  [7:0]         ntt_wr_addr;
     reg  signed [15:0] ntt_wr_data;
@@ -139,6 +188,8 @@ module pqc_accel_axi #(
         .wr_en(ntt_wr_en), .wr_addr(ntt_wr_addr), .wr_data(ntt_wr_data),
         .rd_addr(ntt_rd_addr), .rd_data(ntt_rd_data));
 
+    // 模式 9 的裸置换：不再自己例化 keccak_f1600，改成向 sha3_core 借 ——
+    // 端口名与语义与直接例化时完全一致，所以下面的状态机一行没改。
     reg          kec_start, kec_wr_en;
     reg  [4:0]   kec_wr_addr;
     reg  [63:0]  kec_wr_data;
@@ -146,11 +197,33 @@ module pqc_accel_axi #(
     wire [63:0]  kec_rd_data;
     wire         kec_done;
 
-    keccak_f1600 u_keccak (
+    // 模式 10 的海绵
+    reg          shk_start, shk_flush, shk_zeroize;
+    wire         shk_in_ready, shk_out_valid, shk_busy;
+    wire [7:0]   shk_out_data;
+    reg  [7:0]   shk_rate, shk_suffix;
+    reg  [9:0]   shk_msglen, shk_outlen;
+
+    // 输出字数（向上取整到 32 位字）。写成独立的 wire 是因为 Verilog-2001
+    // 不允许对表达式直接做位选，写在赋值语句里会编译不过。
+    wire [9:0]   shk_outw = (shk_outlen + 10'd3) >> 2;
+
+    wire         shk_in_valid  = (state == S_SHK_ABS) && (cnt != shk_msglen);
+    wire         shk_out_ready = (state == S_SHK_SQ)  && (cnt != shk_outlen);
+
+    sha3_core u_sha3 (
         .clk(clk), .rst_n(core_rst_n),
-        .start(kec_start), .done(kec_done),
-        .wr_en(kec_wr_en), .wr_addr(kec_wr_addr), .wr_data(kec_wr_data),
-        .rd_addr(kec_rd_addr), .rd_data(kec_rd_data));
+        .rate_bytes(shk_rate), .suffix(shk_suffix),
+        .start(shk_start), .zeroize(shk_zeroize),
+        .in_valid(shk_in_valid), .in_ready(shk_in_ready), .in_data(shk_in_byte),
+        .in_flush(shk_flush),
+        .out_valid(shk_out_valid), .out_ready(shk_out_ready),
+        .out_data(shk_out_data),
+        .busy(shk_busy), .absorbing(), .squeezing(),
+        .ext_start(kec_start), .ext_done(kec_done),
+        .ext_wr_en(kec_wr_en), .ext_wr_addr(kec_wr_addr),
+        .ext_wr_data(kec_wr_data),
+        .ext_rd_addr(kec_rd_addr), .ext_rd_data(kec_rd_data));
 
     // ---- 数据面握手 ----
     assign s_axis_tready = !busy;
@@ -161,16 +234,28 @@ module pqc_accel_axi #(
     // ---- 命令状态机 ----
     // 缓冲区只在这一个 always 块里被写：输入流、结果回写共用同一组端口，
     // 避免多驱动。
-    reg [2:0]  state;
-    reg [9:0]  cnt;
-    reg        is_ntt;
-    reg [15:0] lo_lat;                    // 半字暂存（NTT 结果回写用）
-    reg [31:0] lane_lo;                   // 低 32 位暂存（Keccak 装载用）
-
     wire mode_ntt    = (mode == MODE_NTT_FWD) || (mode == MODE_NTT_INV);
     wire mode_keccak = (mode == MODE_KECCAK);
+    wire mode_shake  = (mode == MODE_SHAKE);
+
+    // 模式 10 的 PARAM 拆解
+    wire [7:0]  p_suffix = param_w[7:0];
+    wire [7:0]  p_rate   = param_w[15:8];
+    wire [15:0] p_outlen = param_w[31:16];
+
+    // 参数校验就地做完，不进状态机 ——
+    // rate 必须是 8 的倍数（pad 的位置计算全建立在这上面），消息与输出都
+    // 不能超过这块 512 字节的缓冲区。校验不过就与"未实现的模式"一样报
+    // ERRCODE=3，因为对调用方来说都是"这条命令这台加速器干不了"。
+    wire shake_ok = mode_shake
+                 && (p_rate != 8'd0) && (p_rate[2:0] == 3'd0) && (p_rate <= 8'd200)
+                 && (p_outlen != 16'd0) && (p_outlen <= 16'd512)
+                 && (in_len <= 32'd512);
+
     wire cmd_ok      = (mode_ntt && (in_len == 32'd512))
-                    || (mode_keccak && (in_len == 32'd200));
+                    || (mode_keccak && (in_len == 32'd200))
+                    || shake_ok;
+
 
     wire [BUF_AW-1:0] widx_half = cnt[7:1];               // NTT：两系数一字
     wire [31:0] load_word = bufmem[widx_half];
@@ -208,6 +293,13 @@ module pqc_accel_axi #(
             kec_rd_addr <= 5'd0;
             lo_lat      <= 16'd0;
             lane_lo     <= 32'd0;
+            shk_start   <= 1'b0;
+            shk_flush   <= 1'b0;
+            shk_zeroize <= 1'b0;
+            shk_rate    <= 8'd136;
+            shk_suffix  <= 8'h1F;
+            shk_msglen  <= 10'd0;
+            shk_outlen  <= 10'd0;
         end else if (soft_reset) begin
             state       <= S_IDLE;
             cnt         <= 10'd0;
@@ -234,6 +326,13 @@ module pqc_accel_axi #(
             kec_rd_addr <= 5'd0;
             lo_lat      <= 16'd0;
             lane_lo     <= 32'd0;
+            shk_start   <= 1'b0;
+            shk_flush   <= 1'b0;
+            shk_zeroize <= 1'b0;
+            shk_rate    <= 8'd136;
+            shk_suffix  <= 8'h1F;
+            shk_msglen  <= 10'd0;
+            shk_outlen  <= 10'd0;
         end else begin
             done_set  <= 1'b0;
             err_set   <= 1'b0;
@@ -242,6 +341,9 @@ module pqc_accel_axi #(
             kec_start <= 1'b0;
             ntt_wr_en <= 1'b0;
             kec_wr_en <= 1'b0;
+            shk_start   <= 1'b0;
+            shk_flush   <= 1'b0;
+            shk_zeroize <= 1'b0;
 
             // 输入流：命令进行中不接收。超出缓冲区的拍照常握手但丢弃，
             // 否则写指针回绕会把包首已经收好的字覆盖掉。
@@ -279,7 +381,13 @@ module pqc_accel_axi #(
                         cnt         <= 10'd0;
                         rd_ptr      <= 9'd0;
                         out_words   <= 9'd0;
-                        state       <= S_LOAD;
+                        // 参数在这里锁存一次。软件不该在命令进行中改 PARAM，
+                        // 但锁存之后就轮不到"不该"来兜底了。
+                        shk_rate    <= p_rate;
+                        shk_suffix  <= p_suffix;
+                        shk_msglen  <= in_len[9:0];
+                        shk_outlen  <= p_outlen[9:0];
+                        state       <= mode_shake ? S_SHK_KICK : S_LOAD;
                     end
                 end
             end
@@ -362,6 +470,73 @@ module pqc_accel_axi #(
                     end else begin
                         cnt <= cnt + 10'd1;
                     end
+                end
+            end
+
+            // ---- 模式 10：SHAKE / SHA3 ----
+            // 与 NTT/Keccak 那两条路的分工不同：这里不"装载→踢→等→回写"，
+            // 而是把缓冲区当成一条字节流喂给海绵、再把挤出来的字节写回同一块
+            // 缓冲区。中间状态一次也不经过总线。
+            S_SHK_KICK: begin
+                shk_start <= 1'b1;
+                cnt       <= 10'd0;
+                state     <= S_SHK_ABS;
+            end
+
+            // 吸收。shk_in_valid 是组合的（state 与 cnt 决定），核心的
+            // in_ready 在清空海绵和置换期间为低，握上了才推进 cnt。
+            // 空消息（msglen==0）直接落到 S_SHK_FLUSH —— SHA3-256("") 是
+            // FIPS 202 的第一条向量，不是边角料。
+            S_SHK_ABS: begin
+                if (cnt == shk_msglen) begin
+                    state <= S_SHK_FLUSH;
+                end else if (shk_in_ready) begin
+                    cnt <= cnt + 10'd1;
+                end
+            end
+
+            // 宣告消息结束。in_flush 只在 in_valid 为低时被采样，而此刻
+            // shk_in_valid 已经为低（cnt == msglen），所以只要等 in_ready。
+            // shk_flush 是寄存的，下一拍才到核心 —— 那时本状态机已经在
+            // S_SHK_SQ，in_valid 依旧为低，核心仍停在吸收态，采样点成立。
+            S_SHK_FLUSH: begin
+                if (shk_in_ready) begin
+                    shk_flush <= 1'b1;
+                    cnt       <= 10'd0;
+                    state     <= S_SHK_SQ;
+                end
+            end
+
+            // 挤压。结果按字节读-改-写进缓冲区；消息此时已经全部吸收完，
+            // 覆盖掉它是安全的，也顺带把明文消息从缓冲区里抹掉。
+            S_SHK_SQ: begin
+                if (cnt == shk_outlen) begin
+                    out_len_r <= {22'd0, shk_outlen};
+                    // 向上取整到字：AXI4-Stream 按 32 位搬运，最后一个字里
+                    // 多出来的字节由软件按 OUT_LEN 截断
+                    out_words <= {shk_outw[8:0]};
+                    shk_zeroize <= 1'b1;
+                    state       <= S_SHK_WIPE;
+                end else if (shk_out_valid) begin
+                    bufmem[byte_widx] <=
+                        (byte_word & ~(32'h0000_00FF << byte_sh))
+                        | ({24'd0, shk_out_data} << byte_sh);
+                    cnt <= cnt + 10'd1;
+                end
+            end
+
+            // 等海绵擦完再报 DONE。
+            //
+            // 不擦是不行的：挤压没有自然终点，核心挤完最后一块会一直停在
+            // 挤压态，既不回空闲、也就不肯把置换核借出去 —— 紧接着的一条
+            // 模式 9 命令会永远等不到 done。擦除同时把上一条消息的海绵状态
+            // 清掉，两件事一次做完。
+            //
+            // 必须等 busy 落下才报 DONE，否则软件看到 DONE 立刻发下一条
+            // 模式 9 命令时，海绵还在写那 25 个 0，会把刚装进去的 lane 冲掉。
+            S_SHK_WIPE: begin
+                if (!shk_busy) begin
+                    state <= S_FIN;
                 end
             end
 

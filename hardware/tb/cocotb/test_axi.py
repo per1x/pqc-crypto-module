@@ -43,6 +43,19 @@ ST_ERR  = 1 << 2
 MODE_NTT_FWD = 7
 MODE_NTT_INV = 8
 MODE_KECCAK  = 9
+MODE_SHAKE   = 10
+
+# 模式 10 的 PARAM 编码：[7:0] 后缀 [15:8] rate [31:16] 输出字节数
+SHAKE_PARAMS = {
+    "shake128": (168, 0x1F),
+    "shake256": (136, 0x1F),
+    "sha3-256": (136, 0x06),
+    "sha3-512": (72, 0x06),
+}
+
+
+def shake_param(rate, suffix, outlen):
+    return (outlen << 16) | (rate << 8) | suffix
 
 VERSION_CONST = 0x0001_0000
 
@@ -353,6 +366,161 @@ async def test_keccak_with_gaps(dut):
     want = b"".join(x.to_bytes(8, "little") for x in keccak_f1600(lanes))
     assert dense == want, "结果与参考模型不一致"
     dut._log.info("输入输出流的空拍不影响结果")
+
+
+# ---------------------------------------------------------------- 模式 10：SHAKE
+
+async def run_shake(dut, name, msg, outlen, gap=0):
+    """整条 SHAKE 命令：消息进 → 触发 → 轮询 → 摘要出。
+
+    与模式 9 的区别正是这一步要证明的东西：这里总线上走的是**消息和摘要**，
+    海绵的 25 个 lane 一次都没出芯片。模式 9 每置换一次就要搬 400 字节状态。
+    """
+    rate, suffix = SHAKE_PARAMS[name]
+    # 消息按小端补齐到 32 位字（末尾不足一字的补 0，硬件按 IN_LEN 截断）
+    padded = msg + b"\x00" * ((-len(msg)) % 4)
+    words = [int.from_bytes(padded[i:i + 4], "little")
+             for i in range(0, len(padded), 4)]
+    if not words:
+        words = [0]          # 空消息也要发一个包，否则流侧没有 TLAST
+    await axis_send(dut, words, gap=gap)
+
+    await axil_write(dut, REG_MODE, MODE_SHAKE)
+    await axil_write(dut, REG_PARAM, shake_param(rate, suffix, outlen))
+    await axil_write(dut, REG_IN_LEN, len(msg))
+    await axil_write(dut, REG_CTRL, CTRL_START)
+    st = await poll_done(dut, limit=20000)
+    assert not (st & ST_ERR), f"SHAKE 命令返回了错误（{name} len={len(msg)}）"
+
+    olen, _ = await axil_read(dut, REG_OUT_LEN)
+    assert olen == outlen, f"OUT_LEN 应为 {outlen}，实际 {olen}"
+    out_words = await axis_recv(dut, gap=gap)
+    assert len(out_words) == (outlen + 3) // 4, (
+        f"输出流应有 {(outlen + 3) // 4} 拍，实际 {len(out_words)}")
+    return b"".join(w.to_bytes(4, "little") for w in out_words)[:outlen]
+
+
+@cocotb.test()
+async def test_shake_datapath(dut):
+    """四个参数集 × 边界长度，与 hashlib 逐字节比对。
+
+    黄金模型用 hashlib 而不是本仓库的 ref_model：ref_model 与 RTL 出自同一个人
+    对同一份规范的理解，一起错的时候两边都不会报警。
+    """
+    import hashlib
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    def golden(name, msg, n):
+        if name == "shake128":
+            return hashlib.shake_128(msg).digest(n)
+        if name == "shake256":
+            return hashlib.shake_256(msg).digest(n)
+        if name == "sha3-256":
+            return hashlib.sha3_256(msg).digest()[:n]
+        return hashlib.sha3_512(msg).digest()[:n]
+
+    for name, (rate, _s) in SHAKE_PARAMS.items():
+        # 边界长度：pad 的 bug 基本全藏在 rate-1 / rate / rate+1 这几处
+        for n in (0, 1, 3, rate - 1, rate, rate + 1):
+            msg = bytes((i * 31 + n) & 0xFF for i in range(n))
+            outlen = 32
+            got = await run_shake(dut, name, msg, outlen)
+            want = golden(name, msg, outlen)
+            assert got == want, (
+                f"{name} 消息长 {n}（rate={rate}）：{got.hex()} != {want.hex()}")
+    dut._log.info("SHAKE/SHA3 经 AXI 全路径与 hashlib 逐字节一致")
+
+
+@cocotb.test()
+async def test_shake_long_squeeze_and_gaps(dut):
+    """跨块挤压 + 流侧空拍。
+
+    输出长度不是 4 的倍数这一条要单独压：OUT_LEN 按字节算，而流按 32 位字搬，
+    最后一个字里多出来的字节由软件截断 —— 硬件报错了字数就对不上。
+    """
+    import hashlib
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    msg = bytes(range(200))
+    for outlen in (1, 31, 137, 300):
+        got = await run_shake(dut, "shake256", msg, outlen)
+        want = hashlib.shake_256(msg).digest(outlen)
+        assert got == want, f"outlen={outlen}：{got.hex()} != {want.hex()}"
+
+    dense = await run_shake(dut, "shake128", msg, 64, gap=0)
+    sparse = await run_shake(dut, "shake128", msg, 64, gap=3)
+    assert dense == sparse, "带空拍的传输给出了不同结果"
+    assert dense == hashlib.shake_128(msg).digest(64)
+    dut._log.info("跨块挤压、非 4 倍数输出长度、流侧空拍均正确")
+
+
+@cocotb.test()
+async def test_shake_then_keccak(dut):
+    """SHAKE 之后紧接一条模式 9 —— 两条命令共用同一个置换核。
+
+    这条用例挡的是一个只会挂死不会报错的失败：海绵挤压完不会自己回空闲
+    （SHAKE 输出长度任意，核心不知道上层何时读够），所以命令收尾必须打一拍
+    zeroize 把它清回空闲，直通口才借得出去。少了那一步，这里的 run_keccak
+    会永远等不到 DONE。
+    """
+    import hashlib
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    msg = b"sponge then raw permutation"
+    got = await run_shake(dut, "shake256", msg, 32)
+    assert got == hashlib.shake_256(msg).digest(32)
+
+    state = bytes((i * 11) & 0xFF for i in range(200))
+    raw = await run_keccak(dut, state)
+    lanes = [int.from_bytes(state[8 * i:8 * i + 8], "little") for i in range(25)]
+    want = b"".join(x.to_bytes(8, "little") for x in keccak_f1600(lanes))
+    assert raw == want, "SHAKE 之后的裸置换算错了 —— 海绵没让出置换核"
+
+    # 反过来再来一次：裸置换之后海绵还能正常用
+    got2 = await run_shake(dut, "sha3-256", b"back to sponge", 32)
+    assert got2 == hashlib.sha3_256(b"back to sponge").digest()
+    dut._log.info("模式 9 与模式 10 交替执行，共用置换核无残留")
+
+
+@cocotb.test()
+async def test_shake_bad_params(dut):
+    """非法参数必须报错，不能安静地算出个错误摘要。
+
+    rate 不是 8 的倍数时 pad 的位置计算全盘失效，而状态机照样能跑完 ——
+    这正是必须在命令入口拦下来的那类参数。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    bad = [
+        ("rate 非 8 的倍数", shake_param(100, 0x1F, 32), 8),
+        ("rate 为 0",        shake_param(0, 0x1F, 32),   8),
+        ("输出长度为 0",     shake_param(136, 0x1F, 0),  8),
+        ("输出超出缓冲区",   shake_param(136, 0x1F, 513), 8),
+        ("消息超出缓冲区",   shake_param(136, 0x1F, 32), 513),
+    ]
+    for why, param, in_len in bad:
+        await axis_send(dut, [0, 0])
+        await axil_write(dut, REG_MODE, MODE_SHAKE)
+        await axil_write(dut, REG_PARAM, param)
+        await axil_write(dut, REG_IN_LEN, in_len)
+        await axil_write(dut, REG_CTRL, CTRL_START)
+        st = await poll_done(dut)
+        assert st & ST_ERR, f"{why}：应当置 ERR"
+        ec, _ = await axil_read(dut, REG_ERRCODE)
+        assert ec == 3, f"{why}：ERRCODE 应为 3，实际 {ec}"
+
+    # 报错之后设备仍然可用（错误不该让状态机卡住）
+    import hashlib
+    got = await run_shake(dut, "shake256", b"ok now", 32)
+    assert got == hashlib.shake_256(b"ok now").digest(32)
+    dut._log.info("非法参数逐条报 ERRCODE=3，且不影响后续命令")
 
 
 @cocotb.test()

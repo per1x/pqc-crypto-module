@@ -164,6 +164,27 @@ static void keccak_f1600_sw(uint64_t A[25])
 	}
 }
 
+/* 200 字节视图 ↔ 25 个 64 位 lane，小端。与 RTL 侧的 lane 字节序一致。 */
+static void bytes_to_lanes(const uint8_t *b, uint64_t *lanes)
+{
+	for (int i = 0; i < 25; i++) {
+		uint64_t v = 0;
+		for (int k = 0; k < 8; k++) {
+			v |= (uint64_t)b[i * 8 + k] << (8 * k);
+		}
+		lanes[i] = v;
+	}
+}
+
+static void lanes_to_bytes(const uint64_t *lanes, uint8_t *b)
+{
+	for (int i = 0; i < 25; i++) {
+		for (int k = 0; k < 8; k++) {
+			b[i * 8 + k] = (uint8_t)(lanes[i] >> (8 * k));
+		}
+	}
+}
+
 /* 写 CTRL.START 时真正干活 —— 与真 PL 的行为一致：命令是"边沿触发"的 */
 static void stub_write_reg(uint32_t off, uint32_t val)
 {
@@ -350,6 +371,64 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 			}
 		}
 		set_done(200);
+		return;
+	}
+	case ACCEL_MODE_SHAKE: {
+		/* 模式 10：整条海绵。桩里当然还是软件做，但**寄存器语义要与 PL
+		 * 一模一样** —— 包括参数校验的边界与 ERRCODE。桩的价值就在这里：
+		 * 上层调用模式 10 的代码在没有 PL 的机器上也走同一条分支，
+		 * 参数编码写错这类 bug 不必等到板子到手才暴露。 */
+		uint32_t param = g_regs[ACCEL_REG_PARAM / 4];
+		uint32_t suffix = param & 0xFFu;
+		uint32_t rate = (param >> 8) & 0xFFu;
+		uint32_t outlen = (param >> 16) & 0xFFFFu;
+		if (rate == 0 || rate % 8 != 0 || rate > 200
+		    || outlen == 0 || outlen > ACCEL_SHAKE_MAX
+		    || in_len > ACCEL_SHAKE_MAX) {
+			set_err(3);
+			return;
+		}
+		/* 状态按 200 字节的小端序视图操作 —— 与 RTL 侧 lane 的字节序一致 */
+		uint8_t sb[200];
+		uint64_t st[25];
+		memset(sb, 0, sizeof(sb));
+		uint32_t off = 0;
+		for (; in_len - off >= rate; off += rate) {
+			for (uint32_t i = 0; i < rate; i++) {
+				sb[i] ^= g_buf[off + i];
+			}
+			bytes_to_lanes(sb, st);
+			keccak_f1600_sw(st);
+			lanes_to_bytes(st, sb);
+		}
+		{
+			uint8_t last[200];
+			memset(last, 0, sizeof(last));
+			memcpy(last, g_buf + off, in_len - off);
+			last[in_len - off] = (uint8_t)suffix;
+			last[rate - 1] ^= 0x80;
+			for (uint32_t i = 0; i < rate; i++) {
+				sb[i] ^= last[i];
+			}
+			pqc_secure_zero(last, sizeof(last));
+		}
+		bytes_to_lanes(sb, st);
+		keccak_f1600_sw(st);
+		lanes_to_bytes(st, sb);
+
+		for (uint32_t done = 0; done < outlen;) {
+			uint32_t n = outlen - done < rate ? outlen - done : rate;
+			memcpy(g_buf + done, sb, n);
+			done += n;
+			if (done < outlen) {
+				bytes_to_lanes(sb, st);
+				keccak_f1600_sw(st);
+				lanes_to_bytes(st, sb);
+			}
+		}
+		pqc_secure_zero(st, sizeof(st));
+		pqc_secure_zero(sb, sizeof(sb));
+		set_done(outlen);
 		return;
 	}
 	case ACCEL_MODE_NTT_FWD:

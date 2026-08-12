@@ -47,10 +47,29 @@ from it, and **neither falls back to software on failure**. Silent fallback woul
 
 ## Division of labour between hardware and software
 
-`accel_shake()` performs the sponge — padding, rate, absorb, squeeze — in C, and calls
-the transport only for the Keccak-f[1600] permutation. This mirrors how a real design
-would be partitioned: a permutation-only core is smaller and serves SHAKE128, SHAKE256,
-SHA3-256 and SHA3-512 alike, with framing handled by the processing system.
+`accel_shake()` has two paths and prefers the hardware sponge:
+
+- **Mode 10 (`ACCEL_MODE_SHAKE`)** — the whole sponge runs inside the PL; only the
+  message and the digest cross the bus. This is the default, taken whenever the message
+  and the output both fit in `ACCEL_SHAKE_MAX` (512 bytes, the size of the PL-side
+  buffer). Rate, domain-separation suffix and output length are packed into `PARAM`
+  (see `ACCEL_SHAKE_PARAM`).
+- **Mode 9 (`ACCEL_MODE_KECCAK_F1600`)** — when the message exceeds that limit, or the
+  transport does not implement mode 10 (it answers `ERRCODE=3`), framing falls back to C
+  and only the permutation goes to hardware.
+
+**Why the first path matters** is not speed but that the sponge's intermediate state
+never leaves the crypto boundary. Mode 9 ships 200 bytes of state in and out for every
+permutation, and in ML-KEM that intermediate state *is* the context of the ρ/σ expansion.
+
+**This fallback is not the same thing as the entropy source's "never fall back".** SHAKE
+is a public function: falling back to software framing costs no confidentiality
+guarantee, only that extra layer of depth. Falling back to a software RNG would change
+the security root itself. That difference is why one is allowed and the other fails hard.
+
+**The fallback triggers on `ERRCODE=3` only** (mode not implemented). Any other failure
+is reported upward as-is — an accelerator that is broken but always caught by software is
+an accelerator nobody will ever notice is broken.
 
 ## What the simulated backend covers
 

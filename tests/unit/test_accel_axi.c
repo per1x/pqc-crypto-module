@@ -111,6 +111,45 @@ static void test_sponge_against_openssl(const accel_transport_t *axi)
 	}
 }
 
+/* 上面那组用例有个盲区：**结果对不代表走的是硬件海绵**。
+ * accel_shake() 在模式 10 不可用时会退回 C 侧 framing，两条路的输出逐字节
+ * 相同 —— 也就是说模式 10 整个没生效，上面照样全绿。
+ *
+ * 所以这里查一次"路走对了没有"的痕迹：命令跑完之后 MODE 停在 10、
+ * OUT_LEN 等于请求的输出长度。若退回了 C 侧海绵，最后一条命令是模式 9，
+ * MODE=9 且 OUT_LEN=200。 */
+static void test_shake_really_runs_in_pl(const accel_transport_t *axi)
+{
+	TCASE("SHAKE 确实由 PL 的海绵完成（而不是悄悄退回 C 侧）");
+	accel_set_transport(axi);
+
+	uint8_t msg[200], out[64];
+	for (size_t i = 0; i < sizeof(msg); i++) {
+		msg[i] = (uint8_t)(i * 5 + 1);
+	}
+	CHECK_EQ_INT(accel_shake(136, 0x1F, msg, sizeof(msg), out, sizeof(out)), 0);
+	CHECK_EQ_INT((int)axi->read_reg(ACCEL_REG_MODE), ACCEL_MODE_SHAKE);
+	CHECK_EQ_INT((int)axi->read_reg(ACCEL_REG_OUT_LEN), (int)sizeof(out));
+
+	/* 反过来：超出 PL 缓冲区的消息必须退回 C 侧，且结果依旧正确。
+	 * 这条把"回落存在且有效"也钉住 —— 否则以后有人把回落删了，
+	 * 长消息会直接失败而没人预料到。 */
+	static uint8_t big[ACCEL_SHAKE_MAX + 64];
+	for (size_t i = 0; i < sizeof(big); i++) {
+		big[i] = (uint8_t)(i * 11 + 7);
+	}
+	uint8_t got[32], want[32];
+	CHECK_EQ_INT(accel_shake(136, 0x1F, big, sizeof(big), got, sizeof(got)), 0);
+	CHECK_EQ_INT((int)axi->read_reg(ACCEL_REG_MODE), ACCEL_MODE_KECCAK_F1600);
+
+	EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+	CHECK_EQ_INT(EVP_DigestInit_ex(ctx, EVP_get_digestbyname("SHAKE256"), NULL), 1);
+	CHECK_EQ_INT(EVP_DigestUpdate(ctx, big, sizeof(big)), 1);
+	CHECK_EQ_INT(EVP_DigestFinalXOF(ctx, want, sizeof(want)), 1);
+	EVP_MD_CTX_free(ctx);
+	CHECK_EQ_MEM(want, got, sizeof(got));
+}
+
 static void test_register_contract(const accel_transport_t *axi)
 {
 	accel_set_transport(axi);
@@ -188,6 +227,7 @@ int main(void)
 	test_keccak_equivalence(axi);
 	test_ntt_equivalence(axi);
 	test_sponge_against_openssl(axi);
+	test_shake_really_runs_in_pl(axi);
 	test_register_contract(axi);
 	test_unsupported_modes(axi);
 

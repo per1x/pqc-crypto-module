@@ -70,7 +70,26 @@ typedef enum {
 	ACCEL_MODE_NTT_FWD       = 7,   /* in: 256×int16       out: 256×int16    */
 	ACCEL_MODE_NTT_INV       = 8,
 	ACCEL_MODE_KECCAK_F1600  = 9,   /* in: 200B 状态       out: 200B 状态    */
+	ACCEL_MODE_SHAKE         = 10,  /* in: 消息            out: 摘要        */
 } accel_mode_t;
+
+/* 模式 10 的 PARAM 编码。
+ *
+ * 与模式 9 的分工差别就在这里：模式 9 只做一次置换，海绵的 padding、吸收、
+ * 挤压由 C 侧串起来，**中间状态每一轮都要过一次总线**；模式 10 把整条海绵
+ * 交给 PL，总线上只走消息和摘要。中间状态不出密码边界这一条，在真密码机里
+ * 比省下来的搬运更要紧 —— SHAKE 的中间状态在 ML-KEM 里就是 ρ/σ 展开的上下文。
+ *
+ * 输出长度塞进 PARAM 而不是新加一个寄存器，是为了不动上面那张已经定死的表。
+ * PARAM 本来就是"参数集"字段，NTT/Keccak 三个操作码都没用过它。
+ */
+#define ACCEL_SHAKE_PARAM(rate, suffix, outlen) \
+	(((uint32_t)(outlen) << 16) | ((uint32_t)(rate) << 8) | (uint32_t)(suffix))
+
+/* 模式 10 的消息与输出各自的上限：PL 侧那块缓冲区就 512 字节。
+ * 超出的消息由 accel_shake() 退回 C 侧海绵 —— 结果一样，只是中间状态会
+ * 重新经过总线。 */
+#define ACCEL_SHAKE_MAX 512
 
 /* 数据缓冲上限：够放最大的 pk‖sk（ML-DSA-87: 2592+4896）与签名输入 */
 #define ACCEL_BUF_MAX 16384
@@ -120,12 +139,17 @@ int accel_ntt(const int16_t *in, int16_t *out, int inverse);
  * 成功返回 0。 */
 int accel_keccak_f1600(const uint8_t state_in[200], uint8_t state_out[200]);
 
-/* 用当前 transport 的 Keccak 置换搭出 SHAKE / SHA3。
+/* SHAKE / SHA3。
  *
- * 【分工说明】置换在"硬件"（RTL 仿真或软件桩）里做，**海绵的吸收/挤压/padding
- * 在这里用 C 做**。这是有意的分层：真 PL 上 Keccak 核通常也只暴露置换（或
- * absorb/squeeze 原语），framing 由 PS 侧负责 —— 那样核更小、也更通用
- * （SHAKE128/256、SHA3-256/512 共用同一个置换核，只是 rate 与域分隔后缀不同）。
+ * 【两条路，优先走硬件海绵】
+ *   ① 模式 10：整条海绵在 PL 里跑完，中间状态一次也不出密码边界。
+ *      消息与输出都不超过 ACCEL_SHAKE_MAX 时走这条。
+ *   ② 消息或输出超限、或该 transport 没实现模式 10（回 ERRCODE=3）时，
+ *      退回"C 侧做 framing、模式 9 只做置换"的老路。结果逐字节相同。
+ *
+ * 这个回落与 hwrng 的"绝不回落"不是一回事：SHAKE 是公开函数，退回软件海绵
+ * 不损失任何机密性保证，损失的只是"中间状态留在 PL 里"这条纵深。熵源不同 ——
+ * 那里回落到软件 RNG 会直接改变安全根基，所以宁可失败。
  *
  * rate：SHAKE128=168，SHAKE256/SHA3-256=136，SHA3-512=72
  * suffix：SHAKE 用 0x1F，SHA3 用 0x06

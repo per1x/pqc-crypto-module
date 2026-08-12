@@ -73,7 +73,7 @@ hardware/syn/
 
 | 模块 | 约束 | 说明 |
 |---|---|---|
-| `ntt_core`、`keccak_f1600` | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]`、I/O delay、`rst_n` false path |
+| `ntt_core`、`keccak_f1600`、`sha3_core`、`pqc_accel_axi` | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]`、I/O delay、`rst_n` false path |
 | `mont_reduce`、`butterfly_ct`、`butterfly_gs` | `ooc_comb.xdc` | 虚拟时钟，组合路径延迟 |
 
 **为什么是 100 MHz 而不是 150 MHz。** 单周期蝶形中含两级串行乘法（`zeta·b`，以及

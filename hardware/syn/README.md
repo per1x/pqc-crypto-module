@@ -80,7 +80,7 @@ Combinational modules, having no clock port, need the opposite treatment.
 
 | Module | Constraints | Notes |
 |---|---|---|
-| `ntt_core`, `keccak_f1600` | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]`, I/O delay, `rst_n` false path |
+| `ntt_core`, `keccak_f1600`, `sha3_core`, `pqc_accel_axi` | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]`, I/O delay, `rst_n` false path |
 | `mont_reduce`, `butterfly_ct`, `butterfly_gs` | `ooc_comb.xdc` | virtual clock, combinational path delay |
 
 **Why 100 MHz rather than 150 MHz.** The single-cycle butterfly contains two serial

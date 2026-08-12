@@ -27,12 +27,14 @@ file mkdir $rpt
 # 所以这里不需要 read_ip，也因此能在 Verilator/Icarus 里跑 cocotb。
 read_verilog -sv [glob $root/rtl/mlkem/*.v]
 read_verilog -sv [glob $root/rtl/keccak/*.v]
+read_verilog -sv [glob $root/rtl/bus/*.v]
 
 # ---- 约束 --------------------------------------------------------------------
 # 时序模块与纯组合模块需要不同的约束：
 #   ntt_core 有真实 clk 端口 → 必须 create_clock 到该端口，否则时序报告失真；
 #   mont_reduce / butterfly_* 是纯组合 → 只能用虚拟时钟报 in2out 延迟。
-if {$top eq "ntt_core" || $top eq "keccak_f1600" || $top eq "sha3_core"} {
+if {$top eq "ntt_core" || $top eq "keccak_f1600" || $top eq "sha3_core"
+    || $top eq "pqc_accel_axi"} {
     read_xdc $root/syn/constraints/ooc_seq.xdc
     puts "约束：ooc_seq.xdc（clk 端口，100 MHz）"
 } else {

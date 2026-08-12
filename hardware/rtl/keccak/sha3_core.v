@@ -67,7 +67,30 @@ module sha3_core (
     // ---- 状态观测 ----
     output wire        busy,
     output wire        absorbing,
-    output wire        squeezing
+    output wire        squeezing,
+
+    // ---- 直通口：空闲时把底下的置换核借给上层 ----
+    //
+    // 存在的理由是**不要第二个置换核**。pqc_accel_axi 原本自己例化一个
+    // keccak_f1600 去实现 ACCEL_MODE_KECCAK_F1600（裸置换，给对拍用），
+    // 现在又要 SHAKE。若两者各占一个置换核，光这一块就是 ~7000 LUT ——
+    // 整片 ZU3EG 才 70560，而后面 S4 的 ML-KEM 核还要再要一个。
+    // 置换核在两种模式下不可能同时用（一次只有一条命令在跑），所以借出去。
+    //
+    // 【纪律】只在 busy 为低时有效。海绵在跑的时候写口被忽略、读口回 0 ——
+    // 后者是有意的：ext_rd_data 若无条件接出 kec_rd_data，上层在挤压途中读
+    // 一下就能拿到海绵的中间状态，那把"状态不出密码边界"这句话直接作废了。
+    //
+    // ext_start 是**组合**打进置换核的，不多寄存一拍：上层判完成普遍写成
+    // 「踢的那一拍跳过、下一拍起看 done」（kick_busy 那套），中间多一级寄存
+    // 会让上层在置换真正开始前就看到上一次遗留的 done。
+    input  wire        ext_start,
+    output wire        ext_done,
+    input  wire        ext_wr_en,
+    input  wire [4:0]  ext_wr_addr,
+    input  wire [63:0] ext_wr_data,
+    input  wire [4:0]  ext_rd_addr,
+    output wire [63:0] ext_rd_data
 );
     localparam [3:0] S_IDLE      = 4'd0,
                      S_CLR       = 4'd1,
@@ -92,7 +115,8 @@ module sha3_core (
     reg [4:0] clr_idx;
 
     // ---- 置换核 ----
-    reg         kec_start;
+    reg         kec_start_r;
+    wire        kec_start = kec_start_r || (ext_start && (state == S_IDLE));
     wire        kec_done;
     reg         kec_wr_en;
     reg  [4:0]  kec_wr_addr;
@@ -114,6 +138,7 @@ module sha3_core (
         case (state)
         S_SQUEEZE:  kec_rd_addr = sq_bpos[7:3];
         S_PAD_LAST: kec_rd_addr = last_lane;
+        S_IDLE:     kec_rd_addr = ext_rd_addr;
         default:    kec_rd_addr = bpos[7:3];
         endcase
     end
@@ -129,6 +154,11 @@ module sha3_core (
         kec_wr_addr = kec_rd_addr;
         kec_wr_data = 64'd0;
         case (state)
+        S_IDLE: begin
+            kec_wr_en   = ext_wr_en;
+            kec_wr_addr = ext_wr_addr;
+            kec_wr_data = ext_wr_data;
+        end
         S_CLR: begin
             kec_wr_en   = 1'b1;
             kec_wr_addr = clr_idx;
@@ -158,6 +188,11 @@ module sha3_core (
     assign busy      = (state != S_IDLE);
     assign absorbing = (state == S_ABSORB);
     assign squeezing = (state == S_SQUEEZE);
+
+    // 直通读口：非空闲时回 0 而不是透传。见端口声明处的理由 ——
+    // 这一条是"海绵中间状态不出密码边界"的实际落点，不是防御性编程。
+    assign ext_rd_data = (state == S_IDLE) ? kec_rd_data : 64'd0;
+    assign ext_done    = kec_done;
 
     // 置换是否正在进行。**必须自己记**，因为 keccak_f1600 不往外给 busy，
     // 而它在 busy 期间会**默默丢弃写入**。zeroize 若在置换途中把 25 个 lane
@@ -192,16 +227,16 @@ module sha3_core (
     // 否则等待状态会立刻看见上一次遗留的 done。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state     <= S_IDLE;
-            ret       <= R_ABSORB;
-            rate_r    <= 8'd136;
-            suffix_r  <= 8'h1F;
-            bpos      <= 8'd0;
-            sq_bpos   <= 8'd0;
-            clr_idx   <= 5'd0;
-            kec_start <= 1'b0;
+            state       <= S_IDLE;
+            ret         <= R_ABSORB;
+            rate_r      <= 8'd136;
+            suffix_r    <= 8'h1F;
+            bpos        <= 8'd0;
+            sq_bpos     <= 8'd0;
+            clr_idx     <= 5'd0;
+            kec_start_r <= 1'b0;
         end else begin
-            kec_start <= 1'b0;
+            kec_start_r <= 1'b0;
 
             // start 与 zeroize 都是**从任何状态**都生效的，不只是空闲时。
             //
@@ -272,8 +307,8 @@ module sha3_core (
                 end
 
                 S_PERM_KICK: begin
-                    kec_start <= 1'b1;
-                    state     <= S_PERM_WAIT;
+                    kec_start_r <= 1'b1;
+                    state       <= S_PERM_WAIT;
                 end
 
                 // 判完成必须用 perm_busy 把 kec_done **限定在本次置换**上。
@@ -325,6 +360,14 @@ module sha3_core (
         end
         if (rst_n && in_valid && in_flush) begin
             $display("[sha3_core] in_valid 与 in_flush 不得同时拉高");
+            $finish;
+        end
+        // 直通口在海绵运行期间被写/被踢：写入会被忽略、置换不会启动，
+        // 但**不会有任何报错**，上层只会得到一个静静算错的结果。
+        // 这正是需要在仿真里拦下来的那类错误。
+        if (rst_n && busy && (ext_wr_en || ext_start)) begin
+            $display("[sha3_core] 海绵运行中（state=%0d）动用了直通口：写入会被忽略",
+                     state);
             $finish;
         end
     end

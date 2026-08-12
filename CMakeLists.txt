@@ -65,6 +65,7 @@ if(VERILATOR_BIN)
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/butterfly.v
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/mlkem/ntt_core.v
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/keccak/keccak_f1600.v
+    ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/keccak/sha3_core.v
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/bus/axi4lite_regs.v
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/rtl/bus/pqc_accel_axi.v)
   add_custom_command(
