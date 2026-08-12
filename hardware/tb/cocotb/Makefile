@@ -13,6 +13,7 @@ RTL_KECCAK    := $(PWD)/../../rtl/keccak
 RTL_BUS       := $(PWD)/../../rtl/bus
 RTL_TRNG      := $(PWD)/../../rtl/trng
 RTL_COMMON    := $(PWD)/../../rtl/common
+RTL_SYM       := $(PWD)/../../rtl/sym
 
 # 用法：make MODULE=test_ops TOPLEVEL=mont_reduce
 MODULE   ?= test_ops
@@ -38,6 +39,10 @@ VERILOG_SOURCES = \
   $(RTL_MLDSA)/ntt_core.v \
   $(RTL_MLDSA)/rounding.v \
   $(RTL_MLDSA)/sample.v \
+  $(RTL_SYM)/sbox.v \
+  $(RTL_SYM)/aes_core.v \
+  $(RTL_SYM)/sm4_core.v \
+  $(RTL_SYM)/sm3_core.v \
   $(RTL_KECCAK)/keccak_f1600.v \
   $(RTL_KECCAK)/sha3_core.v \
   $(RTL_TRNG)/trng_health.v \
@@ -46,6 +51,8 @@ VERILOG_SOURCES = \
   $(RTL_BUS)/key_vault.v \
   $(RTL_BUS)/key_vault_axi.v \
   $(RTL_BUS)/pqc_accel_axi.v \
+  $(RTL_BUS)/sym_axi.v \
+  $(RTL_BUS)/sym_vault_top.v \
   $(PWD)/tb_mlkem_units.v \
   $(PWD)/tb_mldsa_units.v \
   $(PWD)/tb_trng_health.v

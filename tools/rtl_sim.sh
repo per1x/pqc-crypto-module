@@ -77,6 +77,13 @@ run test_axi         pqc_accel_axi
 run test_key_vault   key_vault_axi
 
 echo
+echo "  对称与国密"
+run test_aes         aes_core
+run test_sm4         sm4_core
+run test_sm3         sm3_core
+run test_sym_vault   sym_vault_top
+
+echo
 echo "  噪声源健康检测"
 run test_trng_health tb_trng_health
 

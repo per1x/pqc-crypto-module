@@ -126,8 +126,14 @@ yosys -q -p "read_verilog $RTL_FILES
 #     2048 bit 摊成 2048 个 FF 是这颗片子的 1.5%，为这条性质付得起。
 #     判断标准仍然是 ram_dp.v 那条：**看规模**。这里的规模允许，S3 那块 16 KiB
 #     的缓冲不允许。
-echo "  （以上都是预期之内：keccak 状态必须全并行访问，sync_fifo 要 FWFT 时序，"
-echo "    key_vault 要一拍擦完整个密钥仓。判断标准见 hardware/rtl/common/ram_dp.v。）"
+#   aes_core 的 rkey / wbuf / sb_in、sm4_core 的 rk、sm3_core 的 w
+#     都是几十个字的小阵列，而且**每一拍都要多口并行访问**：15 个轮密钥要
+#     按轮号整块选出、16 个 S 盒同时查、SM3 的窗口一拍里要读 w[0]/w[3]/w[7]/
+#     w[10]/w[13] 五个位置。BRAM 只有两个口，装不下这种访问模式 ——
+#     和 keccak 的状态是同一类，本来就该是触发器。
+echo "  （以上都是预期之内：keccak 状态与对称核的小阵列必须多口并行访问，"
+echo "    sync_fifo 要 FWFT 时序，key_vault 要一拍擦完整个密钥仓。"
+echo "    判断标准见 hardware/rtl/common/ram_dp.v。）"
 
 echo
 if [ "$fail" -eq 0 ]; then

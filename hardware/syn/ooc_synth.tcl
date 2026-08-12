@@ -32,6 +32,10 @@ read_verilog -sv [glob $root/rtl/mlkem/*.v]
 read_verilog -sv [glob $root/rtl/mldsa/*.v]
 read_verilog -sv [glob $root/rtl/keccak/*.v]
 read_verilog -sv [glob $root/rtl/bus/*.v]
+read_verilog -sv [glob $root/rtl/sym/*.v]
+read_verilog -sv [glob $root/rtl/trng/*.v]
+# ⚠️ 这份 glob 清单要跟着 rtl/ 下的子目录一起长。漏一个目录的表现是
+#    "module 'xxx' not found" —— 报错很清楚，但要跑完一整轮才看得到。
 
 # ---- 约束 --------------------------------------------------------------------
 # 时序模块与纯组合模块需要不同的约束：
@@ -41,6 +45,8 @@ if {$top eq "ntt_core" || $top eq "mldsa_ntt_core" || $top eq "keccak_f1600"
     || $top eq "sha3_core" || $top eq "pqc_accel_axi"
     || $top eq "mlkem_keygen" || $top eq "mlkem_encaps" || $top eq "mlkem_decaps"
     || $top eq "key_vault_axi" || $top eq "key_vault" || $top eq "axi4lite_firewall"
+    || $top eq "aes_core" || $top eq "sm4_core" || $top eq "sm3_core"
+    || $top eq "sym_axi"
     || $top eq "mlkem_cbd_stream" || $top eq "mlkem_bitpack"
     || $top eq "mlkem_bitunpack"} {
     read_xdc $root/syn/constraints/ooc_seq.xdc
