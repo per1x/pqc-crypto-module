@@ -142,10 +142,13 @@ module mlkem_keygen #(
         S_MAC_A0   = 6'd17,
         S_MAC_A1   = 6'd18,
         S_MAC_C    = 6'd19,
+        S_MAC_M    = 6'd34,   // 基乘前半的寄存级（见下面"为什么要打两拍"）
+        S_MAC_T    = 6'd35,   // 基乘后半的寄存级
         S_MAC_W0   = 6'd20,
         S_MAC_W1   = 6'd21,
         S_PO_RD    = 6'd22,
         S_PO_C     = 6'd23,
+        S_PO_M     = 6'd36,   // tomont 的寄存级
         S_PO_W     = 6'd24,
         S_H_START  = 6'd25,
         S_OUT_RD0  = 6'd26,
@@ -156,6 +159,8 @@ module mlkem_keygen #(
         S_H_FLUSH  = 6'd31,
         S_H_SQ     = 6'd32,
         S_DONE     = 6'd33;
+        // 34/35/36 见上：为了收时序插进来的三级流水，编号接在后面，
+        // 免得把原来的编号全动一遍。
 
     reg [5:0] state;
 
@@ -228,6 +233,9 @@ module mlkem_keygen #(
     reg         ntt_kicked;        // NTT 的 start 已经发过了（不能靠计数器判，
                                    // 一次变换 2305 拍，9 位计数器会绕回去再踢一次）
     reg signed [15:0] a0_r, a1_r, b0_r, b1_r, acc0_r, acc1_r;
+    reg signed [15:0] t_ab_r;      // 基乘前半的结果，打一拍
+    reg signed [15:0] bm0_r, bm1_r;// 基乘后半的结果，再打一拍
+    reg signed [15:0] po_mont_r;   // tomont 的结果，打一拍
     reg [2:0]   sec;               // 输出段号
     reg [1:0]   obyte;             // 一对系数的第几个字节
     reg signed [15:0] enc_c0, enc_c1;
@@ -237,14 +245,23 @@ module mlkem_keygen #(
     // ---- 组合：基乘 ----
     wire signed [15:0] bm_zeta_raw = bz[pair[7:1]];
     wire signed [15:0] bm_zeta = pair[0] ? -bm_zeta_raw : bm_zeta_raw;
+    // 【为什么要打两拍】
+    // 一次基乘外加一次 barrett 是 8 级串起来的乘法（basemul 6 级 + barrett 2 级），
+    // 在 ZU3EG 上二十来纳秒 —— 第一版这么写，WNS −10.722 ns，48 MHz。
+    // 按 basemul 的 head/tail 边界切一刀、barrett 之前再切一刀，
+    // 变成 3 + 3 + 2 三段，每段都在 10 ns 以内。
+    // 代价是每对系数从 5 拍变 7 拍（整个 keygen 慢约三成），换 100 MHz，划算。
+    wire signed [15:0] t_ab;
+    mlkem_basemul_head u_bm_h (.a1(a1_r), .b1(b1_r), .t_a1b1(t_ab));
+
     wire signed [15:0] bm_r0, bm_r1;
-    mlkem_basemul u_bm (
+    mlkem_basemul_tail u_bm_t (
         .a0(a0_r), .a1(a1_r), .b0(b0_r), .b1(b1_r), .zeta(bm_zeta),
-        .r0(bm_r0), .r1(bm_r1));
+        .t_a1b1(t_ab_r), .r0(bm_r0), .r1(bm_r1));
 
     wire signed [15:0] acc0_next, acc1_next;
-    barrett_reduce u_br0 (.a(acc0_r + bm_r0), .r(acc0_next));
-    barrett_reduce u_br1 (.a(acc1_r + bm_r1), .r(acc1_next));
+    barrett_reduce u_br0 (.a(acc0_r + bm0_r), .r(acc0_next));
+    barrett_reduce u_br1 (.a(acc1_r + bm1_r), .r(acc1_next));
 
     // ---- 组合：搬进蒙域 + 加 ê + barrett ----
     localparam signed [15:0] F_TOMONT = 16'sd1353;   // 2³² mod q
@@ -252,7 +269,8 @@ module mlkem_keygen #(
     wire signed [15:0] po_mont;
     mont_reduce u_po_mont (.a(po_prod), .t_out(po_mont));
     wire signed [15:0] po_out;
-    barrett_reduce u_po_br (.a(po_mont + acc1_r), .r(po_out));   // acc1_r 这里存 ê
+    // 同上：tomont 是 1 + 2 = 3 级乘法，再接 barrett 的 2 级就超了，中间打一拍。
+    barrett_reduce u_po_br (.a(po_mont_r + acc1_r), .r(po_out)); // acc1_r 这里存 ê
 
     // ---- 组合：12 位编码 ----
     wire [23:0] enc_bytes;
@@ -497,6 +515,8 @@ module mlkem_keygen #(
             pair <= 8'd0; pk_buf <= 16'd0; pk_cnt <= 2'd0; ntt_kicked <= 1'b0;
             a0_r <= 16'sd0; a1_r <= 16'sd0; b0_r <= 16'sd0; b1_r <= 16'sd0;
             acc0_r <= 16'sd0; acc1_r <= 16'sd0;
+            t_ab_r <= 16'sd0; bm0_r <= 16'sd0; bm1_r <= 16'sd0;
+            po_mont_r <= 16'sd0;
             sec <= 3'd0; obyte <= 2'd0; out_poly <= 3'd0; feed_h <= 1'b0;
             enc_c0 <= 16'sd0; enc_c1 <= 16'sd0;
         end else if (start) begin
@@ -664,7 +684,16 @@ module mlkem_keygen #(
                 a1_r   <= $signed(rej_rd_data);
                 b1_r   <= ba_dout;
                 acc1_r <= bb_dout;
-                state  <= S_MAC_W0;
+                state  <= S_MAC_M;
+            end
+            S_MAC_M: begin
+                t_ab_r <= t_ab;         // a1·b1 的 fqmul 落一拍
+                state  <= S_MAC_T;
+            end
+            S_MAC_T: begin
+                bm0_r <= bm_r0;         // 剩下四次 fqmul 再落一拍
+                bm1_r <= bm_r1;
+                state <= S_MAC_W0;
             end
             S_MAC_W0: state <= S_MAC_W1;
             S_MAC_W1: begin
@@ -692,7 +721,11 @@ module mlkem_keygen #(
             S_PO_C: begin
                 acc0_r <= bb_dout;      // Â∘ŝ 的累加值
                 acc1_r <= ba_dout;      // ê[i]
-                state  <= S_PO_W;
+                state  <= S_PO_M;
+            end
+            S_PO_M: begin
+                po_mont_r <= po_mont;   // acc0·2³² 的 fqmul 落一拍
+                state     <= S_PO_W;
             end
             S_PO_W: begin
                 if (cnt == 9'd255) begin
