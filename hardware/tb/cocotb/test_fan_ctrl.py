@@ -10,6 +10,10 @@
   ⑤ 手动覆盖**盖不过**过温强制。调试口不能让人把芯片烤了。
   ⑥ AA11 是低有效：占空比越高，引脚为低的时间越长。写反了的表现是
      "温度越高越安静"，而且在实验室里未必立刻看得出来。
+  ⑦ **读数长时间一个比特不变也要强制满速。**这一条是上板之后补的：
+     SYSMON 配错的时候 ④ 完全挡不住 —— DRP 照样应答、寄存器里照样有个
+     看着合理的 32.5°C，只是 ADC 没在转换。"读不到"永远不成立，
+     风扇就心安理得停在最低档。所以"完全不变"本身要当故障看。
 """
 import cocotb
 from cocotb.clock import Clock
@@ -57,15 +61,17 @@ async def feed(dut, code, n=3):
 async def measure_duty(dut, keep_temp=None):
     """量一个完整 PWM 周期里引脚为低的比例（AA11 低=转）
 
-    ⚠️ 量的过程中**必须继续喂温度**。一个 PWM 周期是 3000 拍，而测试里
-    STALE_LIMIT 被压到 200 拍 —— 不喂的话"温度陈旧强制满速"会在测量中途
-    触发，量出来永远是 100%。这不是 RTL 的问题，是测量方法的问题：
-    真硬件上 SYSMON 每 1 ms 更新一次，本来就一直在喂。
+    ⚠️ 量的过程中**必须继续喂温度，而且要带 ±1 LSB 的抖动**。
+       两条理由，都对应一条真实的安全性质：
+         · 不喂 → STALE 判定触发（测试里压到 200 拍），量出来全是 100%；
+         · 喂了但纹丝不动 → **卡死判定**触发（压到 20 次），同样是 100%。
+       真硬件上 SYSMON 每 1 ms 出一个数，而且读数一直在抖 —— 测试台照着
+       这个样子喂才算模拟到位。±1 LSB 只有 0.008°C，不会改变档位。
     """
     low = 0
     for i in range(PWM_PERIOD):
         if keep_temp is not None and (i % 64) == 0:
-            dut.temp_code.value = keep_temp
+            dut.temp_code.value = keep_temp + ((i // 64) & 1)   # ±1 LSB 抖动
             dut.temp_valid.value = 1
         await RisingEdge(dut.clk)
         dut.temp_valid.value = 0
@@ -209,3 +215,30 @@ async def test_pin_polarity(dut):
         "AA11 的极性写反了，表现会是「温度越高越安静」")
 
     dut._log.info(f"极性：低温 {d_low:.1f}% → 高温 {d_high:.1f}%，方向正确")
+
+
+@cocotb.test()
+async def test_stuck_sensor_forces_full(dut):
+    """读数一个比特不变 → 强制满速（真机上真的这么坏过）"""
+    cocotb.start_soon(Clock(dut.clk, 13, unit="ns").start())
+    await reset(dut)
+
+    # 先喂两个**不同**的温度，让卡死计数器清零、档位落到 0
+    await feed(dut, c2code(30), 6)
+    await feed(dut, c2code(31), 6)
+    assert int(dut.forced_full.value) == 0, "温度正常抖动时不该强制满速"
+    assert int(dut.sensor_stuck.value) == 0
+
+    # 之后一直喂**完全相同**的码。STUCK_LIMIT 在测试里被压到很小，见 Makefile。
+    await feed(dut, c2code(31), 40)
+    assert int(dut.sensor_stuck.value) == 1, \
+        "读数几十次一模一样却没报卡死 —— 传感器死了风扇会一直停在最低档"
+    assert int(dut.forced_full.value) == 1
+    assert int(dut.cur_duty.value) == 100
+
+    # 温度真的动了就该自己恢复
+    await feed(dut, c2code(33), 4)
+    assert int(dut.sensor_stuck.value) == 0, "读数变了却还卡在卡死状态"
+    assert int(dut.forced_full.value) == 0
+
+    dut._log.info("传感器卡死：读数不变 → 强制满速；读数一变 → 自己恢复")

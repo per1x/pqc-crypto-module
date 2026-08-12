@@ -87,6 +87,7 @@ run test_sym_vault   sym_vault_top
 echo
 echo "  风扇控制"
 run test_fan_ctrl    fan_ctrl
+run test_sysmon_drp  sysmon_drp
 
 echo
 echo "  噪声源健康检测"

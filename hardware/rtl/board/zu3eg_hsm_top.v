@@ -345,21 +345,31 @@ module zu3eg_hsm_top (
     wire [7:0]  fan_cur_duty, fan_ovr_duty;
     wire [2:0]  fan_cur_step;
     wire [15:0] fan_cur_temp;
-    wire        fan_forced_full, fan_ovr_en;
+    wire        fan_forced_full, fan_ovr_en, fan_stuck;
+    wire        fan_dbg_req, fan_dbg_valid, fan_dbg_to;
+    wire [7:0]  fan_dbg_addr;
+    wire [15:0] fan_dbg_data;
 
-    fan_sysmon #(.PERIOD(75_000)) u_fan_sysmon (   // 75 MHz 下 1 ms 采一次
+    // DCLK_DIV=16 → ADCCLK = 75 MHz/16 = 4.69 MHz，在 SYSMONE4 的上限之内。
+    // 这个数跟着 clk_sys 走，改分频比就要改它（见 fan_sysmon.v 文件头 ②）。
+    fan_sysmon #(.PERIOD(75_000), .DCLK_DIV(16)) u_fan_sysmon (
         .clk(clk_sys), .rst_n(rst_n),
         .temp_code(fan_temp), .temp_valid(fan_temp_valid),
-        .sysmon_timeout(fan_sysmon_to));
+        .sysmon_timeout(fan_sysmon_to),
+        .dbg_req(fan_dbg_req), .dbg_addr(fan_dbg_addr),
+        .dbg_data(fan_dbg_data), .dbg_valid(fan_dbg_valid),
+        .dbg_timeout(fan_dbg_to));
 
     fan_ctrl #(.PWM_PERIOD(3000),          // 75 MHz / 3000 = 25 kHz
-               .STALE_LIMIT(64_000_000))   // 约 0.85 秒没温度就强制满速
+               .STALE_LIMIT(64_000_000),   // 约 0.85 秒没温度就强制满速
+               .STUCK_LIMIT(30_000))       // 30000 次采样 ≈ 30 秒读数不变
     u_fan (
         .clk(clk_sys), .rst_n(rst_n),
         .temp_code(fan_temp), .temp_valid(fan_temp_valid),
         .ovr_en(fan_ovr_en), .ovr_duty(fan_ovr_duty),
         .cur_temp(fan_cur_temp), .cur_duty(fan_cur_duty),
         .cur_step(fan_cur_step), .forced_full(fan_forced_full),
+        .sensor_stuck(fan_stuck),
         .fan_pin(fan));
 
     fan_ctrl_axi u_fan_axi (
@@ -376,8 +386,11 @@ module zu3eg_hsm_top (
         .s_axi_rvalid(x_rvalid[5]), .s_axi_rready(x_rready[5]),
         .cur_temp(fan_cur_temp), .cur_duty(fan_cur_duty),
         .cur_step(fan_cur_step), .forced_full(fan_forced_full),
-        .sysmon_timeout(fan_sysmon_to),
-        .ovr_en(fan_ovr_en), .ovr_duty(fan_ovr_duty));
+        .sysmon_timeout(fan_sysmon_to), .sensor_stuck(fan_stuck),
+        .ovr_en(fan_ovr_en), .ovr_duty(fan_ovr_duty),
+        .dbg_req(fan_dbg_req), .dbg_addr(fan_dbg_addr),
+        .dbg_data(fan_dbg_data), .dbg_valid(fan_dbg_valid),
+        .dbg_timeout(fan_dbg_to));
 
     wire _unused = &{1'b0, m_awlen, m_arlen,
                      m_awsize, m_arsize, m_awburst, m_arburst,

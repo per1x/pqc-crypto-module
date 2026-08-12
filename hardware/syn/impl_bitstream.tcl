@@ -107,6 +107,25 @@ if {$fanpkg ne "AA11"} {
 }
 puts "断言通过：fan -> PACKAGE_PIN $fanpkg / [get_property IOSTANDARD $fanport]"
 
+# ---- 断言：SYSMONE4 的 SIM_DEVICE ---------------------------------------------
+# 这条断言也是拿一整轮（三十多分钟）换来的。
+# SYSMONE4 的 SIM_DEVICE 默认是 ULTRASCALE_PLUS，而本器件是 ZYNQ_ULTRASCALE。
+# Vivado 初始化网表时**自动把它改掉**（只给一条 critical warning），然后在
+# **最后一步 write_bitstream 的 DRC ADEF-911** 里因为"它被改过"而拒绝出图。
+# 于是综合、布局布线、时序全跑完才失败。在这里查，五分钟内就能知道。
+set smon [get_cells -quiet -hier -filter {REF_NAME == SYSMONE4}]
+if {[llength $smon] == 0} {
+    puts "错误：网表里没有 SYSMONE4 —— 风扇读不到温度，会一直强制满速"
+    exit 1
+}
+set simdev [get_property SIM_DEVICE [lindex $smon 0]]
+if {$simdev ne "ZYNQ_ULTRASCALE"} {
+    puts "错误：SYSMONE4 的 SIM_DEVICE = $simdev，应当是 ZYNQ_ULTRASCALE"
+    puts "      （在 fpga/fan_ctrl/fan_sysmon.v 里显式写死，别靠默认值）"
+    exit 1
+}
+puts "断言通过：SYSMONE4 SIM_DEVICE = $simdev"
+
 # ---- 断言：PS 的时钟/复位输入必须有驱动 --------------------------------------
 # **这条断言是拿两次断电换来的。**
 # 顶层若引用了后面才声明的 wire（例如把 BUFGCE_DIV 写在 PS 例化之后），

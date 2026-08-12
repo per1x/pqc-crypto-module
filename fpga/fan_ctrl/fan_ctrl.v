@@ -39,13 +39,25 @@
 //  ③ **SYSMON 迟迟读不到有效数据就强制 100%**。温度未知时唯一安全的假设
 //     是"可能很热"。上电后 SYSMON 需要若干个采样周期才有第一个有效值，
 //     这段时间里风扇是满速的 —— 听起来像出厂状态，几秒后自己降下来。
+//  ④ **读数长时间一个比特都不变，也强制 100%。**
+//     这一条是上板之后补的，因为第 ③ 条挡不住真实发生的那种坏法：
+//     SYSMON 配置错了的时候，DRP **照样应答**，寄存器里**照样有一个看着
+//     很合理的温度**（32.5°C），只是 ADC 根本没在转换。于是"读不到"永远
+//     不成立，风扇心安理得停在最低档，而没有任何人会发现。
+//     真实的结温永远在抖 —— 同期 PS 侧 AMS 的读数在 24.9~29.1°C 之间动，
+//     而我这条链路五分钟六十次采样一个比特没变。所以"完全不变"本身就是
+//     故障信号。误判的方向是风扇多吹，可以接受。
 `default_nettype none
 
 module fan_ctrl #(
     // PWM 周期：25 kHz 左右，避开人耳敏感区。75 MHz / 3000 = 25 kHz
     parameter integer PWM_PERIOD = 3000,
     // 多久没拿到有效温度就当故障（75 MHz 下约 0.9 秒）
-    parameter integer STALE_LIMIT = 64_000_000
+    parameter integer STALE_LIMIT = 64_000_000,
+    // 连续多少次采样读数**完全相同**就当传感器卡死（见文件头第 ④ 条）。
+    // 单位是"采样次数"不是时钟拍数，这样换时钟频率不用重算 —— 采样间隔由
+    // fan_sysmon 的 PERIOD 定（1 ms），30000 次 ≈ 30 秒。
+    parameter integer STUCK_LIMIT = 30_000
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -60,7 +72,8 @@ module fan_ctrl #(
     output wire [15:0] cur_temp,       // 最近一次温度码
     output wire [7:0]  cur_duty,       // 当前占空比（百分比）
     output wire [2:0]  cur_step,       // 当前档位 0..5
-    output wire        forced_full,    // 因高温或数据陈旧被强制满速
+    output wire        forced_full,    // 因高温 / 数据陈旧 / 传感器卡死被强制满速
+    output wire        sensor_stuck,   // 读数长时间一个比特不变
 
     // ---- 出到 AA11 ----
     output wire        fan_pin
@@ -92,6 +105,8 @@ module fan_ctrl #(
     reg         ot_latch;
     reg  [25:0] stale;          // 距上次有效温度多久
     wire        stale_bad = (stale >= STALE_LIMIT[25:0]);
+    reg  [15:0] same_cnt;       // 连续多少次采样读数完全相同
+    wire        stuck_bad = (same_cnt >= STUCK_LIMIT[15:0]);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -99,10 +114,19 @@ module fan_ctrl #(
             temp_r   <= 16'd0;
             ot_latch <= 1'b1;
             stale    <= {26{1'b1}};
+            same_cnt <= 16'd0;
         end else begin
             if (temp_valid) begin
                 temp_r <= temp_code;
                 stale  <= 26'd0;
+
+                // 卡死检测：一模一样就累加，变了就清零。到顶不再加，
+                // 否则会绕回 0 把故障状态自己"治好"。
+                if (temp_code == temp_r) begin
+                    if (!stuck_bad) same_cnt <= same_cnt + 16'd1;
+                end else begin
+                    same_cnt <= 16'd0;
+                end
 
                 // 过温锁存：进得早、出得晚
                 if (temp_code >= OT_ON)       ot_latch <= 1'b1;
@@ -132,7 +156,7 @@ module fan_ctrl #(
 
     // 强制满速优先于一切，包括手动覆盖 —— 覆盖是给调试用的，
     // 不能让调试的人把芯片烤了。
-    wire force_full = ot_latch || stale_bad;
+    wire force_full = ot_latch || stale_bad || stuck_bad;
     wire [7:0] duty = force_full ? 8'd100
                     : ovr_en     ? ((ovr_duty > 8'd100) ? 8'd100 : ovr_duty)
                                  : auto_duty;
@@ -156,7 +180,8 @@ module fan_ctrl #(
     assign cur_temp    = temp_r;
     assign cur_duty    = duty;
     assign cur_step    = step;
-    assign forced_full = force_full;
+    assign forced_full  = force_full;
+    assign sensor_stuck = stuck_bad;
 
 endmodule
 

@@ -12,9 +12,23 @@
 // 【寄存器表】（偏移，32 位）
 //   0x00 VERSION  R
 //   0x04 STATUS   R  [15:0]=温度 ADC 码 [23:16]=占空比% [26:24]=档位
-//                    [27]=强制满速 [28]=SYSMON 超时
+//                    [27]=强制满速 [28]=SYSMON 超时 [29]=传感器卡死
 //   0x08 TEMP_C   R  [15:0]=换算好的摄氏度×10（软件不用自己算）
 //   0x0C OVR      RW [0]=覆盖使能 [15:8]=覆盖占空比 0..100
+//   0x10 DRP_CTL  W  [7:0]=要读的 SYSMON DRP 地址，一写就发起一次读
+//   0x14 DRP_DATA R  [15:0]=读回的数据 [16]=有效 [17]=超时
+//
+// ============================================================================
+// 【0x10/0x14 这个 DRP 窗口为什么值得做】
+// ============================================================================
+// 第一版上板时温度码是个死值（32.5°C，五分钟一个比特没变），而软件侧
+// **看不到 SYSMON 的任何配置和状态**，只能猜哪个 INIT 字写错了，
+// 每猜一次要重出一版 bitstream（三十多分钟）。
+//
+// 有了这个窗口，下面这些一条命令就能读：
+//   0x3F 标志寄存器、0x40/0x41/0x42 配置（确认 INIT 真的生效）、
+//   **0x20 最高温 / 0x24 最低温**——这两个是决定性的：它们要是还停在
+//   复位值，就证明 ADC 一次都没转换过，而不是"转换了但读错地方"。
 `default_nettype none
 
 module fan_ctrl_axi #(
@@ -50,10 +64,18 @@ module fan_ctrl_axi #(
     input  wire [2:0]  cur_step,
     input  wire        forced_full,
     input  wire        sysmon_timeout,
+    input  wire        sensor_stuck,
 
     // 去往 fan_ctrl
     output reg         ovr_en,
-    output reg  [7:0]  ovr_duty
+    output reg  [7:0]  ovr_duty,
+
+    // ---- SYSMON DRP 调试窗口 ----
+    output reg         dbg_req,        // 单拍脉冲
+    output reg  [7:0]  dbg_addr,
+    input  wire [15:0] dbg_data,
+    input  wire        dbg_valid,
+    input  wire        dbg_timeout
 );
     localparam [1:0] RESP_OKAY = 2'b00;
 
@@ -84,6 +106,7 @@ module fan_ctrl_axi #(
             aw_got <= 1'b0; w_got <= 1'b0; aw_addr_r <= 8'd0; w_data_r <= 32'd0;
             s_axi_bvalid <= 1'b0; s_axi_bresp <= RESP_OKAY;
             ovr_en <= 1'b0; ovr_duty <= 8'd0;
+            dbg_req <= 1'b0; dbg_addr <= 8'd0;
         end else begin
             if (s_axi_awvalid && s_axi_awready) begin
                 aw_got <= 1'b1; aw_addr_r <= s_axi_awaddr;
@@ -91,12 +114,17 @@ module fan_ctrl_axi #(
             if (s_axi_wvalid && s_axi_wready) begin
                 w_got <= 1'b1; w_data_r <= s_axi_wdata;
             end
+            dbg_req <= 1'b0;                     // 只拉一拍
             if (wr_now) begin
                 aw_got <= 1'b0; w_got <= 1'b0;
                 s_axi_bvalid <= 1'b1; s_axi_bresp <= RESP_OKAY;
                 if (wr_addr[5:2] == 4'h3) begin      // 0x0C OVR
                     ovr_en   <= wr_data[0];
                     ovr_duty <= wr_data[15:8];
+                end
+                if (wr_addr[5:2] == 4'h4) begin      // 0x10 DRP_CTL
+                    dbg_addr <= wr_data[7:0];
+                    dbg_req  <= 1'b1;
                 end
             end
             if (s_axi_bvalid && s_axi_bready) s_axi_bvalid <= 1'b0;
@@ -115,10 +143,12 @@ module fan_ctrl_axi #(
                 s_axi_rresp  <= RESP_OKAY;
                 case (s_axi_araddr[5:2])
                 4'h0: s_axi_rdata <= VERSION;
-                4'h1: s_axi_rdata <= {3'd0, sysmon_timeout, forced_full,
-                                      cur_step, cur_duty, cur_temp};
+                4'h1: s_axi_rdata <= {2'd0, sensor_stuck, sysmon_timeout,
+                                      forced_full, cur_step, cur_duty, cur_temp};
                 4'h2: s_axi_rdata <= {16'd0, temp_c10};
                 4'h3: s_axi_rdata <= {16'd0, ovr_duty, 7'd0, ovr_en};
+                4'h4: s_axi_rdata <= {24'd0, dbg_addr};
+                4'h5: s_axi_rdata <= {14'd0, dbg_timeout, dbg_valid, dbg_data};
                 default: s_axi_rdata <= 32'd0;
                 endcase
             end
@@ -127,12 +157,13 @@ module fan_ctrl_axi #(
     end
 
     // 地址只译 [5:2]（16 个 32 位寄存器），高位与字节内偏移按设计忽略；
-    // OVR 只用到 wdata 的 [0] 与 [15:8]。这些"有意不用"要显式吸收掉，
+    // 写数据只用到低 16 位（OVR 用 [0] 与 [15:8]，DRP_CTL 用 [7:0]）。
+    // 这些"有意不用"要显式吸收掉，
     // 否则 lint 报 UNUSEDSIGNAL —— 而那条告警在别处是能抓到真漏接的。
     wire _unused = &{1'b0, s_axi_awprot, s_axi_arprot, s_axi_wstrb,
                      s_axi_araddr[7:6], s_axi_araddr[1:0],
                      wr_addr[7:6], wr_addr[1:0],
-                     wr_data[31:16], wr_data[7:1], 1'b0};
+                     wr_data[31:16], 1'b0};
 
 endmodule
 

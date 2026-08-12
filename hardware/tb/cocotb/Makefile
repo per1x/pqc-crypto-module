@@ -84,6 +84,13 @@ endif
 # 仿真里等不起 —— 把门限压到 200 拍，测的仍是同一条逻辑。
 ifeq ($(TOPLEVEL),fan_ctrl)
 COMPILE_ARGS += -Pfan_ctrl.STALE_LIMIT=200
+# 卡死检测默认要 30000 次采样（约 30 秒），仿真里等不起，压到 20 次。
+COMPILE_ARGS += -Pfan_ctrl.STUCK_LIMIT=20
+endif
+
+ifeq ($(TOPLEVEL),sysmon_drp)
+# 采样间隔默认 75000 拍（1 ms），仿真里压到 200 拍；超时压到 64。
+COMPILE_ARGS += -Psysmon_drp.PERIOD=200 -Psysmon_drp.TIMEOUT=64
 endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
