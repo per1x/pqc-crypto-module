@@ -36,7 +36,8 @@ read_verilog -sv [glob $root/rtl/bus/*.v]
 #   ntt_core 有真实 clk 端口 → 必须 create_clock 到该端口，否则时序报告失真；
 #   mont_reduce / butterfly_* 是纯组合 → 只能用虚拟时钟报 in2out 延迟。
 if {$top eq "ntt_core" || $top eq "mldsa_ntt_core" || $top eq "keccak_f1600"
-    || $top eq "sha3_core" || $top eq "pqc_accel_axi"} {
+    || $top eq "sha3_core" || $top eq "pqc_accel_axi"
+    || $top eq "mlkem_keygen" || $top eq "mlkem_cbd_stream"} {
     read_xdc $root/syn/constraints/ooc_seq.xdc
     puts "约束：ooc_seq.xdc（clk 端口，100 MHz）"
 } else {

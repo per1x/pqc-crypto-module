@@ -26,6 +26,8 @@ VERILOG_SOURCES = \
   $(RTL_MLKEM)/basemul.v \
   $(RTL_MLKEM)/compress.v \
   $(RTL_MLKEM)/sample.v \
+  $(RTL_MLKEM)/cbd_stream.v \
+  $(RTL_MLKEM)/keygen.v \
   $(RTL_MLKEM)/pack.v \
   $(RTL_MLDSA)/mont_reduce.v \
   $(RTL_MLDSA)/reduce.v \
@@ -47,6 +49,12 @@ VERILOG_SOURCES = \
 ifneq ($(PARAM_D),)
 COMPILE_ARGS += -P$(TOPLEVEL).D=$(PARAM_D)
 export PARAM_D
+endif
+
+# mlkem_keygen 的存储观察口只在仿真里接出来（DEBUG_BANK=1）。
+# 综合时它必须是 0 —— 那个口直连私钥系数。
+ifeq ($(TOPLEVEL),mlkem_keygen)
+COMPILE_ARGS += -Pmlkem_keygen.DEBUG_BANK=1
 endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

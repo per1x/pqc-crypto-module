@@ -40,7 +40,19 @@ module tb_mlkem_units (
     output wire [23:0]  enc_bytes,
     input  wire [23:0]  dec_bytes,
     output wire [11:0]  dec_c0,
-    output wire [11:0]  dec_c1
+    output wire [11:0]  dec_c1,
+
+    // CBD 流式采样器
+    input  wire         cbs_eta3,
+    input  wire         cbs_start,
+    output wire         cbs_done,
+    input  wire         cbs_in_valid,
+    output wire         cbs_in_ready,
+    input  wire [7:0]   cbs_in_data,
+    output wire         cbs_out_valid,
+    input  wire         cbs_out_ready,
+    output wire signed [15:0] cbs_out_coeff,
+    output wire [8:0]   cbs_count
 );
 
     mlkem_cbd2 u_cbd2 (.rand_in(cbd2_in), .coeffs(cbd2_out));
@@ -55,6 +67,13 @@ module tb_mlkem_units (
         .start(rej_start), .done(rej_done),
         .in_valid(rej_valid), .in_bytes(rej_bytes), .in_ready(rej_ready),
         .count(rej_count), .rd_addr(rej_addr), .rd_data(rej_data));
+
+    mlkem_cbd_stream u_cbd_stream (
+        .clk(clk), .rst_n(rst_n),
+        .eta3(cbs_eta3), .start(cbs_start), .done(cbs_done),
+        .in_valid(cbs_in_valid), .in_ready(cbs_in_ready), .in_data(cbs_in_data),
+        .out_valid(cbs_out_valid), .out_ready(cbs_out_ready),
+        .out_coeff(cbs_out_coeff), .count(cbs_count));
 
     mlkem_encode12 u_encode12 (.c0(enc_c0), .c1(enc_c1), .bytes_out(enc_bytes));
     mlkem_decode12 u_decode12 (.bytes_in(dec_bytes), .c0(dec_c0), .c1(dec_c1));

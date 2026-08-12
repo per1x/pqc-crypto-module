@@ -43,6 +43,10 @@ hardware/
 | `mldsa_rej_uniform`、`mldsa_rej_eta` | 组合逻辑 | — |
 | `mldsa_rej_uniform_buf` | 收集器，每周期吃一组 3 字节，结果存在 `ram_dp` 里（读延迟 1 拍） | 约 340 / 个多项式 |
 | `keccak_f1600` | 单轮迭代，`round_cnt` 走 24 轮 | 24 / 次置换 |
+| `mlkem_cbd_stream` | PRF 字节流 → 256 个 CBD 系数，流式吐出 | η=2 约 384 / η=3 约 448 |
+| `mlkem_keygen` | **完整 ML-KEM.KeyGen_internal**：G/PRF/XOF/H、采样、NTT、基乘、打包全在 PL | 约 12 万 / 次（768） |
+| `mlkem_cbd_stream` | PRF 字节流 → 256 个 CBD 系数，流式吐出 | η=2 约 384 / η=3 约 448 |
+| `mlkem_keygen` | **完整 ML-KEM.KeyGen_internal**：G/PRF/XOF/H、采样、NTT、基乘、打包全在 PL | 约 12 万 / 次（768） |
 | `ram_dp` | 参数化真双口同步 RAM，推断成块 RAM | 读延迟 1 拍 |
 | `axi4lite_regs` | AXI4-Lite 从机，控制/状态寄存器 | — |
 | `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核 | — |

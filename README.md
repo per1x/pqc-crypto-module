@@ -280,7 +280,7 @@ PKCS#11 multi-part signing buffers the whole message rather than streaming a dig
 | macOS `leaks` | 0 leaks |
 | libFuzzer | 1.38 M executions, no crashes |
 | aarch64 Linux (GCC 12) | 45 / 45 |
-| cocotb RTL regression | 113 tests across 18 top levels |
+| cocotb RTL regression | 117 tests across 19 top levels |
 | RTL lint (Verilator `-Wall` + Icarus) | 31 modules, 0 warnings |
 | RTL synthesisability (Yosys) | 31 modules, all synthesise |
 

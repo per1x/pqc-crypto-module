@@ -240,3 +240,85 @@ async def test_encode_decode12(dut):
         assert back == (c0 % Q, c1 % Q) == decode12(b0, b1, b2), (
             f"解码往返不还原：{(c0, c1)} → {back}")
     dut._log.info(f"mlkem_encode12/decode12: {len(rows)} 条三方一致，往返还原")
+
+
+def sample_poly_cbd_reference(sigma: bytes, nonce: int, eta: int) -> list[int]:
+    """FIPS 203 Alg 8 的独立实现：hashlib 出流，逐比特数汉明重量
+
+    刻意不走 ref_model.cbd2/cbd3 —— 那两个是位并行技巧，RTL 也照它写。
+    两边都错同一个方向的话对拍就成了自证，所以这里回到定义式。
+    """
+    import hashlib
+    buf = hashlib.shake_256(sigma + bytes([nonce])).digest(64 * eta)
+    bits = int.from_bytes(buf, "little")
+    out = []
+    for i in range(256):
+        a = sum((bits >> (2 * i * eta + k)) & 1 for k in range(eta))
+        b = sum((bits >> (2 * i * eta + eta + k)) & 1 for k in range(eta))
+        out.append(a - b)
+    return out
+
+
+@cocotb.test()
+async def test_cbd_stream(dut):
+    """流式 CBD 采样器：真实 SHAKE256 流跑完整 SamplePolyCBD，逐系数比对定义式"""
+    import hashlib
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    dut.rst_n.value = 0
+    dut.cbs_start.value = 0
+    dut.cbs_eta3.value = 0
+    dut.cbs_in_valid.value = 0
+    dut.cbs_in_data.value = 0
+    dut.cbs_out_ready.value = 1
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+    for eta in (2, 3):
+        for nonce in range(2):
+            sigma = bytes([eta, nonce]) * 16
+            stream = hashlib.shake_256(sigma + bytes([nonce])).digest(64 * eta)
+            want = sample_poly_cbd_reference(sigma, nonce, eta)
+
+            dut.cbs_eta3.value = 1 if eta == 3 else 0
+            dut.cbs_start.value = 1
+            await RisingEdge(dut.clk)
+            dut.cbs_start.value = 0
+            await Timer(1, unit="ns")
+            assert int(dut.cbs_done.value) == 0, "start 之后 done 应当已被清掉"
+            assert int(dut.cbs_count.value) == 0
+
+            got = []
+            pos = 0
+            guard = 0
+            while len(got) < 256:
+                guard += 1
+                assert guard < 4000, "采样器不再前进"
+                # 先让组合逻辑稳定再读握手信号：紧跟在 RisingEdge 之后读
+                # in_ready / out_valid 会读到边沿前的旧值
+                await Timer(1, unit="ns")
+                # 只在采样器要字节时才推进字节流指针 —— 这正是被测的握手
+                feed = int(dut.cbs_in_ready.value) == 1 and pos < len(stream)
+                dut.cbs_in_valid.value = 1 if feed else 0
+                dut.cbs_in_data.value = stream[pos] if feed else 0
+                if int(dut.cbs_out_valid.value) == 1:
+                    got.append(s16(int(dut.cbs_out_coeff.value)))
+                await RisingEdge(dut.clk)
+                if feed:
+                    pos += 1
+
+            dut.cbs_in_valid.value = 0
+            await Timer(1, unit="ns")
+            assert int(dut.cbs_count.value) == 256
+            assert int(dut.cbs_done.value) == 1, "吐满 256 个系数之后应当 done"
+            assert got == want, f"η={eta} nonce={nonce}：系数与定义式不一致"
+            # 消耗的字节数恰好是 64η —— 多吃一个字节就意味着下一个多项式会错位
+            assert pos == 64 * eta, f"η={eta} 消耗了 {pos} 字节，应当是 {64 * eta}"
+            assert all(-eta <= c <= eta for c in got), "系数越出 [−η, η]"
+
+            # done 之后不该再抽字节：上层要拿同一条 SHAKE 流喂下一个多项式
+            assert int(dut.cbs_in_ready.value) == 0, "采样结束后 in_ready 仍为高"
+
+    dut._log.info("mlkem_cbd_stream：η=2/3 各两组 SHAKE256 流与 FIPS 203 定义式逐系数一致")
