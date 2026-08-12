@@ -79,6 +79,8 @@ async def run_keygen(dut, name: str, d: bytes, z: bytes, ready=None):
             break
     assert saw_last, "跑完了却没见到 out_last"
     assert int(dut.done.value) == 1, "超时：核没有完成"
+    # 拍数直接从这里报出来，进展文档里的数字就是这一行打的，不是估的
+    dut._log.info(f"{name}：{tick + 1} 拍（@100 MHz ≈ {(tick + 1) / 100:.0f} µs）")
     return bytes(got)
 
 

@@ -30,6 +30,7 @@ VERILOG_SOURCES = \
   $(RTL_MLKEM)/bitpack.v \
   $(RTL_MLKEM)/keygen.v \
   $(RTL_MLKEM)/encaps.v \
+  $(RTL_MLKEM)/decaps.v \
   $(RTL_MLKEM)/pack.v \
   $(RTL_MLDSA)/mont_reduce.v \
   $(RTL_MLDSA)/reduce.v \
@@ -60,6 +61,9 @@ COMPILE_ARGS += -Pmlkem_keygen.DEBUG_BANK=1
 endif
 ifeq ($(TOPLEVEL),mlkem_encaps)
 COMPILE_ARGS += -Pmlkem_encaps.DEBUG_BANK=1
+endif
+ifeq ($(TOPLEVEL),mlkem_decaps)
+COMPILE_ARGS += -Pmlkem_decaps.DEBUG_BANK=1
 endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

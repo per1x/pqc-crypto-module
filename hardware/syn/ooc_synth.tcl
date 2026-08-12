@@ -39,7 +39,7 @@ read_verilog -sv [glob $root/rtl/bus/*.v]
 #   mont_reduce / butterfly_* 是纯组合 → 只能用虚拟时钟报 in2out 延迟。
 if {$top eq "ntt_core" || $top eq "mldsa_ntt_core" || $top eq "keccak_f1600"
     || $top eq "sha3_core" || $top eq "pqc_accel_axi"
-    || $top eq "mlkem_keygen" || $top eq "mlkem_encaps"
+    || $top eq "mlkem_keygen" || $top eq "mlkem_encaps" || $top eq "mlkem_decaps"
     || $top eq "mlkem_cbd_stream" || $top eq "mlkem_bitpack"
     || $top eq "mlkem_bitunpack"} {
     read_xdc $root/syn/constraints/ooc_seq.xdc
