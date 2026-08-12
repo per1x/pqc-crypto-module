@@ -35,8 +35,25 @@ The excluded items are excluded for different reasons, stated honestly:
   assembly, source-level auditing would not be meaningful in any case.
 - **`hardware/`** is register-transfer logic, where the relevant question is cycle
   counts, not instruction timing. `ntt_core` and `keccak_f1600` both run a fixed number
-  of cycles per transform (2305 and 24 respectively), independent of the data — but that
+  of cycles per transform (3457 and 24 respectively), independent of the data — but that
   is verified by the cocotb regression, not by these tools.
+
+  The one place in the RTL with a *real* constant-time requirement is `mlkem_decaps`.
+  Decapsulation ends by comparing the re-encrypted ciphertext c' against the c it was
+  given; if that comparison exits early, how long decapsulation took reveals the byte
+  index at which the two first differ — and c' is the attacker's own c decrypted and
+  re-encrypted, so that timing channel is enough to recover the plaintext byte by byte
+  (the classic pitfall in the Fujisaki-Okamoto transform). The core therefore compares
+  the whole ciphertext unconditionally, accumulates a single `cmp_diff`, computes the
+  implicit-rejection value J(z‖c) whether or not it is needed, and selects with a bit
+  mask rather than an `if`. `test_decaps_constant_time` tests exactly this property —
+  three ciphertexts under one dk must take identical cycle counts — and the test has
+  been falsified: rewriting the comparison to bail out on the first mismatch makes that
+  test, and only that test, fail.
+
+  > Changing the key under a fixed parameter set moves the cycle count by about 0.1%.
+  > That comes from rejection sampling of the matrix A inside encapsulation, which
+  > depends only on the *public* ek — not on the ciphertext and not on the private key.
 - **`cli/` and `tests/`** do not hold long-lived key material; the daemon passes PINs
   straight through to the slot manager and wipes its stack buffers.
 

@@ -27,6 +27,42 @@ module barrett_reduce (
     assign r = a - t * Q;
 endmodule
 
+// ============================================================================
+// 【为什么拆成 _head / _tail 两半】
+// ============================================================================
+// 蝶形这条路是：BRAM 读出 → 一次乘法 → mont_reduce（内部又是两次乘法：
+// m = a·QINV、m·Q）→ BRAM 写入。**三级 DSP 串在一起**，在 ZU3EG 上实测
+// 9.7 ns，接不住 100 MHz —— mlkem_decaps 第一版 WNS −0.127 ns，关键路径
+// 就是 u_enc/u_ntt/u_mem 的这条自环。
+//
+// 切在**乘积之后、Montgomery 归约之前**：前半 1 级乘法，后半 2 级。
+// 切法与 basemul.v 的 _head/_tail 完全一样，理由也一样 ——
+// 组合版 butterfly_ct / butterfly_gs 仍由这两半拼出来，接口与原有的
+// cocotb 用例都不变，**同一段数学只有一份实现**。
+//
+// 这一刀值得在 ntt_core 里切、而不是让每个调用它的核各切各的：
+// keygen / encaps / decaps 三个核的关键路径最后都收敛到这里。
+
+module butterfly_ct_head (
+    input  wire signed [15:0] b,
+    input  wire signed [15:0] zeta,
+    output wire signed [31:0] prod
+);
+    assign prod = $signed({{16{zeta[15]}}, zeta}) * $signed({{16{b[15]}}, b});
+endmodule
+
+module butterfly_ct_tail (
+    input  wire signed [15:0] a,
+    input  wire signed [31:0] prod,
+    output wire signed [15:0] a_out,
+    output wire signed [15:0] b_out
+);
+    wire signed [15:0] t;
+    mont_reduce u_mont (.a(prod), .t_out(t));
+    assign a_out = a + t;
+    assign b_out = a - t;
+endmodule
+
 module butterfly_ct (
     input  wire signed [15:0] a,
     input  wire signed [15:0] b,
@@ -34,12 +70,33 @@ module butterfly_ct (
     output wire signed [15:0] a_out,
     output wire signed [15:0] b_out
 );
-    wire signed [31:0] prod =
-        $signed({{16{zeta[15]}}, zeta}) * $signed({{16{b[15]}}, b});
-    wire signed [15:0] t;
-    mont_reduce u_mont (.a(prod), .t_out(t));
-    assign a_out = a + t;
-    assign b_out = a - t;
+    wire signed [31:0] prod;
+    butterfly_ct_head u_head (.b(b), .zeta(zeta), .prod(prod));
+    butterfly_ct_tail u_tail (.a(a), .prod(prod), .a_out(a_out), .b_out(b_out));
+endmodule
+
+// GS 的前半多算一件事：a′ = barrett(a+b) 这条路是 2 级乘法，放前半正好和
+// 后半的 mont（2 级）配平。放后半的话后半变成"2 级并 2 级"、前半只剩 1 级，
+// 白白浪费一边。
+module butterfly_gs_head (
+    input  wire signed [15:0] a,
+    input  wire signed [15:0] b,
+    input  wire signed [15:0] zeta,
+    output wire signed [31:0] prod,
+    output wire signed [15:0] a_out
+);
+    wire signed [15:0] sum = a + b;
+    barrett_reduce u_barrett (.a(sum), .r(a_out));
+
+    wire signed [15:0] diff = b - a;
+    assign prod = $signed({{16{zeta[15]}}, zeta}) * $signed({{16{diff[15]}}, diff});
+endmodule
+
+module butterfly_gs_tail (
+    input  wire signed [31:0] prod,
+    output wire signed [15:0] b_out
+);
+    mont_reduce u_mont (.a(prod), .t_out(b_out));
 endmodule
 
 module butterfly_gs (
@@ -49,13 +106,10 @@ module butterfly_gs (
     output wire signed [15:0] a_out,
     output wire signed [15:0] b_out
 );
-    wire signed [15:0] sum = a + b;
-    barrett_reduce u_barrett (.a(sum), .r(a_out));
-
-    wire signed [15:0] diff = b - a;
-    wire signed [31:0] prod =
-        $signed({{16{zeta[15]}}, zeta}) * $signed({{16{diff[15]}}, diff});
-    mont_reduce u_mont (.a(prod), .t_out(b_out));
+    wire signed [31:0] prod;
+    butterfly_gs_head u_head (
+        .a(a), .b(b), .zeta(zeta), .prod(prod), .a_out(a_out));
+    butterfly_gs_tail u_tail (.prod(prod), .b_out(b_out));
 endmodule
 
 `default_nettype wire

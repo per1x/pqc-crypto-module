@@ -27,9 +27,10 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | Module | Structure | Cycles |
 |---|---|---|
 | `mont_reduce`, `barrett_reduce` | combinational | — |
-| `butterfly_ct`, `butterfly_gs` | combinational | — |
-| `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT, coefficients in a true dual-port BRAM (`ram_dp`), instantiates the above | 2305 per transform (2 cycles per butterfly) |
+| `butterfly_ct`, `butterfly_gs` | combinational; likewise composed of `_head` + `_tail`, with `ntt_core` registering between the halves | — |
+| `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT, coefficients in a true dual-port BRAM (`ram_dp`), instantiates the above | 3457 per transform (3 cycles per butterfly) |
 | `mlkem_basemul` | combinational, five Montgomery multiplies; composed of `_head` + `_tail` so a timing-critical core can register between the halves | — |
+| `mlkem_bmzeta` | the base-multiply ζ table (ZETAS[64..127]) and its indexing, shared by all three cores | — |
 | `mlkem_compress`, `mlkem_decompress` | combinational, parameterised by `D` | — |
 | `mlkem_cbd2`, `mlkem_cbd3` | combinational, bit-parallel binomial sampling | — |
 | `mlkem_rej_pair` | combinational candidate extraction | — |
@@ -45,8 +46,9 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `keccak_f1600` | single-round iterative, `round_cnt` over 24 rounds | 24 per permutation |
 | `mlkem_cbd_stream` | PRF byte stream → 256 CBD coefficients, streamed out | ~384 (η=2) / ~448 (η=3) |
 | `mlkem_bitpack`, `mlkem_bitunpack` | variable-width ByteEncode_d / ByteDecode_d; `d` is a runtime input (du/dv change with the parameter set) | one byte or one coefficient per cycle |
-| `mlkem_keygen` | **full ML-KEM.KeyGen_internal**: G/PRF/XOF/H, sampling, NTT, base multiply and packing all in PL | ~43.3k per keygen (768) |
-| `mlkem_encaps` | **full ML-KEM.Encaps_internal**: H(ek), G, matrix A, r̂/e₁/e₂ sampling, NTT and inverse NTT, compression and packing all in PL | ~42.5k per encaps (768) |
+| `mlkem_keygen` | **full ML-KEM.KeyGen_internal**: G/PRF/XOF/H, sampling, NTT, base multiply and packing all in PL | ~50.2k per keygen (768) |
+| `mlkem_encaps` | **full ML-KEM.Encaps_internal**: H(ek), G, matrix A, r̂/e₁/e₂ sampling, NTT and inverse NTT, compression and packing all in PL | ~50.6k per encaps (768) |
+| `mlkem_decaps` | **full ML-KEM.Decaps_internal**: decrypt, re-encrypt by instantiating `mlkem_encaps`, **constant-time** ciphertext comparison, implicit rejection J(z‖c) | ~78.0k per decaps (768) |
 | `ram_dp` | parameterised true dual-port synchronous RAM, inferred as block RAM | 1 cycle read latency |
 | `axi4lite_regs` | AXI4-Lite slave, control and status registers | — |
 | `pqc_accel_axi` | accelerator top level: AXI4-Lite + AXI4-Stream + cores | — |
@@ -86,7 +88,7 @@ additionally folds signed coefficients back into `[0, q)`, exists as a module.
 `keccak_f1600` is deliberately **not** a 24-round unrolled design. Unrolling multiplies
 the round logic by 24 for no benefit at the call rates involved: 24 cycles at 100 MHz is
 240 ns per permutation, and an ML-KEM-768 key generation needs 43 of them — about 1000
-cycles in total, against roughly 13800 for the NTTs. The bottleneck is elsewhere.
+cycles in total, against roughly 20700 for the NTTs. The bottleneck is elsewhere.
 
 `pqc_accel_axi` is the accelerator as a system would see it: AXI4-Lite for the control
 and status registers, AXI4-Stream for bulk data, and the algorithm cores underneath. The

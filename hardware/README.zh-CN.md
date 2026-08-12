@@ -27,9 +27,10 @@ hardware/
 | 模块 | 结构 | 周期数 |
 |---|---|---|
 | `mont_reduce`、`barrett_reduce` | 组合逻辑 | — |
-| `butterfly_ct`、`butterfly_gs` | 组合逻辑 | — |
-| `ntt_core` | 单蝶形单元，ML-KEM 的 7 层 NTT，系数存在真双口 BRAM（`ram_dp`）里，实例化上述模块 | 2305 / 次变换（一个蝶形两拍） |
+| `butterfly_ct`、`butterfly_gs` | 组合逻辑；同样由 `_head` + `_tail` 拼成，`ntt_core` 在两半之间插了一级寄存器 | — |
+| `ntt_core` | 单蝶形单元，ML-KEM 的 7 层 NTT，系数存在真双口 BRAM（`ram_dp`）里，实例化上述模块 | 3457 / 次变换（一个蝶形三拍） |
 | `mlkem_basemul` | 组合逻辑，五次 Montgomery 乘法；由 `_head` + `_tail` 拼成，要收时序的核可以在两半之间插一级寄存器 | — |
+| `mlkem_bmzeta` | 基乘用的 ζ 表（ZETAS[64..127]）与取法，三个核共用 | — |
 | `mlkem_compress`、`mlkem_decompress` | 组合逻辑，位宽 `D` 由参数给出 | — |
 | `mlkem_cbd2`、`mlkem_cbd3` | 组合逻辑，位并行的中心二项分布采样 | — |
 | `mlkem_rej_pair` | 组合逻辑，取候选 | — |
@@ -45,8 +46,9 @@ hardware/
 | `keccak_f1600` | 单轮迭代，`round_cnt` 走 24 轮 | 24 / 次置换 |
 | `mlkem_cbd_stream` | PRF 字节流 → 256 个 CBD 系数，流式吐出 | η=2 约 384 / η=3 约 448 |
 | `mlkem_bitpack`、`mlkem_bitunpack` | 变宽度 ByteEncode_d / ByteDecode_d，`d` 是运行时输入（du/dv 随参数集变） | 每拍一字节或一系数 |
-| `mlkem_keygen` | **完整 ML-KEM.KeyGen_internal**：G/PRF/XOF/H、采样、NTT、基乘、打包全在 PL | 约 43.3 k / 次（768） |
-| `mlkem_encaps` | **完整 ML-KEM.Encaps_internal**：H(ek)、G、A 矩阵、r̂/e₁/e₂ 采样、NTT/逆 NTT、压缩打包全在 PL | 约 42.5 k / 次（768） |
+| `mlkem_keygen` | **完整 ML-KEM.KeyGen_internal**：G/PRF/XOF/H、采样、NTT、基乘、打包全在 PL | 约 50.2 k / 次（768） |
+| `mlkem_encaps` | **完整 ML-KEM.Encaps_internal**：H(ek)、G、A 矩阵、r̂/e₁/e₂ 采样、NTT/逆 NTT、压缩打包全在 PL | 约 50.6 k / 次（768） |
+| `mlkem_decaps` | **完整 ML-KEM.Decaps_internal**：解密 + 例化 `mlkem_encaps` 重加密 + **常量时间**密文比对 + 隐式拒绝 J(z‖c) | 约 78.0 k / 次（768） |
 | `ram_dp` | 参数化真双口同步 RAM，推断成块 RAM | 读延迟 1 拍 |
 | `axi4lite_regs` | AXI4-Lite 从机，控制/状态寄存器 | — |
 | `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核 | — |
@@ -76,7 +78,7 @@ Vivado 报出 `LUT as Memory = 0`，整块摊成了约 30000 个 LUT 的选择�
 
 `keccak_f1600` 刻意**不做** 24 轮全展开。展开会把轮逻辑复制 24 份，而在此调用频度下
 毫无收益：100 MHz 下 24 周期即 240 ns/次置换，而一次 ML-KEM-768 密钥生成需要 43 次
-置换，合计约 1000 周期，相较 NTT 的约 13800 周期微不足道。瓶颈不在这里。
+置换，合计约 1000 周期，相较 NTT 的约 20700 周期微不足道。瓶颈不在这里。
 
 `pqc_accel_axi` 是系统视角下的加速器：控制/状态寄存器走 AXI4-Lite，成块数据走
 AXI4-Stream，底下挂算法核。它实现的正是 `include/pqchsm/accel.h` 当初据以编写的那套

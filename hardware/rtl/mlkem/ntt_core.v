@@ -1,8 +1,14 @@
 // ntt_core —— ML-KEM 的 256 点 NTT / INTT 核（BRAM 版：2 周期一个蝶形）
 //
 // 系数放在一块 256×16 的**真双口 BRAM**（common/ram_dp.v）里，一个蝶形拆成
-// 两拍：S_RD 发地址、S_WB 拿数算完写回。896 个蝶形 + 256 个缩放，
-// 约 2×896 + 2×256 ≈ 2300 cycles @100MHz ≈ 23 µs。原型验证够用。
+// 三拍：S_RD 发地址、S_MU 收数算前半、S_WB 算后半并写回。896 个蝶形 +
+// 256 个缩放，约 3×896 + 3×256 ≈ 3500 cycles @100MHz ≈ 35 µs。原型验证够用。
+//
+// **中间那一拍（S_MU）是时序需要，不是随手加的**：BRAM 读出 → 一次乘法 →
+// mont_reduce（内部两次乘法）→ BRAM 写入，三级 DSP 串一拍在 ZU3EG 上要
+// 9.7 ns。两拍版能跑到约 99 MHz —— 单独综合勉强过，一旦被别的核例化、
+// 布线一挤就掉下来（mlkem_decaps 实测 WNS −0.127 ns）。切法见 butterfly.v
+// 的 _head/_tail 注释；代价是每个蝶形多一拍，NTT 从 2305 拍变 3457 拍。
 //
 // 为什么从"1 蝶形/周期的寄存器阵列"改成这样：那一版综合出来
 //     CLB LUTs 28494 (40.38%)   Block RAM Tile 0
@@ -91,7 +97,8 @@ module ntt_core (
     // 一个蝶形两拍：S_RD 发地址 → S_WB 收数、算、写回并推进下标。
     // 缩放同理拆成 S_SC_RD / S_SC_WB。
     localparam S_IDLE  = 3'd0, S_RD    = 3'd1, S_WB  = 3'd2,
-               S_SC_RD = 3'd3, S_SC_WB = 3'd4, S_DONE = 3'd5;
+               S_SC_RD = 3'd3, S_SC_WB = 3'd4, S_DONE = 3'd5,
+               S_MU    = 3'd6, S_SC_MU = 3'd7;
 
     reg [2:0] state;
     reg [8:0] len;        // 128..2（正）或 2..128（逆）
@@ -130,20 +137,40 @@ module ntt_core (
     wire signed [15:0] b_val = pb_dout;
     wire signed [15:0] zeta  = zetas[k[6:0]];
 
-    // CT（正）与 GS（逆）两种蝶形 —— 直接例化 butterfly.v 里的模块
-    wire signed [15:0] ct_a, ct_b, gs_a, gs_b;
-    butterfly_ct u_bf_ct (.a(a_val), .b(b_val), .zeta(zeta), .a_out(ct_a), .b_out(ct_b));
-    butterfly_gs u_bf_gs (.a(a_val), .b(b_val), .zeta(zeta), .a_out(gs_a), .b_out(gs_b));
+    // CT（正）与 GS（逆）两种蝶形，各拆成 _head / _tail 两半，中间插一级
+    // 寄存器（S_MU 那一拍）。前半吃 BRAM 出来的数，后半算完写回去。
+    wire signed [31:0] ct_prod, gs_prod;
+    wire signed [15:0] gs_a_h;
+    butterfly_ct_head u_bf_ct_h (.b(b_val), .zeta(zeta), .prod(ct_prod));
+    butterfly_gs_head u_bf_gs_h (
+        .a(a_val), .b(b_val), .zeta(zeta), .prod(gs_prod), .a_out(gs_a_h));
 
-    // S_SC_WB 用：正变换末尾统一 Barrett 归约，逆变换末尾乘 f = mont^2/128。
+    // 一次只跑正变换或逆变换，两条前半的乘积共用一个寄存器
+    reg signed [31:0] prod_r;
+    reg signed [15:0] bf_a_r;      // CT 后半要用的 a
+    reg signed [15:0] gs_a_r;      // GS 的 a′ 在前半就算完了
+
+    wire signed [15:0] ct_a, ct_b, gs_b;
+    butterfly_ct_tail u_bf_ct_t (
+        .a(bf_a_r), .prod(prod_r), .a_out(ct_a), .b_out(ct_b));
+    butterfly_gs_tail u_bf_gs_t (.prod(prod_r), .b_out(gs_b));
+
+    // 缩放：正变换末尾统一 Barrett 归约，逆变换末尾乘 f = mont^2/128。
     // 缩放只用 A 口，所以取的是 pa_dout。
+    //
+    // 逆变换这一路同样是三级乘法（FINV·x 一次、mont_reduce 两次），与蝶形
+    // 一样深，所以照样切一刀（S_SC_MU）：前半算乘积与 barrett，后半算 mont。
     wire signed [15:0] scale_in = pa_dout;
     wire signed [15:0] scale_barr;
     barrett_reduce u_scale_barr (.a(scale_in), .r(scale_barr));
     wire signed [31:0] finv_prod =
         $signed({{16{FINV[15]}}, FINV}) * $signed({{16{scale_in[15]}}, scale_in});
+
+    reg signed [31:0] scprod_r;
+    reg signed [15:0] scbarr_r;
+
     wire signed [15:0] scale_mont;
-    mont_reduce u_scale_mont (.a(finv_prod), .t_out(scale_mont));
+    mont_reduce u_scale_mont (.a(scprod_r), .t_out(scale_mont));
 
     // ---- 两个 BRAM 口的归属：完全由状态决定 ----
     always @(*) begin
@@ -167,19 +194,25 @@ module ntt_core (
             pa_addr = j[7:0];
             pb_addr = j_hi[7:0];
         end
+        // 地址要一直驱动到 S_MU：BRAM 是同步读，数据这一拍才出来
+        S_MU: begin
+            pa_addr = j[7:0];
+            pb_addr = j_hi[7:0];
+        end
         S_WB: begin
             pa_we   = 1'b1;
             pa_addr = j[7:0];
-            pa_din  = inv_r ? gs_a : ct_a;
+            pa_din  = inv_r ? gs_a_r : ct_a;
             pb_we   = 1'b1;
             pb_addr = j_hi[7:0];
             pb_din  = inv_r ? gs_b : ct_b;
         end
         S_SC_RD: pa_addr = scale_i[7:0];
+        S_SC_MU: pa_addr = scale_i[7:0];
         S_SC_WB: begin
             pa_we   = 1'b1;
             pa_addr = scale_i[7:0];
-            pa_din  = inv_r ? scale_mont : scale_barr;
+            pa_din  = inv_r ? scale_mont : scbarr_r;
         end
         default: ;
         endcase
@@ -198,6 +231,11 @@ module ntt_core (
             k       <= 8'd1;
             inv_r   <= 1'b0;
             scale_i <= 9'd0;
+            prod_r   <= 32'sd0;
+            bf_a_r   <= 16'sd0;
+            gs_a_r   <= 16'sd0;
+            scprod_r <= 32'sd0;
+            scbarr_r <= 16'sd0;
         end else begin
             case (state)
             S_IDLE: begin
@@ -216,12 +254,21 @@ module ntt_core (
 
             // 第一拍：地址已经由 mux 发给 BRAM，等一个沿把 mem[j] / mem[j+len]
             // 装进输出寄存器，下一拍才能用。这里除了换状态没别的事。
-            S_RD: state <= S_WB;
+            S_RD: state <= S_MU;
+
+            // 第二拍：BRAM 的数到了，算蝶形前半（一次乘法）并存进寄存器。
+            // 正、逆一次只跑一种，所以两条前半共用 prod_r。
+            S_MU: begin
+                prod_r <= inv_r ? gs_prod : ct_prod;
+                bf_a_r <= a_val;
+                gs_a_r <= gs_a_h;
+                state  <= S_WB;
+            end
 
             S_WB: begin
-                // 第二拍：蝶形结果由 mux 写回两个地址，这里只推进下标。
+                // 第三拍：蝶形后半（Montgomery 归约）的结果由 mux 写回两个
+                // 地址，这里只推进下标。
                 state <= S_RD;
-
                 if (j + 1 < grp + len) begin
                     j <= j + 1;
                 end else begin
@@ -255,8 +302,14 @@ module ntt_core (
                 end
             end
 
-            // 缩放也是两拍：读一个系数，算完写回同一地址。
-            S_SC_RD: state <= S_SC_WB;
+            // 缩放同样三拍：发地址、算前半、算后半写回同一地址。
+            S_SC_RD: state <= S_SC_MU;
+
+            S_SC_MU: begin
+                scprod_r <= finv_prod;
+                scbarr_r <= scale_barr;
+                state    <= S_SC_WB;
+            end
 
             S_SC_WB: begin
                 // 正变换：最后统一 Barrett 归约；逆变换：乘 f。
