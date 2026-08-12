@@ -1500,3 +1500,166 @@ cocotb 全量 **156 个用例**（新增 22 个）全通；Yosys 63 个模块全
 - **侧信道**：见上，没有做 DPA 防护。
 - **上板**：本线**尚未上板**。综合与时序都是 OOC 的结果，接进真实的 PS-PL
   互联、配上 XMPU/XPPU 之后要重新收敛一次。
+
+---
+
+# S7：上板 —— 在 ZU3EG 真硅上跑通官方向量（2026-08-12，24/24 通过）
+
+前面六节末尾都写着"未上板"。这一节把那句话去掉了。
+
+**在此之前，本条线一个 bitstream 都没有过。** 所有"综合通过、时序收敛"都是
+`synth_design -mode out_of_context` 的模块级结果 —— OOC 设计没有顶层、没有 PS、
+没有 I/O，**根本产不出 bitstream**。这一点当时每节都写了"未上板"，但没说透。
+
+## 补齐的三层
+
+| 模块 | 作用 |
+|---|---|
+| `mlkem_axi` | ML-KEM 三个整核的 AXI4-Lite 从机 |
+| `axi4lite_xbar` | 一主多从的地址译码 |
+| `zu3eg_hsm_top` + `impl_bitstream.tcl` | 板级顶层与完整实现流程（非工程模式，全进 git） |
+
+**三个核的输入形状完全不同**（KeyGen 要两个并行 256 位种子，Encaps 要 m 加一条
+ek 字节流，Decaps 要 dk 与 c 两条流），`mlkem_axi` 统一成"一切都往 `IN_DATA` 灌，
+顺序就是标准里的顺序"，长度由 `param_set` 算 —— **软件不用报长度，也就报不错**。
+
+地址译码自己写而不用 Xilinx 的互联 IP：本设计单主、单时钟、全 AXI4-Lite，
+那个 IP 带来的全是用不上的东西；更要紧的是**它进不了 cocotb 回归**，
+译码这一段就会成为整条链上唯一没被对拍覆盖的地方。
+
+## 真机结果
+
+```
+[ML-KEM-512  NIST ACVP]  KeyGen/Encaps/Decaps 各三组，逐字节一致
+[对称与国密]             AES-128/256（FIPS 197 C.1/C.3）、SM4（GB/T 32907 A.1）、
+                         SM3（GB/T 32905 A.1）
+[密码边界]               两个从机各 256 字节扫完（48 读得到 / 80 被防火墙拒）：
+                         密钥的 4 个字一个都没出现，而密文正确
+[AxPROT]                 金丝雀（SECURE_ONLY=1）被 DECERR 拒；
+                         对照组（同模块 SECURE_ONLY=0）正常读回 VERSION
+[TRNG]                   启动健康检测通过（1023 样本）、无 RCT/APT 告警、
+                         256 字、一比特占比 0.5035、无相邻重复
+                                                              通过 24，失败 0
+```
+
+原文存在 `board/RESULT_hwtest.txt`。
+
+**AxPROT 那一条是仿真给不了的**：板上的 Linux 跑在非安全世界，它发出的每一笔
+事务 `AxPROT[1]` 都是 1。所以这一版把四个功能从机设成 `SECURE_ONLY=0`
+（让 Linux 能跑 KAT），另加一个 `SECURE_ONLY=1` 的**金丝雀实例**——
+与槽 1 是同一个模块，只差那个参数。它被拒、对照组通过，两条同时成立才算数。
+生产版本四个从机全是 `SECURE_ONLY=1`，由安全世界驱动。
+
+## 三个只在真硅上现形的 bug
+
+**仿真、综合、时序、bitstream 生成全部正常**，载进板子也显示 `operating`，
+但 CPU 卡死在第一笔读上 —— 串口日志里是 RCU 报某个 CPU 死在用户进程里、
+其它 CPU 还活着。
+
+**① 顶层引用了后面才声明的 wire。**
+`.maxihpm0_lpd_aclk(clk_sys)` 写在 `wire clk_sys;` 之前。**Vivado 不报错**，
+而是给那个端口新建一条同名的**无驱动**网络。查布线后 checkpoint 才看见：
+
+```
+u_ps/inst/maxihpm0_lpd_aclk → net u_ps/maxihpm0_lpd_aclk → driver = （空）
+BUFGCE_DIV: O → net clk_sys，扇出 26 个引脚（我的逻辑），不含 PS
+```
+
+PS 的 AXI 主口没有时钟。**Icarus 对同样的写法直接报 `Unable to bind wire`**
+（本会话前面已经被它抓过好几次）—— Vivado 的静默才是危险的那个。
+
+**② `M_AXI_HPM0_LPD` 是 AXI4，不是 AXI4-Lite。**
+`bid` / `rid` / **`rlast`** 这三个由 PL 驱动、送回 PS 的响应信号全部悬空。
+**PS 在等 `rlast` 结束读突发，永远等不到。** 这是真凶。
+AXI4-Lite 本质是"突发长度恒为 1 的 AXI4"，所以 `rlast = rvalid`、
+`bid`/`rid` 回显即可。
+
+**③ `mlkem_axi` 的 start 是非阻塞赋值**（下一拍才有效），而三个核的 `done`
+是**电平**、保持到下次 start。一进 `S_RUN` 就查 `core_dn` 会读到上一次残留的
+`done`，当场结束、`OUT_LEN` 为 0。表现是**每个核第一次跑永远对、第二次必错**
+（真机上 tc0 通过、tc1 报"输出 0 字节"）。
+
+仿真抓不到 ③，是因为链式用例里每个核只跑一次，而"跑两次"那条中间隔着一次
+zeroize —— zeroize 会复位核，正好把 `done` 清掉。补了
+`test_repeat_same_core` 堵这个缺口。
+
+### 挡住 ① 与 ②
+
+`impl_bitstream.tcl` 加了综合后断言：PS 的 `maxihpm0_lpd_aclk` / `maxigp2_rlast`
+/ `maxigp2_bid` / `maxigp2_rid` 只要没有驱动就**中止实现**。
+
+```
+断言通过：maxihpm0_lpd_aclk <- u_div/O
+断言通过：maxigp2_rlast <- u_xbar/s_rvalid_reg/Q
+断言通过：maxigp2_bid <- awid_r_reg[15]/Q
+断言通过：maxigp2_rid <- arid_r_reg[15]/Q
+```
+
+**这条断言是拿两次断电换来的。**
+
+## 上板方法：不需要新 BOOT.BIN
+
+从 `system.xsa` 里确认过厂家 psu_init 已经开好 `PSU__USE__M_AXI_GP2=1`
+（M_AXI_HPM0_LPD，32 位）与 `PSU__FPGA_PL0_ENABLE=1`（150 MHz，实测 147.456）。
+所以运行时 `fpgautil -b xxx.bit -f Full` 就够，**golden BOOT.BIN 全程不动**。
+
+PL0 经 `BUFGCE_DIV` 二分频到 **75 MHz** 给密码核 —— 最慢的 `mlkem_decaps`
+单独综合 108.5 MHz，留 45% 余量给"接上总线、加了时钟树"那部分。
+用 `BUFGCE_DIV` 而不是 MMCM：没有 lock 要等、没有复位时序要排。
+
+顶层**没有任何外部管脚**（一切经 PS 进出），因此一条 XDC 管脚约束都不需要，
+也就没有"管脚号写错"这一整类问题。
+
+## 一个流程上的教训：eth0 在 PL 里
+
+板上 `eth0` 是 `80000000.ethernet` —— **网卡在厂家 PL 里面**。刷 PL 的那一刻
+SSH 必断，而 rootfs 是 initramfs。我为此断了三次网、要了三次断电，
+每次都是同一个错：**把解绑网卡的命令放在前台 SSH 里跑**，第一个被解绑的就是
+eth0，SSH 当场断，后面的恢复步骤再也不会执行。
+
+修的不是某一条命令，是方法。`board/plharness.sh`：
+
+```
+setsid 脱离终端 → 解绑 PL 驱动 → 跑 payload
+              → 收尾**必定**装回 factory.bit、rebind 驱动、恢复 IP
+              → 网络自己回来，不用重启（重启会冲掉 initramfs 里的东西）
+```
+
+配套还有两条：**日志逐行 `sync`**（硬挂时 SD 卡的写回缓存会把没落盘的全丢掉
+—— 前两次挂死之所以"日志全空"就是这个），以及看门狗。
+
+## 排障顺序：先做能证伪的实验
+
+三次挂死之后，先做的不是继续改设计，而是一个**用已知能工作的设计**做的对照
+实验：解绑全部 PL 驱动 → 运行时重载**厂家**的 bitstream → 读厂家的寄存器。
+
+一次同时证伪了两个假设：
+
+| 假设 | 结果 |
+|---|---|
+| 解绑 PL 驱动会关掉 PL 时钟（引用计数归零） | **证伪** —— 持有 `pl0_ref` 的是 `xilinx_fclk`，一直绑着；解绑 9 个 PL 驱动后计数不变 |
+| PCAP 运行时重配后 PS-PL 隔离没解除 | **证伪** —— 驱动全解绑后读 `0x80080000 = 0x00000001` 成功 |
+
+两条都排除之后，剩下的只能是我的设计 —— 于是回去读顶层，找到了 `rlast`。
+
+## 综合结果（完整实现，含布局布线）
+
+| 项 | 值 |
+|---|---|
+| CLB LUT | 34716 / 70560（**49.2%**） |
+| 寄存器 | 25519（18.1%） |
+| BRAM | 15.5 / 216（7.2%） |
+| DSP | 138 / 360（38.3%） |
+| WNS / WHS | **+3.037 ns / +0.010 ns** @75 MHz |
+
+整机（TRNG + 密钥仓 + AES/SM4/SM3 + ML-KEM 三核 + 金丝雀 + 译码 + PS）
+占这颗片子**不到一半**。
+
+## 还没做的，照旧说清楚
+
+- **最小熵**：TRNG 只做了通过/不通过的健康检测与粗统计。真实最小熵必须导出
+  原始比特跑 SP 800-90B 的 EntropyAssessment —— 仿真里的抖动是编的，
+  比真实器件大一到两个数量级，**任何最小熵数字都不能从仿真得出**。
+- **`SECURE_ONLY=1` 的完整形态**：要由安全世界（OP-TEE）驱动，那归另一条线。
+- **XMPU/XPPU 与设备树**：PS 侧的隔离还没配。
+- **侧信道**：没做 DPA 防护，也不假装做了。
