@@ -46,7 +46,7 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `mlkem_cbd_stream` | PRF byte stream → 256 CBD coefficients, streamed out | ~384 (η=2) / ~448 (η=3) |
 | `mlkem_bitpack`, `mlkem_bitunpack` | variable-width ByteEncode_d / ByteDecode_d; `d` is a runtime input (du/dv change with the parameter set) | one byte or one coefficient per cycle |
 | `mlkem_keygen` | **full ML-KEM.KeyGen_internal**: G/PRF/XOF/H, sampling, NTT, base multiply and packing all in PL | ~43.3k per keygen (768) |
-| `mlkem_encaps` | **full ML-KEM.Encaps_internal**: H(ek), G, matrix A, r̂/e₁/e₂ sampling, NTT and inverse NTT, compression and packing all in PL | ~41.7k per encaps (768) |
+| `mlkem_encaps` | **full ML-KEM.Encaps_internal**: H(ek), G, matrix A, r̂/e₁/e₂ sampling, NTT and inverse NTT, compression and packing all in PL | ~42.5k per encaps (768) |
 | `ram_dp` | parameterised true dual-port synchronous RAM, inferred as block RAM | 1 cycle read latency |
 | `axi4lite_regs` | AXI4-Lite slave, control and status registers | — |
 | `pqc_accel_axi` | accelerator top level: AXI4-Lite + AXI4-Stream + cores | — |
@@ -184,5 +184,7 @@ execute exactly as written while synthesis produces different hardware.
 
 ## Synthesis
 
-Scripts are in `syn/` and have **never been executed** — Vivado is not installed on the
-development machine. See [syn/README.md](syn/README.md).
+Scripts are in `syn/`. Vivado is not installed on the Mac, so they run on the build
+machine (Vivado 2020.1); the utilisation and Fmax figures in
+[docs/fpga-进展.md](../docs/fpga-进展.md) all come from there, post-route.
+See [syn/README.md](syn/README.md).

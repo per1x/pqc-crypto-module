@@ -4,14 +4,18 @@
 
 Out-of-context 综合脚本，产出资源占用与时序报告。
 
-> **状态：已写好，从未执行。** 开发机上没有安装 Vivado。`ooc_synth.tcl` 遵循标准的
-> non-project 流程，首次运行时可能需要按你的 Vivado 版本做少量调整。
+> **状态：在用。** Mac 上没有 Vivado，所以这套脚本在构建机（Vivado 2020.1）上跑。
+> `docs/fpga-进展.md` 里的每一个资源占用与 Fmax 数字都出自它，且取的是**布线后**的值
+> —— 综合后的 WNS 通常偏乐观。
 
 ```bash
 vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top_module>
 # 例如
-vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xck26-sfvc784-2LV-c butterfly_ct
+vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xazu3eg-sfvc784-1-i mlkem_encaps
 ```
+
+**两个 tclargs 都是必需的，part 在前、top 在后。** 漏掉 part 会直接打印用法退出，
+很容易白跑一次。
 
 可综合的顶层模块：`mont_reduce`、`barrett_reduce`、`butterfly_ct`、`butterfly_gs`
 （组合逻辑，由 `ooc_comb.xdc` 约束）；`ntt_core` 与 `keccak_f1600`（时序逻辑，由

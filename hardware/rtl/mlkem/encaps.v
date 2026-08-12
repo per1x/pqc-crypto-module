@@ -151,9 +151,10 @@ module mlkem_encaps #(
         S_MAC_W1    = 6'd27,
         S_INV_RUN   = 6'd28,
         S_OUT_RD    = 6'd29,
-        S_OUT_FEED  = 6'd30,
-        S_OUT_DRAIN = 6'd31,
-        S_DONE      = 6'd32;
+        S_OUT_CMP   = 6'd30,
+        S_OUT_FEED  = 6'd31,
+        S_OUT_DRAIN = 6'd32,
+        S_DONE      = 6'd33;
 
     reg [5:0] state;
 
@@ -227,8 +228,8 @@ module mlkem_encaps #(
 
     // 打包器只在输出状态里排空 —— 否则别的状态下 out_ready 恰好为高时
     // 会把字节吐掉而没人接（out_valid 那时是低的）。
-    wire out_phase = (state == S_OUT_RD) || (state == S_OUT_FEED)
-                     || (state == S_OUT_DRAIN);
+    wire out_phase = (state == S_OUT_RD) || (state == S_OUT_CMP)
+                     || (state == S_OUT_FEED) || (state == S_OUT_DRAIN);
 
     mlkem_bitpack u_bp (
         .clk(clk), .rst_n(rst_n), .d(bp_d),
@@ -291,13 +292,21 @@ module mlkem_encaps #(
     wire signed [15:0] outc;
     barrett_reduce u_out_br (.a(ntt_rd_data + err_term), .r(outc));
 
+    // ⚠️ 这一级寄存器是**时序需要**，不是随手加的。
+    // 没有它的时候整条输出尾巴挤在一拍里：
+    //   BRAM 读出 → barrett（两级 DSP）→ compress（一级 DSP）→ 打包器累加器，
+    // 布线后 WNS = −1.987 ns（83.4 MHz）。切在 barrett 与 compress 之间，
+    // 前半是"读存储 + barrett"、后半是"compress + 打包"，两边各剩一半。
+    // 代价是每个系数从 2 拍变 3 拍（S_OUT_RD → S_OUT_CMP → S_OUT_FEED）。
+    reg signed [15:0] outc_r;
+
     // du ∈ {10, 11}、dv ∈ {4, 5} 各要一份：压缩的整数式里 d 在移位量上，
     // 不能由别的 d 推出来。四个都很小（一次 24×22 乘法）。
     wire [10:0] cmp11; wire [9:0] cmp10; wire [4:0] cmp5; wire [3:0] cmp4;
-    mlkem_compress #(.D(11)) u_c11 (.coeff(outc), .val(cmp11));
-    mlkem_compress #(.D(10)) u_c10 (.coeff(outc), .val(cmp10));
-    mlkem_compress #(.D(5))  u_c5  (.coeff(outc), .val(cmp5));
-    mlkem_compress #(.D(4))  u_c4  (.coeff(outc), .val(cmp4));
+    mlkem_compress #(.D(11)) u_c11 (.coeff(outc_r), .val(cmp11));
+    mlkem_compress #(.D(10)) u_c10 (.coeff(outc_r), .val(cmp10));
+    mlkem_compress #(.D(5))  u_c5  (.coeff(outc_r), .val(cmp5));
+    mlkem_compress #(.D(4))  u_c4  (.coeff(outc_r), .val(cmp4));
 
     wire [11:0] cmp_out = out_is_v ? (d11_r ? {7'd0, cmp5} : {8'd0, cmp4})
                                    : (d11_r ? {1'd0, cmp11} : {2'd0, cmp10});
@@ -499,10 +508,15 @@ module mlkem_encaps #(
             ntt_rd_addr = cnt[7:0];
             ba_addr     = {slot_err, cnt[7:0]};
         end
-        S_OUT_FEED: begin
+        // 存储的数据这一拍到齐，走完 barrett 存进 outc_r。地址要继续驱动，
+        // 否则同步存储的输出在这一拍就不是这个系数了。
+        S_OUT_CMP: begin
             bp_d        = out_is_v ? dv : du;
             ntt_rd_addr = cnt[7:0];
             ba_addr     = {slot_err, cnt[7:0]};
+        end
+        S_OUT_FEED: begin
+            bp_d        = out_is_v ? dv : du;
             bp_in_valid = bp_in_ready;
             bp_in_data  = cmp_out;
         end
@@ -515,9 +529,7 @@ module mlkem_encaps #(
     // ================= 时序 =================
     wire ek_fire  = ek_valid && ek_ready;
     wire out_fire = out_valid && out_ready;
-    wire bp_fire  = bp_out_valid && out_ready
-                    && (state == S_OUT_RD || state == S_OUT_FEED
-                        || state == S_OUT_DRAIN);
+    wire bp_fire  = bp_out_valid && out_ready && out_phase;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -530,6 +542,7 @@ module mlkem_encaps #(
             tp <= 3'd0; tn <= 8'd0; hdr_cnt <= 6'd0; pair <= 8'd0;
             ntt_kicked <= 1'b0; ntt_inverse <= 1'b0;
             mac_v <= 1'b0; out_poly <= 3'd0; out_is_v <= 1'b0; obcnt <= 8'd0;
+            outc_r <= 16'sd0;
             a0_r <= 16'sd0; a1_r <= 16'sd0; b0_r <= 16'sd0; b1_r <= 16'sd0;
             acc0_r <= 16'sd0; acc1_r <= 16'sd0;
             t_ab_r <= 16'sd0; bm0_r <= 16'sd0; bm1_r <= 16'sd0;
@@ -714,9 +727,13 @@ module mlkem_encaps #(
                 end
             end
 
-            // 每个系数两拍：RD 发地址、FEED 等打包器要。
+            // 每个系数三拍：RD 发地址、CMP 收数据走 barrett、FEED 等打包器要。
             // 打包器的 in_ready 与 out_valid 互斥，所以等的时候正好在吐字节。
-            S_OUT_RD: state <= S_OUT_FEED;
+            S_OUT_RD: state <= S_OUT_CMP;
+            S_OUT_CMP: begin
+                outc_r <= outc;
+                state  <= S_OUT_FEED;
+            end
             S_OUT_FEED: if (bp_in_ready) begin
                 cnt <= cnt + 9'd1;
                 if (cnt == 9'd255) state <= S_OUT_DRAIN;

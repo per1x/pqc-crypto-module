@@ -251,7 +251,7 @@ Vivado 脚本已写好但未验证），没有时序收敛、功耗测量、TRNG
 | macOS `leaks` | 0 泄漏 |
 | libFuzzer | 138 万次执行，无崩溃 |
 | aarch64 Linux（GCC 12） | 45 / 45 |
-| cocotb RTL 回归 | 19 个顶层共 117 个测试 |
+| cocotb RTL 回归 | 20 个顶层共 122 个测试 |
 | RTL lint（Verilator `-Wall` + Icarus） | 31 个模块，0 条告警 |
 | RTL 可综合性（Yosys） | 31 个模块全部可综合 |
 

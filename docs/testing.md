@@ -16,7 +16,7 @@ clean checkout by running the command in the last column.
 | ThreadSanitizer | 0 races | `ctest --test-dir build-tsan` |
 | aarch64 Linux (GCC 12) | 45 / 45 | `./tools/aarch64_test.sh` |
 | libFuzzer | 1.38 M executions, no crashes | `./tools/fuzz.sh` |
-| cocotb RTL regression | 117 tests across 19 top levels | `./tools/rtl_sim.sh` |
+| cocotb RTL regression | 122 tests across 20 top levels | `./tools/rtl_sim.sh` |
 | RTL lint | 31 modules, 0 warnings | `./tools/rtl_lint.sh` |
 | RTL synthesisability (Yosys) | 31 modules, all synthesise | `./tools/rtl_synth_check.sh` |
 | Constant-time source audit | 0 unannotated findings, 1 justified waiver | `python3 tools/ct_audit.py` |
@@ -65,7 +65,7 @@ out individually:
 
 ## Hardware tests
 
-`./tools/rtl_sim.sh` runs 117 cocotb tests across 19 top levels under Icarus
+`./tools/rtl_sim.sh` runs 122 cocotb tests across 20 top levels under Icarus
 Verilog. The same RTL is separately compiled by Verilator and driven from the C
 test suite, so any disagreement between the two simulators' width-truncation
 semantics surfaces as a test failure rather than as a silent difference.

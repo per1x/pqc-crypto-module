@@ -46,7 +46,7 @@ hardware/
 | `mlkem_cbd_stream` | PRF 字节流 → 256 个 CBD 系数，流式吐出 | η=2 约 384 / η=3 约 448 |
 | `mlkem_bitpack`、`mlkem_bitunpack` | 变宽度 ByteEncode_d / ByteDecode_d，`d` 是运行时输入（du/dv 随参数集变） | 每拍一字节或一系数 |
 | `mlkem_keygen` | **完整 ML-KEM.KeyGen_internal**：G/PRF/XOF/H、采样、NTT、基乘、打包全在 PL | 约 43.3 k / 次（768） |
-| `mlkem_encaps` | **完整 ML-KEM.Encaps_internal**：H(ek)、G、A 矩阵、r̂/e₁/e₂ 采样、NTT/逆 NTT、压缩打包全在 PL | 约 41.7 k / 次（768） |
+| `mlkem_encaps` | **完整 ML-KEM.Encaps_internal**：H(ek)、G、A 矩阵、r̂/e₁/e₂ 采样、NTT/逆 NTT、压缩打包全在 PL | 约 42.5 k / 次（768） |
 | `ram_dp` | 参数化真双口同步 RAM，推断成块 RAM | 读延迟 1 拍 |
 | `axi4lite_regs` | AXI4-Lite 从机，控制/状态寄存器 | — |
 | `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核 | — |
@@ -158,5 +158,6 @@ Verilator 的 2-state 语义与 Icarus 的 4-state 语义在位宽截断上并�
 
 ## 综合
 
-脚本位于 `syn/`，**从未执行过**——开发机上没有安装 Vivado。参见
-[syn/README.zh-CN.md](syn/README.zh-CN.md)。
+脚本位于 `syn/`。Mac 上没有 Vivado，所以它们在构建机（Vivado 2020.1）上跑；
+[docs/fpga-进展.md](../docs/fpga-进展.md) 里的资源占用与 Fmax 数字全部出自那里，
+且都是布线后的值。参见 [syn/README.zh-CN.md](syn/README.zh-CN.md)。

@@ -4,15 +4,18 @@
 
 Out-of-context synthesis scripts producing utilisation and timing reports.
 
-> **Status: written, never executed.** Vivado is not installed on the development
-> machine. `ooc_synth.tcl` follows the standard non-project flow and may need minor
-> adjustment for your Vivado version on first run.
+> **Status: in use.** Vivado is not installed on the Mac, so this runs on the build
+> machine (Vivado 2020.1). Every utilisation and Fmax figure in `docs/fpga-进展.md`
+> comes from it, taken **post-route** — post-synthesis WNS is usually optimistic.
 
 ```bash
 vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top_module>
 # e.g.
-vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xck26-sfvc784-2LV-c butterfly_ct
+vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xazu3eg-sfvc784-1-i mlkem_encaps
 ```
+
+**Both tclargs are required, part first and top second.** Leaving out the part makes the
+script print its usage and exit — easy to lose a run to.
 
 Synthesisable top levels: `mont_reduce`, `barrett_reduce`, `butterfly_ct`,
 `butterfly_gs` (combinational, constrained by `ooc_comb.xdc`); `ntt_core` and
