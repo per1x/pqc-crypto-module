@@ -1,0 +1,188 @@
+# ZU3EG PL 密码硬件 — 进展
+
+> 分支 `zu3eg-fpga-crypto`，独立 worktree。
+> 与 OP-TEE 隔离主线（分支 `board/zu3eg`）**共用同一个仓库和同一块开发板**，
+> 但**不共用 checkout**：那条线的进展记在桌面 `axu3egb-secure-report/进展报告.md`，
+> 本文件只记 PL 侧，两边不互相写。
+
+## 目标与边界
+
+按真商用密码机的架构，把能塞进 ZU3EG PL 的密码硬件做出来并接进系统。
+**目的是原型验证，不追性能** —— 门槛是"能实现、能塞进这颗片子"。
+
+**目标器件：`xazu3eg-sfvc784-1-i`**（车规 XA 版，不是 XC）。
+这是从构建机上出厂 Vivado 工程 `~/factory_vivado/board_test.xpr` 里挖出来的
+真实器件号。资源与 XCZU3EG 相同：70560 LUT / 141120 FF / 360 DSP /
+216 个 BRAM36。7020 时代的资源假设一律不适用。
+
+**工具链分工**：RTL 与 cocotb 仿真在 Mac（iverilog + verilator + cocotb 2.0.1
+都在本地，仓库原有对拍流程也在这儿）；Vivado 2020.1 综合/布局布线在构建机
+`ssh -p 2222 root@192.168.50.191`。**两者都不需要板子、不需要 JTAG。**
+构建机是 Ubuntu 18.04 + Python 3.6，装不动现代 cocotb，所以仿真不放那边。
+
+**上板一律先停下问用户**，与 OP-TEE 会话串行安排板子时间。
+
+## 落地顺序
+
+| 步 | 内容 | 状态 |
+|---|---|---|
+| S1 | 硬件 TRNG：环振熵源 + SP 800-90B 健康检测 + Keccak 调理 + AXI | ✅ 完成（未上板） |
+| S2 | SHA-3 / SHAKE 海绵包装，把 padding/absorb/squeeze 从 C 挪进 PL | 待做 |
+| S3 | NTT 核改 BRAM 存储版（现有版本是寄存器阵列，7020 时代的取舍） | 待做 |
+| S4 | 完整 ML-KEM 核纯 RTL（keygen/encaps/decaps 状态机） | 待做 |
+| S5 | 密码边界：PL BRAM 密钥保险库 + AXI firewall + zeroize-on-tamper 汇总 | 待做 |
+
+---
+
+# S1 硬件 TRNG（2026-08-12，完成，未上板）
+
+## 做了什么
+
+仓库里原本只有 `trng_health.v`（SP 800-90B §4.4 的 RCT + APT，阈值参数化、
+告警锁存，质量很好）—— 但**缺噪声源本身**，也缺调理和总线接口。补齐成完整熵源：
+
+```
+环振阵列 ──采样/抽取──> 原始比特 ──┬──> 连续健康检测（RCT + APT）
+                                    └──> Keccak 海绵调理 ──> FIFO ──> AXI ──> 安全世界
+```
+
+| 文件 | 作用 |
+|---|---|
+| `hardware/rtl/trng/ring_osc.v` | 单条环振。综合走真反相器环，仿真走抖动行为模型 |
+| `hardware/rtl/trng/trng_source.v` | 8 条环振（13/15/…/27 级）+ 两级同步器 + 抽取 |
+| `hardware/rtl/trng/trng_cond.v` | Keccak 海绵调理器，复用已有的 `keccak_f1600` |
+| `hardware/rtl/trng/trng_top.v` | 启动健康检测、告警处置、zeroize 策略 |
+| `hardware/rtl/trng/trng_axi.v` | AXI4-Lite 从机 + **AxPROT 安全门控** + tamper 引脚 |
+| `hardware/rtl/common/sync_fifo.v` | 可擦除 FIFO（flush 逐地址覆零，不是只挪指针） |
+| `hardware/model/trng_cond_model.py` | 调理器的 Python 黄金模型 |
+| `docs/trng-register-map.zh-CN.md` | 寄存器表与驱动契约 |
+
+## 几个有意的设计选择
+
+**调理用 Keccak 海绵，不是自己发明的白化。**
+SP 800-90B §3.1.5.1.2 给了一份 vetted conditioning 清单（HMAC/CMAC/CBC-MAC/
+Hash_df/哈希函数），用清单里的构件，输出熵可以直接按 `min(输出长度, 输入熵)` 计；
+自己发明的白化（von Neumann、LFSR 打散）要另行论证。
+选 Keccak 还顺带证明了 `keccak_f1600` 是可复用的 IP，而不是只能给
+`pqc_accel_axi` 用的一次性件 —— **零增量面积拿到一个 vetted 构件**。
+
+**健康检测吃的是抽取之后的样本流**，也就是调理器实际消费的那一条。
+检测的对象必须和被使用的对象是同一个，否则检测没有意义。
+
+**告警之后连熵池一起清。**
+标准只要求"停止输出并上报"，动作留给使用方。这里选最保守的：
+告警 → ready 拉低 → FIFO 擦除 → **调理器连同海绵状态一起复位** → 启动检测重跑。
+理由是告警意味着噪声源可能已经失效了一段时间，池子里可能混进了低熵输入，
+留着比丢掉风险大。代价只是重新暖机。
+
+**AxPROT 门控：被拒的读绝不弹 FIFO。**
+`AxPROT[1]=1`（non-secure）的读写一律 DECERR，且不产生任何副作用。
+返回 DECERR 而不是 OKAY+0 是有意的 —— 静默返回 0 会让普通世界以为拿到了
+随机数，而 0 是最糟的"随机数"。
+"被拒的读不弹 FIFO"单独测一条：如果被拒的读仍然弹出，普通世界虽然拿不到数，
+却获得了一个"反复读把熵池抽干"的手段。让安全世界拿不到随机数，
+和自己拿到随机数，是两个不同的攻击，后者一样致命。
+
+**这一层不是唯一一层。** AxPROT 是纵深防御的最内层，完整隔离还要靠
+XMPU/XPPU（在 master 那端就挡掉）和地址映射（不出现在普通世界设备树里）。
+三层的分工写在 `docs/trng-register-map.zh-CN.md`。
+
+## 综合结果（构建机 Vivado 2020.1，`xazu3eg-sfvc784-1-i`，OOC，含布局布线）
+
+| 项 | 值 | 占比 |
+|---|---|---|
+| CLB LUT | **4238** | 6.01 %（共 70560） |
+| CLB 寄存器 | **2540** | 1.80 %（共 141120） |
+| Block RAM | **0** | 0 %（共 216） |
+| DSP | 0 | 0 % |
+| WNS @ 100 MHz | **+5.669 ns** | 时序全过 |
+| 估算 Fmax | **230.9 MHz** | 目标 100 MHz，余量充足 |
+| 片上功耗（估） | 0.298 W（动态 0.077 W） | 估算模型，误差可达 2× |
+
+`All user specified timing constraints are met.`
+
+LUT 主要花在 Keccak 上（单轮迭代的 f[1600] 组合逻辑），环振只占 160 个。
+**整个 TRNG 只用掉这颗片子 6% 的 LUT**，后面 S2–S4 的空间很宽裕。
+
+复现：
+```bash
+ssh -p 2222 root@192.168.50.191
+sudo -H -u build bash -lc "cd ~/fpga_trng && \
+  source /tools/Xilinx/Vivado/2020.1/settings64.sh && \
+  vivado -mode batch -source hardware/syn/trng_ooc.tcl"
+```
+
+## 环振被优化掉是最危险的失效模式，脚本里专门防了
+
+反相器环违反了综合工具的两条基本假设（组合逻辑无环、逻辑可化简）。
+不做三件事，环就会被优化掉：
+
+1. RTL 里 `DONT_TOUCH`（在 `ring_osc.v` 的 `chain` 声明上）；
+2. `ALLOW_COMBINATORIAL_LOOPS TRUE`（在 `trng_ooc.tcl` 里对环网络设置）；
+3. `LUTLP-1` DRC 降级为 Warning，否则 `write_bitstream` 直接失败。
+
+**环被吃掉之后，综合日志里不会有任何报错** —— 采样器采到常量，TRNG 静默变成
+常数发生器。所以 `trng_ooc.tcl` 在**综合后和布线后各数一次** ring_osc 层次下的
+LUT 数量，少于 120 就直接 `error` 退出。实测两次都是 **160 个 LUT**
+（8 条环 × 平均 20 级 = 160），与设计值精确吻合。
+
+> 顺带一个坑：XDC **不是完整的 Tcl**。`if`、`for`、`remove_from_collection`
+> 都会报 `[Designutils 20-1307]` 并**静默忽略那一条约束**，脚本还继续跑完。
+> 第一版把条件判断写进 XDC，三条约束全被吞了。带判断的部分必须放在 `.tcl` 里。
+
+## 验证：21 个 cocotb 用例，全通
+
+在 Mac 上跑（`hardware/tb/cocotb/Makefile.trng`，与主 Makefile 分开 ——
+环振仿真要 ps 级时间单位）：
+
+| 文件 | 用例 | 测什么 |
+|---|---|---|
+| `test_trng_cond.py` | 4 | **与 Python Keccak 海绵模型逐字对拍**，含全零输入、状态推进、背压 |
+| `test_trng_source.py` | 3 | 抽取比、enable 门控、采样通路没接坏 |
+| `test_trng_top.py` | 4 | 启动检测前零输出、第一个字不早于 1088 比特、zeroize |
+| `test_trng_axi.py` | 6 | 寄存器契约、UNDERRUN 锁存、**AxPROT 门控**、tamper |
+| `test_trng_top_alarm.py` | 4 | 告警处置（用 `-P` 把 RCT 阈值压到 2 让告警确定性发生） |
+
+```bash
+cd hardware/tb/cocotb
+make -f Makefile.trng MODULE=test_trng_cond      TOPLEVEL=trng_cond
+make -f Makefile.trng MODULE=test_trng_source    TOPLEVEL=trng_source
+make -f Makefile.trng MODULE=test_trng_top       TOPLEVEL=trng_top
+make -f Makefile.trng MODULE=test_trng_axi       TOPLEVEL=trng_axi
+make -f Makefile.trng MODULE=test_trng_top_alarm TOPLEVEL=trng_top \
+     PARAMS=-Ptrng_top.RCT_CUTOFF=2
+```
+
+对拍里最有分量的一条是调理器：同一条比特流喂给 RTL 和 `trng_cond_model.py`，
+挤出的每个 32 位字都相等。海绵是有状态的，一个字对不上后面全错，
+所以这一条实际上把比特序、lane 顺序、异或注入、置换时机全钉住了。
+
+---
+
+## ⚠️ 尚未成立的事（不要在任何报告里写成结论）
+
+**1. 最小熵完全没有实测。**
+RTL 仿真里环振跑的是 `ring_osc.v` 的行为模型，**抖动量是编的**，比真实器件
+大一到两个数量级 —— 这样做只是为了让下游数字逻辑能在合理仿真时长里被跑到。
+因此：
+
+> **任何最小熵数字都不能从仿真里得出。**
+> 测试里"看起来很随机"的断言（1 的比例 0.507、最长游程 10）
+> **只是在防低级错误**（采样器接反、异或写成或、抽取计数器差一），
+> 不构成任何熵评估。
+
+当前假设 **H = 0.5 bit/样本**，健康检测阈值（RCT C=41、APT W=1024 C=793）和
+调理比例（1088 比特进 → 256 比特出）都是照它算的。上板之后必须：
+1. 导出 ≥1M 个原始比特（`DECIM` 可调）；
+2. 跑 NIST EntropyAssessment（SP 800-90B 官方工具）；
+3. 按实测的 H 反过来定 `DECIM`、`RCT_CUTOFF`、`APT_CUTOFF`、`ABSORB_BLOCKS`。
+
+**2. 环振的物理布局没有约束。**
+真实设计要用 `LOC`/`pblock` 把各条环分散摆放，避免互锁（injection locking）
+和电源耦合。当前是 OOC 综合，布局由工具自选。集成进完整工程时要补。
+
+**3. 没上过板。** 以上全部是仿真 + 综合结果。
+
+**4. 还没接进 pqc-hsm 的软件路径。**
+`accel_transport` 的 mmap 通路、以及"让安全世界从它取随机、替掉软件 RNG"
+这一步还没做 —— 那要等 OP-TEE 主线的 TA 稳定后再合过来接。

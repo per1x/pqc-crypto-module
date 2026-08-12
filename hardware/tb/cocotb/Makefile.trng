@@ -1,0 +1,51 @@
+# TRNG 的 cocotb 对拍 —— 与主 Makefile 分开，理由是时间单位不同
+#
+# 环振的仿真模型工作在 ps 量级（周期约 2 ns，抖动几十 ps），主 Makefile 那套
+# 1 ns 的时间单位根本分辨不出来。把它并进主 Makefile 就得把所有既有测试的
+# 时间单位一起改成 1 ps，收益为零、风险不小。所以单开一个。
+#
+# 用法：
+#   make -f Makefile.trng MODULE=test_trng_cond   TOPLEVEL=trng_cond
+#   make -f Makefile.trng MODULE=test_trng_source TOPLEVEL=trng_source
+#   make -f Makefile.trng MODULE=test_trng_top    TOPLEVEL=trng_top
+#
+# TRNG_SIM_MODEL 把 ring_osc 换成带抖动的行为模型 —— 真正的反相器环在
+# Icarus 里是零延迟组合环，会死循环。**综合时绝不能定义这个宏**，
+# 定义了就等于把噪声源换成一个伪随机发生器。见 ring_osc.v 文件头。
+
+SIM           ?= icarus
+TOPLEVEL_LANG ?= verilog
+
+RTL_TRNG   := $(PWD)/../../rtl/trng
+RTL_KECCAK := $(PWD)/../../rtl/keccak
+RTL_COMMON := $(PWD)/../../rtl/common
+
+MODULE   ?= test_trng_cond
+TOPLEVEL ?= trng_cond
+
+# ring_osc.v 要排在最前：它里面的 `timescale 指令按编译顺序生效。
+VERILOG_SOURCES = \
+  $(RTL_TRNG)/ring_osc.v \
+  $(RTL_TRNG)/trng_source.v \
+  $(RTL_TRNG)/trng_health.v \
+  $(RTL_TRNG)/trng_cond.v \
+  $(RTL_TRNG)/trng_top.v \
+  $(RTL_TRNG)/trng_axi.v \
+  $(RTL_COMMON)/sync_fifo.v \
+  $(RTL_KECCAK)/keccak_f1600.v
+
+COMPILE_ARGS += -DTRNG_SIM_MODEL
+
+# 每个顶层用各自的构建目录。共用一个的话，换 TOPLEVEL 重跑时 make 会认为
+# .vvp 已经是最新的而不重新编译，于是拿着上一个顶层的镜像去跑，
+# 报 "Can not find root handle"。参数覆盖（PARAMS）同理，也要进目录名。
+SIM_BUILD = sim_build_$(TOPLEVEL)$(if $(PARAMS),_p)
+
+COCOTB_HDL_TIMEUNIT      = 1ps
+COCOTB_HDL_TIMEPRECISION = 1ps
+
+# 顶层参数覆盖：例如把启动检测的样本数调小，让测试跑得完。
+# 用法 make -f Makefile.trng ... PARAMS="-Ptrng_top.STARTUP_SAMPLES=64"
+COMPILE_ARGS += $(PARAMS)
+
+include $(shell cocotb-config --makefiles)/Makefile.sim

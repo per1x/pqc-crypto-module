@@ -11,7 +11,8 @@ __pycache__/
 .venv-p11/
 
 # Simulation and synthesis outputs
-hardware/tb/cocotb/sim_build/
+# Makefile.trng 给每个顶层单开一个构建目录（sim_build_trng_axi 等），所以带通配。
+hardware/tb/cocotb/sim_build*/
 hardware/tb/cocotb/results.xml
 hardware/syn/rpt/
 
