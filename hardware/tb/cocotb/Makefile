@@ -51,6 +51,7 @@ VERILOG_SOURCES = \
   $(RTL_BUS)/key_vault.v \
   $(RTL_BUS)/key_vault_axi.v \
   $(RTL_BUS)/pqc_accel_axi.v \
+  $(RTL_BUS)/mlkem_axi.v \
   $(RTL_BUS)/sym_axi.v \
   $(RTL_BUS)/sym_vault_top.v \
   $(PWD)/tb_mlkem_units.v \

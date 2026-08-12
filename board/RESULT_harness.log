@@ -1,0 +1,28 @@
+=== harness 开始 Wed Aug 12 11:13:51 UTC 2026 payload=/media/sd-mmcblk1p2/hsm/pay_full.sh ===
+已解绑 8 个 PL 驱动
+--- payload 开始 ---
+载入 zu3eg_hsm.bit
+cp: '/lib/firmware/zu3eg_hsm.bit' and '/lib/firmware/zu3eg_hsm.bit' are the same file
+Time taken to load BIN is 2696.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+rc=0 state=operating
+--- 四个功能从机的 VERSION ---
+读 0x80000020 ...
+0x80000020 = 0x00010000
+读 0x80010000 ...
+0x80010000 = 0x00010000
+读 0x80020000 ...
+0x80020000 = 0x00010000
+读 0x80030000 ...
+0x80030000 = 0x00010000
+--- 全套硬件自测（NIST ACVP / FIPS 197 / GB-T / TRNG / 边界反证）---
+hsm_hwtest rc=0
+--- payload 结束 rc=0 ---
+恢复：装回厂家 bitstream
+cp: '/lib/firmware/factory.bit' and '/lib/firmware/factory.bit' are the same file
+Time taken to load BIN is 2240.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+恢复：重新 bind 驱动
+恢复：eth0 地址
+eth0: 11: eth0    inet 192.168.50.174/24 scope global eth0\       valid_lft forever preferred_lft forever
+=== harness 结束 ===

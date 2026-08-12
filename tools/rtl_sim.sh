@@ -75,6 +75,7 @@ echo
 echo "  总线接口"
 run test_axi         pqc_accel_axi
 run test_key_vault   key_vault_axi
+run test_mlkem_axi   mlkem_axi
 
 echo
 echo "  对称与国密"
