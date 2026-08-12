@@ -46,6 +46,11 @@ module fan_sysmon #(
     output wire        dbg_valid,
     output wire        dbg_timeout
 );
+    // 分频比放在 [15:8]。DCLK_DIV 是 integer 参数，任何算术都会先扩成 32 位，
+    // 所以显式取低 8 位再拼 —— 这样结果天然是 16 位，不用靠截断。
+    localparam [7:0]  DIV8   = DCLK_DIV[7:0];
+    localparam [15:0] INIT42 = {DIV8, 8'h00};
+
     wire        den, dwe;
     wire [7:0]  daddr;   // 由 sysmon_drp 驱动（温度地址 / 调试地址切换）
     wire [15:0] di, dout;
@@ -70,7 +75,7 @@ module fan_sysmon #(
         .SIM_MONITOR_FILE ("design.txt"),
         .INIT_40 (16'h0000),      // 通道/平均：默认
         .INIT_41 (16'h00F0),      // SEQ=0 → **默认模式**，报警全关（见文件头 ①）
-        .INIT_42 (DCLK_DIV << 8)  // [15:8] = DCLK 分频比（见文件头 ②）
+        .INIT_42 (INIT42)         // [15:8] = DCLK 分频比（见文件头 ②）
     ) u_sysmon (
         .DCLK      (clk),
         .RESET     (~rst_n),

@@ -115,15 +115,10 @@ module zu3eg_hsm_top (
     wire [1:0]  m_awburst, m_arburst;
     wire        m_wlast;
 
-    reg  [15:0] awid_r, arid_r;
-    always @(posedge clk_sys) begin
-        if (m_awvalid && m_awready) awid_r <= m_awid;
-        if (m_arvalid && m_arready) arid_r <= m_arid;
-    end
-    wire [15:0] m_bid   = awid_r;
-    wire [15:0] m_rid   = arid_r;
-    wire        m_rlast = m_rvalid;
-
+    // ⚠️ 这段回显逻辑用到 clk_sys，所以它**搬到时钟那一段之后**去了 ——
+    //    就在 BUFGCE_DIV 下面。同一个模块里"先用后声明"正是让板子挂死两次的
+    //    那类写法：Icarus 直接报 Unable to bind wire，Vivado 却可能静默接受
+    //    （这一版恰好接对了，但那是运气，不是保证）。
     // ================= 时钟与复位 =================
     // ⚠️⚠️ **这一段必须放在 PS 例化之前。**
     // 第一版把它放在后面，于是 PS 的 .maxihpm0_lpd_aclk(clk_sys) 引用了一个
@@ -146,6 +141,16 @@ module zu3eg_hsm_top (
         .CE  (1'b1),
         .CLR (1'b0),
         .I   (pl_clk0));
+
+    // AXI4 的响应回显（上面那段搬下来的，因为要用 clk_sys）
+    reg  [15:0] awid_r, arid_r;
+    always @(posedge clk_sys) begin
+        if (m_awvalid && m_awready) awid_r <= m_awid;
+        if (m_arvalid && m_arready) arid_r <= m_arid;
+    end
+    wire [15:0] m_bid   = awid_r;
+    wire [15:0] m_rid   = arid_r;
+    wire        m_rlast = m_rvalid;
 
     zynq_ultra_ps_e_0 u_ps (
         .maxihpm0_lpd_aclk (clk_sys),
