@@ -52,7 +52,24 @@ module tb_mlkem_units (
     output wire         cbs_out_valid,
     input  wire         cbs_out_ready,
     output wire signed [15:0] cbs_out_coeff,
-    output wire [8:0]   cbs_count
+    output wire [8:0]   cbs_count,
+
+    // 变宽度 ByteEncode_d / ByteDecode_d
+    input  wire [3:0]   bp_d,
+    input  wire         bp_in_valid,
+    output wire         bp_in_ready,
+    input  wire [11:0]  bp_in_data,
+    output wire         bp_out_valid,
+    input  wire         bp_out_ready,
+    output wire [7:0]   bp_out_data,
+
+    input  wire [3:0]   bu_d,
+    input  wire         bu_in_valid,
+    output wire         bu_in_ready,
+    input  wire [7:0]   bu_in_data,
+    output wire         bu_out_valid,
+    input  wire         bu_out_ready,
+    output wire [11:0]  bu_out_data
 );
 
     mlkem_cbd2 u_cbd2 (.rand_in(cbd2_in), .coeffs(cbd2_out));
@@ -74,6 +91,16 @@ module tb_mlkem_units (
         .in_valid(cbs_in_valid), .in_ready(cbs_in_ready), .in_data(cbs_in_data),
         .out_valid(cbs_out_valid), .out_ready(cbs_out_ready),
         .out_coeff(cbs_out_coeff), .count(cbs_count));
+
+    mlkem_bitpack u_bitpack (
+        .clk(clk), .rst_n(rst_n), .d(bp_d),
+        .in_valid(bp_in_valid), .in_ready(bp_in_ready), .in_data(bp_in_data),
+        .out_valid(bp_out_valid), .out_ready(bp_out_ready), .out_data(bp_out_data));
+
+    mlkem_bitunpack u_bitunpack (
+        .clk(clk), .rst_n(rst_n), .d(bu_d),
+        .in_valid(bu_in_valid), .in_ready(bu_in_ready), .in_data(bu_in_data),
+        .out_valid(bu_out_valid), .out_ready(bu_out_ready), .out_data(bu_out_data));
 
     mlkem_encode12 u_encode12 (.c0(enc_c0), .c1(enc_c1), .bytes_out(enc_bytes));
     mlkem_decode12 u_decode12 (.bytes_in(dec_bytes), .c0(dec_c0), .c1(dec_c1));

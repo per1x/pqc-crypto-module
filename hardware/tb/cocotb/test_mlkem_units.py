@@ -322,3 +322,117 @@ async def test_cbd_stream(dut):
             assert int(dut.cbs_in_ready.value) == 0, "采样结束后 in_ready 仍为高"
 
     dut._log.info("mlkem_cbd_stream：η=2/3 各两组 SHAKE256 流与 FIPS 203 定义式逐系数一致")
+
+
+def bits_pack_reference(vals: list[int], d: int) -> bytes:
+    """ByteEncode_d 的独立参考实现：一位一位地摆，不用移位技巧
+
+    刻意写得和 RTL 的"移位累加器"完全不同 —— 否则两边同一个误解会一起错。
+    """
+    bits = []
+    for v in vals:
+        for i in range(d):
+            bits.append((v >> i) & 1)
+    out = bytearray()
+    for i in range(0, len(bits), 8):
+        b = 0
+        for j in range(8):
+            b |= bits[i + j] << j
+        out.append(b)
+    return bytes(out)
+
+
+@cocotb.test()
+async def test_bitpack(dut):
+    """变宽度 ByteEncode_d：d ∈ {1,4,5,10,11} 各一条 256 值的流"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    dut.rst_n.value = 0
+    dut.bp_in_valid.value = 0
+    dut.bp_out_ready.value = 0
+    dut.bp_d.value = 10
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+    rng = random.Random(0xB17)
+    for d in (1, 4, 5, 10, 11):
+        vals = [rng.randrange(1 << d) for _ in range(256)]
+        want = bits_pack_reference(vals, d)
+
+        dut.bp_d.value = d
+        got = bytearray()
+        pos = 0
+        guard = 0
+        while len(got) < len(want):
+            guard += 1
+            assert guard < 20000, f"d={d}：打包器不再前进"
+            await Timer(1, unit="ns")
+            feed = int(dut.bp_in_ready.value) == 1 and pos < len(vals)
+            dut.bp_in_valid.value = 1 if feed else 0
+            dut.bp_in_data.value = vals[pos] if feed else 0
+            dut.bp_out_ready.value = 1
+            await Timer(1, unit="ns")
+            if int(dut.bp_out_valid.value) == 1:
+                got.append(int(dut.bp_out_data.value))
+            await RisingEdge(dut.clk)
+            if feed:
+                pos += 1
+        dut.bp_in_valid.value = 0
+        dut.bp_out_ready.value = 0
+        await Timer(1, unit="ns")
+
+        assert bytes(got) == want, f"d={d}：打包结果与逐比特参考不一致"
+        assert pos == 256, f"d={d}：消耗了 {pos} 个系数，应当是 256"
+        # 256·d 比特整字节，跑完累加器必须是空的 —— 否则下一个多项式会错位
+        assert int(dut.bp_in_ready.value) == 1 and int(dut.bp_out_valid.value) == 0, \
+            f"d={d}：跑完一个多项式后累加器没清空"
+
+    dut._log.info("mlkem_bitpack：d ∈ {1,4,5,10,11} 与逐比特参考逐字节一致，跨 d 无残留")
+
+
+@cocotb.test()
+async def test_bitunpack(dut):
+    """变宽度 ByteDecode_d：必须是 bitpack 的逆"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    dut.rst_n.value = 0
+    dut.bu_in_valid.value = 0
+    dut.bu_out_ready.value = 0
+    dut.bu_d.value = 10
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+    rng = random.Random(0xB18)
+    for d in (1, 4, 5, 10, 11, 12):
+        vals = [rng.randrange(1 << d) for _ in range(256)]
+        stream = bits_pack_reference(vals, d)
+
+        dut.bu_d.value = d
+        got = []
+        pos = 0
+        guard = 0
+        while len(got) < 256:
+            guard += 1
+            assert guard < 20000, f"d={d}：解包器不再前进"
+            await Timer(1, unit="ns")
+            feed = int(dut.bu_in_ready.value) == 1 and pos < len(stream)
+            dut.bu_in_valid.value = 1 if feed else 0
+            dut.bu_in_data.value = stream[pos] if feed else 0
+            dut.bu_out_ready.value = 1
+            await Timer(1, unit="ns")
+            if int(dut.bu_out_valid.value) == 1:
+                got.append(int(dut.bu_out_data.value))
+            await RisingEdge(dut.clk)
+            if feed:
+                pos += 1
+        dut.bu_in_valid.value = 0
+        dut.bu_out_ready.value = 0
+        await Timer(1, unit="ns")
+
+        assert got == vals, f"d={d}：解包结果与原值不一致"
+        assert pos == 32 * d, f"d={d}：消耗了 {pos} 字节，应当是 {32 * d}"
+        assert int(dut.bu_out_valid.value) == 0, f"d={d}：跑完后累加器还剩着比特"
+
+    dut._log.info("mlkem_bitunpack：d ∈ {1,4,5,10,11,12} 与 bitpack 严格互逆，跨 d 无残留")

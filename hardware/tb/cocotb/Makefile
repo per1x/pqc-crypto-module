@@ -27,6 +27,7 @@ VERILOG_SOURCES = \
   $(RTL_MLKEM)/compress.v \
   $(RTL_MLKEM)/sample.v \
   $(RTL_MLKEM)/cbd_stream.v \
+  $(RTL_MLKEM)/bitpack.v \
   $(RTL_MLKEM)/keygen.v \
   $(RTL_MLKEM)/pack.v \
   $(RTL_MLDSA)/mont_reduce.v \
