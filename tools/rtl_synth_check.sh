@@ -22,7 +22,8 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # 文件名之间必须用空格连接：yosys 的 -p 脚本按行拆命令，换行会被当成新命令
-RTL_FILES=$(find "$ROOT/hardware/rtl" -name '*.v' | sort | tr '\n' ' ')
+# 风扇温控在 hardware/rtl/ 之外（fpga/fan_ctrl/），一样要过可综合性检查。
+RTL_FILES=$(find "$ROOT/hardware/rtl" "$ROOT/fpga/fan_ctrl" -name '*.v' 2>/dev/null | sort | tr '\n' ' ')
 
 command -v yosys >/dev/null 2>&1 || { echo "SKIP: 没装 yosys（brew install yosys）"; exit 0; }
 
@@ -50,7 +51,11 @@ LOOP_OK=" ring_osc trng_source trng_top trng_axi "
 # 这**不是**缺陷：板级顶层按定义就是绑器件的那一层，算法核那边仍然是
 # 可移植的纯 RTL（整个仓库的厂商原语只出现在这一个文件里）。
 # 它的正确性由 Vivado 的实现流程本身保证 —— 跑不通就出不了 bitstream。
-VENDOR_TOP=" zu3eg_hsm_top "
+#
+# fan_sysmon 也在列：它例化 SYSMONE4（UltraScale+ 的系统监测原语）。
+# 那个文件里**只有**原语和一根连线，真正的时序逻辑被特意拆到 sysmon_drp.v，
+# 所以"厂商原语"这件事只污染一个文件，DRP 状态机照样进 Yosys 和 cocotb。
+VENDOR_TOP=" zu3eg_hsm_top fan_sysmon "
 
 echo "Yosys 可综合性检查（通用综合流程）"
 while read -r m; do

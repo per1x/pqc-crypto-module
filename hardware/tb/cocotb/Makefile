@@ -14,6 +14,8 @@ RTL_BUS       := $(PWD)/../../rtl/bus
 RTL_TRNG      := $(PWD)/../../rtl/trng
 RTL_COMMON    := $(PWD)/../../rtl/common
 RTL_SYM       := $(PWD)/../../rtl/sym
+# 风扇控制在 fpga/fan_ctrl/ —— 与密码核代码分开放，但同一个 bitstream
+RTL_FAN       := $(PWD)/../../../fpga/fan_ctrl
 
 # 用法：make MODULE=test_ops TOPLEVEL=mont_reduce
 MODULE   ?= test_ops
@@ -39,6 +41,8 @@ VERILOG_SOURCES = \
   $(RTL_MLDSA)/ntt_core.v \
   $(RTL_MLDSA)/rounding.v \
   $(RTL_MLDSA)/sample.v \
+  $(RTL_FAN)/fan_ctrl.v \
+  $(RTL_FAN)/sysmon_drp.v \
   $(RTL_SYM)/sbox.v \
   $(RTL_SYM)/aes_core.v \
   $(RTL_SYM)/sm4_core.v \
@@ -75,6 +79,11 @@ COMPILE_ARGS += -Pmlkem_encaps.DEBUG_BANK=1
 endif
 ifeq ($(TOPLEVEL),mlkem_decaps)
 COMPILE_ARGS += -Pmlkem_decaps.DEBUG_BANK=1
+endif
+# 风扇的"温度陈旧就强制满速"在真硬件上要等约 0.9 秒才触发，
+# 仿真里等不起 —— 把门限压到 200 拍，测的仍是同一条逻辑。
+ifeq ($(TOPLEVEL),fan_ctrl)
+COMPILE_ARGS += -Pfan_ctrl.STALE_LIMIT=200
 endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

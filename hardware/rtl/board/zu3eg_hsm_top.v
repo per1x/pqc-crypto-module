@@ -6,7 +6,11 @@
 //        └─ BUFGCE_DIV /2 ──▶ 75 MHz 给全部密码核             ├─ 0x8001_0000 key_vault_axi
 //                                                             ├─ 0x8002_0000 sym_axi
 //                                                             ├─ 0x8003_0000 mlkem_axi
-//                                                             └─ 0x8004_0000 金丝雀（只用来被拒）
+//                                                             ├─ 0x8004_0000 金丝雀（只用来被拒）
+//                                                             └─ 0x8005_0000 风扇观测口
+//
+//   另有一条**完全不经过 AXI** 的通路：SYSMONE4 ──▶ fan_ctrl ──▶ AA11。
+//   风扇不依赖软件，理由见 fpga/fan_ctrl/fan_ctrl.v 的文件头。
 //
 // ============================================================================
 // 【时钟：为什么要分频，为什么用 BUFGCE_DIV 而不是 MMCM】
@@ -62,14 +66,20 @@
 `default_nettype none
 
 // ============================================================================
-// 【没有任何外部管脚】
+// 【唯一的外部管脚：风扇 PWM】
 // ============================================================================
-// 本设计与外界的全部往来都经过 PS：AXI 从 PS 来，时钟与复位从 PS 来。
-// 于是**一个 XDC 管脚约束都不需要**，也就没有"管脚号写错"这一整类问题
-// —— 而板子的管脚表我手上没有，猜一个反而危险。
+// 密码那一半与外界的全部往来仍然只经过 PS（AXI、时钟、复位都从 PS 来），
+// 一个管脚约束都不需要。**整个设计唯一的外部管脚是风扇 PWM（AA11）**，
+// 约束在 hardware/syn/constraints/board_pins.xdc —— 管脚号抄自厂家
+// system.xdc，不是猜的。
 //
-// 代价是没有 LED 之类不经过总线的旁证。等真要接篡改检测管脚时再加 XDC。
-module zu3eg_hsm_top ();
+// 风扇和密码核在同一个 bitstream 里，是因为 **PL 只有一份**：运行时载进去的
+// 那一个 bitstream 就是全部，分成两个"设计"没有意义（载了谁另一个就没了）。
+// 但**代码是分开的**（fpga/fan_ctrl/ vs hardware/rtl/）：风扇不碰密码的任何
+// 信号，密码也不碰风扇的，两边只共用时钟和复位。
+module zu3eg_hsm_top (
+    output wire fan          // AA11，低=转（见 fpga/fan_ctrl/fan_ctrl.v）
+);
     // ================= PS =================
     wire        pl_clk0;
     wire        pl_resetn0;
@@ -211,7 +221,7 @@ module zu3eg_hsm_top ();
     wire tamper = 1'b0;
 
     // ================= 地址译码 =================
-    localparam integer NS = 5;
+    localparam integer NS = 6;
 
     wire [8*NS-1:0]  x_awaddr, x_araddr;
     wire [3*NS-1:0]  x_awprot, x_arprot;
@@ -322,6 +332,52 @@ module zu3eg_hsm_top ();
         .s_axi_rvalid(x_rvalid[4]), .s_axi_rready(x_rready[4]),
         .tamper(tamper),
         .use_sel(3'd0), .use_key(), .use_valid(), .vault_tampered());
+
+    // ================= 槽 5：风扇温控（与密码无关）=================
+    // ⚠️ **这一路的存在不影响散热的可靠性。** fan_ctrl 的温度直接来自 PL 里的
+    //    SYSMONE4，PWM 直接出到 AA11，整条链路只依赖 clk_sys —— AXI 这一路
+    //    只是"能读到温度和占空比"的观测口，拔掉它风扇照转。
+    //
+    // 有这个口是为了能**证明**温控在工作：要在板上看到"空载低占空比、加负载
+    // 结温上去占空比跟上"，光靠耳朵不算验证。
+    wire [15:0] fan_temp;
+    wire        fan_temp_valid, fan_sysmon_to;
+    wire [7:0]  fan_cur_duty, fan_ovr_duty;
+    wire [2:0]  fan_cur_step;
+    wire [15:0] fan_cur_temp;
+    wire        fan_forced_full, fan_ovr_en;
+
+    fan_sysmon #(.PERIOD(75_000)) u_fan_sysmon (   // 75 MHz 下 1 ms 采一次
+        .clk(clk_sys), .rst_n(rst_n),
+        .temp_code(fan_temp), .temp_valid(fan_temp_valid),
+        .sysmon_timeout(fan_sysmon_to));
+
+    fan_ctrl #(.PWM_PERIOD(3000),          // 75 MHz / 3000 = 25 kHz
+               .STALE_LIMIT(64_000_000))   // 约 0.85 秒没温度就强制满速
+    u_fan (
+        .clk(clk_sys), .rst_n(rst_n),
+        .temp_code(fan_temp), .temp_valid(fan_temp_valid),
+        .ovr_en(fan_ovr_en), .ovr_duty(fan_ovr_duty),
+        .cur_temp(fan_cur_temp), .cur_duty(fan_cur_duty),
+        .cur_step(fan_cur_step), .forced_full(fan_forced_full),
+        .fan_pin(fan));
+
+    fan_ctrl_axi u_fan_axi (
+        .clk(clk_sys), .rst_n(rst_n),
+        .s_axi_awaddr(x_awaddr[8*5 +: 8]), .s_axi_awprot(x_awprot[3*5 +: 3]),
+        .s_axi_awvalid(x_awvalid[5]), .s_axi_awready(x_awready[5]),
+        .s_axi_wdata(x_wdata[32*5 +: 32]), .s_axi_wstrb(x_wstrb[4*5 +: 4]),
+        .s_axi_wvalid(x_wvalid[5]), .s_axi_wready(x_wready[5]),
+        .s_axi_bresp(x_bresp[2*5 +: 2]), .s_axi_bvalid(x_bvalid[5]),
+        .s_axi_bready(x_bready[5]),
+        .s_axi_araddr(x_araddr[8*5 +: 8]), .s_axi_arprot(x_arprot[3*5 +: 3]),
+        .s_axi_arvalid(x_arvalid[5]), .s_axi_arready(x_arready[5]),
+        .s_axi_rdata(x_rdata[32*5 +: 32]), .s_axi_rresp(x_rresp[2*5 +: 2]),
+        .s_axi_rvalid(x_rvalid[5]), .s_axi_rready(x_rready[5]),
+        .cur_temp(fan_cur_temp), .cur_duty(fan_cur_duty),
+        .cur_step(fan_cur_step), .forced_full(fan_forced_full),
+        .sysmon_timeout(fan_sysmon_to),
+        .ovr_en(fan_ovr_en), .ovr_duty(fan_ovr_duty));
 
     wire _unused = &{1'b0, m_awlen, m_arlen,
                      m_awsize, m_arsize, m_awburst, m_arburst,

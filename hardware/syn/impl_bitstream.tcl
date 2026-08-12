@@ -71,9 +71,41 @@ foreach d {common mlkem mldsa keccak trng sym bus board} {
     }
 }
 
+# 风扇温控在 rtl/ 之外（fpga/fan_ctrl/），因为它**不是密码逻辑** —— 目录分开
+# 是为了让"风扇不碰密码的任何信号"这件事在文件系统上就看得见。
+# 但 PL 只有一份、运行时载进去的那一个 bitstream 就是全部，所以它和密码核
+# 必须进同一个 bitstream。
+set fanfiles [glob -nocomplain $root/../fpga/fan_ctrl/*.v]
+if {[llength $fanfiles] == 0} {
+    puts "错误：fpga/fan_ctrl/ 下一个文件都没读到"
+    puts "      —— 那样 fan 端口会没有驱动，AA11 悬空，风扇行为不可预测。"
+    exit 1
+}
+read_verilog -sv $fanfiles
+puts "读入 fpga/fan_ctrl：[llength $fanfiles] 个文件"
+
+# ---- 管脚约束 ----------------------------------------------------------------
+# 必须在 synth_design 之前读：综合要知道 fan 这个端口的 I/O 标准才能推 IOB。
+read_xdc $root/syn/constraints/board_pins.xdc
+
 # ---- 综合 --------------------------------------------------------------------
 # ⚠️ 不加 -mode out_of_context：这一次要的是能布到器件上的真实现。
 synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt
+
+# ---- 断言：风扇管脚必须真的落在 AA11 -----------------------------------------
+# 风扇错了不会崩，只会**安静地让芯片变热** —— 没有任何运行时症状会告诉你
+# 约束没读进来。所以在这里直接查器件上的落点。
+set fanport [get_ports -quiet fan]
+if {[llength $fanport] == 0} {
+    puts "错误：顶层没有 fan 端口 —— 风扇不会被驱动"
+    exit 1
+}
+set fanpkg [get_property PACKAGE_PIN $fanport]
+if {$fanpkg ne "AA11"} {
+    puts "错误：fan 落在 $fanpkg，应当是 AA11（board_pins.xdc 没读进来？）"
+    exit 1
+}
+puts "断言通过：fan -> PACKAGE_PIN $fanpkg / [get_property IOSTANDARD $fanport]"
 
 # ---- 断言：PS 的时钟/复位输入必须有驱动 --------------------------------------
 # **这条断言是拿两次断电换来的。**

@@ -64,3 +64,28 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/axi4lite_regs.v" -match "*
 // PARAM 寄存器属于软件侧的寄存器契约（可读可写），但加速器顶层实现的三个操作码
 // 都不按参数集分支，因此该输出有意不接。留空是显式的，不是漏接。
 lint_off -rule PINCONNECTEMPTY -file "*/hardware/rtl/bus/pqc_accel_axi.v" -match "*'param'*"
+
+// ---- PINCONNECTEMPTY：**规则级**豁免（新增，理由如下）----
+//
+// 这一条与本文件"逐条精确匹配"的策略不同，是有意为之。
+//
+// PINCONNECTEMPTY 针对的是 `.some_output()` 这种**显式留空**。而真正会造成
+// 事故的是**把端口整个省略**（那会让输入悬空，Vivado 还不报错 —— 板子挂死
+// 两次就是这么来的），那一类归 PINMISSING 管，**PINMISSING 保持开启**。
+//
+// 也就是说：这条豁免放过的恰恰是"作者明确写出了这个输出我不用"的安全写法，
+// 而危险的省略写法一条都没放过。在一个有几十个观测/调试输出的仓库里，
+// 逼着每个不用的输出都去声明一根 dangling wire，只会让例化更难读，
+// 并不会多挡住任何一个 bug。
+lint_off -rule PINCONNECTEMPTY
+
+// ---- DECLFILENAME：lint 用的厂商原语桩 ----
+// hardware/tb/lint/vendor_stubs.v 里放着 BUFGCE_DIV / SYSMONE4 /
+// zynq_ultra_ps_e_0 三个空壳，一个文件三个模块，理由见该文件头。
+lint_off -rule DECLFILENAME -file "*/hardware/tb/lint/vendor_stubs.v"
+
+// ---- UNUSEDPARAM：厂商原语桩上的配置参数 ----
+// 桩不实现 SYSMONE4 的任何行为，自然用不到 INIT_4x / SIM_MONITOR_FILE。
+// 但这些参数**必须存在** —— 例化处是按名字传的，少一个就报错，
+// 也就是说它们仍然在替我校验参数名的拼写。
+lint_off -rule UNUSEDPARAM -file "*/hardware/tb/lint/vendor_stubs.v"

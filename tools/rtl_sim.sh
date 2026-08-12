@@ -85,6 +85,10 @@ run test_sm3         sm3_core
 run test_sym_vault   sym_vault_top
 
 echo
+echo "  风扇控制"
+run test_fan_ctrl    fan_ctrl
+
+echo
 echo "  噪声源健康检测"
 run test_trng_health tb_trng_health
 
