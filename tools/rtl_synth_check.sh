@@ -31,9 +31,51 @@ n=0
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 
+# 允许存在组合环的模块。
+# ring_osc 是反相器环 —— 组合环**就是**它的工作原理，环被打断就没有熵了。
+# 综合侧靠 hardware/syn/constraints/trng_ro.xdc 里的 DONT_TOUCH +
+# ALLOW_COMBINATORIAL_LOOPS + LUTLP-1 降级三条放行；Yosys 没有对应开关，
+# `check -assert` 一律把逻辑环判成错误，所以这几个模块要单独走一条路。
+#
+# 单独那条路**不是"跳过检查"**：仍然跑 check，只是把"ring_osc 里的逻辑环"
+# 这一条从问题清单里划掉，剩下任何一条问题照样算失败。所以这几个模块的
+# 其它可综合性问题不会被这条例外掩盖。
+#
+# trng_source / trng_top / trng_axi 在列，是因为它们例化了 ring_osc，
+# 环被逐层带上来。
+LOOP_OK=" ring_osc trng_source trng_top trng_axi "
+
 echo "Yosys 可综合性检查（通用综合流程）"
 while read -r m; do
   n=$((n + 1))
+  if [[ "$LOOP_OK" == *" $m "* ]]; then
+    yosys -q -p "
+      read_verilog $RTL_FILES
+      hierarchy -top $m -check
+      proc
+      opt
+      memory
+      opt
+      check
+      stat
+    " >"$LOG" 2>&1
+    # check 报的每个问题都以 "Warning: found ..." 开头；只放行 ring_osc 的环。
+    # 带参数例化后 Yosys 会把模块改名成 `$paramod$<hex>\ring_osc`（STAGES 每
+    # 个实例不同，所以 trng_source 下面有 8 个不同的哈希），改名形式一并放行；
+    # 但前缀写死成 $paramod$<hex>\，免得 my_ring_osc 之类也被顺手放过。
+    others=$(grep -E '^Warning: found ' "$LOG" \
+             | grep -vE 'logic loop in module (\$paramod\$[0-9a-f]+\\)?ring_osc:' \
+             || true)
+    if [[ -n "$others" ]] || grep -q '^ERROR' "$LOG"; then
+      printf '  ✗ %-24s\n' "$m"
+      { grep -E '^ERROR' "$LOG"; echo "$others"; } | head -5 | sed 's/^/      /'
+      fail=1
+      continue
+    fi
+    printf '  ✓ %-24s (组合环已按环振例外放行)\n' "$m"
+    continue
+  fi
+
   if ! yosys -q -p "
     read_verilog $RTL_FILES
     hierarchy -top $m -check
