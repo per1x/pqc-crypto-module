@@ -54,6 +54,12 @@ hardware/
 | `axi4lite_firewall` | AXI4-Lite 防火墙：AxPROT / 地址窗口 / tamper 门控，**不合规的事务不进下游**，带违规计数 | 每笔访问 3~4 拍 |
 | `key_vault` | PL 内密钥仓，8 槽 × 256 bit 寄存器；只写入口 + 只给 PL 内部的使用口；tamper 一拍全清并锁存 | 擦除 1 拍 |
 | `key_vault_axi` | 密钥仓的 AXI4-Lite 从机 = 防火墙 + 元数据寄存器 + 仓 | — |
+| `aes_sbox`、`aes_inv_sbox`、`sm4_sbox` | 组合查表，由 `sym_oracle.py --emit-sbox` 生成 | — |
+| `aes_core` | AES-128/256 分组加解密（FIPS 197），密钥扩展与分组是两条命令 | 装密钥 41/53，每分组 11/15 |
+| `sm4_core` | SM4 分组加解密（GB/T 32907），解密复用加密通路只倒轮密钥 | 装密钥 32，每分组 33 |
+| `sm3_core` | SM3 杂凑（GB/T 32905），填充在核内做 | 65 / 64 字节块 |
+| `sym_axi` | AES/SM4/SM3 的 AXI4-Lite 从机；**没有 KEY 寄存器**，密钥从 `key_vault` 的 use 口进来 | — |
+| `sym_vault_top` | 密钥仓 + 对称核的顶层，两个从机各带一个防火墙，共用一根 tamper | — |
 | `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核 | — |
 
 ML-KEM 与 ML-DSA 是两套不同的算术：模数不同（3329 对 8380417）、Montgomery 基不同
@@ -82,6 +88,11 @@ Vivado 报出 `LUT as Memory = 0`，整块摊成了约 30000 个 LUT 的选择�
 `keccak_f1600` 刻意**不做** 24 轮全展开。展开会把轮逻辑复制 24 份，而在此调用频度下
 毫无收益：100 MHz 下 24 周期即 240 ns/次置换，而一次 ML-KEM-768 密钥生成需要 43 次
 置换，合计约 1000 周期，相较 NTT 的约 20700 周期微不足道。瓶颈不在这里。
+
+三个对称核**零 BRAM、零 DSP** —— 全是查表与移位异或，与 ML-KEM 那边
+（72 个 DSP）正好是两种完全不同的形状。`aes_core` 比 `sm4_core` 大三倍半，
+差的就是那套逆变换：16 个逆 S 盒加 InvMixColumns 的四个 GF(2⁸) 常数乘法；
+SM4 的解密是同一条通路倒着用轮密钥，一分钱不用多花。
 
 `pqc_accel_axi` 是系统视角下的加速器：控制/状态寄存器走 AXI4-Lite，成块数据走
 AXI4-Stream，底下挂算法核。它实现的正是 `include/pqchsm/accel.h` 当初据以编写的那套
