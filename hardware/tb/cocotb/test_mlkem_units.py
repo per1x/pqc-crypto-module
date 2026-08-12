@@ -173,9 +173,11 @@ async def test_rej_uniform(dut):
         dut.rej_valid.value = 0
         assert int(dut.rej_count.value) == 256
 
+        # 读口是**同步读**（系数存储是 BRAM）：地址给出后要等一个上升沿
         got = []
         for i in range(256):
             dut.rej_addr.value = i
+            await RisingEdge(dut.clk)
             await Timer(1, unit="ns")
             got.append(int(dut.rej_data.value))
         assert got == want, f"第 {trial} 组采样结果与独立实现不一致"

@@ -49,8 +49,13 @@ endmodule
 
 // 均匀采样的收集器：每周期吃一组 3 字节，攒够 256 个系数就置 done。
 //
-// 接口与 mlkem_rej_uniform 同形（start 触发 → 轮询 done → 组合读结果），
+// 接口与 mlkem_rej_uniform 同形（start 触发 → 轮询 done → 读结果），
 // 输入侧用 valid/ready 握手，因为字节流由上游 SHAKE 核按拍供给。
+//
+// ⚠️ **读口是同步读**：给出 rd_addr 之后要走一个时钟沿，rd_data 才是那个
+// 地址的内容。原来是组合读，但组合读的存储在 Vivado 里**永远变不成 BRAM**
+// —— 它会被摊成 F7/F8 多路选择器树，256×23 bit 要吃掉几千个 LUT。
+// 换成 common/ram_dp 之后是 1 块 BRAM。详见 rtl/common/ram_dp.v 的注释。
 module mldsa_rej_uniform_buf (
     input  wire        clk,
     input  wire        rst_n,
@@ -66,10 +71,8 @@ module mldsa_rej_uniform_buf (
     input  wire [7:0]  rd_addr,
     output wire [22:0] rd_data
 );
-    reg [22:0] mem [0:255];
     reg        busy;
 
-    assign rd_data  = mem[rd_addr];
     assign in_ready = busy;
 
     wire [22:0] cand;
@@ -78,6 +81,14 @@ module mldsa_rej_uniform_buf (
         .bytes_in(in_bytes), .cand(cand), .cand_ok(cand_ok));
 
     wire take = cand_ok && (count < 9'd256);
+
+    // 写口（A）在采样期间用 count 当地址，读口（B）常年挂 rd_addr。
+    // 采样和读结果在时间上不重叠（done 之前不该读），所以两个口不会打架。
+    ram_dp #(.DW(23), .AW(8)) u_mem (
+        .clk(clk),
+        .a_we(busy && in_valid && take), .a_addr(count[7:0]),
+        .a_din(cand), .a_dout(),
+        .b_we(1'b0), .b_addr(rd_addr), .b_din(23'd0), .b_dout(rd_data));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -90,7 +101,6 @@ module mldsa_rej_uniform_buf (
             count <= 9'd0;
         end else if (busy && in_valid) begin
             if (take) begin
-                mem[count[7:0]] <= cand;
                 count           <= count + 9'd1;
                 if (count == 9'd255) begin
                     busy <= 1'b0;

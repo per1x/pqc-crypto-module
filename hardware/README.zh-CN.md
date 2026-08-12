@@ -33,15 +33,15 @@ hardware/
 | `mlkem_compress`、`mlkem_decompress` | 组合逻辑，位宽 `D` 由参数给出 | — |
 | `mlkem_cbd2`、`mlkem_cbd3` | 组合逻辑，位并行的中心二项分布采样 | — |
 | `mlkem_rej_pair` | 组合逻辑，取候选 | — |
-| `mlkem_rej_uniform` | 收集器，每周期吃一组 3 字节 | 约 430 / 个多项式 |
+| `mlkem_rej_uniform` | 收集器，每周期吃一组 3 字节，结果存在 `ram_dp` 里（读延迟 1 拍） | 约 430 / 个多项式 |
 | `mlkem_encode12`、`mlkem_decode12` | 组合逻辑 | — |
 | `mldsa_mont_reduce`、`mldsa_reduce32`、`mldsa_caddq` | 组合逻辑 | — |
 | `mldsa_butterfly_ct`、`mldsa_butterfly_gs` | 组合逻辑 | — |
-| `mldsa_ntt_core` | 单蝶形单元，ML-DSA 的完整 8 层 NTT | 正 1025 / 逆 1281 |
+| `mldsa_ntt_core` | 单蝶形单元，ML-DSA 的完整 8 层 NTT，系数存在 `ram_dp` 块 RAM 里 | 正 2049 / 逆 2561（一个蝶形两拍） |
 | `mldsa_power2round`、`mldsa_decompose` | 组合逻辑，参数集由 `MODE` 选 | — |
 | `mldsa_make_hint`、`mldsa_use_hint` | 组合逻辑，参数集由 `MODE` 选 | — |
 | `mldsa_rej_uniform`、`mldsa_rej_eta` | 组合逻辑 | — |
-| `mldsa_rej_uniform_buf` | 收集器，每周期吃一组 3 字节 | 约 340 / 个多项式 |
+| `mldsa_rej_uniform_buf` | 收集器，每周期吃一组 3 字节，结果存在 `ram_dp` 里（读延迟 1 拍） | 约 340 / 个多项式 |
 | `keccak_f1600` | 单轮迭代，`round_cnt` 走 24 轮 | 24 / 次置换 |
 | `ram_dp` | 参数化真双口同步 RAM，推断成块 RAM | 读延迟 1 拍 |
 | `axi4lite_regs` | AXI4-Lite 从机，控制/状态寄存器 | — |

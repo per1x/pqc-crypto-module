@@ -16,7 +16,7 @@ clean checkout by running the command in the last column.
 | ThreadSanitizer | 0 races | `ctest --test-dir build-tsan` |
 | aarch64 Linux (GCC 12) | 45 / 45 | `./tools/aarch64_test.sh` |
 | libFuzzer | 1.38 M executions, no crashes | `./tools/fuzz.sh` |
-| cocotb RTL regression | 78 tests across 10 top levels | `./tools/rtl_sim.sh` |
+| cocotb RTL regression | 113 tests across 18 top levels | `./tools/rtl_sim.sh` |
 | RTL lint | 31 modules, 0 warnings | `./tools/rtl_lint.sh` |
 | RTL synthesisability (Yosys) | 31 modules, all synthesise | `./tools/rtl_synth_check.sh` |
 | Constant-time source audit | 0 unannotated findings, 1 justified waiver | `python3 tools/ct_audit.py` |
@@ -65,7 +65,7 @@ out individually:
 
 ## Hardware tests
 
-`./tools/rtl_sim.sh` runs 78 cocotb tests across 10 top levels under Icarus
+`./tools/rtl_sim.sh` runs 113 cocotb tests across 18 top levels under Icarus
 Verilog. The same RTL is separately compiled by Verilator and driven from the C
 test suite, so any disagreement between the two simulators' width-truncation
 semantics surfaces as a test failure rather than as a silent difference.
@@ -78,7 +78,7 @@ semantics surfaces as a test failure rather than as a silent difference.
 | `mlkem_compress`, `mlkem_decompress` | Exhaustive over the whole input domain, for every `d` |
 | `tb_mlkem_units` | Binomial sampling, rejection sampling and its collector, 12-bit encoding |
 | `tb_mldsa_units` | ML-DSA operators, rounding, hints, both sampling paths, both parameter sets |
-| `mldsa_ntt_core` | Full 8-layer ML-DSA NTT, 1025 cycles forward, 1281 inverse |
+| `mldsa_ntt_core` | Full 8-layer ML-DSA NTT, 2049 cycles forward, 2561 inverse |
 | `keccak_f1600` | Published permutation vector, sponge against `hashlib` |
 | `pqc_accel_axi` | Register map contract clause by clause, both datapaths, stream handshake gaps |
 | `tb_trng_health` | SP 800-90B continuous health tests, with a null-control instance |

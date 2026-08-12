@@ -33,15 +33,15 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `mlkem_compress`, `mlkem_decompress` | combinational, parameterised by `D` | — |
 | `mlkem_cbd2`, `mlkem_cbd3` | combinational, bit-parallel binomial sampling | — |
 | `mlkem_rej_pair` | combinational candidate extraction | — |
-| `mlkem_rej_uniform` | collector, one 3-byte group per cycle | ~430 per polynomial |
+| `mlkem_rej_uniform` | collector, one 3-byte group per cycle; results live in a `ram_dp` (1-cycle read latency) | ~430 per polynomial |
 | `mlkem_encode12`, `mlkem_decode12` | combinational | — |
 | `mldsa_mont_reduce`, `mldsa_reduce32`, `mldsa_caddq` | combinational | — |
 | `mldsa_butterfly_ct`, `mldsa_butterfly_gs` | combinational | — |
-| `mldsa_ntt_core` | single butterfly unit, full 8-layer ML-DSA NTT | 1025 forward, 1281 inverse |
+| `mldsa_ntt_core` | single butterfly unit, full 8-layer ML-DSA NTT, coefficients in a `ram_dp` block RAM | 2049 forward, 2561 inverse (2 cycles per butterfly) |
 | `mldsa_power2round`, `mldsa_decompose` | combinational, parameterised by `MODE` | — |
 | `mldsa_make_hint`, `mldsa_use_hint` | combinational, parameterised by `MODE` | — |
 | `mldsa_rej_uniform`, `mldsa_rej_eta` | combinational | — |
-| `mldsa_rej_uniform_buf` | collector, one 3-byte group per cycle | ~340 per polynomial |
+| `mldsa_rej_uniform_buf` | collector, one 3-byte group per cycle; results live in a `ram_dp` (1-cycle read latency) | ~340 per polynomial |
 | `keccak_f1600` | single-round iterative, `round_cnt` over 24 rounds | 24 per permutation |
 | `ram_dp` | parameterised true dual-port synchronous RAM, inferred as block RAM | 1 cycle read latency |
 | `axi4lite_regs` | AXI4-Lite slave, control and status registers | — |

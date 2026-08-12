@@ -98,10 +98,8 @@ module mlkem_rej_uniform (
     input  wire [7:0]  rd_addr,
     output wire [15:0] rd_data
 );
-    reg [11:0] mem [0:255];
     reg        busy;
 
-    assign rd_data  = {4'd0, mem[rd_addr]};
     assign in_ready = busy;
 
     wire [11:0] d1, d2;
@@ -116,6 +114,26 @@ module mlkem_rej_uniform (
     wire [8:0] slot2 = count + (take1 ? 9'd1 : 9'd0);
     wire [8:0] next  = slot2 + (take2 ? 9'd1 : 9'd0);
 
+    // 系数存储用一块真双口 BRAM，而不是 256×12 的寄存器阵列：
+    // 后者有两个写口（同一拍最多收下两个候选）加一个组合读口，
+    // 综合出来是几千个 LUT 的选择树，理由与 ntt_core 那次一样，见 docs/fpga-进展.md 的 S3。
+    //
+    // 端口分工：A 口专写第一个候选；B 口在收集期间写第二个候选，
+    // 收完（!busy）之后改接外部读口。两个候选的槽位恒差 1，不会同址。
+    // ⚠️ 读口因此是**同步读**：给出 rd_addr 要等一个上升沿。
+    wire        m_a_we   = busy && in_valid && take1;
+    wire        m_b_we   = busy && in_valid && take2;
+    wire [7:0]  m_b_addr = busy ? slot2[7:0] : rd_addr;
+    wire [11:0] m_b_dout;
+
+    ram_dp #(.DW(12), .AW(8)) u_mem (
+        .clk    (clk),
+        .a_we   (m_a_we), .a_addr(count[7:0]), .a_din(d1), .a_dout(),
+        .b_we   (m_b_we), .b_addr(m_b_addr),   .b_din(d2), .b_dout(m_b_dout)
+    );
+
+    assign rd_data  = {4'd0, m_b_dout};
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             done  <= 1'b0;
@@ -126,12 +144,7 @@ module mlkem_rej_uniform (
             busy  <= 1'b1;
             count <= 9'd0;
         end else if (busy && in_valid) begin
-            if (take1) begin
-                mem[count[7:0]] <= d1;
-            end
-            if (take2) begin
-                mem[slot2[7:0]] <= d2;
-            end
+            // 两个候选的写入由上面的 BRAM 端口直接完成，这里只推进计数
             count <= next;
             if (next == 9'd256) begin
                 busy <= 1'b0;

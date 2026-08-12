@@ -1,4 +1,4 @@
-// mldsa_ntt_core —— ML-DSA 的 256 点 NTT / INTT 核（1 蝶形/周期）
+// mldsa_ntt_core —— ML-DSA 的 256 点 NTT / INTT 核（BRAM 版：2 周期一个蝶形）
 //
 // 与 ML-KEM 侧的 ntt_core 结构相同，数学不同：
 //   模数 q = 8380417（23 位），系数用 32 位有符号承载
@@ -15,6 +15,14 @@
 // **done 是电平不是脉冲**：置位后一直保持，直到下一次 start（或复位）才清。
 // accel.h 的契约是软件轮询 STATUS.DONE，而真实寄存器/AXI 轮询在任意时刻采样
 // 会漏掉 1 周期脉冲，所以核这一侧就要给出可锁存的电平。
+//
+// ⚠️ **读口是同步读，有一拍延迟**：系数存储是一块真双口 BRAM
+// （common/ram_dp.v），而 BRAM 没有组合读口。给出 rd_addr 之后要等一个上升沿，
+// rd_data 才是那个地址的内容。写口仍是同拍生效。
+// 一个蝶形也因此拆成两拍（S_RD 发地址 / S_WB 拿数算完写回），
+// 正变换 1025 → 2049 cycles，逆变换 1281 → 2561 cycles。
+// 理由与 ML-KEM 侧那一版相同：256×32 的寄存器阵列加多个组合读口，
+// 综合出来是几万个 LUT 的选择树，一颗 ZU3EG 放不下 —— 见 docs/fpga-进展.md 的 S3。
 `default_nettype none
 
 module mldsa_ntt_core (
@@ -30,7 +38,7 @@ module mldsa_ntt_core (
     input  wire  [7:0]        wr_addr,
     input  wire signed [31:0] wr_data,
 
-    // 系数读口（组合读）
+    // 系数读口（**同步读，一拍延迟**）
     input  wire  [7:0]        rd_addr,
     output wire signed [31:0] rd_data
 );
@@ -130,12 +138,9 @@ module mldsa_ntt_core (
         zetas[255]=32'sd1976782;
     end
 
-    // ---- 系数存储 ----
-    reg signed [31:0] mem [0:255];
-    assign rd_data = mem[rd_addr];
-
-    // ---- 状态机 ----
-    localparam S_IDLE = 3'd0, S_RUN = 3'd1, S_SCALE = 3'd2, S_DONE = 3'd3;
+    // ---- 状态机的控制寄存器（要在存储例化之前声明：端口 mux 用得到）----
+    localparam S_IDLE  = 3'd0, S_RD    = 3'd1, S_WB   = 3'd2,
+               S_SC_RD = 3'd3, S_SC_WB = 3'd4, S_DONE = 3'd5;
 
     reg [2:0] state;
     reg [8:0] len;        // 正变换 128..1，逆变换 1..128
@@ -146,8 +151,26 @@ module mldsa_ntt_core (
     reg [8:0] scale_i;
 
     wire [8:0] j_hi = j + len;
-    wire signed [31:0] a_val = mem[j[7:0]];
-    wire signed [31:0] b_val = mem[j_hi[7:0]];
+
+    // ---- 系数存储：一块真双口 BRAM ----
+    // A 口：空闲时接外部写口，蝶形时管 mem[j]，缩放时管 mem[scale_i]；
+    // B 口：空闲时接外部读口，蝶形时管 mem[j+len]。
+    // 蝶形的两个地址恒不相等（len ≥ 1），不会触发 ram_dp 的同址写断言。
+    reg         pa_we,  pb_we;
+    reg  [7:0]  pa_addr, pb_addr;
+    reg  signed [31:0] pa_din, pb_din;
+    wire signed [31:0] pa_dout, pb_dout;
+
+    ram_dp #(.DW(32), .AW(8)) u_mem (
+        .clk    (clk),
+        .a_we   (pa_we), .a_addr(pa_addr), .a_din(pa_din), .a_dout(pa_dout),
+        .b_we   (pb_we), .b_addr(pb_addr), .b_din(pb_din), .b_dout(pb_dout)
+    );
+
+    assign rd_data = pb_dout;
+
+    wire signed [31:0] a_val = pa_dout;
+    wire signed [31:0] b_val = pb_dout;
     wire signed [31:0] zeta_raw = zetas[k[7:0]];
     // 逆变换用 −zetas[k]
     wire signed [31:0] zeta = inv_r ? -zeta_raw : zeta_raw;
@@ -158,12 +181,49 @@ module mldsa_ntt_core (
     mldsa_butterfly_gs u_bf_gs (
         .a(a_val), .b(b_val), .zeta(zeta), .a_out(gs_a), .b_out(gs_b));
 
-    // S_SCALE 用：逆变换末尾统一乘 f
-    wire signed [31:0] scale_in = mem[scale_i[7:0]];
+    // S_SC_WB 用：逆变换末尾统一乘 f。缩放只用 A 口，所以取的是 pa_dout。
+    wire signed [31:0] scale_in = pa_dout;
     wire signed [63:0] finv_prod =
         $signed({{32{FINV[31]}}, FINV}) * $signed({{32{scale_in[31]}}, scale_in});
     wire signed [31:0] scale_mont;
     mldsa_mont_reduce u_scale_mont (.a(finv_prod), .t_out(scale_mont));
+
+    // ---- 两个 BRAM 口的归属：完全由状态决定 ----
+    always @(*) begin
+        pa_we   = 1'b0;
+        pa_addr = 8'd0;
+        pa_din  = 32'sd0;
+        pb_we   = 1'b0;
+        pb_addr = 8'd0;
+        pb_din  = 32'sd0;
+        case (state)
+        S_IDLE: begin
+            pa_we   = wr_en;
+            pa_addr = wr_addr;
+            pa_din  = wr_data;
+            pb_addr = rd_addr;
+        end
+        S_RD: begin
+            pa_addr = j[7:0];
+            pb_addr = j_hi[7:0];
+        end
+        S_WB: begin
+            pa_we   = 1'b1;
+            pa_addr = j[7:0];
+            pa_din  = inv_r ? gs_a : ct_a;
+            pb_we   = 1'b1;
+            pb_addr = j_hi[7:0];
+            pb_din  = inv_r ? gs_b : ct_b;
+        end
+        S_SC_RD: pa_addr = scale_i[7:0];
+        S_SC_WB: begin
+            pa_we   = 1'b1;
+            pa_addr = scale_i[7:0];
+            pa_din  = scale_mont;
+        end
+        default: ;
+        endcase
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -180,10 +240,8 @@ module mldsa_ntt_core (
         end else begin
             case (state)
             S_IDLE: begin
-                // done 保持到下一次 start，这里不无条件清
-                if (wr_en) begin
-                    mem[wr_addr] <= wr_data;
-                end
+                // done 保持到下一次 start，这里不无条件清。
+                // 系数写入由上面的端口 mux 直接落到 BRAM 的 A 口，这里不用管。
                 if (start) begin
                     done  <= 1'b0;
                     inv_r <= inverse;
@@ -191,19 +249,17 @@ module mldsa_ntt_core (
                     grp   <= 9'd0;
                     j     <= 9'd0;
                     k     <= inverse ? 9'd255 : 9'd1;
-                    state <= S_RUN;
+                    state <= S_RD;
                 end
             end
 
-            S_RUN: begin
-                // 一个周期一个蝶形
-                if (inv_r) begin
-                    mem[j[7:0]]    <= gs_a;
-                    mem[j_hi[7:0]] <= gs_b;
-                end else begin
-                    mem[j[7:0]]    <= ct_a;
-                    mem[j_hi[7:0]] <= ct_b;
-                end
+            // 第一拍：地址已经由 mux 发给 BRAM，等一个沿把 mem[j] / mem[j+len]
+            // 装进输出寄存器，下一拍才能用。
+            S_RD: state <= S_WB;
+
+            S_WB: begin
+                // 第二拍：蝶形结果由 mux 写回两个地址，这里只推进下标。
+                state <= S_RD;
 
                 if (j + 1 < grp + len) begin
                     j <= j + 1;
@@ -218,7 +274,7 @@ module mldsa_ntt_core (
                         if (inv_r) begin
                             if (len == 9'd128) begin
                                 scale_i <= 9'd0;
-                                state   <= S_SCALE;
+                                state   <= S_SC_RD;
                             end else begin
                                 len <= len << 1;
                                 grp <= 9'd0;
@@ -237,12 +293,16 @@ module mldsa_ntt_core (
                 end
             end
 
-            S_SCALE: begin
-                mem[scale_i[7:0]] <= scale_mont;
+            // 缩放也是两拍：读一个系数，乘完写回同一地址。
+            S_SC_RD: state <= S_SC_WB;
+
+            S_SC_WB: begin
+                // 写回由端口 mux 完成，这里只推进下标。
                 if (scale_i == 9'd255) begin
                     state <= S_DONE;
                 end else begin
                     scale_i <= scale_i + 9'd1;
+                    state   <= S_SC_RD;
                 end
             end
 

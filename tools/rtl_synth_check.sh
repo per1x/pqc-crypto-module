@@ -64,6 +64,23 @@ yosys -q -p "read_verilog $RTL_FILES
 " 2>&1 | sed -n 's/^Warning: Replacing memory \\\([A-Za-z0-9_]*\) .*See \(.*\)$/  \1  <- \2/p' \
   | sed 's#'"$ROOT"'/##' | sort -u | head -20
 
+# 下面这几条是**故意留着**的，不要照着 ram_dp 去改：
+#
+#   keccak_f1600 的 A / Anext / Ath / B / C / D
+#     A 是 1600 bit 置换状态，每一轮 25 条 lane 要同时读、同时写 ——
+#     BRAM 只有两个口，装不下这种全并行访问，它本来就该是触发器。
+#     B/C/D/Ath/Anext 是轮内的组合中间量，Yosys 把数组一律当 memory 报，
+#     综合出来是纯组合线网，不占存储。
+#
+#   sync_fifo 的 mem
+#     实例只有 TRNG 那一个，32 bit × FIFO_DEPTH，一共 1 Kbit 上下，
+#     摊成触发器的代价可以忽略。更要紧的是它是 FWFT（首字直通）：
+#     rd_valid 拉高的同一拍 rd_data 就得有效，因为 AXI4-Lite 要在同一次
+#     读事务里返回数据。换成同步读的 BRAM 就得加一拍，那要动 trng_top
+#     和 AXI 读通路 —— 为 1 Kbit 付这个代价不值。
+echo "  （以上都是预期之内：keccak 状态必须全并行访问，sync_fifo 要 FWFT 时序。"
+echo "    判断标准见 hardware/rtl/common/ram_dp.v 的注释。）"
+
 echo
 if [ "$fail" -eq 0 ]; then
   echo "全部可综合（$n 个模块）"

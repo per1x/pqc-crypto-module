@@ -15,7 +15,7 @@
 | ThreadSanitizer | 0 条竞争 | `ctest --test-dir build-tsan` |
 | aarch64 Linux（GCC 12） | 45 / 45 | `./tools/aarch64_test.sh` |
 | libFuzzer | 138 万次执行，无崩溃 | `./tools/fuzz.sh` |
-| cocotb RTL 回归 | 10 个顶层共 78 个测试 | `./tools/rtl_sim.sh` |
+| cocotb RTL 回归 | 18 个顶层共 113 个测试 | `./tools/rtl_sim.sh` |
 | RTL lint | 31 个模块，0 条告警 | `./tools/rtl_lint.sh` |
 | RTL 可综合性（Yosys） | 31 个模块全部可综合 | `./tools/rtl_synth_check.sh` |
 | 常量时间源码审计 | 0 条未标注问题，1 条带理由的白名单 | `python3 tools/ct_audit.py` |
@@ -57,7 +57,7 @@
 
 ## 硬件测试
 
-`./tools/rtl_sim.sh` 在 Icarus Verilog 下跑 10 个顶层共 78 个 cocotb 测试。
+`./tools/rtl_sim.sh` 在 Icarus Verilog 下跑 18 个顶层共 113 个 cocotb 测试。
 同一份 RTL 另由 Verilator 编译并被 C 测试套件驱动，因此两个仿真器在位宽截断
 语义上的分歧会表现为测试失败，而不是悄悄的差异。
 
@@ -69,7 +69,7 @@
 | `mlkem_compress`、`mlkem_decompress` | 对整个输入域穷举，覆盖每个 `d` |
 | `tb_mlkem_units` | 二项采样、拒绝采样及其收集器、12 位编解码 |
 | `tb_mldsa_units` | ML-DSA 算子、高低位拆分、提示位、两类采样、两个参数集 |
-| `mldsa_ntt_core` | ML-DSA 的完整 8 层 NTT，正变换 1025 周期、逆变换 1281 周期 |
+| `mldsa_ntt_core` | ML-DSA 的完整 8 层 NTT，正变换 2049 周期、逆变换 2561 周期 |
 | `keccak_f1600` | 公开的置换向量、与 `hashlib` 比对的海绵 |
 | `pqc_accel_axi` | 寄存器映射契约逐条验证、两条数据通路、流握手空拍 |
 | `tb_trng_health` | SP 800-90B 连续健康检测，附空对照实例 |

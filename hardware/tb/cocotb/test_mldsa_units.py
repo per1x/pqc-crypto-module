@@ -242,9 +242,11 @@ async def test_rej_uniform_buf(dut):
         dut.rb_valid.value = 0
         assert int(dut.rb_count.value) == 256
 
+        # 读口是同步读：给地址之后要过一个时钟沿，rd_data 才是该地址的内容
         got = []
         for i in range(256):
             dut.rb_addr.value = i
+            await RisingEdge(dut.clk)
             await Timer(1, unit="ns")
             got.append(int(dut.rb_data.value))
         assert got == want, f"第 {trial} 组采样结果与独立实现不一致"
