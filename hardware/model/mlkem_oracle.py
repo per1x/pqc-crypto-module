@@ -38,13 +38,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from ref_model import (  # noqa: E402
     Q, ZETAS, barrett_reduce, basemul, cbd2, cbd3, compress, decode12,
-    decompress, encode12, montgomery_reduce, ntt, rej_pair,
+    decompress, encode12, invntt, montgomery_reduce, ntt, rej_pair,
 )
 
-KAT = Path(__file__).resolve().parents[2] / "vectors" / "mlkem_keygen.kat"
+VEC = Path(__file__).resolve().parents[2] / "vectors"
+KAT = VEC / "mlkem_keygen.kat"
+KAT_ENC = VEC / "mlkem_encaps.kat"
+KAT_DEC = VEC / "mlkem_decaps.kat"
 
 # 参数集：k, eta1
 PARAMS = {"ML-KEM-512": (2, 3), "ML-KEM-768": (3, 2), "ML-KEM-1024": (4, 2)}
+# 密文参数：du, dv（eta2 三套都是 2）
+PARAMS_C = {"ML-KEM-512": (10, 4), "ML-KEM-768": (10, 4), "ML-KEM-1024": (11, 5)}
+ETA2 = 2
 
 D_VALUES = (1, 4, 5, 10, 11)
 
@@ -274,12 +280,126 @@ def mlkem_keygen(d: bytes, z: bytes, name: str) -> tuple[bytes, bytes]:
     return ek, dk
 
 
-def load_kat(limit_per_alg: int = 2):
-    if not KAT.exists():
+def poly_frombytes(b: bytes) -> list[int]:
+    """ByteDecode12，逐三字节走 ref_model.decode12"""
+    out = []
+    for i in range(128):
+        c0, c1 = decode12(b[3 * i], b[3 * i + 1], b[3 * i + 2])
+        out.extend((c0, c1))
+    return out
+
+
+def bits_pack(vals: list[int], d: int) -> bytes:
+    """ByteEncode_d：把 256 个 d 位值按小端比特序打成 32d 字节"""
+    acc = 0
+    for i, v in enumerate(vals):
+        acc |= (v & ((1 << d) - 1)) << (d * i)
+    return acc.to_bytes(32 * d, "little")
+
+
+def bits_unpack(b: bytes, d: int) -> list[int]:
+    """ByteDecode_d：bits_pack 的逆"""
+    acc = int.from_bytes(b, "little")
+    m = (1 << d) - 1
+    return [(acc >> (d * i)) & m for i in range(256)]
+
+
+def pke_encrypt(ek: bytes, m: bytes, rand: bytes, name: str) -> bytes:
+    """FIPS 203 Alg 14 K-PKE.Encrypt，算子全部取自 ref_model
+
+    ⚠️ 这里的矩阵是**转置**的：Encrypt 用 Âᵀ，写成采样端就是 XOF 头
+    ρ‖i‖j（KeyGen 是 ρ‖j‖i）。两者都能跑出合法密文，只有一个是 ML-KEM。
+    """
+    k, eta1 = PARAMS[name]
+    du, dv = PARAMS_C[name]
+
+    t_hat = [poly_frombytes(ek[384 * i:384 * (i + 1)]) for i in range(k)]
+    rho = ek[384 * k:384 * k + 32]
+
+    at = [[sample_ntt(rho, i, j) for j in range(k)] for i in range(k)]
+
+    r = [sample_poly_cbd(rand, n, eta1) for n in range(k)]
+    e1 = [sample_poly_cbd(rand, k + n, ETA2) for n in range(k)]
+    e2 = sample_poly_cbd(rand, 2 * k, ETA2)
+
+    r_hat = [ntt(list(x)) for x in r]
+
+    def acc_mul(row: list[list[int]]) -> list[int]:
+        a = poly_basemul(row[0], r_hat[0])
+        for j in range(1, k):
+            p = poly_basemul(row[j], r_hat[j])
+            a = [a[n] + p[n] for n in range(256)]
+        return [barrett_reduce(x) for x in a]
+
+    u = []
+    for i in range(k):
+        w = invntt(acc_mul(at[i]))
+        u.append([barrett_reduce(w[n] + e1[i][n]) for n in range(256)])
+
+    mu = [decompress(bit, 1) for bit in bits_unpack(m, 1)]
+    w = invntt(acc_mul(t_hat))
+    v = [barrett_reduce(w[n] + e2[n] + mu[n]) for n in range(256)]
+
+    c1 = b"".join(bits_pack([compress(x, du) for x in p], du) for p in u)
+    c2 = bits_pack([compress(x, dv) for x in v], dv)
+    return c1 + c2
+
+
+def pke_decrypt(dk_pke: bytes, c: bytes, name: str) -> bytes:
+    """FIPS 203 Alg 15 K-PKE.Decrypt"""
+    k, _ = PARAMS[name]
+    du, dv = PARAMS_C[name]
+
+    c1, c2 = c[:32 * du * k], c[32 * du * k:]
+    u = [[decompress(y, du) for y in bits_unpack(c1[32 * du * i:32 * du * (i + 1)], du)]
+         for i in range(k)]
+    v = [decompress(y, dv) for y in bits_unpack(c2, dv)]
+
+    s_hat = [poly_frombytes(dk_pke[384 * i:384 * (i + 1)]) for i in range(k)]
+
+    u_hat = [ntt(list(x)) for x in u]
+    a = poly_basemul(s_hat[0], u_hat[0])
+    for i in range(1, k):
+        p = poly_basemul(s_hat[i], u_hat[i])
+        a = [a[n] + p[n] for n in range(256)]
+    su = invntt([barrett_reduce(x) for x in a])
+
+    w = [barrett_reduce(v[n] - su[n]) for n in range(256)]
+    return bits_pack([compress(x, 1) for x in w], 1)
+
+
+def mlkem_encaps(ek: bytes, m: bytes, name: str) -> tuple[bytes, bytes]:
+    """FIPS 203 Alg 17 ML-KEM.Encaps_internal(ek, m) → (K, c)"""
+    shared, rand = G(m + H(ek))
+    return shared, pke_encrypt(ek, m, rand, name)
+
+
+def mlkem_decaps(dk: bytes, c: bytes, name: str) -> bytes:
+    """FIPS 203 Alg 18 ML-KEM.Decaps_internal(dk, c) → K
+
+    密文比对不通过时返回隐式拒绝值 J(z‖c) —— 注意这是**常量时间**要求的地方，
+    RTL 里必须逐字节全比完再选，不能一发现不同就跳出。
+    """
+    k, _ = PARAMS[name]
+    dk_pke = dk[:384 * k]
+    ek = dk[384 * k:768 * k + 32]
+    h = dk[768 * k + 32:768 * k + 64]
+    z = dk[768 * k + 64:768 * k + 96]
+
+    m2 = pke_decrypt(dk_pke, c, name)
+    shared, rand = G(m2 + h)
+    reject = hashlib.shake_256(z + c).digest(32)
+    c2 = pke_encrypt(ek, m2, rand, name)
+    return shared if c2 == c else reject
+
+
+def load_kat(limit_per_alg: int = 2, path: Path = None):
+    path = path or KAT
+    if not path.exists():
         return None
     recs = []
     cur: dict[str, str] = {}
-    for line in KAT.read_text().splitlines():
+    for line in path.read_text().splitlines():
         line = line.strip()
         if line.startswith("#"):
             continue
@@ -327,6 +447,66 @@ def oracle_d() -> bool:
     return ok
 
 
+# ------------------------------------------------------------ 预言机 E / F
+
+def oracle_e() -> bool:
+    """Encaps：用同一批算子重建 K-PKE.Encrypt，比对 ACVP 的 (K, c)"""
+    recs = load_kat(path=KAT_ENC)
+    if recs is None:
+        print("  ⚠ 预言机 E 跳过：找不到 vectors/mlkem_encaps.kat")
+        return True
+    ok, n = True, 0
+    for r in recs:
+        shared, c = mlkem_encaps(bytes.fromhex(r["ek"]), bytes.fromhex(r["m"]), r["alg"])
+        if c != bytes.fromhex(r["c"]):
+            print(f"  ✗ {r['alg']} tcId={r.get('tcid')}：密文 c 不匹配")
+            ok = False
+        elif shared != bytes.fromhex(r["k"]):
+            print(f"  ✗ {r['alg']} tcId={r.get('tcid')}：共享密钥 K 不匹配（c 对了）")
+            ok = False
+        n += 1
+    if ok:
+        print(f"  ✓ 预言机 E：用 compress / invntt / basemul 重建 ML-KEM Encaps，"
+              f"{n} 条 ACVP 向量的 c 与 K 逐字节重现")
+    return ok
+
+
+def oracle_f() -> bool:
+    """Decaps：含重加密比对与隐式拒绝那条分支"""
+    recs = load_kat(path=KAT_DEC)
+    if recs is None:
+        print("  ⚠ 预言机 F 跳过：找不到 vectors/mlkem_decaps.kat")
+        return True
+    ok, n = True, 0
+    for r in recs:
+        got = mlkem_decaps(bytes.fromhex(r["dk"]), bytes.fromhex(r["c"]), r["alg"])
+        if got != bytes.fromhex(r["k"]):
+            print(f"  ✗ {r['alg']} tcId={r.get('tcid')}：共享密钥 K 不匹配")
+            ok = False
+        n += 1
+
+    # 隐式拒绝那条分支 ACVP 的正向向量未必覆盖到，这里自己造一条：
+    # 把密文改一个比特，K 必须变成 J(z‖c)，而不是报错、也不是原来的 K。
+    r = recs[0]
+    dk, c = bytes.fromhex(r["dk"]), bytes.fromhex(r["c"])
+    bad = bytearray(c); bad[0] ^= 1; bad = bytes(bad)
+    k, _ = PARAMS[r["alg"]]
+    z = dk[768 * k + 64:768 * k + 96]
+    want = hashlib.shake_256(z + bad).digest(32)
+    got = mlkem_decaps(dk, bad, r["alg"])
+    if got != want:
+        print("  ✗ 隐式拒绝：改坏密文后 K 不是 J(z‖c)")
+        ok = False
+    elif got == bytes.fromhex(r["k"]):
+        print("  ✗ 隐式拒绝：改坏密文后 K 竟然没变")
+        ok = False
+
+    if ok:
+        print(f"  ✓ 预言机 F：重建 ML-KEM Decaps，{n} 条 ACVP 向量的 K 逐字节重现；"
+              "改坏密文后走隐式拒绝、K = J(z‖c)")
+    return ok
+
+
 # ---------------------------------------------------------------- 反证
 
 def falsify() -> bool:
@@ -362,6 +542,20 @@ def falsify() -> bool:
     ref_model.basemul = orig_basemul
     globals()["basemul"] = orig_basemul
 
+    # Encrypt 的矩阵不转置 —— 也就是 XOF 头写成和 KeyGen 一样的 ρ‖j‖i。
+    # 这样照样能算出合法密文，只是不是 ML-KEM 的那一个；只有锚在外部向量上
+    # 才抓得到。RTL 侧同一个坑见 docs/fpga-进展.md 的 S4 一节。
+    orig_sample_ntt = globals()["sample_ntt"]
+    globals()["sample_ntt"] = lambda rho, i, j: orig_sample_ntt(rho, j, i)
+    checks.append(("Encrypt 的矩阵忘了转置", not oracle_e_quiet()))
+    globals()["sample_ntt"] = orig_sample_ntt
+
+    # Decaps 少了重加密比对 —— 密文被改坏时不再走隐式拒绝
+    orig_encrypt = globals()["pke_encrypt"]
+    globals()["pke_encrypt"] = lambda ek, m, rand, name: b""
+    checks.append(("Decaps 跳过重加密比对", not oracle_f_quiet()))
+    globals()["pke_encrypt"] = orig_encrypt
+
     ok = True
     for name, caught in checks:
         mark = "✓" if caught else "✗"
@@ -389,10 +583,19 @@ def oracle_c_quiet() -> bool:
     return _quiet(oracle_c)
 
 
+def oracle_e_quiet() -> bool:
+    return _quiet(oracle_e)
+
+
+def oracle_f_quiet() -> bool:
+    return _quiet(oracle_f)
+
+
 def main() -> int:
     print("ML-KEM 算子独立预言机")
     print()
-    results = [oracle_a(), oracle_b(), oracle_c(), oracle_d()]
+    results = [oracle_a(), oracle_b(), oracle_c(), oracle_d(),
+               oracle_e(), oracle_f()]
     print()
     print("反证（把算子改坏，预言机必须报错）")
     results.append(falsify())
