@@ -1,11 +1,13 @@
 # ooc_synth.tcl —— out-of-context 综合，出资源与时序报告
 #
-# ⚠️ **需要 AMD Vivado**（免费版即可）。本仓库的开发机上没有装，所以这个脚本
-#    **未经实机验证** —— 它是照 Vivado 的标准 non-project 流程写的，
-#    第一次跑可能需要按你的 Vivado 版本微调。装了 Vivado 之后：
+# ⚠️ **需要 AMD Vivado**（免费版即可）。Mac 上没有，所以本脚本在构建机
+#    （Vivado 2020.1）上跑；docs/fpga-进展.md 里的资源与 Fmax 数字都出自它。
 #
 #      vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top>
-#      # 例：vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xck26-sfvc784-2LV-c butterfly_ct
+#      # 例：vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xazu3eg-sfvc784-1-i mlkem_encaps
+#
+#    **两个 tclargs 都是必需的，顺序是 part 在前、top 在后**；漏掉 part 会
+#    直接打印用法退出（别把 top 当成第一个参数传）。
 #
 # 为什么值得先跑：明确说资源占用、时序收敛与 Fmax 估算**不需要板子**，
 # 只需指定 part。在下单开发板**之前**跑一遍，才知道选的器件够不够用 ——
@@ -37,7 +39,9 @@ read_verilog -sv [glob $root/rtl/bus/*.v]
 #   mont_reduce / butterfly_* 是纯组合 → 只能用虚拟时钟报 in2out 延迟。
 if {$top eq "ntt_core" || $top eq "mldsa_ntt_core" || $top eq "keccak_f1600"
     || $top eq "sha3_core" || $top eq "pqc_accel_axi"
-    || $top eq "mlkem_keygen" || $top eq "mlkem_cbd_stream"} {
+    || $top eq "mlkem_keygen" || $top eq "mlkem_encaps"
+    || $top eq "mlkem_cbd_stream" || $top eq "mlkem_bitpack"
+    || $top eq "mlkem_bitunpack"} {
     read_xdc $root/syn/constraints/ooc_seq.xdc
     puts "约束：ooc_seq.xdc（clk 端口，100 MHz）"
 } else {

@@ -53,6 +53,7 @@ run test_ntt_core    ntt_core
 run test_basemul     mlkem_basemul
 run test_mlkem_units tb_mlkem_units
 run test_mlkem_keygen mlkem_keygen
+run test_mlkem_encaps mlkem_encaps
 for d in 1 4 5 10 11; do
   run test_compress   mlkem_compress   "$d"
 done
