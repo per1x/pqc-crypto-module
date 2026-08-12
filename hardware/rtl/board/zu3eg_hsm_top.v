@@ -80,6 +80,40 @@
 module zu3eg_hsm_top (
     output wire fan          // AA11，低=转（见 fpga/fan_ctrl/fan_ctrl.v）
 );
+    // ========================================================================
+    // 【PQC_CHARACTERIZE：表征构建，不是产品形态】
+    // ========================================================================
+    // 有些东西**在产品形态下没法测**，必须专门出一版：
+    //
+    //  ① 风扇温度阈值。产品值是 45/55/65/75°C，而这块板**热不起来** ——
+    //     实测把风扇完全停转、四个 CPU 满载、PL 密码核循环跑，180 秒结温
+    //     只从 34.1 升到 36.5°C 就趋平。45°C 那一档够不着，"温度上去→
+    //     档位上去"这个上升沿在真硅上就永远验不到。表征版把阈值压到
+    //     30/32/34/36°C，落在这块板真实够得着的区间里。
+    //     控制律是同一份 RTL，改的只有常数。
+    //
+    //  ② TRNG 的原始噪声抽头。SP 800-90B 要的是**调理前**的样本，而把噪声
+    //     源的原始比特摆在总线上等于把熵源内部状态交出去 —— 产品形态下这条
+    //     通路必须整个不存在（不是"读了返回 0"）。取数用表征版，取完就换回。
+    //
+    // 打开方式：impl_bitstream.tcl 里 `PQC_CHARACTERIZE=1 vivado ...`，
+    // 产物另起名字（zu3eg_hsm_char.bit），免得和产品 bitstream 混在一起。
+`ifdef PQC_CHARACTERIZE
+    localparam integer RAW_TAP_EN = 1;
+    localparam [15:0] F_T1_UP = 16'd39592, F_T1_DN = 16'd39462;  // 30 / 29°C
+    localparam [15:0] F_T2_UP = 16'd39852, F_T2_DN = 16'd39722;  // 32 / 31°C
+    localparam [15:0] F_T3_UP = 16'd40113, F_T3_DN = 16'd39983;  // 34 / 33°C
+    localparam [15:0] F_T4_UP = 16'd40374, F_T4_DN = 16'd40243;  // 36 / 35°C
+    localparam [15:0] F_OT_ON = 16'd40634, F_OT_OFF = 16'd40374; // 38 / 36°C
+`else
+    localparam integer RAW_TAP_EN = 0;
+    localparam [15:0] F_T1_UP = 16'd41547, F_T1_DN = 16'd40895;  // 45 / 40°C
+    localparam [15:0] F_T2_UP = 16'd42850, F_T2_DN = 16'd42198;  // 55 / 50°C
+    localparam [15:0] F_T3_UP = 16'd44153, F_T3_DN = 16'd43501;  // 65 / 60°C
+    localparam [15:0] F_T4_UP = 16'd45456, F_T4_DN = 16'd44804;  // 75 / 70°C
+    localparam [15:0] F_OT_ON = 16'd46108, F_OT_OFF = 16'd45326; // 80 / 74°C
+`endif
+
     // ================= PS =================
     wire        pl_clk0;
     wire        pl_resetn0;
@@ -260,7 +294,7 @@ module zu3eg_hsm_top (
 
     // ================= 槽 0：TRNG =================
     wire trng_ready, trng_alarm;
-    trng_axi #(.SECURE_ONLY(0)) u_trng (
+    trng_axi #(.SECURE_ONLY(0), .RAW_TAP(RAW_TAP_EN)) u_trng (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*0 +: 8]), .s_axi_awprot(x_awprot[3*0 +: 3]),
         .s_axi_awvalid(x_awvalid[0]), .s_axi_awready(x_awready[0]),
@@ -367,7 +401,12 @@ module zu3eg_hsm_top (
 
     fan_ctrl #(.PWM_PERIOD(3000),          // 75 MHz / 3000 = 25 kHz
                .STALE_LIMIT(64_000_000),   // 约 0.85 秒没温度就强制满速
-               .STUCK_LIMIT(30_000))       // 30000 次采样 ≈ 30 秒读数不变
+               .STUCK_LIMIT(30_000),       // 30000 次采样 ≈ 30 秒读数不变
+               .T1_UP(F_T1_UP), .T1_DN(F_T1_DN),
+               .T2_UP(F_T2_UP), .T2_DN(F_T2_DN),
+               .T3_UP(F_T3_UP), .T3_DN(F_T3_DN),
+               .T4_UP(F_T4_UP), .T4_DN(F_T4_DN),
+               .OT_ON(F_OT_ON), .OT_OFF(F_OT_OFF))
     u_fan (
         .clk(clk_sys), .rst_n(rst_n),
         .temp_code(fan_temp), .temp_valid(fan_temp_valid),

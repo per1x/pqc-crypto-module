@@ -16,6 +16,13 @@
 # ⚠️ 这里故意**自己**做 rebind + 配 IP，而不是等 harness 收尾去做 ——
 #    因为我要验的正是"在这份新 bitstream 之下网卡能不能用"，
 #    等收尾恢复成出厂 bit 再配 IP，验的就是出厂 bit 了，等于没验。
+#
+# ⚠️⚠️ **自己绑了驱动，就必须自己解绑回去。**（这一条是断电换来的。）
+#    第一版跑完直接返回，harness 的收尾于是在 eth0 驱动还绑着、AXI 主口
+#    还活着的时候 fpgautil 重配 fabric —— 总线当场挂死，而 AXI 一挂那条
+#    sysrq 看门狗也跑不起来，480 秒兜底没救回来，只能断电。
+#    plharness.sh 的收尾现在会无条件先解绑一遍（双保险），但 payload
+#    自己也要收干净：谁改的状态谁负责恢复。
 D=/media/sd-mmcblk1p2/hsm
 L=$D/facfan.log
 : > $L
@@ -50,5 +57,13 @@ while [ $i -lt 24 ]; do
     sleep 10
     i=$((i+1))
 done
-echo "=== 窗口结束，交回 harness 恢复出厂 bit ===" >> $L
+echo "=== 窗口结束，解绑驱动再交回 harness ===" >> $L
+# 自己绑的自己解 —— 理由见文件头那条断电换来的注释
+for d in $(ls /sys/bus/platform/devices/ | grep -E "^8[0-9a-f]{7}\."); do
+    if [ -e /sys/bus/platform/devices/$d/driver ]; then
+        echo $d > /sys/bus/platform/devices/$d/driver/unbind 2>/dev/null
+    fi
+done
+sleep 2
+echo "=== 已解绑，交回 harness ===" >> $L
 sync

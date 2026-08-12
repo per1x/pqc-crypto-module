@@ -90,7 +90,24 @@ read_xdc $root/syn/constraints/board_pins.xdc
 
 # ---- 综合 --------------------------------------------------------------------
 # ⚠️ 不加 -mode out_of_context：这一次要的是能布到器件上的真实现。
-synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt
+# ---- 表征构建开关 ------------------------------------------------------------
+# PQC_CHARACTERIZE=1 出的是**表征用**的 bitstream，不是产品形态：
+# 风扇阈值压低（这块板热不起来，产品阈值在真硅上够不着）、TRNG 原始噪声
+# 抽头打开（SP 800-90B 要调理前的样本）。理由见 zu3eg_hsm_top.v 里那段注释。
+# 产物另起名字，免得和产品 bitstream 混在一起 —— 这两份**绝不能搞混**。
+set characterize [expr {[info exists ::env(PQC_CHARACTERIZE)]
+                        && $::env(PQC_CHARACTERIZE) ne "0"}]
+set bitname [expr {$characterize ? "zu3eg_hsm_char" : "zu3eg_hsm"}]
+if {$characterize} {
+    puts "=========================================================="
+    puts "  ⚠️ 表征构建：风扇低阈值 + TRNG 原始抽头打开"
+    puts "     这一份**不是产品形态**，取完数就换回默认构建"
+    puts "=========================================================="
+    synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
+                 -verilog_define PQC_CHARACTERIZE=1
+} else {
+    synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt
+}
 
 # ---- 断言：风扇管脚必须真的落在 AA11 -----------------------------------------
 # 风扇错了不会崩，只会**安静地让芯片变热** —— 没有任何运行时症状会告诉你
@@ -210,7 +227,7 @@ puts "  建立时间 WNS = $wns ns"
 puts "  保持时间 WHS = $whs ns"
 puts "=========================================================="
 
-set fh [open $outdir/timing.txt w]
+set fh [open $outdir/timing_$bitname.txt w]
 puts $fh "wns=$wns whs=$whs"
 close $fh
 
@@ -220,15 +237,15 @@ if {$wns < 0 || $whs < 0} {
 }
 
 # ---- bitstream ---------------------------------------------------------------
-write_bitstream -force $outdir/zu3eg_hsm.bit
+write_bitstream -force $outdir/$bitname.bit
 
 # fpga_manager 吃的是 .bin（原始比特流，没有 .bit 的头）。
 # bitstream 的字节序也要翻 —— 这两件事都由 write_cfgmem 之外的这条路做：
 # 2020.1 里最省事的办法是让 bootgen 转，但这里直接生成 .bin 更少一个依赖。
 write_cfgmem -force -format BIN -interface SMAPx32 -disablebitswap \
-    -loadbit "up 0x0 $outdir/zu3eg_hsm.bit" $outdir/zu3eg_hsm
+    -loadbit "up 0x0 $outdir/$bitname.bit" $outdir/$bitname
 
 puts "产物："
-puts "  $outdir/zu3eg_hsm.bit"
-puts "  $outdir/zu3eg_hsm.bin  （fpga_manager / fpgautil 用这个）"
+puts "  $outdir/$bitname.bit"
+puts "  $outdir/$bitname.bin  （fpga_manager / fpgautil 用这个）"
 exit 0
