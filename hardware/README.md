@@ -29,7 +29,7 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `mont_reduce`, `barrett_reduce` | combinational | — |
 | `butterfly_ct`, `butterfly_gs` | combinational | — |
 | `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT, coefficients in a true dual-port BRAM (`ram_dp`), instantiates the above | 2305 per transform (2 cycles per butterfly) |
-| `mlkem_basemul` | combinational, five Montgomery multiplies | — |
+| `mlkem_basemul` | combinational, five Montgomery multiplies; composed of `_head` + `_tail` so a timing-critical core can register between the halves | — |
 | `mlkem_compress`, `mlkem_decompress` | combinational, parameterised by `D` | — |
 | `mlkem_cbd2`, `mlkem_cbd3` | combinational, bit-parallel binomial sampling | — |
 | `mlkem_rej_pair` | combinational candidate extraction | — |

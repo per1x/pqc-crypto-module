@@ -29,7 +29,7 @@ hardware/
 | `mont_reduce`、`barrett_reduce` | 组合逻辑 | — |
 | `butterfly_ct`、`butterfly_gs` | 组合逻辑 | — |
 | `ntt_core` | 单蝶形单元，ML-KEM 的 7 层 NTT，系数存在真双口 BRAM（`ram_dp`）里，实例化上述模块 | 2305 / 次变换（一个蝶形两拍） |
-| `mlkem_basemul` | 组合逻辑，五次 Montgomery 乘法 | — |
+| `mlkem_basemul` | 组合逻辑，五次 Montgomery 乘法；由 `_head` + `_tail` 拼成，要收时序的核可以在两半之间插一级寄存器 | — |
 | `mlkem_compress`、`mlkem_decompress` | 组合逻辑，位宽 `D` 由参数给出 | — |
 | `mlkem_cbd2`、`mlkem_cbd3` | 组合逻辑，位并行的中心二项分布采样 | — |
 | `mlkem_rej_pair` | 组合逻辑，取候选 | — |
