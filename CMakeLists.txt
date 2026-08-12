@@ -103,6 +103,9 @@ add_library(pqchsm
   src/hal/accel_axi.c
   src/hal/accel_mmap.c
   src/hal/pqc_accel.c
+  src/hal/hwrng.c
+  src/hal/hwrng_stub.c
+  src/hal/hwrng_mmap.c
   src/proto/proto.c
   src/audit/audit.c
   src/audit/anchor.c
@@ -175,6 +178,7 @@ function(pqchsm_test name src)
 endfunction()
 
 pqchsm_test(test_util      tests/unit/test_util.c)
+pqchsm_test(test_hwrng     tests/unit/test_hwrng.c)
 pqchsm_test(test_selftest  tests/unit/test_selftest.c)
 pqchsm_test(test_kat_parse tests/unit/test_kat_parse.c)
 pqchsm_test(test_pqc_meta  tests/unit/test_pqc_meta.c)
@@ -227,6 +231,7 @@ pqchsm_test(test_e2e       tests/integration/test_e2e.c)
 pqchsm_test(kat_runner     tests/kat/kat_runner.c)
 
 add_test(NAME util          COMMAND test_util)
+add_test(NAME hwrng         COMMAND test_hwrng)
 add_test(NAME selftest      COMMAND test_selftest)
 add_test(NAME kat_parse     COMMAND test_kat_parse)
 add_test(NAME pqc_meta      COMMAND test_pqc_meta)

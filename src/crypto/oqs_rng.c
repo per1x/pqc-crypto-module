@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "pqchsm/hwrng.h"
 #include "pqchsm/util.h"
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -41,6 +42,16 @@ static void rng_callback(uint8_t *out, size_t n)
 		/* 脚本不够用：说明对后端随机数消费模型的假设不成立。
 		 * 记下来让 end() 报错，绝不能悄悄用真随机数糊过去。 */
 		g_overrun = 1;
+	}
+	/* 装了硬件熵源就走它。**不回退到 OpenSSL** —— 硬件熵源出故障时悄悄换回
+	 * 软件源，等于让"密钥的熵来自 PL 里那颗 TRNG"这句话在故障时静默失效，
+	 * 而没有任何人会发现。这里没有返回值可用（liboqs 的回调签名是 void），
+	 * 所以只能崩：宁可崩也不能返回可预测数据。 */
+	if (hwrng_available()) {
+		if (hwrng_bytes(out, n) != HWRNG_OK) {
+			abort();
+		}
+		return;
 	}
 	if (RAND_bytes(out, (int)n) != 1) {
 		/* 拿不到随机数是不可恢复的错误，宁可崩也不能返回可预测数据 */

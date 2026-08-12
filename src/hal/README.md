@@ -27,9 +27,23 @@ mistakes surface in software rather than during board bring-up.
 | `accel_verilator.c` | Transport driving Verilator-simulated RTL. Compiled only when Verilator is present; otherwise `accel_transport_verilator()` returns `NULL`. |
 | `verilator/ntt_sim.cpp` | C wrapper around the Verilated `ntt_core` |
 | `verilator/keccak_sim.cpp` | C wrapper around the Verilated `keccak_f1600` |
+| `accel_mmap.c` | `/dev/mem` + `mmap` transport for real programmable logic. Returns `NULL` unless the physical base addresses are supplied at build time. |
+| `hwrng.c` | Driver for the PL entropy source (`trng_axi`), following the contract in `docs/trng-register-map.zh-CN.md` |
+| `hwrng_stub.c` | Software model of `trng_axi`'s register semantics. FIFO filled by OpenSSL — this models the *interface*, not entropy. |
+| `hwrng_mmap.c` | `/dev/mem` + `mmap` transport for the PL TRNG |
 
-A future `accel_mmap.c` will add a `/dev/mem` + `mmap` transport for real programmable
-logic. Nothing above this directory changes when it does.
+## The entropy source is a separate peripheral
+
+`hwrng.h` is a second transport seam, deliberately not folded into `accel.h`'s opcode
+space. Three architectural reasons, the same ones that keep them separate in the RTL:
+their lifecycles differ (the accelerator is command/complete, the TRNG free-runs), their
+access policies differ (entropy is usually guarded more tightly than algorithm cores),
+and their fault domains differ (a TRNG alarm must report independently, not queue behind
+the accelerator's busy state).
+
+Once a transport is installed, `pqc_random_bytes()` and liboqs' random source both draw
+from it, and **neither falls back to software on failure**. Silent fallback would make
+"the entropy comes from hardware" quietly false at exactly the moment it matters.
 
 ## Division of labour between hardware and software
 

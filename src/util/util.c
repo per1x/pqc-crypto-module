@@ -1,5 +1,7 @@
 #include "pqchsm/util.h"
 
+#include "pqchsm/hwrng.h"
+
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <limits.h>
@@ -31,6 +33,12 @@ int pqc_random_bytes(uint8_t *out, size_t n)
 {
 	if (!out || n == 0 || n > INT_MAX) {
 		return -1;
+	}
+	/* 装了硬件熵源就走它，**并且不回退**：取不到就返回错误，让上层决定
+	 * 停机还是降级。静默回退到 OpenSSL 会让"熵来自硬件"变成一句假话，
+	 * 而调用方无从知道。没装 transport 时照旧走软件源。 */
+	if (hwrng_available()) {
+		return hwrng_bytes(out, n) == HWRNG_OK ? 0 : -1;
 	}
 	return RAND_bytes(out, (int)n) == 1 ? 0 : -1;
 }

@@ -25,9 +25,25 @@ AXI 风格的寄存器表，含 `CTRL`、`STATUS`、`MODE`、`PARAM`、`IN_LEN`�
 | `accel_verilator.c` | 驱动 Verilator 仿真 RTL 的 transport。仅在存在 Verilator 时编入，否则 `accel_transport_verilator()` 返回 `NULL`。 |
 | `verilator/ntt_sim.cpp` | 对 Verilated `ntt_core` 的 C 包装 |
 | `verilator/keccak_sim.cpp` | 对 Verilated `keccak_f1600` 的 C 包装 |
+| `accel_mmap.c` | 打真 PL 的 `/dev/mem` + `mmap` transport。物理基址未在构建时给出时返回 `NULL`。 |
+| `hwrng.c` | PL 熵源（`trng_axi`）驱动，照 `docs/trng-register-map.zh-CN.md` 的契约实现 |
+| `hwrng_stub.c` | `trng_axi` 寄存器语义的软件模型。FIFO 由 OpenSSL 填 —— 模拟的是**接口**，不是熵。 |
+| `hwrng_mmap.c` | PL 里 TRNG 的 `/dev/mem` + `mmap` transport |
 
-将来的 `accel_mmap.c` 会为真实可编程逻辑增加 `/dev/mem` + `mmap` transport。届时本
-目录之上的一切都不需要改动。
+## 熵源是独立外设，没有并进加速器的操作码
+
+`hwrng.h` 是第二条 transport 接缝，**有意**不并进 `accel.h` 的操作码空间。三条理由
+都是架构性的，与 RTL 侧把它们分成两个从机的理由完全相同：
+
+- **生命周期不同**：加速器是"发命令 → 等完成"，TRNG 是常开自由运行的；
+- **访问权限不同**：熵源通常比算法加速器管得更严；
+- **故障域不同**：TRNG 告警要能独立上报，不该被加速器的忙闲状态挡住。
+
+并进操作码会把这三件事搅在一起。
+
+装上 transport 之后，`pqc_random_bytes()` 与 liboqs 的随机源都改从它取，
+且**取不到时都不回退到软件源**。静默回退会让"熵来自硬件"这句话恰好在最要紧的
+时刻悄悄变成假话，而调用方无从知道。
 
 ## 软硬件的分工
 
