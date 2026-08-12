@@ -1,0 +1,76 @@
+#!/bin/sh
+# fanquiet —— 开机早期把带温控的 bitstream 装进 PL
+#
+# 【三条不变量，每一条都是踩出来的】
+#  ① **重配 PL 之前必须先解绑 PL 驱动。** 带着活的 AXI 主口重配 fabric 会把
+#     总线挂死，而 AXI 一挂连 sysrq 都写不进去 —— 那次只能断电。
+#  ② **装完要自检，不对就退回出厂 bitstream。** 判据取"以太网驱动有没有重新
+#     绑上"：这一步跑在网络初始化之前，那时还没有 IP 可查，而驱动绑没绑上
+#     是此刻就能看的、且直接决定后面网络起不起得来。
+#  ③ 找不到 bitstream 就安静退出。删掉 /lib/firmware/fanquiet.bit 就是回退。
+#
+# 装在 S20：网络初始化（S40）之前，bootok（S99，延迟 60 秒清三振标记）之前。
+# 万一这一步把板子搞挂，三振标记还在，第三次启动自动退回备份镜像。
+BIT=/lib/firmware/fanquiet.bit
+LOG=/tmp/fanquiet.log
+ETH=80000000.ethernet
+
+say() { echo "$(cut -d' ' -f1 /proc/uptime) $*" >> $LOG 2>/dev/null; }
+
+unbind_pl() {
+    : > /tmp/fanquiet.drvmap
+    for d in $(ls /sys/bus/platform/devices/ 2>/dev/null | grep -E "^8[0-9a-f]{7}\."); do
+        if [ -e /sys/bus/platform/devices/$d/driver ]; then
+            drv=$(readlink /sys/bus/platform/devices/$d/driver | sed 's#.*/##')
+            echo "$d $drv" >> /tmp/fanquiet.drvmap
+            echo $d > /sys/bus/platform/devices/$d/driver/unbind 2>/dev/null
+        fi
+    done
+}
+
+rebind_pl() {
+    sort -u /tmp/fanquiet.drvmap 2>/dev/null | while read d drv; do
+        echo $d > /sys/bus/platform/drivers/$drv/bind 2>/dev/null
+    done
+    sleep 2
+}
+
+eth_bound() { [ -e /sys/bus/platform/devices/$ETH/driver ]; }
+
+case "$1" in
+  start)
+    [ -f "$BIT" ] || exit 0
+    : > $LOG
+    say "开始：装 $BIT"
+
+    unbind_pl
+    say "已解绑 $(wc -l < /tmp/fanquiet.drvmap 2>/dev/null) 个 PL 驱动"
+    sleep 1
+
+    fpgautil -b $BIT -f Full >> $LOG 2>&1
+    say "fpgautil rc=$? state=$(cat /sys/class/fpga_manager/fpga0/state 2>/dev/null)"
+    sleep 1
+    rebind_pl
+
+    if eth_bound; then
+        say "成功：温控 bitstream 已生效，以太网驱动已重新绑上"
+        exit 0
+    fi
+
+    # ② 自愈
+    say "以太网驱动没绑回来 —— 退回出厂 bitstream"
+    unbind_pl
+    sleep 1
+    if [ -f /media/sd-mmcblk1p2/hsm/factory.bit ]; then
+        fpgautil -b /media/sd-mmcblk1p2/hsm/factory.bit -f Full >> $LOG 2>&1
+    fi
+    sleep 1
+    rebind_pl
+    if eth_bound; then
+        say "已退回出厂 bitstream（风扇回到满速，但板子还在）"
+    else
+        say "退回后仍未绑上 —— 交给三振退备份镜像"
+    fi
+    ;;
+esac
+exit 0
