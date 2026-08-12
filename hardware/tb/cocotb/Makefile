@@ -32,6 +32,7 @@ VERILOG_SOURCES = \
   $(RTL_MLDSA)/rounding.v \
   $(RTL_MLDSA)/sample.v \
   $(RTL_KECCAK)/keccak_f1600.v \
+  $(RTL_KECCAK)/sha3_core.v \
   $(RTL_TRNG)/trng_health.v \
   $(RTL_BUS)/axi4lite_regs.v \
   $(RTL_BUS)/pqc_accel_axi.v \
