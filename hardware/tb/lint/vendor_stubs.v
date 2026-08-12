@@ -51,6 +51,7 @@ endmodule
 // SYSMONE4 —— UltraScale+ 的系统监测单元（这里只用它的 DRP 口读结温）
 // ---------------------------------------------------------------------------
 module SYSMONE4 #(
+    parameter SIM_DEVICE       = "ULTRASCALE_PLUS",
     parameter SIM_MONITOR_FILE = "design.txt",
     parameter [15:0] INIT_40 = 16'h0000,
     parameter [15:0] INIT_41 = 16'h0000,
