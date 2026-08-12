@@ -142,7 +142,8 @@ async def read_use_key(dut, slot):
 
 
 def as_words(key_int):
-    return [(key_int >> (32 * i)) & 0xFFFFFFFF for i in range(WORDS)]
+    # 先写进去的字在最高位，见 key_vault.v 里 use_mux 的注释
+    return [(key_int >> (32 * (WORDS - 1 - i))) & 0xFFFFFFFF for i in range(WORDS)]
 
 
 @cocotb.test()

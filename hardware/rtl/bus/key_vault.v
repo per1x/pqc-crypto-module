@@ -83,11 +83,14 @@ module key_vault #(
 
     // 使用口：整把密钥的 SLOTS 选 1。tamper 之后恒零 —— 不是"读出来无效"，
     // 是槽位真的已经被清了，这里再加一道是为了 tamper 与 rst_n 之间的那几拍。
+    // 字序：**先写进来的字在最高位**（use_key[255:224] 是第 0 个字）。
+    // 与仓库里其它地方一致（block_in[127:120] 是第 0 个字节），也正是
+    // aes_core / sm4_core 期待的顺序 —— 反过来的话密文全错而不会报任何错。
     reg [WORDS*32-1:0] use_mux;
     always @(*) begin
         use_mux = {(WORDS*32){1'b0}};
         for (i = 0; i < WORDS; i = i + 1) begin
-            use_mux[i*32 +: 32] = keys[use_sel*WORDS + i];
+            use_mux[(WORDS-1-i)*32 +: 32] = keys[use_sel*WORDS + i];
         end
     end
     assign use_key   = tamper_latched ? {(WORDS*32){1'b0}} : use_mux;
