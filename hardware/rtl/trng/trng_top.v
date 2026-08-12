@@ -39,7 +39,24 @@ module trng_top #(
     parameter integer RATE_LANES      = 17,    // 调理器 rate（1088 bit）
     parameter integer ABSORB_BLOCKS   = 1,
     parameter integer OUT_LANES       = 4,     // 每次挤出 256 bit
-    parameter integer FIFO_DEPTH      = 16
+    parameter integer FIFO_DEPTH      = 16,
+    // ============================================================================
+    // 【RAW_TAP：把**调理前**的原始噪声比特接到一个软件可读的口上】
+    // ============================================================================
+    // 为什么必须有：SP 800-90B 的最小熵评估要的是**噪声源的原始数字化样本**，
+    // 不是调理器（SHA-3）的输出 —— 调理器的输出无论熵多低看着都像随机数，
+    // 拿它跑 EntropyAssessment 得到的数字是**无意义的**，而且会得到一个
+    // 非常好看的数字，正好骗过想少做一步的人。
+    //
+    // 抽头点取 src_valid/src_bit，也就是**健康检测（RCT/APT）吃的同一条流**。
+    // 检测的对象、评估的对象、被使用的对象必须是同一个，否则三者都没有意义。
+    //
+    // ⚠️ **这是表征用的口，不是产品形态。** 把噪声源的原始比特摆在总线上，
+    //    等于把熵源的内部状态直接给了读它的人。所以：
+    //      · 默认 RAW_TAP=0，整条通路连同寄存器一起不存在（不是"读了返回 0"）；
+    //      · 打开它的构建只用于跑 SP 800-90B 取数，取完就换回 0；
+    //      · 即使打开，它仍在 AXI 防火墙之后，生产形态下只有安全世界够得到。
+    parameter integer RAW_TAP         = 0
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -67,7 +84,12 @@ module trng_top #(
     output wire [15:0] apt_index,
     output reg  [31:0] startup_count,
     output wire [31:0] blocks_absorbed,
-    output reg  [31:0] words_out
+    output reg  [31:0] words_out,
+
+    // ---- 原始噪声抽头（RAW_TAP=1 时才有东西）----
+    input  wire        raw_rd_en,
+    output wire [31:0] raw_data,
+    output wire        raw_valid
 );
 
     // ---- zeroize 展宽 ----
@@ -93,6 +115,52 @@ module trng_top #(
         .clk(clk), .rst_n(rst_n),
         .enable(enable && !zeroize_active),
         .sample_valid(src_valid), .sample(src_bit));
+
+    // ---- 原始噪声抽头 ----
+    // 把 src_bit 每 32 个攒成一个字，压进一个小 FIFO 供软件取。
+    // 满了就**丢新的**，不做背压 —— 抽头绝不能拖慢噪声源本身，那会改变
+    // 被评估的那条流的统计性质，等于评估了一个不存在的东西。
+    // 丢样本对 SP 800-90B 没有影响：它评估的是**独立同分布/非独立同分布**
+    // 的样本序列性质，中间整段缺失只相当于换了一段采集窗口。
+    generate if (RAW_TAP != 0) begin : g_rawtap
+        reg  [31:0] raw_sh;
+        reg  [4:0]  raw_cnt;
+        reg         raw_push;
+        reg  [31:0] raw_word;
+        wire        raw_wr_ready;
+
+        always @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                raw_sh <= 32'd0; raw_cnt <= 5'd0;
+                raw_push <= 1'b0; raw_word <= 32'd0;
+            end else begin
+                raw_push <= 1'b0;
+                if (zeroize_active) begin
+                    raw_sh <= 32'd0; raw_cnt <= 5'd0; raw_word <= 32'd0;
+                end else if (src_valid) begin
+                    raw_sh  <= {raw_sh[30:0], src_bit};
+                    raw_cnt <= raw_cnt + 5'd1;          // 自然回绕 = 每 32 个一组
+                    if (raw_cnt == 5'd31) begin
+                        raw_word <= {raw_sh[30:0], src_bit};
+                        raw_push <= 1'b1;
+                    end
+                end
+            end
+        end
+
+        sync_fifo #(.WIDTH(32), .DEPTH(64), .WIPE_ON_FLUSH(1)) u_rawfifo (
+            .clk(clk), .rst_n(rst_n),
+            .flush(zeroize),
+            .wr_en(raw_push && raw_wr_ready), .wr_data(raw_word),
+            .wr_ready(raw_wr_ready),
+            .rd_en(raw_rd_en), .rd_data(raw_data), .rd_valid(raw_valid),
+            .wiping(), .level());
+    end else begin : g_norawtap
+        // 关掉的时候是**真的没有这条通路**，不是"读了返回 0"。
+        assign raw_data  = 32'd0;
+        assign raw_valid = 1'b0;
+        wire _unused_raw = &{1'b0, raw_rd_en, 1'b0};
+    end endgenerate
 
     // ---- 连续健康检测 ----
     // 吃的是抽取之后的样本流，也就是调理器实际消费的那一条 —— 检测的对象

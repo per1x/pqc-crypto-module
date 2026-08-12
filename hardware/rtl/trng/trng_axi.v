@@ -64,7 +64,10 @@ module trng_axi #(
     parameter integer RATE_LANES      = 17,
     parameter integer ABSORB_BLOCKS   = 1,
     parameter integer OUT_LANES       = 4,
-    parameter integer FIFO_DEPTH      = 16
+    parameter integer FIFO_DEPTH      = 16,
+    // 原始噪声抽头。默认关。打开的构建**只用于跑 SP 800-90B 取数**，
+    // 取完换回 0 —— 理由见 trng_top.v 里 RAW_TAP 的那段注释。
+    parameter integer RAW_TAP         = 0
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -107,7 +110,8 @@ module trng_axi #(
     localparam [3:0] A_CTRL    = 4'h0, A_STATUS  = 4'h1, A_RDATA   = 4'h2,
                      A_HEALTH  = 4'h3, A_APTIDX  = 4'h4, A_STARTUP = 4'h5,
                      A_BLOCKS  = 4'h6, A_WORDS   = 4'h7, A_VERSION = 4'h8,
-                     A_PARAM0  = 4'h9, A_PARAM1  = 4'hA, A_PARAM2  = 4'hB;
+                     A_PARAM0  = 4'h9, A_PARAM1  = 4'hA, A_PARAM2  = 4'hB,
+                     A_RAW     = 4'hC;   // 原始噪声，RAW_TAP=1 时才有东西
 
     // ---- TRNG 本体 ----
     reg         reg_enable;
@@ -118,13 +122,16 @@ module trng_axi #(
     wire        ready, alarm, rct_alarm, apt_alarm, startup_done, fifo_wiping;
     wire [15:0] rct_run, apt_count, apt_index;
     wire [31:0] startup_count, blocks_absorbed, words_out;
+    wire        raw_rd_en;
+    wire [31:0] raw_data;
+    wire        raw_valid;
 
     trng_top #(
         .NUM_RO(NUM_RO), .RO_STAGES_0(RO_STAGES_0), .DECIM(DECIM),
         .RCT_CUTOFF(RCT_CUTOFF), .APT_WINDOW(APT_WINDOW),
         .APT_CUTOFF(APT_CUTOFF), .STARTUP_SAMPLES(STARTUP_SAMPLES),
         .RATE_LANES(RATE_LANES), .ABSORB_BLOCKS(ABSORB_BLOCKS),
-        .OUT_LANES(OUT_LANES), .FIFO_DEPTH(FIFO_DEPTH)
+        .OUT_LANES(OUT_LANES), .FIFO_DEPTH(FIFO_DEPTH), .RAW_TAP(RAW_TAP)
     ) u_trng (
         .clk(clk), .rst_n(rst_n),
         .enable(reg_enable),
@@ -136,7 +143,8 @@ module trng_axi #(
         .startup_done(startup_done), .fifo_wiping(fifo_wiping),
         .rct_run(rct_run), .apt_count(apt_count), .apt_index(apt_index),
         .startup_count(startup_count), .blocks_absorbed(blocks_absorbed),
-        .words_out(words_out));
+        .words_out(words_out),
+        .raw_rd_en(raw_rd_en), .raw_data(raw_data), .raw_valid(raw_valid));
 
     assign trng_ready = ready;
     assign trng_alarm = alarm;
@@ -222,9 +230,16 @@ module trng_axi #(
     assign fifo_rd_en = ar_go && ar_permit
                      && (s_axi_araddr[5:2] == A_RDATA) && fifo_rd_valid;
 
+    // 原始噪声口同一条纪律：被 DECERR 挡掉的读不弹出。
+    // 这里更要紧 —— 原始比特是熵源的内部状态，让一个拿不到数据的读把它
+    // 冲掉，等于把"取样"和"取到"拆开了，采集程序会以为自己拿到了连续的流。
+    assign raw_rd_en = ar_go && ar_permit
+                    && (s_axi_araddr[5:2] == A_RAW) && raw_valid;
+
     reg underrun;
 
-    wire [31:0] status_word = {23'd0,
+    wire [31:0] status_word = {22'd0,
+                               raw_valid,       // [9] 原始噪声 FIFO 里有字
                                underrun,        // [8]
                                reg_enable,      // [7]
                                fifo_wiping,     // [6]
@@ -271,6 +286,11 @@ module trng_axi #(
                     A_STARTUP: s_axi_rdata <= startup_count;
                     A_BLOCKS:  s_axi_rdata <= blocks_absorbed;
                     A_WORDS:   s_axi_rdata <= words_out;
+                    A_RAW: begin
+                        // RAW_TAP=0 时这里恒为 0 —— 但那不是"读了返回 0"，
+                        // 而是整条通路在综合时就不存在（见 trng_top.v）。
+                        s_axi_rdata <= raw_valid ? raw_data : 32'd0;
+                    end
                     A_VERSION: s_axi_rdata <= VERSION;
                     A_PARAM0:  s_axi_rdata <= {DECIM[7:0], NUM_RO[7:0],
                                                RATE_LANES[7:0], OUT_LANES[7:0]};

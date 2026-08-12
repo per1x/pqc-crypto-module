@@ -122,6 +122,10 @@ run_trng test_trng_top       trng_top
 run_trng test_trng_axi       trng_axi
 # 告警要确定性发生，把 RCT 阈值压到 2 —— 等自然出现 41 连的话跑不完
 run_trng test_trng_top_alarm trng_top -Ptrng_top.RCT_CUTOFF=2
+# 原始噪声抽头：默认 RAW_TAP=0（通路根本不存在），只有这一条用例把它打开。
+# 打开的构建只用于跑 SP 800-90B 取数 —— 把噪声源的原始比特摆在总线上
+# 等于把熵源内部状态给了读它的人，不是产品形态。
+run_trng test_trng_raw       trng_top -Ptrng_top.RAW_TAP=1
 rm -rf sim_build_trng_*
 
 rm -rf sim_build results.xml
