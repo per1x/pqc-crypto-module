@@ -72,6 +72,45 @@ module mlkem_basemul_tail (
     assign r1 = t_a0b1 + t_a1b0;
 endmodule
 
+// 基乘的 ζ 取值 —— 表就是 ZETAS[64..127]，也就是 7 层 NTT 之后剩下的那一层。
+//
+// 【为什么单独成模块】
+// 调用基乘的核（keygen / encaps / decaps）都要这张表，而且取法完全一样：
+// 第 pair 对系数用 bz[pair>>1]，奇数对取负号（x² − ζ 与 x² + ζ 交替）。
+// 抄三份的话，改一个数就得记得改三处 —— 这类"数据副本"正是最容易改漏的地方。
+// 所以表和取法一起放在这里，各核只例化。
+//
+// 综合出来是 64×16 的分布式 ROM，几十个 LUT；三个核各例化一份仍然比
+// 共享一份再做仲裁便宜，共用的是**源码**而不是硅上的那块 ROM。
+module mlkem_bmzeta (
+    input  wire        [7:0]  pair,     // 0..127：偶数用 +ζ，奇数用 −ζ
+    output wire signed [15:0] zeta
+);
+    (* rom_style = "distributed" *)
+    reg signed [15:0] bz [0:63];
+    initial begin
+        bz[ 0]=-16'sd1103; bz[ 1]= 16'sd430;  bz[ 2]= 16'sd555;  bz[ 3]= 16'sd843;
+        bz[ 4]=-16'sd1251; bz[ 5]= 16'sd871;  bz[ 6]= 16'sd1550; bz[ 7]= 16'sd105;
+        bz[ 8]= 16'sd422;  bz[ 9]= 16'sd587;  bz[10]= 16'sd177;  bz[11]=-16'sd235;
+        bz[12]=-16'sd291;  bz[13]=-16'sd460;  bz[14]= 16'sd1574; bz[15]= 16'sd1653;
+        bz[16]=-16'sd246;  bz[17]= 16'sd778;  bz[18]= 16'sd1159; bz[19]=-16'sd147;
+        bz[20]=-16'sd777;  bz[21]= 16'sd1483; bz[22]=-16'sd602;  bz[23]= 16'sd1119;
+        bz[24]=-16'sd1590; bz[25]= 16'sd644;  bz[26]=-16'sd872;  bz[27]= 16'sd349;
+        bz[28]= 16'sd418;  bz[29]= 16'sd329;  bz[30]=-16'sd156;  bz[31]=-16'sd75;
+        bz[32]= 16'sd817;  bz[33]= 16'sd1097; bz[34]= 16'sd603;  bz[35]= 16'sd610;
+        bz[36]= 16'sd1322; bz[37]=-16'sd1285; bz[38]=-16'sd1465; bz[39]= 16'sd384;
+        bz[40]=-16'sd1215; bz[41]=-16'sd136;  bz[42]= 16'sd1218; bz[43]=-16'sd1335;
+        bz[44]=-16'sd874;  bz[45]= 16'sd220;  bz[46]=-16'sd1187; bz[47]=-16'sd1659;
+        bz[48]=-16'sd1185; bz[49]=-16'sd1530; bz[50]=-16'sd1278; bz[51]= 16'sd794;
+        bz[52]=-16'sd1510; bz[53]=-16'sd854;  bz[54]=-16'sd870;  bz[55]= 16'sd478;
+        bz[56]=-16'sd108;  bz[57]=-16'sd308;  bz[58]= 16'sd996;  bz[59]= 16'sd991;
+        bz[60]= 16'sd958;  bz[61]=-16'sd1460; bz[62]= 16'sd1522; bz[63]= 16'sd1628;
+    end
+
+    wire signed [15:0] raw = bz[pair[7:1]];
+    assign zeta = pair[0] ? -raw : raw;
+endmodule
+
 module mlkem_basemul (
     input  wire signed [15:0] a0,
     input  wire signed [15:0] a1,
