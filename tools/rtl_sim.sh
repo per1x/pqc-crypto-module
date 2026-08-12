@@ -74,6 +74,7 @@ run test_sha3_core   sha3_core
 echo
 echo "  总线接口"
 run test_axi         pqc_accel_axi
+run test_key_vault   key_vault_axi
 
 echo
 echo "  噪声源健康检测"

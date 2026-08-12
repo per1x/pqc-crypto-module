@@ -42,6 +42,9 @@ VERILOG_SOURCES = \
   $(RTL_KECCAK)/sha3_core.v \
   $(RTL_TRNG)/trng_health.v \
   $(RTL_BUS)/axi4lite_regs.v \
+  $(RTL_BUS)/axi4lite_firewall.v \
+  $(RTL_BUS)/key_vault.v \
+  $(RTL_BUS)/key_vault_axi.v \
   $(RTL_BUS)/pqc_accel_axi.v \
   $(PWD)/tb_mlkem_units.v \
   $(PWD)/tb_mldsa_units.v \

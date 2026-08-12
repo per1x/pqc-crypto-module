@@ -51,6 +51,9 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `mlkem_decaps` | **full ML-KEM.Decaps_internal**: decrypt, re-encrypt by instantiating `mlkem_encaps`, **constant-time** ciphertext comparison, implicit rejection J(z‖c) | ~78.0k per decaps (768) |
 | `ram_dp` | parameterised true dual-port synchronous RAM, inferred as block RAM | 1 cycle read latency |
 | `axi4lite_regs` | AXI4-Lite slave, control and status registers | — |
+| `axi4lite_firewall` | AXI4-Lite firewall: AxPROT / address-window / tamper gating; a rejected transaction **never reaches the downstream port**; violation counters | 3-4 cycles per access |
+| `key_vault` | in-PL key vault, 8 slots x 256 bit in registers; write-only load port plus a use port that stays inside the PL; tamper wipes everything in one cycle and latches | 1 cycle to wipe |
+| `key_vault_axi` | the vault as an AXI4-Lite slave = firewall + metadata registers + vault | — |
 | `pqc_accel_axi` | accelerator top level: AXI4-Lite + AXI4-Stream + cores | — |
 
 ML-KEM and ML-DSA use different arithmetic — different modulus (3329 against 8380417),

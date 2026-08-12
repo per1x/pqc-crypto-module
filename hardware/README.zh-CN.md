@@ -51,6 +51,9 @@ hardware/
 | `mlkem_decaps` | **完整 ML-KEM.Decaps_internal**：解密 + 例化 `mlkem_encaps` 重加密 + **常量时间**密文比对 + 隐式拒绝 J(z‖c) | 约 78.0 k / 次（768） |
 | `ram_dp` | 参数化真双口同步 RAM，推断成块 RAM | 读延迟 1 拍 |
 | `axi4lite_regs` | AXI4-Lite 从机，控制/状态寄存器 | — |
+| `axi4lite_firewall` | AXI4-Lite 防火墙：AxPROT / 地址窗口 / tamper 门控，**不合规的事务不进下游**，带违规计数 | 每笔访问 3~4 拍 |
+| `key_vault` | PL 内密钥仓，8 槽 × 256 bit 寄存器；只写入口 + 只给 PL 内部的使用口；tamper 一拍全清并锁存 | 擦除 1 拍 |
+| `key_vault_axi` | 密钥仓的 AXI4-Lite 从机 = 防火墙 + 元数据寄存器 + 仓 | — |
 | `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核 | — |
 
 ML-KEM 与 ML-DSA 是两套不同的算术：模数不同（3329 对 8380417）、Montgomery 基不同

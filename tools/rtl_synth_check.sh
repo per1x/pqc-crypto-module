@@ -120,8 +120,14 @@ yosys -q -p "read_verilog $RTL_FILES
 #     rd_valid 拉高的同一拍 rd_data 就得有效，因为 AXI4-Lite 要在同一次
 #     读事务里返回数据。换成同步读的 BRAM 就得加一拍，那要动 trng_top
 #     和 AXI 读通路 —— 为 1 Kbit 付这个代价不值。
-echo "  （以上都是预期之内：keccak 状态必须全并行访问，sync_fifo 要 FWFT 时序。"
-echo "    判断标准见 hardware/rtl/common/ram_dp.v 的注释。）"
+#   key_vault 的 keys / fill：**这里是故意摊成寄存器的**，理由与上面两处不同 ——
+#     密钥仓要求"擦除一拍完成"。BRAM 只能逐地址写零，擦除过程中存在一个
+#     "擦了一半"的窗口，掉电或复位卡在那个窗口里残留就还在片上。
+#     2048 bit 摊成 2048 个 FF 是这颗片子的 1.5%，为这条性质付得起。
+#     判断标准仍然是 ram_dp.v 那条：**看规模**。这里的规模允许，S3 那块 16 KiB
+#     的缓冲不允许。
+echo "  （以上都是预期之内：keccak 状态必须全并行访问，sync_fifo 要 FWFT 时序，"
+echo "    key_vault 要一拍擦完整个密钥仓。判断标准见 hardware/rtl/common/ram_dp.v。）"
 
 echo
 if [ "$fail" -eq 0 ]; then

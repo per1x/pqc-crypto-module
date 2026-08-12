@@ -40,6 +40,7 @@ read_verilog -sv [glob $root/rtl/bus/*.v]
 if {$top eq "ntt_core" || $top eq "mldsa_ntt_core" || $top eq "keccak_f1600"
     || $top eq "sha3_core" || $top eq "pqc_accel_axi"
     || $top eq "mlkem_keygen" || $top eq "mlkem_encaps" || $top eq "mlkem_decaps"
+    || $top eq "key_vault_axi" || $top eq "key_vault" || $top eq "axi4lite_firewall"
     || $top eq "mlkem_cbd_stream" || $top eq "mlkem_bitpack"
     || $top eq "mlkem_bitunpack"} {
     read_xdc $root/syn/constraints/ooc_seq.xdc
