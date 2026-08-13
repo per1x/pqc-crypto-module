@@ -59,6 +59,136 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/sample.v" -match "*'scal
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/axi4lite_regs.v" -match "*'wr_addr'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/axi4lite_regs.v" -match "*'ar_addr'*"
 
+// 同一件事，其余四个 AXI4-Lite 从设备。地址口一律给满 8 位（AW=8 是这几个
+// 从设备的统一约定），而每个从设备的寄存器只占其中一段：
+//   · [1:0] 是字节内偏移 —— AXI4-Lite 一拍一个 32 位字，从来不看它；
+//   · 高位是片内没用到的地址空间 —— 落在那里的访问由译码的 default 分支
+//     回 DECERR，不需要把每一位都读出来。
+// 逐个从设备、逐个信号列，新增一个从设备不会被这几条顺带遮住。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v"     -match "*'f_araddr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v"     -match "*'wr_addr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/key_vault_axi.v" -match "*'f_araddr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/key_vault_axi.v" -match "*'wr_addr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/sym_axi.v"       -match "*'f_araddr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/sym_axi.v"       -match "*'wr_addr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/trng/trng_axi.v"     -match "*'s_axi_araddr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/trng/trng_axi.v"     -match "*'wr_addr'*"
+
+// AxPROT 只有 [1]（NS）和 [0]（特权）参与判据；[2] 是取指/取数，
+// 密码机的寄存器面按定义不区分这两者，所以那一位处处不接。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/axi4lite_firewall.v" -match "*'prot'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/key_vault_axi.v"     -match "*'viol_first_prot'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/trng/trng_axi.v"         -match "*'s_axi_arprot'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/trng/trng_axi.v"         -match "*'wr_prot'*"
+
+// 只有一位/一个字节宽的控制寄存器：写通道给满 32 位数据和 4 位字节选通，
+// 而这些寄存器分别只吃低 3 位（trng_axi 的 CTRL）和低 8 位（mlkem_axi 的
+// INDATA 是逐字节喂进去的）。字节选通同理，只看 strb[0]。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/trng/trng_axi.v" -match "*'wr_data'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/trng/trng_axi.v" -match "*'wr_strb'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v" -match "*'wr_data'*"
+
+// 交叉开关的选片函数：按定义只看地址里的 3 位片选段，其余位与选片无关
+// （它们由被选中的那个从设备自己去译）。AW 随例化不同是 8 或 40，
+// 所以未用位的区间在两次 lint 里不一样，这里按信号名匹配。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/board/axi4lite_xbar.v" -match "*'a'*"
+
+// 加速器：向上取整/加一的中间量算满宽度，寻址只取低位段
+//   shk_outw  ——（outlen+3)>>2 算满 10 位，输出字数只用低 9 位
+//   rd_ptr_nxt / cnt_p1 —— 提前一拍的地址算满 9/10 位，进 BRAM 只取 BUF_AW 位
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/pqc_accel_axi.v" -match "*'shk_outw'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/pqc_accel_axi.v" -match "*'rd_ptr_nxt'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/pqc_accel_axi.v" -match "*'cnt_p1'*"
+
+// 位解包/位打包：累加器按最坏情况 20 位，取出来的系数最宽 12 位
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/bitpack.v" -match "*'masked'*"
+
+// 解封装：解包口给满 12 位，而 ML-KEM 的 d 最大是 11（du ≤ 11、dv ≤ 5），
+// 所以最高那一位在任何参数集下都取不到。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/decaps.v" -match "*'bu_out_data'*"
+
+// CBD 采样计数算满 9 位（要能表示 256），写地址只用低 8 位
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/keygen.v" -match "*'cbd_count'*"
+
+// 基乘的 ζ 取法：pair 的取值域是 0..127（keygen / encaps / decaps 三个核里
+// 它都数到 127 就回 0），表只有 64 项，所以查表用 pair[6:1]、符号用 pair[0]，
+// pair[7] 结构上恒为 0，不参与任何一边。
+//
+// 端口保持 8 位而不是收成 7 位，是因为三个调用方的 pair 计数器都是 8 位的：
+// 把端口收窄只会把这一位的"没人用"从本模块挪到那三个核里去（还多两条告警），
+// 真要消掉就得同时改三个核的计数器宽度与它们的 127/加一常量 —— 那是另一件事，
+// 收益只有这一条告警，风险是动三个已经对上 KAT 的核。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/basemul.v" -match "*'pair'*"
+
+// ---- UNUSEDSIGNAL：DEBUG_BANK=0 时编译掉的仿真观察口 ----
+//
+// keygen / encaps 都有一个 dbg_addr/dbg_data 观察口，只在 DEBUG_BANK=1 时
+// 由 generate 接到内部多项式存储上（cocotb 用它把中间多项式读出来对拍）。
+// 上板的例化一律 DEBUG_BANK=0，那一支 generate 整个不展开，dbg_addr 自然
+// 没有读者。**端口本身要保留** —— 它是这两个核与测试台之间的契约，
+// 删掉就得改测试台，而观察口正是那些测试能对拍中间结果的原因。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/keygen.v" -match "*'dbg_addr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/encaps.v" -match "*'dbg_addr'*"
+
+// ---- PROCASSINIT：带初值的 reg 又在 always 里被赋值 ----
+//
+// 织构自生的上电复位计数器。ZU3EG 配置完成时 GSR 把所有触发器初始化成 0，
+// 所以 `reg [7:0] porcnt = 8'd0;` 里的初值**不是仿真用的摆设，而是硅上真实
+// 发生的事**：计数器必然从 0 开始数，数满 255 拍才放开复位。设计正是靠这一点
+// 保证「即使 pl_resetn0 因为运行时重配没有正确释放，整机也能自己起来」。
+//
+// 这里 Verilator 提示的现象（声明处有初值、always 里又赋值）确实存在，但那正是
+// 这段逻辑要表达的东西。**不要改成无初值再加一条复位分支** —— 那就等于把
+// 上电复位又架回到 pl_resetn0 上，回到它要解决的那个问题里去。
+lint_off -rule PROCASSINIT -file "*/hardware/rtl/board/zu3eg_hsm_top.v" -match "*'porcnt'*"
+
+// ---- SYNCASYNCNET：rst_n 既做异步复位又被同步读 ----
+//
+// 这条规则要抓的是"同一根复位在综合逻辑里一处当异步复位、另一处当同步数据"
+// ——那确实是个 CDC 隐患。本工程里全部 8 条的同步读**都在 `ifndef SYNTHESIS`
+// 的断言块里**，形如 `always @(posedge clk) if (rst_n && <非法情况>) $finish;`：
+// 那个 rst_n 只是"复位期间别报警"的门，综合时整块不存在。
+//
+// 源头只有两处（sha3_core 的三条参数/时序断言、cbd_stream 的改 η 断言），
+// 其余几条是同一根 rst_n 经层次传上来的同一件事：decaps / encaps / keygen
+// 例化了它们，pqc_accel_axi 的 core_rst_n 又是喂给 sha3_core 的那一根。
+//
+// 断言本身不能删：sha3_core 那三条挡的是"参数写错/直通口被误用时静静算出
+// 错误摘要"，正是最难查的一类。也不值得为了这条规则把断言改写成异步复位块。
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/keccak/sha3_core.v"   -match "*rst_n'*"
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/mlkem/cbd_stream.v"   -match "*rst_n'*"
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/mlkem/decaps.v"       -match "*rst_n'*"
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/mlkem/encaps.v"       -match "*rst_n'*"
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/mlkem/keygen.v"       -match "*rst_n'*"
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/bus/pqc_accel_axi.v"  -match "*rst_n'*"
+
+// ---- UNOPTFLAT：反相器环的组合回路 ----
+//
+// ring_osc 的 chain 是**故意闭合的组合环** —— 它就是 TRNG 的物理噪声源，
+// 整条链上唯一不是数字逻辑的一环，熵全部来自这里。Verilator 说它
+// "unoptimizable" 是对的：这个环没有稳定解，本来就不该被优化掉。
+// 综合侧配套的三件事（DONT_TOUCH、ALLOW_COMBINATORIAL_LOOPS、LUTLP-1 降级）
+// 在 hardware/syn/constraints/trng_ro.xdc 里，理由见 ring_osc.v 的文件头。
+//
+// 注意仿真走的是另一套实现（`TRNG_SIM_MODEL 下的带抖动行为模型），
+// 那一支没有组合环；这条豁免只对综合那一支生效。
+// （匹配串写成 *chain* 而不是 *'chain'*：这条告警印的是层次全名，
+//   形如 'trng_top.u_src.g_ro[0].u_ro.chain[0]'，signal 名两侧不贴引号。）
+lint_off -rule UNOPTFLAT -file "*/hardware/rtl/trng/ring_osc.v" -match "*chain*"
+
+// ---- UNUSEDPARAM：只有仿真模型用得到的参数 ----
+//
+// SEED / STAGE_PS / JITTER_PS 三个参数只出现在 ring_osc 的
+// `ifdef TRNG_SIM_MODEL 那一支里（抖动模型的种子与延迟量）。lint 不定义那个宏，
+// 于是它们在综合那一支下没有读者。
+//
+// 但**参数必须留在端口表上**：trng_source 是按名字传 .SEED(SD) 的
+// （每个环一个不同的种子，否则八个环在仿真里同相位，采出来的比特全一样），
+// 少一个参数就直接报错。也就是说它们仍然在替我校验参数名的拼写。
+lint_off -rule UNUSEDPARAM -file "*/hardware/rtl/trng/ring_osc.v" -match "*'SEED'*"
+lint_off -rule UNUSEDPARAM -file "*/hardware/rtl/trng/ring_osc.v" -match "*'STAGE_PS'*"
+lint_off -rule UNUSEDPARAM -file "*/hardware/rtl/trng/ring_osc.v" -match "*'JITTER_PS'*"
+
 // ---- PINCONNECTEMPTY：有意留空的例化端口 ----
 //
 // PARAM 寄存器属于软件侧的寄存器契约（可读可写），但加速器顶层实现的三个操作码

@@ -157,7 +157,14 @@ module zynq_ultra_ps_e_0 (
     input  wire        maxigp2_rvalid,
     output wire        maxigp2_rready
 );
-    assign pl_clk0    = maxihpm0_lpd_aclk;
+    // ⚠️ pl_clk0 **不能**从 maxihpm0_lpd_aclk 接出来。
+    // 顶层的接法是 pl_clk0 → BUFGCE_DIV → clk_sys → PS 的 maxihpm0_lpd_aclk，
+    // 桩里再把 aclk 直通回 pl_clk0，就在 lint 视角下闭成一个组合环，
+    // 于是 Verilator 报 UNOPTFLAT('clk_sys')。真 IP 的 pl_clk0 是 PLL 出来的，
+    // 与 aclk 之间没有任何组合通路 —— 那个环完全是桩造出来的假象。
+    // 所以这里给 pl_clk0 一个独立的常量驱动，把假环断开；lint 只看连接关系，
+    // 时钟在这里是什么值没有意义。
+    assign pl_clk0    = 1'b0;
     assign pl_resetn0 = 1'b1;
     assign {maxigp2_awaddr, maxigp2_awprot, maxigp2_awvalid, maxigp2_awid,
             maxigp2_awlen, maxigp2_awsize, maxigp2_awburst, maxigp2_awlock,
@@ -168,7 +175,7 @@ module zynq_ultra_ps_e_0 (
             maxigp2_arlen, maxigp2_arsize, maxigp2_arburst, maxigp2_arlock,
             maxigp2_arcache, maxigp2_arqos, maxigp2_aruser,
             maxigp2_rready} = 0;
-    wire _unused = &{1'b0, maxigp2_awready, maxigp2_wready,
+    wire _unused = &{1'b0, maxihpm0_lpd_aclk, maxigp2_awready, maxigp2_wready,
                      maxigp2_bid, maxigp2_bresp, maxigp2_bvalid,
                      maxigp2_arready, maxigp2_rid, maxigp2_rdata,
                      maxigp2_rresp, maxigp2_rlast, maxigp2_rvalid, 1'b0};

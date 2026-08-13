@@ -60,8 +60,10 @@ module aes_core (
     reg [2:0] state;
 
     reg        k256_r, dec_r;
-    wire [3:0] nr = k256_r ? 4'd14 : 4'd10;      // 轮数
-    wire [3:0] nk = k256_r ? 4'd8  : 4'd4;       // 密钥字数
+    wire [3:0] nr = k256_r ? 4'd14 : 4'd10;      // 轮数 Nr
+    // 密钥字数 Nk（AES-128 是 4、AES-256 是 8）没有单独的信号：它只出现在
+    // "wi 模 Nk" 和 "wi 除以 Nk" 两处，两处都因为 Nk 是 2 的幂而直接写成对
+    // wi 的位选，见下面的 kw_zero / kw_four 与 Rcon 的 case。
 
     // ================= 轮密钥 =================
     // 15 × 128 bit。展开时按字写入，跑轮时整块读出（15 选 1 的 128 位选择器）。
@@ -96,14 +98,14 @@ module aes_core (
     wire [31:0] w_prev = wbuf[7];
     wire [31:0] w_back = k256_r ? wbuf[0] : wbuf[4];    // w[i-Nk]
 
-    // wi % nk == 0 —— nk 是 4 或 8，都是 2 的幂，所以取低位即可
+    // wi % Nk == 0 —— Nk 是 4 或 8，都是 2 的幂，所以取低位即可
     wire kw_zero  = k256_r ? (wi[2:0] == 3'd0) : (wi[1:0] == 2'd0);
     wire kw_four  = k256_r && (wi[2:0] == 3'd4);
 
     wire [31:0] rot_w = {w_prev[23:0], w_prev[31:24]};
     wire [31:0] sw_in = kw_zero ? rot_w : w_prev;
 
-    // Rcon：i/nk - 1，最多到 13
+    // Rcon：i/Nk - 1，最多到 13
     reg [7:0] rcon;
     always @(*) begin
         case (k256_r ? {1'b0, wi[5:3]} : wi[5:2])

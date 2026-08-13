@@ -133,7 +133,10 @@ module key_vault #(
                     // 锁定的槽写不进；写满了还写也写不进（要先 begin）
                     if (locked_sel || (fill[ld_slot] >= WORDS[3:0])) deny <= 1'b1;
                     else begin
-                        keys[ld_slot*WORDS + fill[ld_slot]] <= ld_wdata;
+                        // ld_slot*WORDS 是 32 位整型运算，fill 是 4 位 ——
+                        // 显式补齐再相加，两侧同宽（use_mux 那边的下标本来就
+                        // 是两个整型相加，所以只有这一处要补）。
+                        keys[ld_slot*WORDS + {28'd0, fill[ld_slot]}] <= ld_wdata;
                         fill[ld_slot] <= fill[ld_slot] + 4'd1;
                     end
                 end else if (ld_commit) begin

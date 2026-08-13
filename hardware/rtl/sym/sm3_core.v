@@ -90,7 +90,10 @@ module sm3_core (
     wire [6:0]  jj = j - 7'd1;
 
     wire [31:0] tj = (jj < 7'd16) ? 32'h79CC4519 : 32'h7A879D8A;
-    wire [31:0] tj_rot = rotl(tj, jj[4:0]);          // T_j <<< (j mod 32)
+    // T_j <<< (j mod 32)。rotl 的移位量形参是 integer（32 位），所以这里把
+    // 5 位的 jj[4:0] 显式补齐再传 —— 其余调用点传的都是字面量常数，本来就是
+    // 32 位，只有这一处是从信号里取的。
+    wire [31:0] tj_rot = rotl(tj, {27'd0, jj[4:0]});
 
     wire [31:0] ff = (jj < 7'd16) ? (a ^ b ^ c) : ((a & b) | (a & c) | (b & c));
     wire [31:0] gg = (jj < 7'd16) ? (e ^ f ^ g) : ((e & f) | (~e & g));

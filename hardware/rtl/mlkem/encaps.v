@@ -167,7 +167,7 @@ module mlkem_encaps #(
         .count(), .rd_addr(rej_rd_addr), .rd_data(rej_rd_data));
 
     reg         cbd_start, cbd_out_ready;
-    wire        cbd_done, cbd_in_ready, cbd_out_valid;
+    wire        cbd_in_ready, cbd_out_valid;
     wire signed [15:0] cbd_out_coeff;
 
     // r 用 η1（512 是 3），e₁/e₂ 一律 η2 = 2
@@ -180,7 +180,8 @@ module mlkem_encaps #(
 
     mlkem_cbd_stream u_cbd (
         .clk(clk), .rst_n(rst_n),
-        .eta3(cbd_eta3), .start(cbd_start), .done(cbd_done),
+        // .done() 与 .count() 都有意留空：采样推进看的是 out_valid 的拍数
+        .eta3(cbd_eta3), .start(cbd_start), .done(),
         .in_valid(cbd_fb_valid), .in_ready(cbd_in_ready), .in_data(sha_out_data),
         .out_valid(cbd_out_valid), .out_ready(cbd_out_ready),
         .out_coeff(cbd_out_coeff), .count());

@@ -164,14 +164,14 @@ module mlkem_keygen #(
     reg  [23:0] rej_in_bytes;
     reg  [7:0]  rej_rd_addr;
     wire        rej_done, rej_in_ready;
-    wire [8:0]  rej_count;
     wire [15:0] rej_rd_data;
 
+    // .count() 有意留空：本核只按 rej_done 推进，采到第几个系数不看。
     mlkem_rej_uniform u_rej (
         .clk(clk), .rst_n(rst_n),
         .start(rej_start), .done(rej_done),
         .in_valid(rej_in_valid), .in_bytes(rej_in_bytes), .in_ready(rej_in_ready),
-        .count(rej_count), .rd_addr(rej_rd_addr), .rd_data(rej_rd_data));
+        .count(), .rd_addr(rej_rd_addr), .rd_data(rej_rd_data));
 
     reg         cbd_start, cbd_out_ready;
     wire        cbd_done, cbd_in_ready, cbd_out_valid;
@@ -202,7 +202,9 @@ module mlkem_keygen #(
         .rd_addr(ntt_rd_addr), .rd_data(ntt_rd_data));
 
 
-    reg [255:0] rho_r, sigma_r, h_r, d_r, z_r;
+    // d 本身不单独存：它一进来就写进 hdr_seed（G 要吸收的正是 d‖k），
+    // 之后再没有第二个读者，所以原先那个 d_r 是一份没人看的副本。
+    reg [255:0] rho_r, sigma_r, h_r, z_r;
     reg [2:0]   idx_i, idx_j;      // 矩阵行列
     reg [2:0]   se_n;              // s/e 的第几个多项式（0..2k-1）
     reg [8:0]   cnt;               // 通用系数/字节计数
@@ -479,15 +481,13 @@ module mlkem_keygen #(
     end
 
     // ================= 时序 =================
-    wire [8:0] se_bytes = eta1_3_r ? 9'd192 : 9'd128;   // 64·η1
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= S_IDLE;
             done  <= 1'b0;
             k_r <= 3'd3; eta1_3_r <= 1'b0;
             rho_r <= 256'd0; sigma_r <= 256'd0; h_r <= 256'd0;
-            d_r <= 256'd0; z_r <= 256'd0;
+            z_r <= 256'd0;
             idx_i <= 3'd0; idx_j <= 3'd0; se_n <= 3'd0;
             cnt <= 9'd0; hdr_cnt <= 6'd0; hdr_len <= 6'd33;
             hdr_seed <= 256'd0; hdr_tail0 <= 8'd0; hdr_tail1 <= 8'd0;
@@ -502,7 +502,6 @@ module mlkem_keygen #(
             done     <= 1'b0;
             k_r      <= k_now;
             eta1_3_r <= eta1_3_now;
-            d_r      <= d_in;
             z_r      <= z_in;
             hdr_seed <= d_in;
             hdr_tail0 <= {5'd0, k_now};     // G 吸收的是 d‖k

@@ -258,7 +258,9 @@ module mlkem_axi #(
     wire rd_outdata = f_arvalid && f_arready && (f_araddr[5:2] == A_OUTDATA)
                       && ({1'b0, out_rd} < {1'b0, out_len});
 
-    wire [31:0] r_status = {27'd0, fw_tampered, de_hash_ok,
+    // 四个标志占 [3:0]，填充要 28 位（原来写的 27'd0 让整条拼接只有 31 位，
+    // 靠赋值时的零扩展才凑够 32 —— 值不受影响，但位宽是错的）。
+    wire [31:0] r_status = {28'd0, fw_tampered, de_hash_ok,
                             (state == S_IDLE) && run_done, (state != S_IDLE)};
 
     // ================= 端口归属 =================

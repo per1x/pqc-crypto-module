@@ -162,7 +162,10 @@ module axi4lite_firewall #(
     assign m_wdata  = w_data_r;
     assign m_wstrb  = w_strb_r;
 
-    wire wr_permit = permit(aw_addr_r, aw_prot_r, 1'b1);
+    // 写方向的判据**不能**在这里预先算一份：W_IDLE 那一拍地址可能还在
+    // s_awaddr 上（aw_addr_r 要到下一拍才更新），所以下面是拿
+    // "本拍握手就用 s_awaddr、否则用 aw_addr_r" 现场调 permit 的。
+    // 原先这里有一根 wr_permit，用的是纯 aw_addr_r，从来没有被引用过。
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

@@ -281,7 +281,8 @@ module pqc_accel_axi #(
 
     wire [BUF_AW-1:0] widx_half = cnt[7:1];               // NTT：两系数一字
     wire [15:0] load_half = cnt[0] ? bufa_dout[31:16] : bufa_dout[15:0];
-    wire [BUF_AW-1:0] widx_lane = cnt[6:0];               // Keccak：一字一次
+    // Keccak 是一字一次，地址就是 cnt[BUF_AW-1:0]，在下面的 bufa_addr 里直接写；
+    // 原先这里还有一根同义的 widx_lane，自从那处改成写 cnt 之后就没人用了。
     wire        kick_busy = ntt_start || kec_start;
 
     // ---- 模式 10 挤压：攒满一个 32 位字再整字写回 ----

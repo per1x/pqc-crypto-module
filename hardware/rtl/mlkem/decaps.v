@@ -232,7 +232,7 @@ module mlkem_decaps #(
     reg        v_phase;              // 0 = 正在解 c₁（u），1 = 正在解 c₂（v）
     reg        bu_in_valid, bu_out_ready;
     reg  [7:0] bu_in_data;
-    wire       bu_in_ready, bu_out_valid;
+    wire       bu_out_valid;
     wire [11:0] bu_out_data;
 
     // d 只在两个多项式之间变。256·d 比特总是整字节，所以换 d 的那一刻
@@ -241,7 +241,8 @@ module mlkem_decaps #(
 
     mlkem_bitunpack u_bu (
         .clk(clk), .rst_n(rst_n), .d(bu_d),
-        .in_valid(bu_in_valid), .in_ready(bu_in_ready), .in_data(bu_in_data),
+        // .in_ready() 有意留空：喂字节的节奏由本核的状态机定死，不看反压
+        .in_valid(bu_in_valid), .in_ready(), .in_data(bu_in_data),
         .out_valid(bu_out_valid), .out_ready(bu_out_ready), .out_data(bu_out_data));
 
     // du ∈ {10,11}、dv ∈ {4,5} 各要一份解压：D 在移位量上，推不出来
@@ -299,7 +300,7 @@ module mlkem_decaps #(
     // ================= 重加密：直接例化封装核 =================
     reg          enc_start;
     reg  [255:0] m_r;
-    wire         enc_done, enc_ek_ready, enc_out_valid, enc_out_last;
+    wire         enc_ek_ready, enc_out_valid;
     wire [7:0]   enc_out_data;
 
     reg  [7:0]  ekb_r;               // 从 ek 缓冲取出的一个字节
@@ -311,10 +312,12 @@ module mlkem_decaps #(
     mlkem_encaps #(.DEBUG_BANK(0)) u_enc (
         .clk(clk), .rst_n(rst_n),
         .param_set(ps_r), .m_in(m_r),
-        .start(enc_start), .done(enc_done),
+        // .done() / .out_last() 有意留空：重加密的进度由本核自己数密文字节
+        // （cbcnt），封装核报的完成与末字节标志都用不上。
+        .start(enc_start), .done(),
         .ek_valid(enc_ek_valid), .ek_ready(enc_ek_ready), .ek_data(ekb_r),
         .out_valid(enc_out_valid), .out_ready(1'b1),
-        .out_data(enc_out_data), .out_last(enc_out_last),
+        .out_data(enc_out_data), .out_last(),
         .dbg_addr(12'd0), .dbg_data());
 
     // ================= 状态寄存器 =================

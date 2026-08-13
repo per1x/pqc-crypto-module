@@ -107,7 +107,9 @@ module mlkem_bmzeta (
         bz[60]= 16'sd958;  bz[61]=-16'sd1460; bz[62]= 16'sd1522; bz[63]= 16'sd1628;
     end
 
-    wire signed [15:0] raw = bz[pair[7:1]];
+    // 表是 64 项，下标要 6 位。pair 的取值域是 0..127（三个核里它都数到 127
+    // 就回 0），所以 pair[7] 恒为 0，取 pair[6:1] 与 pair>>1 完全等价。
+    wire signed [15:0] raw = bz[pair[6:1]];
     assign zeta = pair[0] ? -raw : raw;
 endmodule
 
