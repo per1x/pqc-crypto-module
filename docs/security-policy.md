@@ -179,6 +179,13 @@ of which is "reset the pointers":
   be the vulnerability). What the board shows is the behaviour and duration of
   `WIPING`.
 
+One point stated precisely: the PS-side XPPU and FPD_XMPU **structurally do not
+cover** the PL window at `0x8000_0000` (UG1085 v2.5 Table 16-10 enumerates every
+aperture; `M_AXI_HPM0_LPD` bypasses the FPD per p1092). The AxPROT-gated firewall
+in programmable logic is therefore not one layer of defence in depth — **it is the
+only enforcement point on this routing**, which is precisely why the bus decode
+must be one-to-one with no mirrored addresses.
+
 ## 10. Self-tests
 
 Pre-operational self-tests run before the first cryptographic service and can be

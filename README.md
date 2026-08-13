@@ -357,10 +357,17 @@ Still open, with the reason attached:
    reference model) but are not chained into KeyGen/Sign/Verify.
 2. **Boot-time persistence of the PL configuration** — needs JTAG, because the only
    remaining clean route writes the golden `BOOT.BIN`.
-3. **XMPU/XPPU configuration.** Measured from the board: all 149 configuration
-   registers are refused to the normal world (bus error, not a kernel restriction), so
-   configuring them requires a secure-world master. Only the minimal secure payload
-   needed for the gate proof was built.
+3. ~~**XMPU/XPPU configuration.**~~ **Closed: structurally not applicable.** UG1085
+   v2.5 settles it — XPPU's aperture table (Table 16-10) enumerates every aperture and
+   `0x8000_0000` is in none of them, and FPD_XMPU is not on the `M_AXI_HPM0_LPD` path
+   (p1092: the PL is reached "without the FPD"). No PS-side protection unit covers the
+   PL window at all. That reinforces the architecture rather than exposing a gap:
+   **the AxPROT-gated firewall in the PL is the only enforcement point on this
+   routing**, which is exactly why the address decode must be one-to-one with no
+   mirrors. See §5.5 of the delivery document.
+   (Incidentally measured: PS-side protection on this board is entirely unconfigured —
+   XPPU `CTRL=0`, all 400 permission entries at their reset default. Unrelated to the
+   above: even configured, it would not reach the PL.)
 4. **Power/EM side channels.** Not attempted, and not claimed. The constant-time work
    covers timing only, and was checked on the board (median difference 0.000 % between
    the valid and implicit-reject Decaps paths).
