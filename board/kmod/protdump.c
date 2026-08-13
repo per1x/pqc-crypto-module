@@ -44,6 +44,24 @@
 
 #define SIP_PROT_READ   0x8200ff11UL
 
+/* 另一条读法：把请求转给 PMU 执行（ZynqMP 的 PM 通路，与 pmsec.c 同一套）。
+ *
+ * 为什么要有第二条路：XMPU_DDR0..5（0xFD00_0000）与 XMPU_FPD（0xFD5D_0000）
+ * 不在 BL31 的页表里，要从 EL3 读就得**新增一段映射** —— 而加了那段映射的
+ * BL31 在这块板上**起不来**（试过两次，两次断电；MAX_XLAT_TABLES 放宽到 10
+ * 也一样，所以不是转换表不够）。为这两个次要目标继续冒险不值得。
+ *
+ * PMU 本来就是配 XMPU 的那个主控，它的地址白名单很可能放行这些寄存器，
+ * 而且**这条路完全不碰启动**：golden 镜像上就能跑。
+ *
+ * ⚠️ 两条路的发起者不同，报告里必须写清楚是哪一条读到的：
+ *   · SiP    → 发起者是 APU 的 EL3（安全世界）
+ *   · PM     → 发起者是 PMU 这个独立的安全主控
+ * 读到同一个值不代表两者等价，别把它们混成一句"安全世界读到了"。
+ */
+#define PM_SIP_SVC      0xC2000000UL
+#define PM_MMIO_READ    20
+
 #define XPPU_BASE       0xFF980000UL
 #define XPPU_APER_BASE  0xFF981000UL
 #define XPPU_APER_N     400
@@ -66,6 +84,10 @@ static int group = 0;
 module_param(group, int, 0444);
 MODULE_PARM_DESC(group, "读哪一组（0..5，见文件头）");
 
+static int via_pm = 0;
+module_param(via_pm, int, 0444);
+MODULE_PARM_DESC(via_pm, "非 0 则走 PM_MMIO_READ（由 PMU 代读）而不是 EL3 的 SiP");
+
 struct ent {
 	char  name[40];
 	u32   addr;
@@ -76,11 +98,19 @@ struct ent {
 static struct ent *tab;
 static int n_ent;
 
-/* EL3 读一个保护单元寄存器。返回 0 成功。 */
+/* 读一个保护单元寄存器。返回 0 成功。 */
 static int prot_read(u32 addr, u32 *out)
 {
 	struct arm_smccc_res res;
 
+	if (via_pm) {
+		/* PM 约定：x1 = (arg1<<32)|arg0；返回 a0 低 32 位是状态，
+		 * 高 32 位是数据（与 drivers/firmware/xilinx/zynqmp.c 一致）。 */
+		arm_smccc_smc(PM_SIP_SVC | PM_MMIO_READ, (u64)addr, 0,
+			      0, 0, 0, 0, 0, &res);
+		*out = (u32)(res.a0 >> 32);
+		return (int)(s32)(u32)res.a0;
+	}
 	arm_smccc_smc(SIP_PROT_READ, (u64)addr, 0, 0, 0, 0, 0, 0, &res);
 	*out = (u32)res.a1;
 	return (int)(s32)(u32)res.a0;
@@ -131,15 +161,19 @@ static int protdump_show(struct seq_file *m, void *v)
 {
 	int i, refused = 0, okc = 0;
 
-	seq_printf(m, "=== 保护单元实配（EL3 读，group=%d）===\n", group);
+	seq_printf(m, "=== 保护单元实配（%s，group=%d）===\n",
+		   via_pm ? "PM_MMIO_READ：由 **PMU** 代读" : "EL3 的 SiP：由 **APU 安全世界** 读",
+		   group);
 	for (i = 0; i < n_ent; i++) {
 		if (tab[i].ret == 0) {
 			seq_printf(m, "  %-32s @0x%08x = 0x%08x\n",
 				   tab[i].name, tab[i].addr, tab[i].val);
 			okc++;
 		} else {
-			seq_printf(m, "  %-32s @0x%08x  SiP 拒绝（白名单外）\n",
-				   tab[i].name, tab[i].addr);
+			seq_printf(m, "  %-32s @0x%08x  被拒（%s，码 %d）\n",
+				   tab[i].name, tab[i].addr,
+				   via_pm ? "PMUFW 白名单" : "SiP 白名单",
+				   tab[i].ret);
 			refused++;
 		}
 	}
