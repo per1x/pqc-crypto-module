@@ -1,0 +1,36 @@
+=== 载入密码 bitstream（金丝雀在这一版里）===
+cp: '/lib/firmware/zu3eg_hsm_fan.bit' and '/lib/firmware/zu3eg_hsm_fan.bit' are the same file
+Time taken to load BIN is 2695.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+rc=0 state=operating
+
+=== 从哪个槽启动的 ===
+[   88.849532] pmsec: CSU_MULTI_BOOT @0xffca0010 ret=0 val=0x00000004
+
+=== ① 对照：EL3 读 SECURE_ONLY=0 的 ML-KEM（应当成功）===
+[   88.919414] pmsec: EL3 安全读 0x80030000 → ret=0 val=0x00010000
+
+=== ② 决定性一步：EL3 读 SECURE_ONLY=1 的金丝雀 ===
+[   89.003259] pmsec: EL3 安全读 0x80040000 → ret=0 val=0x00010000
+=== 经 PM_MMIO_READ（由 PMU 代为访问）===
+注意：发起者是 PMU 这个安全主控，不是 APU 的安全世界。
+      能读到只说明「某个安全主控穿过了 AxPROT 门控」。
+
+  PL 金丝雀 VERSION (SECURE_ONLY=1)   @0x80040000  PM 返回 2002 （被拒/不可达）
+  PL ML-KEM VERSION (SECURE_ONLY=0)      @0x80030000  PM 返回 2002 （被拒/不可达）
+  PL TRNG VERSION   (SECURE_ONLY=0)      @0x80000020  PM 返回 2002 （被拒/不可达）
+  CSU_MULTI_BOOT                         @0xffca0010 = 0x00000004  （成功）
+
+=== 边界证明：同一地址，两个世界 ===
+  地址 0x80040000
+  安全世界（EL3，AxPROT[1]=0）读到 0x00010000  ← 成功
+  普通世界（EL1-NS，AxPROT[1]=1）**被总线拒绝**
+  两条合起来才是完整的门控证明：安全世界能、普通世界不能。
+
+=== ③ 同一地址，普通世界（用户态 /dev/mem，AxPROT[1]=1）===
+读 0x80030000 ...
+0x80030000 = 0x00010000
+  ↑ SECURE_ONLY=0 的核，普通世界读得到
+读 0x80040000 ...
+/media/sd-mmcblk1p2/hsm/pay_sec.sh: line 38:   826 Bus error               $D/rdreg 0x80040000
+  ↑ 金丝雀，普通世界读的结果（rc=135；被拒时进程收 SIGBUS，rc=135）
