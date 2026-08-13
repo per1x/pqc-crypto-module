@@ -502,3 +502,58 @@ async def test_illegal_mode_and_pset_refused(dut):
     assert not (st & ST_PARAMERR), "合法参数跑完之后 PARAM_ERR 还挂着"
 
     dut._log.info("mode=3 / pset=3 / 两者皆 3 全部被拒且未启动核；换回合法值照常")
+
+
+@cocotb.test()
+async def test_illegal_start_after_success_invalidates_result(dut):
+    """非法 START **发生在一次成功运行之后** —— 这一条是上板才补的
+
+    上面那条 negative test 从复位开始，OUT_LEN 本来就是 0，于是"拒绝之后
+    还留着上一次的结果"这个形状根本没出现过。板上是连着跑的：
+
+        跑一次 KeyGen-512  → DONE=1，OUT_LEN=2432
+        写 MODE = mode:3   → 非法
+        写 CTRL.START      → 被拒，PARAM_ERR=1，核确实没启动 ✓
+        软件轮询 STATUS    → **DONE 还是 1**（上一次留下的）
+        读 OUT_LEN         → **2432**，读 OUT_DATA → 上一次的 ek‖dk
+
+    也就是说：软件拿着**上一次**的输出，当成这一次的结果。这比不报错更糟，
+    因为它看起来成功了。所以一次 START 尝试就作废上一次的结果，
+    不管这次是否被接受。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    d, z = bytes([0x81] * 32), bytes([0x82] * 32)
+    ek, dk = mlkem_keygen(d, z, name)
+    got = await run_op(dut, M_KEYGEN, name, d + z)
+    assert got == ek + dk
+
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_DONE, "先决条件不成立：成功那次没有报 DONE"
+    n, _ = await rd(dut, OUT_LEN)
+    assert n == len(ek) + len(dk)
+
+    # 紧接着来一次非法 START
+    assert await wr(dut, MODE, 3 | (1 << 2)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
+
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_PARAMERR, f"非法 START 没置 PARAM_ERR（{st:#x}）"
+    assert not (st & ST_BUSY), "非法 START 竟然启动了核"
+    assert not (st & ST_DONE), (
+        f"非法 START 之后 DONE 仍然是 1（STATUS={st:#x}）—— "
+        "软件会拿上一次的输出当成这一次的结果")
+
+    n, _ = await rd(dut, OUT_LEN)
+    assert n == 0, (
+        f"非法 START 之后 OUT_LEN 还是 {n} —— 上一次的 ek‖dk 还摆在那里")
+
+    # 换回合法参数，一切照常
+    got = await run_op(dut, M_KEYGEN, name, d + z)
+    assert got == ek + dk, "非法 START 之后再跑合法的，结果不对"
+    st, _ = await rd(dut, STATUS)
+    assert not (st & ST_PARAMERR)
+
+    dut._log.info("非法 START 作废上一次的 DONE 与 OUT_LEN，软件不会误读陈值")

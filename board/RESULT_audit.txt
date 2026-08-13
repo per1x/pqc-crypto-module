@@ -1,0 +1,46 @@
+==== 审计修复上板复验 ====
+五项修复里能从板上观测的三项半在下面；
+证不了的都标成 SKIP 并写明由哪条仿真用例覆盖。
+
+① 地址别名：唯一那个地址通，镜像一律 DECERR
+  PASS  正例 trng VERSION @+0x00020 = 0x00010000
+  PASS  正例 key_vault VERSION @+0x10000 = 0x00010000
+  PASS  正例 sym VERSION @+0x20000 = 0x00010000
+  PASS  正例 mlkem VERSION @+0x30000 = 0x00010000
+  PASS  正例 fan VERSION @+0x50000 = 0x00010000
+  PASS  镜像 @+0x10110 被拒（槽内偏移高位非零（审计点名的那个））
+  PASS  镜像 @+0x10100 被拒（槽内偏移 +0x100）
+  PASS  镜像 @+0x11100 被拒（槽内偏移 +0x1100）
+  PASS  镜像 @+0x3ff00 被拒（槽内偏移 +0xFF00）
+  PASS  镜像 @+0x08000 被拒（槽内偏移 +0x8000）
+  PASS  镜像 @+0x100004 被拒（aperture 之外（旧译码会落到槽 0））
+  PASS  镜像 @+0x60000 被拒（槽号 6 ≥ NS）
+  PASS  镜像 @+0x70000 被拒（槽号 7 ≥ NS）
+  SKIP  未对齐地址：Device 内存的未对齐访问在 CPU 上就报异常，与总线 DECERR 分不开 —— 只在仿真里判
+
+② zeroize：WIPING 的行为（BRAM 全零由仿真判，板上无路可读）
+  PASS  zeroize 前 KeyGen-512 出 2432 字节
+  PASS  写 ZEROIZE 之后 STATUS.WIPING = 1（擦除机真的启动了）
+  SKIP  擦除期间写 IN_DATA 回 SLVERR：写错误在 aarch64 上是 SError，接不住、会 panic —— 由仿真判
+  PASS  WIPING 持续 112.5 µs（8192 拍 @75 MHz ≈ 109 µs，含轮询开销）
+  PASS  擦除后 OUT_LEN = IN_PTR = 0
+  PASS  擦除后同一输入重跑，2432 字节逐字节相同（擦除没有损坏数据通路）
+  SKIP  两块 8 KB BRAM 逐字节为 0：软件没有任何路径能读到那些字节（这正是设计对的表现），全零证据来自仿真的存储读回
+
+④ TRNG：取样 FIFO 一次都没溢出
+  PASS  起点：DROPS=0 BLOCKS=17892 STATUS=0x000000a3
+  PASS  取了 4096 个随机字，调理器吸收块数 17892 → 18402（+510）
+  PASS  DROPS 仍为 0 —— 取样 FIFO 一次都没溢出
+  SKIP  两条流逐比特相同：板上取不到调理器入口的握手，由仿真逐比特对拍
+
+⑤ 非法 mode / pset：START 那一刻被拒，核不启动
+  PASS  mode=3：PARAM_ERR 置位、BUSY 从未拉起、上一次的 DONE/OUT_LEN 已作废
+  PASS  pset=3：PARAM_ERR 置位、BUSY 从未拉起、上一次的 DONE/OUT_LEN 已作废
+  PASS  两个都=3：PARAM_ERR 置位、BUSY 从未拉起、上一次的 DONE/OUT_LEN 已作废
+  PASS  换回合法参数（768）照常跑出 3584 字节，PARAM_ERR 已清
+
+③ tamper 同拍：板上无法复验
+  SKIP  这一版 bitstream 里 tamper 恒接 0（zu3eg_hsm_top.v），板上没有任何东西能拉起它
+  SKIP  即便能拉起，"与总线握手同一拍"是拍级巧合，用户态安排不了 —— 由 test_firewall / test_key_vault_core 判
+
+==== 合计 PASS=25 FAIL=0 SKIP=6 ====

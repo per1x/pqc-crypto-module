@@ -41,6 +41,26 @@
 //    真溢出了也不装作没发生：sample_drops 饱和计数，软件读得到 ——
 //    "一个都没丢"这句话必须是可核对的，不是推导出来的。
 //
+// 5. **调理器的出口永不阻塞：输出 FIFO 满就丢弃这个调理后的字。**
+//    只加上面那个 FIFO 是不够的，**这一条是上板才发现的**：
+//    仿真里测试台一直在读随机字，输出 FIFO 从不满；而板上的常态恰恰相反 ——
+//    没人读的时候输出 FIFO 几拍就满了，调理器于是卡死在 S_SQUEEZE 等
+//    word_ready，bit_ready 一直是 0，取样 FIFO 256 拍就填满，此后**每一个
+//    样本都被丢掉**。实测 DROPS 上电即饱和到 65535。
+//
+//    这不是"深度不够"，加大 FIFO 一点用没有 —— 卡住的时间没有上界。
+//    根子在于：噪声源是自由运行的、压不住，而消费者可以永远不来。
+//    两者之间必须有一个地方允许丢东西。
+//
+//    **让它丢在出口，而不是丢在入口。** 丢弃一个已经调理好的 32 位字是
+//    完全无害的：熵留在海绵状态里（duplex 模式，状态一直往前带），
+//    丢掉的只是一个没人要的随机数。而丢弃入口的样本则直接破坏
+//    "被检测的序列 = 被使用的序列"那条前提。
+//
+//    于是 word_ready 恒为 1，海绵永远转；写进输出 FIFO 的动作被 wr_ready
+//    挡住而已。代价是空闲时也在耗电、环振一直在振 —— 对原型来说无所谓，
+//    而且熵池持续再播种本来就是真密码机的做法。
+//
 // 【复位的写法】
 // 派生复位（cond_rst_n）先寄存一拍再驱动，不把 zeroize / alarm 组合进
 // 异步复位网络。组合出来的异步复位有毛刺风险，Vivado 也会就此报 DRC。
@@ -300,11 +320,18 @@ module trng_top #(
         .WIDTH(32), .DEPTH(FIFO_DEPTH), .WIPE_ON_FLUSH(1)
     ) u_fifo (
         .clk(clk), .rst_n(rst_n), .flush(fifo_flush),
-        .wr_en(cond_word_valid), .wr_data(cond_word), .wr_ready(fifo_wr_ready),
+        // 满了就不写 —— 这个字被丢掉，海绵不受影响
+        .wr_en(cond_word_valid && fifo_wr_ready),
+        .wr_data(cond_word), .wr_ready(fifo_wr_ready),
         .rd_en(rd_en && rd_valid), .rd_data(rd_data), .rd_valid(rd_valid),
         .wiping(fifo_wiping), .level());
 
-    assign cond_word_ready = fifo_wr_ready;
+    // ⚠️ **恒为 1**，不能接 fifo_wr_ready（见文件头第 5 条）。
+    // 接上去的话，没人读随机字时调理器就卡死在 S_SQUEEZE，
+    // 入口的取样 FIFO 随即溢出 —— 丢样就从"出口丢无害的输出"
+    // 变成了"入口丢样本"，正是这一整套改动要消灭的东西。
+    // 板上实测过：接 fifo_wr_ready 时 DROPS 上电即饱和到 65535。
+    assign cond_word_ready = 1'b1;
     assign ready = startup_done && !alarm && !zeroize_active && !fifo_wiping;
 
     always @(posedge clk or negedge rst_n) begin

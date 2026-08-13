@@ -163,7 +163,7 @@ software.
 ├── demo/               PKCS#11 provider demos (Python, Java)
 ├── hardware/
 │   ├── rtl/            Verilog sources: mlkem/, mldsa/, keccak/, sym/, bus/, trng/, board/
-│   ├── tb/cocotb/      cocotb testbenches (195 tests) and simulation-only top levels
+│   ├── tb/cocotb/      cocotb testbenches (197 tests) and simulation-only top levels
 │   ├── tb/lint/        Vendor-primitive stubs — lint only, never synthesised
 │   ├── model/          Python reference model, vector export, independent oracles
 │   └── syn/            Vivado scripts: out-of-context synthesis and the full
@@ -345,7 +345,7 @@ believed. Method and raw logs:
 | Capability | Status and evidence |
 |---|---|
 | A complete ML-KEM dataflow in RTL | **Done.** ML-KEM 512/768/1024 KeyGen/Encaps/Decaps, byte-exact against NIST ACVP vectors **on silicon** (20/20). Parameter set selected by a register field; lengths are derived in RTL, so software cannot report a wrong one |
-| Synthesis and timing closure on the target device | **Done.** Full RTL-to-bitstream flow. 35587 LUT (50.44 %), 25910 FF, 15.5 BRAM, 140 DSP, **WNS +3.222 ns / WHS +0.013 ns** @ 75 MHz |
+| Synthesis and timing closure on the target device | **Done.** Full RTL-to-bitstream flow. 35592 LUT (50.44 %), 25916 FF, 15.5 BRAM, 140 DSP, **WNS +3.174 ns / WHS +0.001 ns** @ 75 MHz |
 | Security boundary in programmable logic | **Done.** AxPROT-gated AXI firewall, key vault whose keys leave only over a private wire. Proven both directions on the board: EL3 reads a `SECURE_ONLY=1` core, EL1-NS is refused (SIGBUS/DECERR), while the *same* normal world reads a `SECURE_ONLY=0` core — so the difference is the gate, not reachability |
 | Key derivation root in eFUSE / BBRAM / PUF | **Not done, and not planned on this board.** eFUSE is irreversible and there is only one board; BBRAM needs JTAG. See the blocked list in the delivery document |
 | A ring-oscillator noise source with an SP 800-90B assessment | **Done.** 1,048,576 **pre-conditioning** samples exported from the board; SP 800-90B non-IID estimators give **H = 0.871234 bits/sample**. The measured value sets the health-test cutoffs (RCT 47, APT 672); cutoffs assumed from H = 0.5 would have left the APT test unable to fire |

@@ -1,0 +1,41 @@
+PL 密码机硬件自测  @ 0x80000000
+mlkem_axi VERSION = 0x00010000
+
+[ML-KEM-512  NIST ACVP 向量]
+  PASS  KeyGen tc0：ek 800 + dk 1632 字节逐字节一致
+  PASS  KeyGen tc1：ek 800 + dk 1632 字节逐字节一致
+  PASS  KeyGen tc2：ek 800 + dk 1632 字节逐字节一致
+  PASS  Encaps tc0：K 32 + c 768 字节逐字节一致
+  PASS  Encaps tc1：K 32 + c 768 字节逐字节一致
+  PASS  Encaps tc2：K 32 + c 768 字节逐字节一致
+  PASS  Decaps tc0：K 32 字节逐字节一致
+  PASS  Decaps tc1：K 32 字节逐字节一致
+  PASS  Decaps tc2：K 32 字节逐字节一致
+
+[对称与国密  FIPS 197 / GB-T 32907 / GB-T 32905]
+  PASS  密钥仓：三把密钥装载并 COMMIT 成功
+  PASS  AES-128 加密：FIPS 197 C.1 逐字节一致
+  PASS  AES-128 解密：回到原文
+  PASS  AES-256 加密：FIPS 197 C.3 逐字节一致
+  PASS  SM4 加密：GB/T 32907 A.1 逐字节一致
+  PASS  SM4 解密：回到原文
+  PASS  SM3("abc")：GB/T 32905 A.1 逐字节一致
+
+[密码边界：密钥能用，但读不出来]
+  PASS  扫完两个从机各 256 字节（48 个读得到、80 个被防火墙拒）：密钥的 4 个字一个都没出现，而密文正确
+
+[AxPROT 门控：非安全 master 访问 SECURE_ONLY=1 的实例]
+  PASS  金丝雀读被总线拒绝（DECERR/SIGBUS）—— AxPROT 门控在真硬件上生效
+  PASS  对照：SECURE_ONLY=0 的同一模块读回 VERSION=0x00010000
+
+[TRNG]
+  PASS  启动健康检测通过（SP 800-90B §4.3，1023 个样本）
+  PASS  无 RCT / APT 告警
+  PASS  取到 256 个随机字，交付计数 256
+  PASS  一比特占比 0.4930（4039/8192），无明显偏置
+  PASS  256 个字里没有相邻重复
+        注：以上**不是**最小熵评估。真实最小熵要导出原始比特
+        跑 SP 800-90B 的 EntropyAssessment，见 ring_osc.v 的说明。
+
+================================
+通过 24，失败 0

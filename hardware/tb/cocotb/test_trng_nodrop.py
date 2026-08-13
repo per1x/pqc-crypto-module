@@ -106,3 +106,48 @@ async def test_conditioner_absorbs_every_sample(dut):
     dut._log.info(
         f"{len(src)} 个样本，调理器逐比特吸收了 {len(absorbed)} 个，"
         f"尾部滞后 {lag}（≤FIFO 深度），溢出计数 0")
+
+
+@cocotb.test()
+async def test_no_drop_when_nobody_reads(dut):
+    """**没有人读随机字**的时候，也不许丢样 —— 这一条是上板才补的
+
+    上一条用例把 rd_en 一直拉着，输出 FIFO 从不满。板上的常态恰恰相反：
+    绝大多数时间没有人在读。输出 FIFO 几拍就满了，调理器卡死在 S_SQUEEZE
+    等 word_ready，bit_ready 一直是 0，入口的取样 FIFO 256 拍填满，
+    此后**每一个样本都被丢掉**。板上实测 DROPS 上电即饱和到 65535。
+
+    加大 FIFO 一点用没有：卡住的时间没有上界。根子是噪声源自由运行、压不住，
+    而消费者可以永远不来 —— 两者之间必须有一个地方允许丢东西。
+    修法是让它丢在**出口**（输出 FIFO 满就丢弃那个调理后的字，无害），
+    而不是丢在入口。
+
+    这条用例就是那个场景：**全程不读**，跑够长，DROPS 必须还是 0，
+    两条流仍然逐比特一致。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    for _ in range(200_000):
+        await RisingEdge(dut.clk)
+        if int(dut.startup_done.value):
+            break
+    else:
+        raise AssertionError("启动健康检测一直没过")
+
+    dut.rd_en.value = 0          # ← 关键：一个字都不读
+    src, absorbed = await collect(dut, 30_000)
+
+    assert len(src) > 3000, f"窗口里只取到 {len(src)} 个样本"
+    drops = int(dut.sample_drops.value)
+    assert drops == 0, (
+        f"没人读随机字的时候丢了 {drops} 个样本 —— "
+        "调理器被出口卡住，丢样从'出口丢无害的输出'变成了'入口丢样本'")
+
+    lag = len(src) - len(absorbed)
+    assert 0 <= lag <= SAMPLE_FIFO_DEPTH, (
+        f"源交出 {len(src)} 个，调理器只吸收 {len(absorbed)} 个，差 {lag} 个")
+    assert absorbed == src[:len(absorbed)], "两条流的内容对不上"
+
+    dut._log.info(
+        f"全程不读随机字：{len(src)} 个样本全部被吸收，滞后 {lag}，DROPS=0")

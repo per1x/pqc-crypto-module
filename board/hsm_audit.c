@@ -346,8 +346,9 @@ static void test_trng_drops(void)
     st = rd(TR_STATUS);
     ok("起点：DROPS=%u BLOCKS=%u STATUS=0x%08x", d0, blk0, st);
     if (d0 != 0)
-        bad("上电到现在已经溢出过 %u 次 —— 调理器吃的与健康检测吃的"
-            "不是同一条流，熵账不成立", d0);
+        bad("上电到现在已经溢出过 %u 次（没有人读随机字的那段时间）—— "
+            "调理器被出口卡住了，丢样从'出口丢无害的输出'变成了'入口丢样本'",
+            d0);
 
     /* 取一批随机字，逼调理器完整跑很多轮"吸收—置换—挤出"，
      * 也就是最容易丢样的那些拍。 */
@@ -410,14 +411,23 @@ static void test_illegal_params(void)
             if (rd(MK_STATUS) & MKS_BUSY) { busy_seen = 1; break; }
         st = rd(MK_STATUS);
 
+        /* 判据三条。第三条不是"核有没有跑"（BUSY 已经答了），而是
+         * **上一次的结果有没有被作废** —— 板上是连着跑的，拒绝之后若
+         * DONE 与 OUT_LEN 还留着上一次的值，软件就会拿上一次的输出
+         * 当成这一次的结果。这比不报错更糟，因为它看起来成功了。 */
         if (!(st & MKS_PARAMER))
             bad("%s：PARAM_ERR 没置位（STATUS=0x%08x）", bad_cfg[k].why, st);
         else if (busy_seen)
             bad("%s：报了 PARAM_ERR，但核**还是被启动了**", bad_cfg[k].why);
+        else if (st & MKS_DONE)
+            bad("%s：拒绝之后 DONE 仍是 1 —— 软件会读到上一次的结果",
+                bad_cfg[k].why);
         else if (rd(MK_OUTLEN) != 0)
-            bad("%s：OUT_LEN=%u，核确实跑了", bad_cfg[k].why, rd(MK_OUTLEN));
+            bad("%s：拒绝之后 OUT_LEN=%u —— 上一次的输出还摆着",
+                bad_cfg[k].why, rd(MK_OUTLEN));
         else
-            ok("%s：PARAM_ERR 置位、BUSY 从未拉起、OUT_LEN=0", bad_cfg[k].why);
+            ok("%s：PARAM_ERR 置位、BUSY 从未拉起、上一次的 DONE/OUT_LEN 已作废",
+               bad_cfg[k].why);
     }
 
     /* 换回合法参数照常能跑，且错误位清掉 */
@@ -426,7 +436,10 @@ static void test_illegal_params(void)
         unsigned char dz[64];
         unsigned n = 0;
         for (i = 0; i < 64; i++) dz[i] = (unsigned char)(0x30 + i);
-        if (mk_run_keygen(1, dz, out, sizeof(out), &n) == 0 && n == 2400) {
+        /* ML-KEM-768：ek 1184 + dk 2400 = 3584。
+         * 上一版这里写的是 2400（只算了 dk），于是 RTL 给出正确的 3584
+         * 反而被判成失败 —— 长度必须按标准算，不能凭印象。 */
+        if (mk_run_keygen(1, dz, out, sizeof(out), &n) == 0 && n == 3584) {
             st = rd(MK_STATUS);
             if (st & MKS_PARAMER)
                 bad("合法参数跑完之后 PARAM_ERR 还挂着（0x%08x）", st);
