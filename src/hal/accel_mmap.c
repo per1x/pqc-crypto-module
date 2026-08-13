@@ -1,17 +1,22 @@
 /* accel_mmap.c —— 经 /dev/mem + mmap 驱动真实 PL 的 transport
  *
- * 【状态】未在任何硬件上运行过。启用它需要两个只有拿到板子才能确定的数值：
+ * 【状态】这条 transport 本身尚未对着真实可编程逻辑驱动过。板上的硬件密码引擎目前
+ * 由 board/ 下的独立程序驱动（它们 mmap /dev/mem 到 0x8000_0000 直接操作各核），
+ * ML-KEM 的 ACVP 结果与边界证明都来自那里。把这条 transport 接上去是另一件事。
+ *
+ * 启用它需要两个由器件地址分配决定的数值：
  *
  *   PQCHSM_ACCEL_MMAP_BASE   寄存器组的物理基址
  *   PQCHSM_ACCEL_MMAP_BUF    数据缓冲窗口的物理基址
  *
- * 这两个地址由具体器件的地址分配决定（Zynq 系列通常落在 0x4000_0000 一段的
- * AXI GP 口地址空间里），因此这里不写死任何取值：未定义时
+ * 这两个地址由具体器件的地址分配决定，因此这里不写死任何取值。
+ * 本项目的目标器件 XCZU3EG 上，PS 的 M_AXI_HPM0_LPD 窗口是 0x8000_0000-0x9FFF_FFFF，
+ * 各密码从机按 64 KB 分槽落在其中（见 docs/密码机原型-说明文档.md 的地址映射）。未定义时
  * accel_transport_mmap() 返回 NULL，如实反映"这条路没有可用的目标"。
  * 定义方式是构建时传入，例如
  *
- *   cmake -S . -B build -DCMAKE_C_FLAGS="-DPQCHSM_ACCEL_MMAP_BASE=0x43C00000 \
- *                                        -DPQCHSM_ACCEL_MMAP_BUF=0x43C10000"
+ *   cmake -S . -B build -DCMAKE_C_FLAGS="-DPQCHSM_ACCEL_MMAP_BASE=0x80030000 \
+ *                                        -DPQCHSM_ACCEL_MMAP_BUF=0x80030010"
  *
  * 【与其它 transport 的关系】
  * 命令时序与 accel_axi.c 完全相同，遵循同一份 docs/register-map.md 契约：

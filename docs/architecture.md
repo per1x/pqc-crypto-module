@@ -18,7 +18,7 @@ PKCS#11 interface see [pkcs11.md](pkcs11.md).
    pqc_backend_t          include/pqchsm/pqc.h
  ─────────────────────────────────────────────────────────────────
    accel_transport_t      include/pqchsm/accel.h
-   stub | Verilator RTL | mmap (future)
+   stub | Verilator RTL | AXI | /dev/mem + mmap
 ```
 
 Each layer depends only on the interface below it. The upper layers are written against
@@ -28,7 +28,10 @@ opaque handles, so the backend can change without any caller changing.
 
 No function declared in `include/pqchsm/` returns private key material. Key generation
 returns an `hsm_handle_t`; signing takes a handle and a message; decapsulation takes a
-handle and a ciphertext. Public keys may cross the boundary, private keys never do.
+handle and a ciphertext. Public keys may cross **the API surface**, private keys never
+do. (That is a property of the host API. The module's *cryptographic* boundary is a
+different and lower thing — the programmable logic; see
+[security-policy.md](security-policy.md).)
 
 A handle encodes the slot identifier and the slot's generation counter. Destroying an
 object increments the generation, so every previously issued handle for that slot
@@ -130,10 +133,19 @@ Three transports implement this interface identically:
 - **Verilator** — drives simulated RTL. Implements the NTT and Keccak modes; every
   other mode returns an explicit "unsupported" error rather than falling back to
   software, so the coverage of the RTL path is never overstated.
-- **mmap** — `/dev/mem` on real programmable logic. Not yet implemented.
+- **AXI** — the same RTL driven over real AXI4-Lite and AXI4-Stream transactions.
+- **mmap** — `/dev/mem` on real programmable logic. The code exists
+  (`src/hal/accel_mmap.c`); its base addresses are supplied at build time.
 
 The stub and the simulated RTL are required to produce byte-identical results through
 this interface, which is asserted in `tests/unit/test_accel.c`.
+
+> **What has actually run on the board, and what has not.** The hardware crypto engine
+> is exercised on silicon by the standalone programs in `board/` — they `mmap`
+> `/dev/mem` at `0x8000_0000` and drive the cores directly. That is where the ML-KEM
+> ACVP results, the symmetric vectors, the TRNG entropy capture and the boundary proof
+> come from. The `src/` stack above `accel_transport_t` has **not** been driven against
+> the real programmable logic; wiring it up is a separate piece of work.
 
 ### SHA3 and SHAKE
 

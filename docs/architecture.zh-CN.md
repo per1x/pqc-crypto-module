@@ -17,7 +17,7 @@
    pqc_backend_t          include/pqchsm/pqc.h
  ─────────────────────────────────────────────────────────────────
    accel_transport_t      include/pqchsm/accel.h
-   stub | Verilator RTL | mmap (future)
+   stub | Verilator RTL | AXI | /dev/mem + mmap
 ```
 
 每一层只依赖其下方的接口。上层全部基于不透明句柄编写，因此后端可以更换，而无需任何
@@ -27,7 +27,8 @@
 
 `include/pqchsm/` 中声明的函数没有任何一个返回私钥材料。密钥生成返回
 `hsm_handle_t`；签名接收一个句柄和一条消息；解封装接收一个句柄和一段密文。公钥可以
-跨越该边界，私钥永远不会。
+跨越 **API 面**，私钥永远不会。（这是主机 API 的性质。模块的**密码边界**是另一个、
+更低的东西 —— 可编程逻辑；见 [security-policy.zh-CN.md](security-policy.zh-CN.md)。）
 
 句柄中编码了槽位标识符与该槽位的世代计数器。销毁对象会使世代递增，因此该槽位此前
 发出的每一个句柄都立即失效，而不会悄悄指向一把新密钥。
@@ -120,7 +121,15 @@ file      := header ‖ slot blob × N ‖ KMAC256(file)
 - **软件桩** — 纯软件，调用 liboqs。始终可用。
 - **Verilator** — 驱动仿真 RTL。实现 NTT 与 Keccak 模式；其余任何模式都返回明确的
   "不支持"错误，而不是回退到软件，因此 RTL 路径的覆盖范围不会被夸大。
-- **mmap** — 在真实可编程逻辑上经由 `/dev/mem` 访问。尚未实现。
+- **AXI** — 同一份 RTL，经真实的 AXI4-Lite 与 AXI4-Stream 事务驱动。
+- **mmap** — 在真实可编程逻辑上经由 `/dev/mem` 访问。代码已存在
+  （`src/hal/accel_mmap.c`），基址在构建时给定。
+
+> **板上真正跑过的是哪一条、没跑过的是哪一条。** 硬件密码引擎在真硅上是由
+> `board/` 下的独立程序驱动的——它们 `mmap` `/dev/mem` 到 `0x8000_0000` 直接操作
+> 各个核。ML-KEM 的 ACVP 结果、对称向量、TRNG 熵采集与边界证明都来自那里。
+> `accel_transport_t` 之上的 `src/` 那一栈**没有**对着真实可编程逻辑驱动过，
+> 把它接上去是另一件事。
 
 软件桩与仿真 RTL 必须经由该接口产出逐字节一致的结果，这一点由
 `tests/unit/test_accel.c` 断言。

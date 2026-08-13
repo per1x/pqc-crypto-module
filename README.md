@@ -7,18 +7,21 @@ and recovery, tamper-evident audit logging, and a PKCS#11 v3.2 front end — plu
 complete hardware crypto engine in programmable logic, **built and validated on real
 silicon** (Xilinx XCZU3EG).
 
-> **Status: research prototype.** Two lines live in this repository and their security
-> boundaries differ:
+> **Status: research prototype.** The cryptographic boundary is **hardware** — an
+> AxPROT-gated AXI firewall in programmable logic — and it has been **proven in both
+> directions on the board**: the secure world (EL3) reads a `SECURE_ONLY=1` core, the
+> normal world is refused at the bus, and that same normal world reads a
+> `SECURE_ONLY=0` core successfully.
 >
-> - **Software line** (`src/`, `cli/`, `demo/`): the boundary is a process address
->   space, not hardware. See [Security model and limitations](#security-model-and-limitations).
-> - **FPGA line** (branch `zu3eg-fpga-crypto`): the boundary is an AxPROT-gated AXI
->   firewall in programmable logic, and it has been **proven in both directions on the
->   board** — the secure world (EL3) reads a `SECURE_ONLY=1` core, the normal world is
->   refused at the bus. See
->   [密码机原型-说明文档.md](docs/密码机原型-说明文档.md) ([PDF](docs/密码机原型-说明文档.pdf)).
+> The host software (`src/`, `cli/`, `demo/`) is the control plane **outside** that
+> boundary: slots, sessions, the keystore file, backup and recovery, and the PKCS#11
+> front end. What does and does not cross the boundary is stated precisely under
+> [Security model and limitations](#security-model-and-limitations) — including the
+> parts that still do.
 >
-> Neither is a certified module. Do not use this to protect anything real.
+> This is not a certified module. Do not use it to protect anything real. Full method
+> and raw logs: [密码机原型-说明文档.md](docs/密码机原型-说明文档.md)
+> ([PDF](docs/密码机原型-说明文档.pdf)).
 
 ## Overview
 
@@ -254,33 +257,42 @@ Both use the low-level PKCS#11 binding directly. Higher-level provider framework
 This is a prototype. The following are accurate statements about what it does and does
 not do.
 
-**The security boundary is software.** Plaintext key material exists in process memory
-during operations. Callers only ever see handles, and buffers are zeroed and `mlock`-ed
-where possible, but nothing here defends against an attacker who can read the process
-address space. Moving the boundary into hardware is future work.
-[constant-time.md](docs/constant-time.md) records what the constant-time and
-zeroization audits cover and, more usefully, what they do not.
+**The cryptographic boundary is hardware.** The ML-KEM cores, the symmetric cores
+(AES-128/256, SM4, SM3), the ring-oscillator TRNG, the key vault and the AXI firewall
+all live in the FPGA's programmable logic. The firewall gates on `AxPROT[1]`, and the
+gate has been proven in **both** directions on the board: the secure world (EL3,
+`AxPROT[1]=0`) reads a `SECURE_ONLY=1` core and gets `0x00010000`; the normal world
+(EL1-NS, `AxPROT[1]=1`) is refused at the bus (SIGBUS/DECERR) — while that *same*
+normal world reads a `SECURE_ONLY=0` core successfully, so the difference is the gate
+and not an unreachable address.
 
-**The key derivation root is a stub.** `src/crypto/kdr.c` contains a fixed 32-byte
-constant whose literal text reads `PQC-HSM STUB KDR -- NOT SECRET!!`. On a real device
-this value comes from eFUSE, BBRAM, or a PUF and never leaves the chip. Until then,
-device binding is not real.
+**What does and does not cross that boundary — stated precisely, because it is easy to
+over-claim.**
 
-**RTL coverage is two arithmetic cores, not a cryptographic accelerator.** `ntt_core`
-and `keccak_f1600` exist and are verified in simulation. Sampling, encoding,
-compression, and the overall ML-KEM/ML-DSA dataflow are all still software. There is no
-hardware implementation of the full algorithms.
+- **Symmetric keys loaded into the key vault do not cross it.** Measured by scanning
+  256 bytes of each of two slaves (48 readable, 80 refused by the firewall): not one of
+  the key's four words appeared anywhere, while the ciphertext those keys produced was
+  correct. Both halves are needed — either alone proves nothing.
+- **ML-KEM private keys currently do cross it.** `KeyGen` returns `ek ‖ dk` over AXI,
+  because that is what checking against NIST ACVP vectors requires. A production form
+  would keep `dk` inside the boundary or export it only wrapped. This is an interface
+  decision, not a firewall failure, and it is not fixed here.
+- **Host-side key handling is outside the boundary.** The keystore file, its AES-GCM
+  wrapping, slot metadata and the PKCS#11 layer run in host software. For those,
+  plaintext key material exists in process memory, buffers are zeroed and `mlock`-ed
+  where possible, and nothing defends against an attacker who can read that address
+  space. [constant-time.md](docs/constant-time.md) records what the constant-time and
+  zeroization audits cover and — more usefully — what they do not.
 
-**Nothing has run on real hardware.** No board, no synthesis run (the Vivado scripts in
-`hardware/syn/` are written but unverified), no timing closure, no power measurement, no
-TRNG entropy assessment, no eFUSE, no tamper detection, no verified `mlock` behaviour
-under memory pressure.
+**The host-side key derivation root is a stub.** `src/crypto/kdr.c` contains a fixed
+32-byte constant whose literal text reads `PQC-HSM STUB KDR -- NOT SECRET!!`. A real
+device takes this from eFUSE, BBRAM, or a PUF. On this board neither is available:
+eFUSE is irreversible and there is only one board, BBRAM needs JTAG. Device binding is
+therefore not real, and that is a deliberate, recorded limit rather than an oversight.
 
-**No speedup figure is available.** On the development machine the simulated cores at
-100 MHz are *slower* than liboqs's hand-written NEON assembly. That comparison is not
-meaningful — the target is a Cortex-A53 without SIMD — but it does mean this project
-cannot state a speedup figure. `./build/pqchsm-prim-bench` prints the measured
-numbers and the reasoning behind them.
+**The constant-time work covers timing only.** Checked on the board: the valid and
+implicit-reject Decaps paths differ by 0.000 % at the median over 200 runs each. Power
+and electromagnetic side channels are **not** addressed and are not claimed.
 
 **Other known gaps.** The audit module assumes a single writer and does not lock the
 file. Shamir share checksums are unkeyed: they detect corruption, not tampering. SO PIN
@@ -323,20 +335,21 @@ Two habits run throughout the test sources:
   function, timing a deliberately early-returning comparison, probing a stack frame
   that was never wiped.
 
-## Roadmap
+## What is built, and what is not
 
-Most of what this section used to list as future work has been done on branch
-`zu3eg-fpga-crypto` and validated on an XCZU3EG board. Kept here with the outcome
-attached, so the claims can be checked rather than believed:
+Every claim below is attached to its evidence, so it can be checked rather than
+believed. Method and raw logs:
+[密码机原型-说明文档.md](docs/密码机原型-说明文档.md)
+([PDF](docs/密码机原型-说明文档.pdf)).
 
-| Was | Now |
+| Capability | Status and evidence |
 |---|---|
-| A complete ML-KEM dataflow in RTL — "what is missing is the sequencer" | **Done.** ML-KEM 512/768/1024 KeyGen/Encaps/Decaps, byte-exact against NIST ACVP vectors **on silicon** (20/20). Parameter set selected by a register field; lengths are derived in RTL, so software cannot report a wrong one |
-| Synthesis and timing closure — "scripts are ready but have never been run" | **Done.** Full RTL-to-bitstream flow. 35173 LUT (49.85 %), 25824 FF, 15.5 BRAM, 140 DSP, **WNS +3.469 ns / WHS +0.011 ns** @ 75 MHz |
-| Security boundary into programmable logic | **Done.** AxPROT-gated AXI firewall, key vault whose keys leave only over a private wire. Proven both directions on the board: EL3 reads a `SECURE_ONLY=1` core, EL1-NS is refused (SIGBUS/DECERR), while the *same* normal world reads a `SECURE_ONLY=0` core — so the difference is the gate, not reachability |
-| Key derivation root into eFUSE / BBRAM / PUF | **Not done, and not planned on this board.** eFUSE is irreversible and there is only one board; BBRAM needs JTAG. See the blocked list in the delivery document |
-| A ring-oscillator noise source with an SP 800-90B assessment | **Done.** 1,048,576 **pre-conditioning** samples exported from the board; SP 800-90B non-IID estimators give **H = 0.871234 bits/sample**. The measurement then invalidated the health-test cutoffs that had been assumed from H = 0.5 — the APT test turned out never to fire — and both were recomputed |
-| Measured end-to-end speedup | **Measured.** ML-KEM-512 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps); 768 and 1024 scale ≈ 1 : 1.5 : 2.1, matching the k = 2/3/4 workload |
+| A complete ML-KEM dataflow in RTL | **Done.** ML-KEM 512/768/1024 KeyGen/Encaps/Decaps, byte-exact against NIST ACVP vectors **on silicon** (20/20). Parameter set selected by a register field; lengths are derived in RTL, so software cannot report a wrong one |
+| Synthesis and timing closure on the target device | **Done.** Full RTL-to-bitstream flow. 35173 LUT (49.85 %), 25824 FF, 15.5 BRAM, 140 DSP, **WNS +3.469 ns / WHS +0.011 ns** @ 75 MHz |
+| Security boundary in programmable logic | **Done.** AxPROT-gated AXI firewall, key vault whose keys leave only over a private wire. Proven both directions on the board: EL3 reads a `SECURE_ONLY=1` core, EL1-NS is refused (SIGBUS/DECERR), while the *same* normal world reads a `SECURE_ONLY=0` core — so the difference is the gate, not reachability |
+| Key derivation root in eFUSE / BBRAM / PUF | **Not done, and not planned on this board.** eFUSE is irreversible and there is only one board; BBRAM needs JTAG. See the blocked list in the delivery document |
+| A ring-oscillator noise source with an SP 800-90B assessment | **Done.** 1,048,576 **pre-conditioning** samples exported from the board; SP 800-90B non-IID estimators give **H = 0.871234 bits/sample**. The measured value sets the health-test cutoffs (RCT 47, APT 672); cutoffs assumed from H = 0.5 would have left the APT test unable to fire |
+| End-to-end throughput | **Measured.** ML-KEM-512 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps); 768 and 1024 scale ≈ 1 : 1.5 : 2.1, matching the k = 2/3/4 workload |
 
 Still open, with the reason attached:
 

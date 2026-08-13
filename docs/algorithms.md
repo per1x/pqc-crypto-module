@@ -71,10 +71,17 @@ that the inventory is not read as a claim of readiness.
 
 - The key derivation root is a fixed constant, so no key is genuinely
   device-bound. A real device sources it from eFUSE, BBRAM, or a PUF.
-- Random bits come from the OpenSSL DRBG seeded by the operating system, not
-  from a noise source inside the module boundary.
-- The module boundary is a process address space. Plaintext key material exists
-  in that address space during operations.
+- The module boundary is the programmable logic: the ML-KEM and symmetric cores,
+  the TRNG, the key vault, and the AxPROT-gated AXI firewall around them.
+  Symmetric keys loaded into the key vault do not cross it (measured). ML-KEM
+  private keys currently do, because `KeyGen` returns `ek ‖ dk` over AXI so it can
+  be checked against ACVP vectors.
+- A ring-oscillator noise source with SP 800-90B health tests runs inside the
+  boundary; measured min-entropy is 0.871234 bits/sample. The **host** software's
+  random bits still come from the OpenSSL DRBG seeded by the operating system.
+- Host-side key handling — the keystore file, its wrapping, the PKCS#11 layer —
+  is outside the boundary, and plaintext key material exists in that process
+  address space during operations.
 - No algorithm certificates have been obtained. The ACVP vectors are run
   locally against the vendor implementation; that is evidence of correctness,
   not a certificate.

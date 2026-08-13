@@ -1,5 +1,19 @@
 # 移植到 Zynq UltraScale+ MPSoC
 
+> **状态：这份计划里的硬件部分已经落地。**
+>
+> 密码引擎现在是 FPGA 可编程逻辑里的硬件（ML-KEM 三参数集、AES/SM4/SM3、
+> 环形振荡器 TRNG、密钥仓、AXI 防火墙），密码边界就是那圈逻辑，并已在真硅上
+> 双向证明。实测结果、资源时序与逐条受阻清单见
+> [密码机原型-说明文档.md](密码机原型-说明文档.md)。
+>
+> 本文保留为**设计与阶段划分的记录**：其中的威胁分析、不可逆步骤清单与
+> 「软件机制 → 硬件机制」的对应关系仍然是这个项目的推理依据。下表中已经
+> 兑现的行标了 ✅，未兑现的标了原因。
+>
+> 阅读这些表格时注意：**最左列是当初要解决的问题，不是对系统现状的描述**。
+
+
 本文是一份**设计与评估文档**：它给出把本模块从纯软件原型移植到 Zynq UltraScale+
 MPSoC 的阶段划分与依赖关系，并逐条说明当前靠软件假设成立的安全性质，在这颗芯片上
 分别由哪个硬件机制强制。
@@ -270,9 +284,9 @@ master 访问加速器"时，指的是后者。
 | 制造模式开关是进程内变量 | `src/backup/inject.c:215` `g_mfg_blown` | eFUSE 用户位，一次性熔断 | 读真实 eFUSE；**排在最后** |
 | 强制清零靠调用方主动调用 | `include/pqchsm/slot.h:203` `hsm_slot_zeroize_forced()` | CSU tamper 响应链 | PMU 固件触发 → TA → 调用现有函数 |
 | 模块映像使用前未经校验 | 无（安全策略 §13.3 记录为差距） | BootROM RSA-4096 + SHA3-384 + AES-256-GCM | `bootgen`；Linux 侧另加 dm-verity |
-| 安全边界是进程地址空间 | 全局（安全策略 §13.5） | TrustZone + XMPU/XPPU | 见 B.4 分层 |
-| 加速器寄存器谁映射谁就能驱动 | `src/hal/accel_mmap.c` 走 `/dev/mem` | XMPU/XPPU 只放行安全 master；PL 侧判 `AxPROT[1]` | 去掉 `/dev/mem`，改由 TA 映射 |
-| 随机数来自宿主操作系统 | `src/util/util.c:30` `pqc_random_bytes()`，以及散落各处的 `RAND_bytes` | CSU TRNG，或 PL 环形振荡器配 `trng_health` | 先把散落调用收敛到 `pqc_random_bytes()`，再换 provider |
+| ✅ 安全边界是进程地址空间 | 全局（安全策略 §13.5） | **已落地**：边界是 PL 里按 AxPROT 门控的 AXI 防火墙，真硅上双向证明 | XMPU/XPPU 仍未配（普通世界配不了，实测 149 个寄存器全拒） |
+| ✅ 加速器寄存器谁映射谁就能驱动 | `src/hal/accel_mmap.c` 走 `/dev/mem` | **已落地（PL 侧那一半）**：`axi4lite_firewall` 判 `AxPROT[1]`，`SECURE_ONLY=1` 的从机拒绝普通世界 | XMPU/XPPU 那一半未配 |
+| ✅ 随机数来自宿主操作系统 | `src/util/util.c:30` `pqc_random_bytes()`，以及散落各处的 `RAND_bytes` | **已落地**：PL 环形振荡器 + `trng_health`，板上实测最小熵 0.871234 比特/样本 | 硬件熵源在边界内可用；`src/` 那一栈仍用 OpenSSL DRBG，接上去是另一件事 |
 | 审计日志可被整体重写，靠外部锚点发现 | `src/audit/`、`include/pqchsm/anchor.h` | eFUSE 用户位作单调计数器，或 eMMC RPMB | 锚点机制不变，增加设备内单调计数 |
 | 协议无认证无加密 | `include/pqchsm/proto.h` | 无对应硬件机制 | 仍需 TLS，或把链路限制在安全世界的 UART |
 
@@ -437,7 +451,7 @@ PIN 直接请求 TA 做签名。若把 PIN 校验也搬进 TA，则 TA 需要维
 | 7 | 审计日志假定单写者 | 不受影响 |
 | 8 | Shamir 分片校验和不带密钥 | 不受影响 |
 | 9 | 管理员 PIN 未强制锁定 | 不受影响 |
-| 10 | 没有完整算法的硬件实现 | 取决于 P9 是否推进 |
+| 10 | 没有完整算法的硬件实现 | ✅ ML-KEM 三参数集与对称核已在 PL 里实现并对官方向量一致；ML-DSA 仍只有算子 |
 
 十条中硬件能关闭三条、部分改善一条，其余六条仍是软件或流程工作。**拿到板子不等于
 接近送检**——这一点应在任何对外表述中保持准确。

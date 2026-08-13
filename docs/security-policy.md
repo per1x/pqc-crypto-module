@@ -15,11 +15,30 @@
 | Item | Value |
 |---|---|
 | Module name | pqc-crypto-module |
-| Module type | Software (multi-chip standalone when hosted on the target SoC) |
-| Target security level | 1 for the software module as it stands; the hardware-boundary design targets 3 |
-| Embodiment | Shared library (`pqchsm-pkcs11`) plus a daemon and CLI |
-| Cryptographic boundary | The process address space of the linked application |
-| Tested operational environment | macOS on arm64, Debian on aarch64 (GCC 12) |
+| Module type | Single-chip hardware module: the cryptographic engine is the programmable logic of a Xilinx XCZU3EG, with host software as the control plane outside the boundary |
+| Target security level | The hardware boundary exists and is enforced; a level-3 claim would additionally require physical tamper response, a device-bound key derivation root, and algorithm certificates — see §10 |
+| Embodiment | FPGA bitstream on an XCZU3EG (AXU3EGB board), driven over AXI4 from a Cortex-A53 running Linux; host side is a shared library (`pqchsm-pkcs11`) plus a daemon and CLI |
+| Cryptographic boundary | The programmable logic: ML-KEM 512/768/1024, AES-128/256, SM4, SM3, the ring-oscillator TRNG, the key vault, and the AxPROT-gated AXI firewall that encloses them |
+| Boundary enforcement | `axi4lite_firewall` refuses any transaction with `AxPROT[1]=1` to a `SECURE_ONLY=1` slave (DECERR). Proven in both directions on silicon — see the evidence below |
+| Tested operational environment | XCZU3EG (`xazu3eg-sfvc784-1-i`) at 75 MHz, Linux 5.4 on the Cortex-A53; host tooling on macOS arm64 and Debian aarch64 (GCC 12) |
+
+**Boundary enforcement evidence.** Measured on the board, one run, one bitstream,
+one address:
+
+| | `0x8004_0000` (`SECURE_ONLY=1`) | `0x8003_0000` (`SECURE_ONLY=0`) |
+|---|---|---|
+| Secure world, EL3 (`AxPROT[1]=0`) | reads `0x00010000` | reads `0x00010000` |
+| Normal world, EL1-NS (`AxPROT[1]=1`) | **refused — SIGBUS / DECERR** | reads `0x00010000` |
+
+The right-hand column is the control: the same normal world reads a non-gated core
+successfully, so the refusal on the left is the gate and not an unreachable address.
+The secure-world side is a minimal EL3 payload — a single SiP call added to BL31 that
+performs one read and returns the value. Raw logs and the full method are in
+[密码机原型-说明文档.md](密码机原型-说明文档.md) §3.6.
+
+A separate measurement covers the key vault: scanning 256 bytes of each of two slaves
+(48 readable, 80 refused by the firewall) found none of the key's four words anywhere,
+while the ciphertext those keys produced was correct.
 
 The module provides post-quantum key encapsulation and digital signature
 services, key storage, slot and session management, M-of-N backup and recovery,
@@ -194,20 +213,29 @@ document is not read as a statement of readiness.
 1. **No device binding.** The key derivation root is a compiled-in constant
    whose literal text says so. A real device sources it from eFUSE, BBRAM, or a
    PUF.
-2. **No entropy source inside the boundary.** Random bits come from the host
+2. **~~No entropy source inside the boundary.~~ Closed.** A ring-oscillator noise
+   source with SP 800-90B continuous health tests runs inside the boundary; measured
+   min-entropy is 0.871234 bits/sample. The **host** software still seeds from
+   OpenSSL — Random bits come from the host
    operating system through OpenSSL.
 3. **No module integrity check.** Nothing verifies the module image before use.
 4. **Conditional self-tests missing.** No pairwise consistency test on generated
    key pairs, no continuous RNG test.
-5. **No physical security.** The boundary is a process address space.
+5. **No physical security.** The boundary is enforced logically (the AxPROT gate),
+   not physically. There is no tamper-evident enclosure, no tamper response, no
+   environmental failure protection. A `tamper` input exists in the RTL and zeroizes
+   the key vault when asserted, but nothing is wired to it.
 6. **No algorithm certificates.** ACVP vectors are run locally; that is evidence
    of correctness, not a certificate.
 7. **Single-writer audit log.** The audit module does not lock the file.
 8. **Unkeyed Shamir share checksums.** They detect corruption, not tampering.
 9. **SO PIN lockout not enforced.** Failures are counted but the slot is not
    locked, because locking it would brick the device; recovery is by M-of-N.
-10. **No hardware algorithm implementation.** The RTL covers arithmetic cores
-    and the bus interface, not complete ML-KEM or ML-DSA.
+10. **No whole-core hardware implementation of ML-DSA.** ML-KEM 512/768/1024
+    KeyGen/Encaps/Decaps run in programmable logic and match NIST ACVP vectors
+    byte-for-byte on silicon; so do the symmetric cores (AES-128/256, SM4, SM3)
+    against their standard vectors. ML-DSA has operators only (13 modules, checked
+    against the reference model), not chained into whole operations.
 
 ## Mapping to GM/T 0028-2014
 

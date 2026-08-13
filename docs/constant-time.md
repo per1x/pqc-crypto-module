@@ -276,6 +276,13 @@ are not obvious from the code alone:
 - **The zeroization check is a static approximation.** Check B has no control-flow
   analysis, so it can miss a path where a buffer is written inside one branch and
   returned from another in a shape the linear scan does not model.
+- **The hardware path was measured on the board.** ML-KEM Decaps with a valid
+  ciphertext versus one with a single bit flipped (the implicit-reject path), 200 runs
+  each: median latencies differ by **0.000 %**. The ciphertext comparison in RTL
+  compares every byte before selecting, with no early exit. This covers timing as
+  observed from software — the layer a timing attack actually gets — and covers
+  neither power nor electromagnetic side channels.
+
 - **Nothing is claimed about memory outside the process address space.** CPU registers,
   swapped-out pages, and DRAM contents after power-off are not covered. `mlock` is
   attempted for key buffers but is best-effort and unverified under memory pressure.
