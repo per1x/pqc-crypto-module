@@ -31,8 +31,11 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include "kmod/secmmio_uapi.h"
 #include <unistd.h>
 
 #include "kat_vectors.h"
@@ -63,26 +66,127 @@ static void on_bus(int sig)
     _exit(135);
 }
 
+
+/* ============================================================================
+ * 【transport：直接 mmap  还是  经 EL3】
+ * ============================================================================
+ * 这一版 bitstream 的四个功能核是 SECURE_ONLY=1，普通世界（本进程，AxPROT[1]
+ * 恒为 1）直接访问一律 DECERR。所以核访问要经 /dev/secmmio 转给 EL3 发。
+ *
+ * 算法与向量一行不改 —— 只把 rd()/wr() 底下换掉。这是有意的：
+ * **两种 transport 跑的必须是同一套 KAT**，否则"安全世界能跑通"就成了
+ * 一句没法与普通世界那次比较的话。
+ *
+ * ⚠️ 直接 mmap 模式（-d）**只读不写**。普通世界写一个被拒的地址，DECERR 是
+ *    posted 的，在 aarch64 上以 SError 回来，内核只能 panic —— 那不是一次
+ *    失败的测试，那是丢一块板子。反证只需要读，读的错误是同步的、接得住。
+ */
+static int sec_fd = -1;          /* >=0 表示走 EL3 */
+static int direct_wr_ok;         /* -D 才置 1，见 main 的用法说明 */
+
+
+
+static void sec_open(void)
+{
+    char st[64] = {0};
+    int f;
+
+    /* 保险的判据放在这里而不是内核里：先确认 PL 已 programmed 再发第一笔 SMC。
+     * 这一步**不碰 PL 总线** —— 若 PL 不在，碰一下就是 EL3 上的取数错误，
+     * 而 BL31 里没有处理它的东西。 */
+    f = open("/sys/class/fpga_manager/fpga0/state", O_RDONLY);
+    if (f < 0) { perror("fpga_manager state"); exit(2); }
+    if (read(f, st, sizeof st - 1) <= 0) { perror("read state"); exit(2); }
+    close(f);
+    if (!strstr(st, "operating")) {
+        fprintf(stderr, "PL 不是 operating（是 \"%s\"），拒绝发 SMC\n", st);
+        exit(2);
+    }
+
+    sec_fd = open("/dev/secmmio", O_RDWR);
+    if (sec_fd < 0) { perror("/dev/secmmio"); exit(2); }
+    if (ioctl(sec_fd, SECMMIO_ARM) < 0) { perror("SECMMIO_ARM"); exit(2); }
+}
+
+/* 上一次 sec 访问是否被 **EL3 白名单** 拒。
+ *
+ * 这个标志必须和"被 **PL 防火墙** 拒"分开记：两者都表现为"读不到"，
+ * 但含义完全不同 —— 前者是这笔访问根本没上总线，后者是上了总线被门控挡回。
+ * 边界扫描要证明的是"密钥字一个都不出现"，两种拒绝都满足；可报告里必须
+ * 说清哪一层拒的，否则就成了含糊其辞。 */
+static int sec_refused;
+
+static uint32_t sec_rd_raw(unsigned off)
+{
+    struct secmmio_op op = { .addr = (uint32_t)(PL_BASE + off), .val = 0 };
+
+    sec_refused = 0;
+    if (ioctl(sec_fd, SECMMIO_RD, &op) < 0) { sec_refused = 1; return 0; }
+    return op.val;
+}
+
+/* 普通寄存器访问用这个：合法寄存器被拒说明白名单与程序对不上，是硬错误 */
+static uint32_t sec_rd(unsigned off)
+{
+    uint32_t v = sec_rd_raw(off);
+
+    if (sec_refused) {
+        fprintf(stderr, "EL3 读 0x%08lx 被拒（白名单）—— "
+                        "合法寄存器不该被拒，检查 patch_atf_secmmio.py 的上界\n",
+                PL_BASE + off);
+        exit(3);
+    }
+    return v;
+}
+
+static void sec_wr_(unsigned off, uint32_t v)
+{
+    struct secmmio_op op = { .addr = (uint32_t)(PL_BASE + off), .val = v };
+
+    if (ioctl(sec_fd, SECMMIO_WR, &op) < 0) {
+        fprintf(stderr, "EL3 写 0x%08x 被拒（白名单）\n", op.addr);
+        exit(3);
+    }
+}
 static inline uint32_t rd(unsigned off)
 {
+    if (sec_fd >= 0) return sec_rd(off);
     return *(volatile uint32_t *)(pl + off);
 }
 
 /* 读一个寄存器；*okp 置 0 表示这次访问被总线拒了（DECERR） */
+static int n_ref_el3, n_ref_fw;   /* 两种拒绝分别计数 */
+
 static uint32_t rd_safe(unsigned off, int *okp)
 {
     uint32_t v = 0;
+
+    if (sec_fd >= 0) {
+        v = sec_rd_raw(off);
+        if (okp) *okp = !sec_refused;
+        if (sec_refused) n_ref_el3++;
+        return sec_refused ? 0 : v;
+    }
     bus_hit = 0;
     bus_armed = 1;
     if (sigsetjmp(busjmp, 1) == 0)
         v = rd(off);
     bus_armed = 0;
     if (okp) *okp = !bus_hit;
+    if (bus_hit) n_ref_fw++;
     return bus_hit ? 0 : v;
 }
 static inline void wr(unsigned off, uint32_t v)
 {
-    *(volatile uint32_t *)(pl + off) = v;
+    if (sec_fd >= 0) { sec_wr_(off, v); return; }
+    /* 闸门对准的是"写一个会拒绝我的核"，不是"直接模式"本身：
+     * 对 SECURE_ONLY=0 的旧 bitstream，普通世界写是正常且必要的。
+     * 所以危险的那条路要显式打开（-D），默认关着。 */
+    if (!direct_wr_ok) {
+        fprintf(stderr, "拒绝：未加 -D 就在直接模式下写 PL。\n"
+                        "若核是 SECURE_ONLY=1，这一笔会 DECERR->SError->panic，丢板子。\n");
+        exit(4);
+    }
 }
 
 /* ---- 记分板 ---- */
@@ -406,8 +510,10 @@ static void test_key_boundary(void)
             }
         }
         if (!leaked)
-            ok("扫完两个从机各 256 字节（%d 个读得到、%d 个被防火墙拒）："
-               "密钥的 4 个字一个都没出现，而密文正确", nread, nrefused);
+            ok("扫完两个从机各 256 字节（%d 个读得到、%d 个被拒："
+               "其中 EL3 白名单 %d、PL 防火墙 %d）："
+               "密钥的 4 个字一个都没出现，而密文正确",
+               nread, nrefused, n_ref_el3, n_ref_fw);
     }
 }
 
@@ -417,23 +523,51 @@ static void test_canary(void)
     int okc, okv;
     uint32_t v, r;
 
-    fprintf(rep, "\n[AxPROT 门控：非安全 master 访问 SECURE_ONLY=1 的实例]\n");
+    /* ⚠️ 这一条的**期望值随 transport 反号**，不是 bug 是语义：
+     *
+     *   普通世界（-d/-D）读金丝雀 → 必须被拒   门控挡住了非安全 master
+     *   安全世界（默认，经 EL3）读 → 必须读到   门控是按 AxPROT 判的，
+     *                                          不是把这个地址一律堵死
+     *
+     * 同一个地址、两种 transport、相反的期望 —— 这一对比单独任何一条都强：
+     * 只测"读不到"的话，一个把地址写死堵掉的实现也能通过。 */
+    fprintf(rep, "\n[AxPROT 门控：同一个金丝雀地址，两种 transport 期望相反]\n");
 
     v = rd_safe(S_CANARY + 0x00, &okc);
-    if (!okc)
-        ok("金丝雀读被总线拒绝（DECERR/SIGBUS）—— AxPROT 门控在真硬件上生效");
-    else if (v == 0x00010000u)
-        bad("金丝雀读出了正确的 VERSION=0x%08x —— AxPROT 门控没生效", v);
-    else
-        ok("金丝雀读回 0x%08x（不是有效 VERSION），访问被拦下", v);
+    if (sec_fd >= 0) {
+        if (okc && v == 0x00010000u)
+            ok("安全世界（EL3）读金丝雀 = 0x%08x —— "
+               "SECURE_ONLY=1 的核对安全 master 是**开的**，"
+               "门控确实按 AxPROT 判", v);
+        else
+            bad("安全世界读金丝雀失败（ok=%d val=0x%08x）—— "
+                "要么 EL3 没发出安全事务，要么门控把地址一律堵死了", okc, v);
+    } else {
+        if (!okc)
+            ok("普通世界读金丝雀被总线拒绝（DECERR/SIGBUS）—— "
+               "AxPROT 门控在真硬件上生效");
+        else if (v == 0x00010000u)
+            bad("普通世界读出了正确的 VERSION=0x%08x —— 门控没生效", v);
+        else
+            ok("金丝雀读回 0x%08x（不是有效 VERSION），访问被拦下", v);
+    }
 
-    /* 对照组：同一个模块、SECURE_ONLY=0 的实例必须读得出 VERSION。
-     * 少了这一条，一个"什么都拒绝"的实现也能通过上面那条。 */
+    /* 对照组：同一个模块的另一个实例。
+     * 这一版四个功能核都是 SECURE_ONLY=1，所以对照组的期望也随 transport 变：
+     * 安全世界读得到（说明核是活的），普通世界读不到（那是 hsm_secneg 的活）。 */
     r = rd_safe(S_VAULT + 0x00, &okv);
-    if (okv && r == 0x00010000u)
-        ok("对照：SECURE_ONLY=0 的同一模块读回 VERSION=0x%08x", r);
-    else
-        bad("对照组读不出 VERSION（ok=%d val=0x%08x）—— 说明不了门控", okv, r);
+    if (sec_fd >= 0) {
+        if (okv && r == 0x00010000u)
+            ok("对照：同模块的 key_vault 实例经 EL3 读回 VERSION=0x%08x —— "
+               "核是活的，上面那条不是\"什么都读不到\"", r);
+        else
+            bad("对照组经 EL3 读不出 VERSION（ok=%d val=0x%08x）", okv, r);
+    } else {
+        if (!okv)
+            ok("对照：普通世界读 key_vault 也被拒 —— 这一版它也是 SECURE_ONLY=1");
+        else
+            bad("普通世界读到了 key_vault VERSION=0x%08x —— 门没关上", r);
+    }
 }
 
 /* ================= TRNG ================= */
@@ -521,10 +655,19 @@ static void test_trng(void)
     fprintf(rep, "        跑 SP 800-90B 的 EntropyAssessment，见 ring_osc.v 的说明。\n");
 }
 
-int main(void)
+/* 用法：
+ *   hsm_hwtest            默认走 EL3（/dev/secmmio）—— 这一版核是 SECURE_ONLY=1
+ *   hsm_hwtest -d         直接 mmap，**只读** —— 反证用（读被拒是同步 SIGBUS，接得住）
+ *   hsm_hwtest -D         直接 mmap，**可写** —— 只对 SECURE_ONLY=0 的旧 bitstream 用。
+ *                    对 SECURE_ONLY=1 的核写一笔就是 DECERR->SError->内核 panic。
+ */
+int main(int argc, char **argv)
 {
     int fd;
     uint32_t v;
+    int direct = (argc > 1 && (strcmp(argv[1], "-d") == 0 ||
+                              strcmp(argv[1], "-D") == 0));
+    direct_wr_ok = (argc > 1 && strcmp(argv[1], "-D") == 0);
 
     struct sigaction sa;
 
@@ -537,10 +680,14 @@ int main(void)
     sa.sa_handler = on_bus;
     sigaction(SIGBUS, &sa, NULL);
 
-    fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0) { perror("open /dev/mem"); return 1; }
-    pl = mmap(NULL, PL_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, PL_BASE);
-    if (pl == MAP_FAILED) { perror("mmap"); return 1; }
+    if (direct) {
+        fd = open("/dev/mem", O_RDWR | O_SYNC);
+        if (fd < 0) { perror("open /dev/mem"); return 1; }
+        pl = mmap(NULL, PL_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, PL_BASE);
+        if (pl == MAP_FAILED) { perror("mmap"); return 1; }
+    } else {
+        sec_open();
+    }
 
     fprintf(rep, "PL 密码机硬件自测  @ 0x%08lx\n", PL_BASE);
     v = rd(S_MLKEM + 0x00);

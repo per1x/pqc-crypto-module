@@ -1,0 +1,40 @@
+ML-KEM 从机 VERSION = 0x00010000
+
+[① ML-KEM 三套参数集 · NIST ACVP 官方向量]
+  ok    ML-KEM-512 KeyGen tc1：ek 800 + dk 1632 字节逐字节一致
+  ok    ML-KEM-512 KeyGen tc2：ek 800 + dk 1632 字节逐字节一致
+  ok    ML-KEM-768 KeyGen tc26：ek 1184 + dk 2400 字节逐字节一致
+  ok    ML-KEM-768 KeyGen tc27：ek 1184 + dk 2400 字节逐字节一致
+  ok    ML-KEM-1024 KeyGen tc51：ek 1568 + dk 3168 字节逐字节一致
+  ok    ML-KEM-1024 KeyGen tc52：ek 1568 + dk 3168 字节逐字节一致
+  ok    ML-KEM-512 Encaps tc1：K 32 + c 768 字节逐字节一致
+  ok    ML-KEM-512 Encaps tc2：K 32 + c 768 字节逐字节一致
+  ok    ML-KEM-768 Encaps tc26：K 32 + c 1088 字节逐字节一致
+  ok    ML-KEM-768 Encaps tc27：K 32 + c 1088 字节逐字节一致
+  ok    ML-KEM-1024 Encaps tc51：K 32 + c 1568 字节逐字节一致
+  ok    ML-KEM-1024 Encaps tc52：K 32 + c 1568 字节逐字节一致
+  ok    ML-KEM-512 Decaps tc76：K 32 字节逐字节一致
+  ok    ML-KEM-512 Decaps tc77：K 32 字节逐字节一致
+  ok    ML-KEM-768 Decaps tc86：K 32 字节逐字节一致
+  ok    ML-KEM-768 Decaps tc87：K 32 字节逐字节一致
+  ok    ML-KEM-1024 Decaps tc96：K 32 字节逐字节一致
+  ok    ML-KEM-1024 Decaps tc97：K 32 字节逐字节一致
+
+[② 性能（每次耗时 / 次每秒；含软件搬数据的开销）]
+  参数集     KeyGen                 Encaps                 Decaps
+  ML-KEM-512        3.03 ms   329.8/s      1.92 ms   521.7/s      2.57 ms   389.9/s
+  ML-KEM-768        4.51 ms   221.6/s      2.82 ms   355.1/s      3.82 ms   261.7/s
+  ML-KEM-1024       6.01 ms   166.5/s      3.90 ms   256.2/s      5.20 ms   192.5/s
+  注：含软件逐字节搬进搬出的开销（AXI 每字节一次读写），
+      不是纯硬件算核时间。原型验证不追性能，这里只作横向对照。
+
+[③ Decaps 常数时间抽测（合法密文 vs 隐式拒绝）]
+  合法密文   中位 3.7164 ms  最小 3.7107  最大 3.7233
+  隐式拒绝   中位 3.7164 ms  最小 3.7107  最大 3.7638
+  中位数相对差 0.000%（各 200 次）
+  ok    两条路径耗时无法区分（相对差 0.000% < 0.5%）——密文比对确实是全比完再选，没有早退
+  说明：这测的是**软件侧能观测到的**那一层延迟，也正是计时攻击
+        能拿到的那一层。它不覆盖功耗/电磁侧信道（本次不做，
+        也不假装做了）。
+
+合计：通过 20，失败 0

@@ -21,7 +21,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include "kmod/secmmio_uapi.h"
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
@@ -63,10 +65,84 @@ static void bad(const char *fmt, ...)
     fflush(rep); va_end(ap); n_fail++;
 }
 
+
+/* ============================================================================
+ * 【transport：直接 mmap  还是  经 EL3】
+ * ============================================================================
+ * 这一版 bitstream 的四个功能核是 SECURE_ONLY=1，普通世界（本进程，AxPROT[1]
+ * 恒为 1）直接访问一律 DECERR。所以核访问要经 /dev/secmmio 转给 EL3 发。
+ *
+ * 算法与向量一行不改 —— 只把 rd()/wr() 底下换掉。这是有意的：
+ * **两种 transport 跑的必须是同一套 KAT**，否则"安全世界能跑通"就成了
+ * 一句没法与普通世界那次比较的话。
+ *
+ * ⚠️ 直接 mmap 模式（-d）**只读不写**。普通世界写一个被拒的地址，DECERR 是
+ *    posted 的，在 aarch64 上以 SError 回来，内核只能 panic —— 那不是一次
+ *    失败的测试，那是丢一块板子。反证只需要读，读的错误是同步的、接得住。
+ */
+static int sec_fd = -1;          /* >=0 表示走 EL3 */
+static int direct_wr_ok;         /* -D 才置 1，见 main 的用法说明 */
+
+
+static void sec_open(void)
+{
+    char st[64] = {0};
+    int f;
+
+    /* 保险的判据放在这里而不是内核里：先确认 PL 已 programmed 再发第一笔 SMC。
+     * 这一步**不碰 PL 总线** —— 若 PL 不在，碰一下就是 EL3 上的取数错误，
+     * 而 BL31 里没有处理它的东西。 */
+    f = open("/sys/class/fpga_manager/fpga0/state", O_RDONLY);
+    if (f < 0) { perror("fpga_manager state"); exit(2); }
+    if (read(f, st, sizeof st - 1) <= 0) { perror("read state"); exit(2); }
+    close(f);
+    if (!strstr(st, "operating")) {
+        fprintf(stderr, "PL 不是 operating（是 \"%s\"），拒绝发 SMC\n", st);
+        exit(2);
+    }
+
+    sec_fd = open("/dev/secmmio", O_RDWR);
+    if (sec_fd < 0) { perror("/dev/secmmio"); exit(2); }
+    if (ioctl(sec_fd, SECMMIO_ARM) < 0) { perror("SECMMIO_ARM"); exit(2); }
+}
+
+static uint32_t sec_rd(unsigned off)
+{
+    struct secmmio_op op = { .addr = (uint32_t)(PL_BASE + off), .val = 0 };
+
+    if (ioctl(sec_fd, SECMMIO_RD, &op) < 0) {
+        fprintf(stderr, "EL3 读 0x%08x 被拒（白名单）\n", op.addr);
+        exit(3);
+    }
+    return op.val;
+}
+
+static void sec_wr_(unsigned off, uint32_t v)
+{
+    struct secmmio_op op = { .addr = (uint32_t)(PL_BASE + off), .val = v };
+
+    if (ioctl(sec_fd, SECMMIO_WR, &op) < 0) {
+        fprintf(stderr, "EL3 写 0x%08x 被拒（白名单）\n", op.addr);
+        exit(3);
+    }
+}
 static inline uint32_t rd(unsigned off)
-{ return *(volatile uint32_t *)(pl + off); }
+{
+    if (sec_fd >= 0) return sec_rd(off);
+    return *(volatile uint32_t *)(pl + off);
+}
 static inline void wr(unsigned off, uint32_t v)
-{ *(volatile uint32_t *)(pl + off) = v; }
+{
+    if (sec_fd >= 0) { sec_wr_(off, v); return; }
+    /* 闸门对准的是"写一个会拒绝我的核"，不是"直接模式"本身：
+     * 对 SECURE_ONLY=0 的旧 bitstream，普通世界写是正常且必要的。
+     * 所以危险的那条路要显式打开（-D），默认关着。 */
+    if (!direct_wr_ok) {
+        fprintf(stderr, "拒绝：未加 -D 就在直接模式下写 PL。\n"
+                        "若核是 SECURE_ONLY=1，这一笔会 DECERR->SError->panic，丢板子。\n");
+        exit(4);
+    }
+}
 
 static double now_ms(void)
 {
@@ -300,18 +376,31 @@ static void test_ct(void)
     fprintf(rep, "        也不假装做了）。\n");
 }
 
-int main(void)
+/* 用法：
+ *   hsm_kem3            默认走 EL3（/dev/secmmio）—— 这一版核是 SECURE_ONLY=1
+ *   hsm_kem3 -d         直接 mmap，**只读** —— 反证用（读被拒是同步 SIGBUS，接得住）
+ *   hsm_kem3 -D         直接 mmap，**可写** —— 只对 SECURE_ONLY=0 的旧 bitstream 用。
+ *                    对 SECURE_ONLY=1 的核写一笔就是 DECERR->SError->内核 panic。
+ */
+int main(int argc, char **argv)
 {
     int fd;
     uint32_t ver;
+    int direct = (argc > 1 && (strcmp(argv[1], "-d") == 0 ||
+                              strcmp(argv[1], "-D") == 0));
+    direct_wr_ok = (argc > 1 && strcmp(argv[1], "-D") == 0);
 
     rep = fopen("/tmp/hsm_kem3.txt", "w");
     if (!rep) rep = stdout;
 
-    fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0) { perror("open /dev/mem"); return 1; }
-    pl = mmap(NULL, PL_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, PL_BASE);
-    if (pl == MAP_FAILED) { perror("mmap"); return 1; }
+    if (direct) {
+        fd = open("/dev/mem", O_RDWR | O_SYNC);
+        if (fd < 0) { perror("open /dev/mem"); return 1; }
+        pl = mmap(NULL, PL_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, PL_BASE);
+        if (pl == MAP_FAILED) { perror("mmap"); return 1; }
+    } else {
+        sec_open();
+    }
 
     ver = rd(MK_VER);
     fprintf(rep, "ML-KEM 从机 VERSION = 0x%08x\n", ver);

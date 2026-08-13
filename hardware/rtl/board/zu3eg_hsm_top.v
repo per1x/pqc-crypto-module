@@ -37,23 +37,35 @@
 // 表现是"偶尔上电起不来"这类最难查的问题。
 //
 // ============================================================================
-// 【SECURE_ONLY 在这一版里为什么是 0 —— 以及那条「金丝雀」是干什么的】
+// 【SECURE_ONLY：四个功能从机全都是 1 —— 送检口径】
 // ============================================================================
-// 防火墙的 AxPROT 门控要求 AxPROT[1]==0（secure）。而**板上的 Linux 跑在
-// 非安全世界**，它经 /dev/mem 发出的每一笔事务 AxPROT[1] 都是 1。
-// 四个功能从机若都设成 SECURE_ONLY=1，Linux 一个寄存器也读不到，
-// 这一版 bitstream 就只能证明"全都拒绝"，证明不了密码算法对不对。
+// 防火墙的 AxPROT 门控要求 AxPROT[1]==0（secure）。板上的 Linux 跑在**非安全
+// 世界**，它经 /dev/mem 发出的每一笔事务 AxPROT[1] 恒为 1。
 //
-// 所以这一版：**四个功能从机 SECURE_ONLY=0**（让 Linux 能跑 KAT），
-// 另加**槽 4 一个 SECURE_ONLY=1 的金丝雀实例** —— 它和槽 1 是同一个
-// key_vault_axi 模块，唯一区别就是那个参数。于是在真硬件上：
+// 【为什么先有过一版全 0，以及那一版证明了什么】
+// 第一版把四个功能从机设成 SECURE_ONLY=0（让 Linux 能直接跑 KAT），另设槽 4
+// 一个只差这一个参数的 key_vault_axi 金丝雀实例。那一版证明的是：
+//   · 算法在真硅上对官方向量正确（槽 0..3 可用）；
+//   · AxPROT 门控在真硬件、真非安全 master 下确实生效（槽 4 每次必 DECERR）。
+// 但它留了一个缺口：**被证明受门控保护的只有金丝雀那个空壳，不是密码核本身。**
 //
-//   · 槽 1..3 能用 → 算法、密钥仓、边界不变量都能实测；
-//   · 槽 4 的每一次访问都必须 DECERR → **这就是 AxPROT 门控在真硬件、
-//     真非安全 master 下确实生效的证据**，而不只是仿真里的结论。
+// 【这一版把缺口补上】
+// 四个功能从机（trng / key_vault / sym / mlkem）**全部 SECURE_ONLY=1**。
+// 于是普通世界一个寄存器都摸不到，整套 KAT 改由**安全世界**驱动：
+// 打过补丁的 BL31 提供一个受限的安全 MMIO 读写 SiP（白名单只覆盖这几个核的
+// 合法寄存器偏移，见 boot/atf/patch_atf_secmmio.py），普通世界的测试程序
+// 把每一笔核访问都经 SMC 转到 EL3 发出。
 //
-// 生产版本里四个从机全都是 SECURE_ONLY=1，由安全世界（OP-TEE）驱动。
-// 那一步归另一条线，这里不越界。
+// 两条一起才是完整的命题：
+//   · **正向**：SECURE_ONLY=1 的全功能核，由安全世界端到端跑完整套 KAT；
+//   · **反向**：同一套地址从普通世界直接读，全部 DECERR。
+//
+// ⚠️ 反向只读、不写。普通世界写一个被拒的地址，DECERR 是 posted 的，
+//    在 aarch64 上以 SError 回来 —— 内核只能 panic。这条代价是一次断电。
+//    会写的旧程序（hsm_hwtest / hsm_kem3）**不能**对着这一版 bitstream 跑。
+//
+// 槽 4 的金丝雀保留：它现在是"同参数下的同类项"，用来说明槽 0..3 的拒绝
+// 不是因为核坏了。风扇（槽 5）保持 0 —— 它不在密码边界内，也不该在。
 //
 // ============================================================================
 // 【为什么没有 pqc_accel_axi】
@@ -294,7 +306,7 @@ module zu3eg_hsm_top (
 
     // ================= 槽 0：TRNG =================
     wire trng_ready, trng_alarm;
-    trng_axi #(.SECURE_ONLY(0), .RAW_TAP(RAW_TAP_EN)) u_trng (
+    trng_axi #(.SECURE_ONLY(1), .RAW_TAP(RAW_TAP_EN)) u_trng (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*0 +: 8]), .s_axi_awprot(x_awprot[3*0 +: 3]),
         .s_axi_awvalid(x_awvalid[0]), .s_axi_awready(x_awready[0]),
@@ -312,7 +324,7 @@ module zu3eg_hsm_top (
     // ================= 槽 1 与 2：密钥仓 + 对称核 =================
     // 这两个是一体的（密钥从 use 口直接进对称核），所以用 sym_vault_top
     wire vault_tampered;
-    sym_vault_top #(.SECURE_ONLY(0)) u_symvault (
+    sym_vault_top #(.SECURE_ONLY(1)) u_symvault (
         .clk(clk_sys), .rst_n(rst_n), .tamper(tamper),
         .vault_awaddr(x_awaddr[8*1 +: 8]), .vault_awprot(x_awprot[3*1 +: 3]),
         .vault_awvalid(x_awvalid[1]), .vault_awready(x_awready[1]),
@@ -338,7 +350,7 @@ module zu3eg_hsm_top (
         .vault_tampered(vault_tampered));
 
     // ================= 槽 3：ML-KEM =================
-    mlkem_axi #(.SECURE_ONLY(0)) u_mlkem (
+    mlkem_axi #(.SECURE_ONLY(1)) u_mlkem (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*3 +: 8]), .s_axi_awprot(x_awprot[3*3 +: 3]),
         .s_axi_awvalid(x_awvalid[3]), .s_axi_awready(x_awready[3]),
