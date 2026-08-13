@@ -1,0 +1,56 @@
+载入 SECURE_ONLY=1 版 zu3eg_hsm.bit
+cp: '/lib/firmware/zu3eg_hsm.bit' and '/lib/firmware/zu3eg_hsm.bit' are the same file
+Time taken to load BIN is 2696.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+fpga_manager state = operating
+insmod: can't insert '/media/sd-mmcblk1p2/hsm/secmmio.ko': File exists
+=== 起 daemon ===
+[17:42:29] 就绪：/tmp/pqchsm_fpgad.sock（每一笔核访问都经 EL3 发出）
+=== 跑独立应用 sdf_demo（另一个进程）===
+[17:42:31] 客户端连上
+[17:42:31] RANDOM 32 字节（PL 环振噪声源）
+[17:42:31] KEYGEN pset=1 → 句柄 0，ek 1184 字节（dk 2400 字节留在 daemon）
+[17:42:31] ENCAPS pset=1 → K 32 + c 1088 字节
+[17:42:31] DECAPS 句柄 0 → K 32 字节
+[17:42:31] IMPORT_KEY 槽 3（16 字节）—— 进 key_vault，再也读不回来
+[17:42:31] SYM_BLOCK alg=2 槽=3 加密
+[17:42:31] SYM_BLOCK alg=2 槽=3 解密
+=== 应用程序：通过 SDF 风格接口使用密码机 ===
+
+[设备] pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000
+
+[1] SDFE_GenerateRandom —— 取自 PL 里的环振噪声源
+  32 字节随机数     981806f53765fbec151360c5d8d3881a…（共 32 字节）
+
+[2] SDFE_GenerateKeyPair_MLKEM(ML-KEM-768)
+  公钥 ek 1184 字节，私钥句柄 = 0
+  ek 开头              68892f63181419799c66728f14342ccb…（共 1184 字节）
+  ← 注意：本程序**从头到尾没有拿到过私钥 dk**，只有这个句柄
+
+[3] SDFE_Encapsulate_MLKEM（用公钥）
+  共享密钥 K         ddc3f00809b1d926c13227b3be474cf9…（共 32 字节）
+  密文 c               a8b6379b715d0c6332de63032c3998c5…（共 1088 字节）
+
+[4] SDFE_Decapsulate_MLKEM（用句柄，不是私钥）
+  解出的 K            ddc3f00809b1d926c13227b3be474cf9…（共 32 字节）
+  ✅ 两边的共享密钥一致 —— 一次完整的 KEM 在 FPGA 上跑通
+
+[5] SDFE_ImportKey + SDFE_Encrypt/Decrypt（SM4，密钥留在硬件）
+  密钥已进 key_vault 槽 3，应用侧已抹除
+  SM4 密文             681edf34d206965e86b3e94f536e4246
+  ✅ 与 GB/T 32907 A.1 逐字节一致
+  ✅ 解密回到原文
+
+=== 全部完成。本程序没有碰过任何寄存器。 ===
+[17:42:31] 客户端断开
+sdf_demo rc=0
+=== 反证：普通世界直读 ===
+hsm_secneg rc=0
+armed        1
+secure_reads  6402565
+secure_writes 5242698
+refused       161  (最后一个被 EL3 白名单拒的地址 0x800200fc)
+
+说明：refused 是 **EL3 白名单**拒的，不是 PL 防火墙拒的 ——
+      白名单在 BL31 里，这个模块只是信使（见文件头）。
+payload 结束
