@@ -14,6 +14,9 @@ RTL_BUS       := $(PWD)/../../rtl/bus
 RTL_TRNG      := $(PWD)/../../rtl/trng
 RTL_COMMON    := $(PWD)/../../rtl/common
 RTL_SYM       := $(PWD)/../../rtl/sym
+# 板级顶层那一层里唯一的纯 RTL：地址译码。厂商原语在 zu3eg_hsm_top，
+# 那个进 lint 不进 cocotb；xbar 没有原语依赖，所以能直接对拍。
+RTL_BOARD     := $(PWD)/../../rtl/board
 # 风扇控制在 fpga/fan_ctrl/ —— 与密码核代码分开放，但同一个 bitstream
 RTL_FAN       := $(PWD)/../../../fpga/fan_ctrl
 
@@ -58,6 +61,7 @@ VERILOG_SOURCES = \
   $(RTL_BUS)/mlkem_axi.v \
   $(RTL_BUS)/sym_axi.v \
   $(RTL_BUS)/sym_vault_top.v \
+  $(RTL_BOARD)/axi4lite_xbar.v \
   $(PWD)/tb_mlkem_units.v \
   $(PWD)/tb_mldsa_units.v \
   $(PWD)/tb_trng_health.v

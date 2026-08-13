@@ -158,6 +158,27 @@ local key buffer is wiped on every return path, and fails the build otherwise.
 primitive is not removed as a dead store, with a negative control that confirms
 a plain `memset` in the same position *is* removed.
 
+Inside the boundary (in programmable logic) zeroisation takes two forms, neither
+of which is "reset the pointers":
+
+- The **key vault** is a register array: `zeroize` / `tamper` clears every slot
+  **on one clock edge**, so no half-erased window exists. That is one of the
+  reasons it is registers and not BRAM.
+- **ML-KEM's two 8 KB buffers** are BRAM and can only be cleared address by
+  address (8192 cycles), so a half-erased window necessarily exists. The design
+  makes that window **an explicit status bit** (`STATUS[4] = WIPING`) and, while
+  it is set, refuses every read and write and refuses to start, answering SLVERR
+  rather than discarding writes silently — a silent discard would let software
+  start with the wrong input length and produce a quietly wrong result. The
+  criterion is a simulation **read-back of all 16384 bytes of both BRAMs
+  confirming zero**, not "`OUT_LEN` became 0"; the latter only shows software can
+  no longer read it, and says nothing about whether the content is still there.
+
+  ⚠️ This one **cannot be shown on the board, and that is the design working**:
+  software has no path to those bytes in the first place (if it had, that would
+  be the vulnerability). What the board shows is the behaviour and duration of
+  `WIPING`.
+
 ## 10. Self-tests
 
 Pre-operational self-tests run before the first cryptographic service and can be

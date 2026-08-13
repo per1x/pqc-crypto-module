@@ -38,6 +38,27 @@
 //   · tamper 一根线同时打掉三个核与两个缓冲区。
 //
 // 换句话说，**软件能拿到的只有算法定义里本来就该给它的那些字节**。
+//
+// ============================================================================
+// 【zeroize 必须真的擦 BRAM，不能只清指针】
+// ============================================================================
+// 第一版的 zeroize 只把 in_ptr / out_len / out_rd / seed 清零。从软件看确实
+// 什么都读不到了（out_len=0，OUT_DATA 不返回任何字节），但**两块 8 KB BRAM
+// 里上一次运算的 dk 一个字节都没少**。
+//
+// 那不是 zeroize，是把目录页撕了而正文还在。剩下的路径都还在：
+//   · 下一次运算只覆盖它用到的那一段，用不到的尾巴留着上一把私钥；
+//   · 位流回读、扫描链、或者哪天有人给缓冲区加个调试读口，都能把它捞出来；
+//   · 更直接的：把 in_ptr 推到旧数据那一段再启动一次运算，旧字节就进了核。
+//
+// 所以这里是一台真正的擦除机：tamper / zeroize 的**上升沿**启动，
+// 两块 BRAM 并行逐地址写 0，8192 拍走完，期间 WIPING=1、拒绝读输出、
+// 拒绝写输入、拒绝启动。key_vault 那边用寄存器阵列所以能一拍全清（见该文件
+// 头），BRAM 没有这个待遇 —— 有"擦了一半"的窗口，就必须把这个窗口
+// 明确地暴露成一个状态位，而不是假装它不存在。
+//
+// 用上升沿而不是电平：fw_tampered 是**锁存**的，用电平的话擦除会永远重启，
+// WIPING 再也不会落下来。
 `default_nettype none
 
 module mlkem_axi #(
@@ -71,7 +92,7 @@ module mlkem_axi #(
 
     input  wire        tamper
 );
-    localparam [1:0] RESP_OKAY = 2'b00;
+    localparam [1:0] RESP_OKAY = 2'b00, RESP_SLVERR = 2'b10;
 
     localparam [3:0] A_VERSION = 4'h0, A_CTRL   = 4'h1, A_STATUS = 4'h2,
                      A_MODE    = 4'h3, A_INDATA = 4'h4, A_INPTR  = 4'h5,
@@ -141,6 +162,20 @@ module mlkem_axi #(
     reg [1:0]  mode, pset;
     reg [12:0] in_ptr, out_len, out_rd;
     reg        zero_pulse;
+
+    // ---- BRAM 擦除机 ----
+    reg        wiping;
+    reg [12:0] wipe_addr;
+    reg        zall_d;
+
+    // ---- 非法参数 ----
+    // mode 与 pset 各 2 位，但**只有 0/1/2 有意义**。值 3 不是"另一种配置"，
+    // 是一个不存在的东西：长度计算会走到 pset==2 那条分支（k=4、dv=5），
+    // 而模式选择会落到 default 也就是 Decaps —— 于是核按 1024 的长度收 Decaps
+    // 的输入，喂不满就永远等下去。软件看到的是 BUSY 一直不落，
+    // 与"算得慢"分不开。所以在 START 那一刻就判掉，并且**明确报错**。
+    reg        param_err;
+    wire       params_ok = (mode != 2'd3) && (pset != 2'd3);
 
     // ---- 由 param_set 算出来的长度（软件不用报，也就报不错）----
     wire [2:0]  k    = (pset == 2'd0) ? 3'd2 : (pset == 2'd1) ? 3'd3 : 3'd4;
@@ -251,23 +286,34 @@ module mlkem_axi #(
     wire [3:0]  wr_strb = (f_wvalid  && f_wready)  ? f_wstrb  : w_strb_r;
 
     wire wr_indata = wr_now && wr_strb[0] && (wr_addr[5:2] == A_INDATA)
-                     && (state == S_IDLE);
+                     && (state == S_IDLE) && !wiping;
 
     // ================= 读通道 =================
     assign f_arready = !f_rvalid;
+    // 擦除期间一律不给输出：out_len 这时已经是 0，但不靠它 ——
+    // 靠一个显式条件，免得哪天 out_len 的清零时机变了就漏出去。
     wire rd_outdata = f_arvalid && f_arready && (f_araddr[5:2] == A_OUTDATA)
-                      && ({1'b0, out_rd} < {1'b0, out_len});
+                      && !wiping && ({1'b0, out_rd} < {1'b0, out_len});
 
     // 四个标志占 [3:0]，填充要 28 位（原来写的 27'd0 让整条拼接只有 31 位，
     // 靠赋值时的零扩展才凑够 32 —— 值不受影响，但位宽是错的）。
-    wire [31:0] r_status = {28'd0, fw_tampered, de_hash_ok,
+    // [0] BUSY  [1] DONE  [2] HASH_OK  [3] TAMPER  [4] WIPING  [5] PARAM_ERR
+    wire [31:0] r_status = {26'd0, param_err, wiping, fw_tampered, de_hash_ok,
                             (state == S_IDLE) && run_done, (state != S_IDLE)};
 
     // ================= 端口归属 =================
     always @(*) begin
-        ina_we   = wr_indata;
-        ina_addr = in_ptr;
-        ina_din  = wr_data[7:0];
+        // 擦除机接管写口：两块 BRAM 同一个地址、同时写 0，8192 拍走完。
+        // 两块并行是因为它们各自有独立的写口，没有理由排队。
+        if (wiping) begin
+            ina_we   = 1'b1;
+            ina_addr = wipe_addr;
+            ina_din  = 8'd0;
+        end else begin
+            ina_we   = wr_indata;
+            ina_addr = in_ptr;
+            ina_din  = wr_data[7:0];
+        end
 
         // 输入缓冲的读口。
         // ⚠️ 预读阶段地址要**提前一拍**：同步读的数据下一拍才出来，
@@ -278,9 +324,15 @@ module mlkem_axi #(
                    ? (fb_wait ? 13'd0 : ({6'd0, pre_cnt} + 13'd1))
                    : fp;
 
-        outa_we   = (state == S_RUN) && core_ov;
-        outa_addr = out_len;
-        outa_din  = core_od;
+        if (wiping) begin
+            outa_we   = 1'b1;
+            outa_addr = wipe_addr;
+            outa_din  = 8'd0;
+        end else begin
+            outa_we   = (state == S_RUN) && core_ov;
+            outa_addr = out_len;
+            outa_din  = core_od;
+        end
 
         // 同步读要提前一拍：这一拍读命中就把地址推到下一个
         outb_addr = out_rd + {12'd0, rd_outdata};
@@ -297,6 +349,8 @@ module mlkem_axi #(
             mode <= 2'd0; pset <= 2'd1;
             in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0;
             zero_pulse <= 1'b0;
+            wiping <= 1'b0; wipe_addr <= 13'd0; zall_d <= 1'b0;
+            param_err <= 1'b0;
             state <= S_IDLE; pre_cnt <= 7'd0; fp <= 13'd0; kickdly <= 2'd0;
             seed_a <= 256'd0; seed_b <= 256'd0;
             fb_r <= 8'd0; fb_v <= 1'b0; fb_wait <= 1'b0;
@@ -306,12 +360,26 @@ module mlkem_axi #(
             zero_pulse <= 1'b0;
             kg_start <= 1'b0; en_start <= 1'b0; de_start <= 1'b0;
 
+            // ---------- BRAM 擦除机 ----------
+            // 上升沿启动。fw_tampered 是锁存电平，所以 tamper 之后只会启动一次，
+            // 擦完 WIPING 就落下来 —— 用电平的话它永远落不下来。
+            zall_d <= zeroize_all;
+            if (zeroize_all && !zall_d) begin
+                wiping    <= 1'b1;
+                wipe_addr <= 13'd0;
+            end else if (wiping) begin
+                // 最后一个地址那一拍 ina_we 仍为高（组合自 wiping），
+                // 所以 0x1FFF 也真的被写了 0，一个字节都不留。
+                if (wipe_addr == 13'h1FFF) wiping <= 1'b0;
+                else                       wipe_addr <= wipe_addr + 13'd1;
+            end
+
             if (zeroize_all) begin
-                // 缓冲区里有私钥字节，擦除要连它们一起 —— 指针清零之后
-                // OUT_DATA 读不出任何东西（out_len = 0）
+                // 指针与并行寄存器一拍清掉；BRAM 交给上面那台擦除机。
                 in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0;
                 seed_a <= 256'd0; seed_b <= 256'd0;
                 state  <= S_IDLE; run_done <= 1'b0;
+                param_err <= 1'b0;
                 fb_v <= 1'b0; fb_wait <= 1'b0;
             end
 
@@ -321,8 +389,13 @@ module mlkem_axi #(
                                               w_strb_r <= f_wstrb; end
             if (wr_now) begin
                 aw_got <= 1'b0; w_got <= 1'b0;
-                f_bvalid <= 1'b1; f_bresp <= RESP_OKAY;
-                if (wr_strb[0]) begin
+                // 擦除期间拒绝一切写，而且**明确回 SLVERR**。
+                // 静默丢弃是这里最危险的选项：软件会以为 IN_DATA 灌进去了，
+                // 实际 in_ptr 一步没动，接着按错误的长度启动 —— 出来的是
+                // 一个安静的错误结果。读仍然放行，否则软件没法轮询 WIPING。
+                f_bvalid <= 1'b1;
+                f_bresp  <= wiping ? RESP_SLVERR : RESP_OKAY;
+                if (wr_strb[0] && !wiping) begin
                     case (wr_addr[5:2])
                     A_CTRL: begin
                         if (wr_data[1]) zero_pulse <= 1'b1;
@@ -330,17 +403,26 @@ module mlkem_axi #(
                         if (wr_data[3]) out_rd  <= 13'd0;
                         // START 只在空闲时有效，且要放在最后判 ——
                         // 同一拍写 IN_RST|START 的语义是"清指针再启动"
-                        if (wr_data[0] && (state == S_IDLE) && !zeroize_all) begin
-                            out_len <= 13'd0;
-                            out_rd  <= 13'd0;
-                            pre_cnt <= 7'd0;
-                            fp      <= 13'd0;
-                            fb_v    <= 1'b0;
-                            fb_wait <= 1'b1;   // 让输入缓冲的同步读跟上
-                            run_done <= 1'b0;
-                            // Decaps 没有并行口要预读。少了这个判断，
-                            // pre_cnt 会一路数到回绕才碰巧退出（白跑 128 拍）。
-                            state   <= (mode == M_DECAPS) ? S_KICK : S_PRE;
+                        if (wr_data[0] && (state == S_IDLE) && !zeroize_all
+                            && !wiping) begin
+                            if (!params_ok) begin
+                                // 非法参数：置错误位，**不启动任何核**。
+                                // 不启动这一点比报错更要紧 —— 启动了再报错
+                                // 的话，核已经按一个不存在的参数集开始收数了。
+                                param_err <= 1'b1;
+                            end else begin
+                                param_err <= 1'b0;
+                                out_len <= 13'd0;
+                                out_rd  <= 13'd0;
+                                pre_cnt <= 7'd0;
+                                fp      <= 13'd0;
+                                fb_v    <= 1'b0;
+                                fb_wait <= 1'b1;   // 让输入缓冲的同步读跟上
+                                run_done <= 1'b0;
+                                // Decaps 没有并行口要预读。少了这个判断，
+                                // pre_cnt 会一路数到回绕才碰巧退出（白跑 128 拍）。
+                                state   <= (mode == M_DECAPS) ? S_KICK : S_PRE;
+                            end
                         end
                     end
                     A_MODE: begin mode <= wr_data[1:0]; pset <= wr_data[3:2]; end
@@ -359,7 +441,7 @@ module mlkem_axi #(
                 A_STATUS:  f_rdata <= r_status;
                 A_MODE:    f_rdata <= {28'd0, pset, mode};
                 A_INPTR:   f_rdata <= {19'd0, in_ptr};
-                A_OUTDATA: f_rdata <= {24'd0, outb_dout};
+                A_OUTDATA: f_rdata <= wiping ? 32'd0 : {24'd0, outb_dout};
                 A_OUTLEN:  f_rdata <= {19'd0, out_len};
                 A_OUTRD:   f_rdata <= {19'd0, out_rd};
                 A_VIOL:    f_rdata <= {viol_rd_count, viol_wr_count};

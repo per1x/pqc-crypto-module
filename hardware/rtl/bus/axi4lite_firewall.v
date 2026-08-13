@@ -117,6 +117,14 @@ module axi4lite_firewall #(
 
     // ================= 篡改锁存 =================
     // 只进不出：软件没有任何一条路能把它清掉，只有 rst_n。
+    //
+    // ⚠️ 锁存要到**下一拍**才生效。所以判据里不能只看 tamper_latched ——
+    //    tamper 拉高的那一拍它还是 0，那一拍到达的事务会被照常放行。
+    //    这是一拍宽的 TOCTOU 窗口：篡改检测（开盖、电压/温度越界）与总线
+    //    事务是两条互不相干的时间线，它们**恰好同拍**并不是小概率事件，
+    //    而是攻击者可以主动去凑的 —— 拔盖的那一刻正在扫描寄存器，
+    //    就有一笔访问踩在这一拍上。
+    //    判据用 (tamper || tamper_latched)，窗口宽度归零。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)      tamper_latched <= 1'b0;
         else if (tamper) tamper_latched <= 1'b1;
@@ -130,7 +138,8 @@ module axi4lite_firewall #(
         reg            ok;
         begin
             ok = 1'b1;
-            if (tamper_latched)                       ok = 1'b0;
+            // 组合项在前：tamper 拉高的**同一拍**就关门，不等锁存
+            if (tamper || tamper_latched)             ok = 1'b0;
             if (is_write  && (ALLOW_WRITE  == 0))     ok = 1'b0;
             if (!is_write && (ALLOW_READ   == 0))     ok = 1'b0;
             if ((SECURE_ONLY != 0) && prot[1])        ok = 1'b0;   // NS=1 → 拒

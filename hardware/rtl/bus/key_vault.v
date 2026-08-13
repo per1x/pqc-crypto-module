@@ -93,8 +93,14 @@ module key_vault #(
             use_mux[(WORDS-1-i)*32 +: 32] = keys[use_sel*WORDS + i];
         end
     end
-    assign use_key   = tamper_latched ? {(WORDS*32){1'b0}} : use_mux;
-    assign use_valid = valid_map[use_sel] && !tamper_latched;
+    // ⚠️ 组合项 tamper 与锁存项 tamper_latched **都要看**。
+    // 只看锁存的话有一拍宽的窗口：tamper 拉高的那一拍锁存还是 0，
+    // 密钥仓照常把整把密钥交给算法核。槽位要到下一个时钟沿才被清 ——
+    // 也就是说那一拍里密钥既还在寄存器里、又还在往外送。
+    // tamper 与算法核取密钥是两条独立的时间线，同拍不是小概率，是可以凑的。
+    wire tamper_now = tamper || tamper_latched;
+    assign use_key   = tamper_now ? {(WORDS*32){1'b0}} : use_mux;
+    assign use_valid = valid_map[use_sel] && !tamper_now;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -118,7 +124,7 @@ module key_vault #(
                 valid_map <= {SLOTS{1'b0}};
                 lock_map  <= {SLOTS{1'b0}};
                 if (zeroize_count != 8'hFF) zeroize_count <= zeroize_count + 8'd1;
-            end else if (tamper_latched) begin
+            end else if (tamper_now) begin
                 // 锁存之后一律拒绝，连擦除都不必了（已经是空的）
                 if (ld_begin || ld_we || ld_commit || ld_lock || ld_erase)
                     deny <= 1'b1;

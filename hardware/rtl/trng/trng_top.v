@@ -22,6 +22,25 @@
 //    重跑启动检测。这是密码边界的 zeroize-on-tamper 挂钩点 —— 上层把
 //    篡改检测信号接到这个口上即可。
 //
+// 4. **源与调理器之间有一个取样 FIFO，让调理器一个样本都不丢。**
+//    第一版是直连的：调理器只在 S_ABSORB 收样，置换（约 26 拍）与挤出
+//    （8 次握手）期间进来的样本直接丢掉，当时的注释说"丢比特损失的是熵率
+//    而不是安全性"。就熵率而言这句话没错，但它错过了真正的问题 ——
+//
+//      · 健康检测（RCT/APT）吃的是**每一个** src_valid；
+//      · RAW_TAP 抽头抽的也是**每一个** src_valid；
+//      · 而调理器吃的是**其中的一部分**。
+//
+//    于是"检测的对象、评估的对象、被使用的对象是同一个"这条前提不成立了。
+//    SP 800-90B 的整套论证都建立在它上面：拿 A 序列算出来的 H，用来给 B 序列
+//    记熵账，中间少了哪些样本、少的那些是不是随机地少，都没有人回答。
+//    丢的比例小（约 0.6%）不改变这一点 —— 这是口径问题，不是精度问题。
+//
+//    修法是最朴素的那个：中间放一个 32 深的 1 位 FIFO。按 DECIM=8 算，
+//    忙的那几十拍最多攒下 6~7 个样本，32 深绰绰有余。
+//    真溢出了也不装作没发生：sample_drops 饱和计数，软件读得到 ——
+//    "一个都没丢"这句话必须是可核对的，不是推导出来的。
+//
 // 【复位的写法】
 // 派生复位（cond_rst_n）先寄存一拍再驱动，不把 zeroize / alarm 组合进
 // 异步复位网络。组合出来的异步复位有毛刺风险，Vivado 也会就此报 DRC。
@@ -40,6 +59,9 @@ module trng_top #(
     parameter integer ABSORB_BLOCKS   = 1,
     parameter integer OUT_LANES       = 4,     // 每次挤出 256 bit
     parameter integer FIFO_DEPTH      = 16,
+    // 源与调理器之间的取样缓冲。深度只需覆盖调理器最长的一次忙 ——
+    // 置换 26 拍 + 挤出 8 拍 + 每 lane 一拍 XOR，按 DECIM=8 折合约 7 个样本。
+    parameter integer SAMPLE_FIFO_DEPTH = 32,
     // ============================================================================
     // 【RAW_TAP：把**调理前**的原始噪声比特接到一个软件可读的口上】
     // ============================================================================
@@ -85,6 +107,10 @@ module trng_top #(
     output reg  [31:0] startup_count,
     output wire [31:0] blocks_absorbed,
     output reg  [31:0] words_out,
+    // 取样 FIFO 溢出过几次（饱和）。正常应当恒为 0 ——
+    // 它不为 0 就意味着"调理器吃的和健康检测吃的不是同一条流"，
+    // 那一刻起熵评估的口径就不成立了，所以它必须是软件读得到的。
+    output reg  [15:0] sample_drops,
 
     // ---- 原始噪声抽头（RAW_TAP=1 时才有东西）----
     input  wire        raw_rd_en,
@@ -197,6 +223,17 @@ module trng_top #(
         end
     end
 
+    // ---- 告警边沿 ----
+    // flush 用边沿而不是电平：alarm 是锁存的电平，用电平会让擦除扫描每拍
+    // 重新开始、永远走不完。
+    reg  alarm_d;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) alarm_d <= 1'b0;
+        else        alarm_d <= alarm;
+    end
+    wire alarm_rise  = alarm && !alarm_d;
+    wire fifo_flush  = zeroize || clear_alarm || alarm_rise;
+
     // ---- 调理器的派生复位 ----
     reg cond_rst_n;
     always @(posedge clk or negedge rst_n) begin
@@ -210,31 +247,53 @@ module trng_top #(
     wire        cond_word_valid, cond_word_ready;
     wire [31:0] cond_word;
 
+    // ---- 取样 FIFO：源与调理器之间 ----
+    // 进：启动检测已过、未告警的每一个样本（启动期与告警后那些本来就该丢，
+    //     那是 §4.3/§4.4 的要求，不是"丢样"）。
+    // 出：调理器在 S_ABSORB 的每一拍取一个。
+    //
+    // ⚠️ 出口要带上 cond_rst_n。调理器复位时它的 state 是 S_ABSORB，
+    //    bit_ready 组合出来是 1 —— 不带这个条件的话，复位期间 FIFO 会被
+    //    白白抽空，等于换了个地方丢样本。
+    wire src_gate = src_valid && startup_done && !alarm;
+    wire sfifo_wr_ready, sfifo_rd_valid, sfifo_bit, cond_bit_ready;
+    wire cond_take = sfifo_rd_valid && cond_bit_ready && cond_rst_n;
+
+    sync_fifo #(
+        .WIDTH(1), .DEPTH(SAMPLE_FIFO_DEPTH), .WIPE_ON_FLUSH(1)
+    ) u_sfifo (
+        .clk(clk), .rst_n(rst_n), .flush(fifo_flush),
+        .wr_en(src_gate && sfifo_wr_ready), .wr_data(src_bit),
+        .wr_ready(sfifo_wr_ready),
+        .rd_en(cond_take), .rd_data(sfifo_bit), .rd_valid(sfifo_rd_valid),
+        .wiping(), .level());
+
+    // 溢出计数。零是正常值 —— 它一旦不是零，熵评估的口径就断了。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sample_drops <= 16'd0;
+        end else if (zeroize || clear_alarm) begin
+            sample_drops <= 16'd0;
+        end else if (src_gate && !sfifo_wr_ready
+                     && (sample_drops != 16'hFFFF)) begin
+            sample_drops <= sample_drops + 16'd1;
+        end
+    end
+
     trng_cond #(
         .RATE_LANES(RATE_LANES),
         .ABSORB_BLOCKS(ABSORB_BLOCKS),
         .OUT_LANES(OUT_LANES)
     ) u_cond (
         .clk(clk), .rst_n(cond_rst_n),
-        // 启动检测未过 / 已告警时不喂比特：那些样本一个都不该进熵池
-        .bit_valid(src_valid && startup_done && !alarm),
-        .bit_in(src_bit),
-        .bit_ready(),
+        .bit_valid(cond_take),
+        .bit_in(sfifo_bit),
+        .bit_ready(cond_bit_ready),
         .word_valid(cond_word_valid), .word_out(cond_word),
         .word_ready(cond_word_ready),
         .blocks_absorbed(blocks_absorbed));
 
     // ---- 输出 FIFO ----
-    // flush 用边沿而不是电平：alarm 是锁存的电平，用电平会让擦除扫描每拍
-    // 重新开始、永远走不完。
-    reg  alarm_d;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) alarm_d <= 1'b0;
-        else        alarm_d <= alarm;
-    end
-    wire alarm_rise  = alarm && !alarm_d;
-    wire fifo_flush  = zeroize || clear_alarm || alarm_rise;
-
     wire fifo_wr_ready;
 
     sync_fifo #(

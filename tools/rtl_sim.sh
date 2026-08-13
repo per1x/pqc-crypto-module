@@ -73,7 +73,10 @@ run test_sha3_core   sha3_core
 
 echo
 echo "  总线接口"
+run test_xbar        axi4lite_xbar
+run test_firewall    axi4lite_firewall
 run test_axi         pqc_accel_axi
+run test_key_vault_core key_vault
 run test_key_vault   key_vault_axi
 run test_mlkem_axi   mlkem_axi
 
@@ -119,6 +122,12 @@ echo "  TRNG 整链"
 run_trng test_trng_source    trng_source
 run_trng test_trng_cond      trng_cond
 run_trng test_trng_top       trng_top
+# 调理器吃的必须与健康检测吃的是同一条流 —— 逐比特对比两条流本身，
+# 不是看我自己写的那个 drops 计数（用它验自己等于没验）。
+run_trng test_trng_nodrop    trng_top
+# 反证：把取样 FIFO 压到 2 深，强迫溢出，证明那条计数是活的 ——
+# 否则"默认深度下 drops==0"与"计数根本没接上"长得一模一样。
+run_trng test_trng_drops     trng_top -Ptrng_top.SAMPLE_FIFO_DEPTH=2
 run_trng test_trng_axi       trng_axi
 # 告警要确定性发生，把 RCT 阈值压到 2 —— 等自然出现 41 连的话跑不完
 run_trng test_trng_top_alarm trng_top -Ptrng_top.RCT_CUTOFF=2

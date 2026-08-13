@@ -10,7 +10,10 @@
      最后解出来的 K 必须等于封装时的 K。这条比三个孤立的 KAT 更有力 ——
      它要求三个核对 ek/dk/c 的字节序理解完全一致。
   ③ 防火墙：non-secure 被拦且无副作用。
-  ④ zeroize 把输入输出缓冲一起清掉（缓冲区里有 dk 的字节）。
+  ④ zeroize 把输入输出缓冲一起清掉（缓冲区里有 dk 的字节）——
+     判据是**读回 BRAM 每一个字节确认是 0**，不是"OUT_LEN 变成 0"。
+     后者只证明目录页被撕了，正文还在不在它答不了。
+  ⑤ 非法的 mode / pset（值 3）在 START 那一刻被拒，不启动任何核。
 """
 import sys
 from pathlib import Path
@@ -30,12 +33,13 @@ OUT_RD, VIOL_CNT, PARAM0 = 0x20, 0x24, 0x28
 
 C_START, C_ZEROIZE, C_IN_RST, C_OUT_RST = 1 << 0, 1 << 1, 1 << 2, 1 << 3
 ST_BUSY, ST_DONE, ST_HASHOK, ST_TAMPER = 1 << 0, 1 << 1, 1 << 2, 1 << 3
+ST_WIPING, ST_PARAMERR = 1 << 4, 1 << 5
 
 M_KEYGEN, M_ENCAPS, M_DECAPS = 0, 1, 2
 PSET = {"ML-KEM-512": 0, "ML-KEM-768": 1, "ML-KEM-1024": 2}
 
 PROT_SECURE, PROT_NONSEC = 0b000, 0b010
-RESP_OKAY, RESP_DECERR = 0, 3
+RESP_OKAY, RESP_SLVERR, RESP_DECERR = 0, 2, 3
 
 
 async def reset(dut):
@@ -252,10 +256,13 @@ async def test_firewall_and_zeroize(dut):
     _, r = await rd(dut, 0x80)
     assert r == RESP_DECERR, "越界地址没被拦"
 
-    # secure 的 zeroize：缓冲区清空
+    # secure 的 zeroize：缓冲区清空。
+    # 擦 8192 个地址要 8192 拍，这期间设备**拒绝一切写并回 SLVERR** ——
+    # 不是静默丢弃。板上软件的义务就是轮询 WIPING，这里照着做。
     assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
-    for _ in range(8):
-        await RisingEdge(dut.clk)
+    assert await wr(dut, IN_DATA, 0x99) == RESP_SLVERR, \
+        "擦除期间的写没有被拒 —— 静默丢弃会让软件按错误长度启动"
+    await _wait_wipe(dut)
     n, _ = await rd(dut, OUT_LEN)
     assert n == 0, f"zeroize 之后 OUT_LEN = {n}，应当是 0"
     p, _ = await rd(dut, IN_PTR)
@@ -305,3 +312,193 @@ async def test_repeat_same_core(dut):
         assert got == shared + ct, f"第 {i+1} 次 Encaps 不一致"
 
     dut._log.info("KeyGen 连跑两次、Encaps 连跑两次，中间不 zeroize —— 全对")
+
+
+# ---------------------------------------------------------------------------
+# 以下三条针对的是"zeroize 只清指针不擦 BRAM"与"非法参数不被拒"
+# ---------------------------------------------------------------------------
+
+def _mem_nonzero(mem):
+    """返回 (非零个数, 第一个非零的 (下标, 值))"""
+    bad = 0
+    first = None
+    for i in range(len(mem)):
+        v = int(mem[i].value)
+        if v:
+            bad += 1
+            if first is None:
+                first = (i, v)
+    return bad, first
+
+
+async def _wait_wipe(dut, limit=4000):
+    """等 WIPING 落下来，顺便断言它确实曾经高过
+
+    用软件可见的 STATUS 位来等，而不是偷看内部信号 —— 板上程序能依赖的
+    就是这一位，测试也应该只依赖这一位。
+    """
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_WIPING, (
+        "写了 ZEROIZE 之后 STATUS.WIPING 没有拉高 —— "
+        "说明根本没有启动擦除，只是清了指针")
+    for _ in range(limit):
+        st, _ = await rd(dut, STATUS)
+        if not (st & ST_WIPING):
+            return
+    raise AssertionError("WIPING 一直没落下来")
+
+
+@cocotb.test()
+async def test_zeroize_really_wipes_bram(dut):
+    """zeroize 之后**读回两块 BRAM 的每一个字节**，必须全是 0
+
+    这是这条用例与旧的 test_firewall_and_zeroize 的区别：那条只验了
+    OUT_LEN == 0 与 IN_PTR == 0，也就是"软件读不到了"。而缓冲区里
+    上一次 KeyGen 的 dk 一个字节都没少 —— 旧用例对此完全无感。
+
+    残留分两种，都要覆盖：
+      · **真实残留**：跑一次真的 KeyGen，outbuf 里就是真的 dk 字节；
+      · **全量残留**：把两块 BRAM 的 8192 个地址全填上 0xAB，
+        证明擦的是整个地址空间，不是"用到的那一段"。
+        只擦用过的那一段是个很容易犯的错，而且看起来一样有效。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    d, z = bytes([0x11] * 32), bytes([0x22] * 32)
+    ek, dk = mlkem_keygen(d, z, name)
+    got = await run_op(dut, M_KEYGEN, name, d + z)
+    assert got == ek + dk
+
+    inmem, outmem = dut.u_inbuf.mem, dut.u_outbuf.mem
+    depth = len(inmem)
+    assert depth == 8192 and len(outmem) == 8192
+
+    # 真实残留确实在（先证明"有东西可擦"，否则后面全 0 的断言不值钱）
+    live = sum(1 for i in range(len(ek) + len(dk)) if int(outmem[i].value))
+    assert live > 1000, f"outbuf 里只有 {live} 个非零字节，残留没建立起来"
+
+    # 全量残留：把两块 BRAM 填满
+    for i in range(depth):
+        inmem[i].value = 0xAB
+        outmem[i].value = 0xCD
+    await RisingEdge(dut.clk)
+
+    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
+    await _wait_wipe(dut)
+
+    for label, mem in (("inbuf", inmem), ("outbuf", outmem)):
+        bad, first = _mem_nonzero(mem)
+        assert bad == 0, (
+            f"{label} 擦除之后还有 {bad}/{depth} 个字节非零，"
+            f"第一个在 [{first[0]}] = 0x{first[1]:02x}")
+
+    # 元数据也清了，而且擦完还能照常再跑
+    n, _ = await rd(dut, OUT_LEN)
+    assert n == 0
+    got = await run_op(dut, M_KEYGEN, name, d + z)
+    assert got == ek + dk, "擦除之后再跑结果不对"
+
+    dut._log.info(f"zeroize 后两块 {depth} 字节 BRAM 逐字节读回，全为 0")
+
+
+@cocotb.test()
+async def test_tamper_wipes_bram_and_blocks_output(dut):
+    """tamper 走同一台擦除机；擦除期间不给输出、不接受启动
+
+    tamper 与软件 zeroize 的区别在于它是**锁存**的电平。擦除机若用电平触发，
+    tamper 之后会永远重启擦除、WIPING 再也不会落下来 —— 所以这条用例
+    专门等 WIPING 落地。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    d, z = bytes([0x33] * 32), bytes([0x44] * 32)
+    ek, dk = mlkem_keygen(d, z, name)
+    assert await run_op(dut, M_KEYGEN, name, d + z) == ek + dk
+
+    inmem, outmem = dut.u_inbuf.mem, dut.u_outbuf.mem
+    for i in range(len(inmem)):
+        inmem[i].value = 0x5A
+        outmem[i].value = 0xA5
+    await RisingEdge(dut.clk)
+
+    dut.tamper.value = 1
+    await RisingEdge(dut.clk)
+    dut.tamper.value = 0
+
+    # 擦除期间：OUT_DATA 不给任何东西
+    # （tamper 之后防火墙已锁存，读会 DECERR —— 这本身也是要证的：
+    #  被 tamper 的模块对总线是完全关闭的，不只是"输出为 0"）
+    _, r = await rd(dut, OUT_DATA)
+    assert r == RESP_DECERR, "tamper 之后 OUT_DATA 还能读"
+
+    # 等擦完（tamper 后总线关了，只能看内部的 wiping —— 这一处是唯一
+    # 无法从软件侧观测的，因为软件侧此时已经被整体拒绝了）
+    for _ in range(9000):
+        await RisingEdge(dut.clk)
+        if not int(dut.wiping.value):
+            break
+    else:
+        raise AssertionError("tamper 之后 WIPING 一直没落下来 —— "
+                             "多半是用电平而不是上升沿触发擦除")
+
+    for label, mem in (("inbuf", inmem), ("outbuf", outmem)):
+        bad, first = _mem_nonzero(mem)
+        assert bad == 0, (
+            f"tamper 之后 {label} 还有 {bad} 个字节非零，"
+            f"第一个在 [{first[0]}] = 0x{first[1]:02x}")
+
+    dut._log.info("tamper 触发一次完整擦除，两块 BRAM 读回全 0，总线全程被拒")
+
+
+@cocotb.test()
+async def test_illegal_mode_and_pset_refused(dut):
+    """mode=3 / pset=3 在 START 那一刻被拒，且**不启动任何核**
+
+    这两个字段各 2 位而只有 0/1/2 有意义。值 3 不是"另一种配置"：
+    模式选择落到 default（Decaps），长度按 pset==2 那条分支算，
+    于是核按 1024 的长度等 Decaps 的输入 —— 喂不满就永远等下去。
+    软件侧看到的是 BUSY 一直不落，与"算得慢"分不开。
+
+    判据是三条一起：PARAM_ERR 置位、BUSY 从未拉起、OUT_LEN 仍是 0。
+    只看 PARAM_ERR 是不够的 —— 先启动再报错同样能置位。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    for mode, pset, why in ((3, 1, "mode=3"), (0, 3, "pset=3"), (3, 3, "两个都=3")):
+        assert await wr(dut, MODE, mode | (pset << 2)) == RESP_OKAY
+        # 读回确认这个非法值确实进到了寄存器里（否则下面测的是别的东西）
+        m, _ = await rd(dut, MODE)
+        assert m == (mode | (pset << 2)), f"{why}：MODE 回读 {m:#x}"
+
+        assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
+        for b in bytes([0x77] * 64):
+            assert await wr(dut, IN_DATA, b) == RESP_OKAY
+
+        assert await wr(dut, CTRL, C_START) == RESP_OKAY
+
+        busy_seen = False
+        for _ in range(200):
+            st, _ = await rd(dut, STATUS)
+            if st & ST_BUSY:
+                busy_seen = True
+        st, _ = await rd(dut, STATUS)
+        assert st & ST_PARAMERR, f"{why}：STATUS.PARAM_ERR 没置位（{st:#x}）"
+        assert not busy_seen, f"{why}：核竟然被启动了（BUSY 拉起过）"
+        assert not (st & ST_DONE), f"{why}：竟然报了 DONE"
+        n, _ = await rd(dut, OUT_LEN)
+        assert n == 0, f"{why}：OUT_LEN = {n}，核确实跑了"
+
+    # 换回合法参数：错误位清掉，照常能跑
+    name = "ML-KEM-512"
+    d, z = bytes([0x61] * 32), bytes([0x62] * 32)
+    ek, dk = mlkem_keygen(d, z, name)
+    assert await run_op(dut, M_KEYGEN, name, d + z) == ek + dk
+    st, _ = await rd(dut, STATUS)
+    assert not (st & ST_PARAMERR), "合法参数跑完之后 PARAM_ERR 还挂着"
+
+    dut._log.info("mode=3 / pset=3 / 两者皆 3 全部被拒且未启动核；换回合法值照常")
