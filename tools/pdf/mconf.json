@@ -1,0 +1,18 @@
+{
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "PingFang SC, Hiragino Sans GB, Helvetica, sans-serif",
+    "fontSize": "22px",
+    "primaryColor": "#eef2fb",
+    "primaryBorderColor": "#5b7fb5",
+    "primaryTextColor": "#12233a",
+    "lineColor": "#4a6a95",
+    "clusterBkg": "#fbfaf2",
+    "clusterBorder": "#c8bd8f"
+  },
+  "flowchart": {
+    "nodeSpacing": 45,
+    "rankSpacing": 55,
+    "padding": 12
+  }
+}

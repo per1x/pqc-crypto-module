@@ -1,0 +1,96 @@
+@page { size: A4; margin: 16mm 14mm 18mm 14mm; }
+
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+body {
+  font-family: "PingFang SC", "Hiragino Sans GB", "Heiti SC",
+               "Songti SC", "Noto Sans CJK SC", -apple-system, sans-serif;
+  font-size: 10.2pt;
+  line-height: 1.65;
+  color: #1a1a1a;
+  max-width: none;
+  margin: 0;
+}
+
+h1 {
+  font-size: 21pt; font-weight: 600; color: #0f2a44;
+  border-bottom: 2.5px solid #0f2a44; padding-bottom: 8px;
+  margin: 0 0 4px 0; letter-spacing: .5px;
+}
+h2 {
+  font-size: 15pt; font-weight: 600; color: #0f2a44;
+  border-left: 5px solid #2b6cb0; padding-left: 10px;
+  margin: 26px 0 10px 0; page-break-after: avoid;
+}
+h3 {
+  font-size: 12pt; font-weight: 600; color: #234e70;
+  margin: 18px 0 7px 0; page-break-after: avoid;
+}
+h1 + blockquote { border: none; background: #eef4fa; margin-top: 10px; }
+
+p { margin: 7px 0; }
+
+/* ---- 引用块：文档里大量用它承载"要说清楚的话" ---- */
+blockquote {
+  border-left: 4px solid #b7c9db;
+  background: #f5f8fb;
+  margin: 12px 0; padding: 8px 14px;
+  color: #26394b;
+  page-break-inside: avoid;
+}
+blockquote p { margin: 4px 0; }
+
+/* ---- 代码与日志：必须完整保留，不换行、允许横向缩放 ---- */
+pre {
+  background: #1f2430; color: #e6e6e6;
+  border-radius: 5px; padding: 10px 12px;
+  font-size: 7.6pt; line-height: 1.42;
+  overflow: visible; white-space: pre;
+  /* 日志块尽量不拆页；超过一页高的自然会拆，这是对的 */
+  page-break-inside: avoid;
+  orphans: 4; widows: 4;
+  border: 1px solid #11141b;
+}
+pre code {
+  font-family: "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK SC", monospace;
+  background: none; color: inherit; padding: 0; font-size: inherit;
+}
+:not(pre) > code {
+  background: #eceff4; color: #b5316a;
+  padding: 1px 4px; border-radius: 3px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: .88em;
+}
+
+/* ---- 表格 ---- */
+/* 表格允许跨页 —— 大表格整块跳页会留下半页空白。
+   但单行不许断开，表头每页重复。 */
+table {
+  border-collapse: collapse; width: 100%;
+  margin: 12px 0; font-size: 9pt;
+}
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+th {
+  background: #0f2a44; color: #fff; font-weight: 600;
+  text-align: left; padding: 6px 9px;
+  border: 1px solid #0f2a44;
+}
+td { padding: 5px 9px; border: 1px solid #cfd8e3; vertical-align: top; }
+tbody tr:nth-child(even) { background: #f4f7fa; }
+
+/* ---- 架构图 ---- */
+/* 架构图占满正文宽度 —— 图里的字号本来就小，缩着就看不清了 */
+img { width: 100%; height: auto; display: block; margin: 16px auto 6px; }
+figure { margin: 16px 0; page-break-inside: avoid; }
+figcaption {
+  text-align: center; font-size: 8.8pt; color: #5a6b7c; margin-top: 2px;
+}
+.mermaid-figure { page-break-inside: avoid; text-align: center; }
+
+hr { border: none; border-top: 1px solid #d6dee7; margin: 22px 0; }
+
+ul, ol { margin: 7px 0; padding-left: 22px; }
+li { margin: 3px 0; }
+
+strong { color: #0d2b45; font-weight: 600; }
