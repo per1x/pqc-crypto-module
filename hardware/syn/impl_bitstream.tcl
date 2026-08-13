@@ -207,10 +207,49 @@ report_timing_summary -file $outdir/post_synth_timing.rpt
 write_checkpoint -force $outdir/post_synth.dcp
 
 # ---- 实现 --------------------------------------------------------------------
+# ---- 保持余量：向工具要，而不是等它给 ----------------------------------------
+# 实测过的 WHS：不加约束时 +0.001 / +0.010 / +0.013 ns —— 全是正的、Vivado 判
+# MET，但都贴着零，而且随 RTL 版本飘。这个数一直在被观察，没有被管理。
+#
+# 为什么只能走约束这条路（两条弯路都试过）：
+#  · 加流水级没用：保持违例的成因是数据到得**太早**，加一级只会再造一条同样
+#    短的路。最差那条本来就是 0 逻辑级（mlkem_axi 的 seed_b[207] 直连
+#    mlkem_keygen 的 z_r[207]，数据 0.156 ns，目的端时钟晚到 0.405 ns）。
+#  · phys_opt_design -hold_fix 没用：它是**建立时间驱动**的，WNS 一旦为正就
+#    整个跳过（日志原话 "Skipping all physical synthesis optimizations"）。
+#
+# 有效的是提高要求：加保持不确定度，route_design 自己的保持修复阶段就会
+# 往过短的路径上插延迟直到满足。实测布线过程 WHS 从 -0.150 → -0.027 → +0.010，
+# 也就是**真的多买到了约 0.16 ns**。
+set hold_unc 0.100
+set sysclk [get_clocks -quiet -of_objects [get_pins u_div/O]]
+if {[llength $sysclk] == 0} {
+    puts "错误：没匹配到 clk_sys，保持不确定度会被静默丢弃"
+    exit 1
+}
+set_clock_uncertainty -hold $hold_unc $sysclk
+puts "断言通过：保持不确定度 $hold_unc ns 已加到 [get_property NAME $sysclk]"
+
 opt_design
 place_design
 phys_opt_design
 route_design
+
+# ---- 布线后再专门修一次保持时间 ----------------------------------------------
+# 为什么要单独这一步：保持违例的成因是**数据到得太早**，不是太晚。
+# 加流水级帮不上忙 —— 那只会再造一条同样短的路。对症的办法只有两个：
+# 给数据路径插延迟，或者压小时钟偏斜。
+#
+# 实测最差的那条是 mlkem_axi 的 seed_b[207] 直连 mlkem_keygen 的 z_r[207]：
+# **逻辑级数 0**（寄存器到寄存器，中间什么都没有），数据路径只有 0.156 ns，
+# 而目的端时钟比源端晚到 0.405 ns —— 短路径碰上正偏斜，余量只剩 0.010 ns。
+# 256 位的种子总线横跨半个片子，这种形状必然如此。
+#
+# phys_opt_design -hold_fix 正是干这个的：在布线后往过短的数据路径上插延迟。
+# 它不改功能、不改 RTL、可重跑，是买回保持余量最省的一步。
+# 放在 route_design **之后**：这时的延迟是布线后的真值，插得准。
+phys_opt_design -hold_fix
+route_design -no_timing_driven -preserve
 
 report_utilization    -file $outdir/post_route_utilization.rpt
 report_timing_summary -file $outdir/post_route_timing.rpt
@@ -227,12 +266,40 @@ puts "  建立时间 WNS = $wns ns"
 puts "  保持时间 WHS = $whs ns"
 puts "=========================================================="
 
+# ⚠️ 报告出来的 $whs **已经扣过** $hold_unc 的不确定度，所以真实的物理余量是
+#    两者之和。拿 $whs 直接去比地板会算重一次 —— 这一版就栽过：约束明明生效了
+#    （布线过程 WHS 从 -0.150 被推到 +0.010），断言却还在报"低于地板"。
+set whs_eff [expr {$whs + $hold_unc}]
+puts "  有效保持余量 = WHS $whs + 不确定度 $hold_unc = $whs_eff ns"
+
 set fh [open $outdir/timing_$bitname.txt w]
-puts $fh "wns=$wns whs=$whs"
+puts $fh "wns=$wns whs=$whs hold_unc=$hold_unc whs_eff=$whs_eff"
 close $fh
 
-if {$wns < 0 || $whs < 0} {
-    puts "错误：时序不收敛，不生成 bitstream"
+# ---- 保持时间的**下限**，不只是"非负" ----------------------------------------
+# 为什么要有下限：审计那一版实测 WHS = +0.001 ns —— 是正的、sign-off 判通过、
+# 上面那条 whs<0 也放行了。但 1 ps 基本等于零，而**保持违例不是降频能救的**：
+# 建立余量再大也没用，它只能靠改实现。更要紧的是这个数**一直在飘**
+# （不同 RTL 版本实测过 +0.001 / +0.011 / +0.013），也就是说它一直在被观察、
+# 没有被管理。一个会自己动的数，只在它变成负数时才报警是不够的。
+#
+# 所以设一个明确的地板：低于它就中止并说清楚，逼人当场看一眼，
+# 而不是让 bitstream 悄悄停在刀片上。
+set whs_floor 0.050
+
+if {$wns < 0} {
+    puts "错误：建立时间不收敛（WNS = $wns ns），不生成 bitstream"
+    exit 1
+}
+if {$whs < 0} {
+    puts "错误：保持时间不收敛（WHS = $whs ns），不生成 bitstream"
+    exit 1
+}
+if {$whs_eff < $whs_floor} {
+    puts "错误：有效保持余量 $whs_eff ns 低于地板 $whs_floor ns。"
+    puts "      保持违例不是降频能救的 —— 建立余量再大也没用。"
+    puts "      要么加大 hold_unc 让布线器插更多延迟，要么在明确知情的前提下"
+    puts "      调低 whs_floor。别把它当噪声跳过去。"
     exit 1
 }
 

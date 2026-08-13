@@ -29,7 +29,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include "kmod/secmmio_uapi.h"
 #include <unistd.h>
 
 #define TRNG_BASE 0x80000000UL
@@ -42,6 +44,54 @@
 #define ST_STARTUP    (1u << 5)
 #define ST_RAW_VALID  (1u << 9)
 
+/* ---- transport：直接 mmap 还是经 EL3 ----------------------------------------
+ * 表征版 bitstream 里核仍然是 SECURE_ONLY=1，普通世界直接读一律 DECERR，
+ * 所以默认经 /dev/secmmio 由 EL3 发。加 -d 才走直接 mmap（只对
+ * SECURE_ONLY=0 的旧 bitstream 有意义）。 */
+static int sec_fd = -1;
+static volatile uint8_t *g_m;
+
+static uint32_t rdreg(unsigned off)
+{
+	struct secmmio_op op = { .addr = (uint32_t)(TRNG_BASE + off), .val = 0 };
+
+	if (sec_fd < 0)
+		return *(volatile uint32_t *)(g_m + off);
+	if (ioctl(sec_fd, SECMMIO_RD, &op) < 0) {
+		fprintf(stderr, "EL3 读 0x%08lx 被拒\n", TRNG_BASE + off);
+		exit(3);
+	}
+	return op.val;
+}
+
+static void wrreg(unsigned off, uint32_t v)
+{
+	struct secmmio_op op = { .addr = (uint32_t)(TRNG_BASE + off), .val = v };
+
+	if (sec_fd < 0) { *(volatile uint32_t *)(g_m + off) = v; return; }
+	if (ioctl(sec_fd, SECMMIO_WR, &op) < 0) {
+		fprintf(stderr, "EL3 写 0x%08lx 被拒\n", TRNG_BASE + off);
+		exit(3);
+	}
+}
+
+static void sec_open(void)
+{
+	char st[64] = {0};
+	FILE *f = fopen("/sys/class/fpga_manager/fpga0/state", "r");
+
+	if (!f || !fgets(st, sizeof st, f)) {
+		fprintf(stderr, "读不到 fpga_manager state\n"); exit(2);
+	}
+	fclose(f);
+	if (!strstr(st, "operating")) {
+		fprintf(stderr, "PL 不是 operating（%s），拒绝发 SMC\n", st); exit(2);
+	}
+	sec_fd = open("/dev/secmmio", O_RDWR);
+	if (sec_fd < 0) { perror("/dev/secmmio"); exit(2); }
+	if (ioctl(sec_fd, SECMMIO_ARM) < 0) { perror("ARM"); exit(2); }
+}
+
 int main(int argc, char **argv)
 {
 	unsigned long want = (argc > 1) ? strtoul(argv[1], NULL, 0) : 32768;
@@ -51,19 +101,31 @@ int main(int argc, char **argv)
 	uint32_t *buf;
 	unsigned long got = 0, spins = 0;
 	FILE *f;
+	int direct = 0;
+	int ai;
 
-	if (fd < 0) { perror("open /dev/mem"); return 1; }
-	m = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, TRNG_BASE);
-	if (m == MAP_FAILED) { perror("mmap"); return 1; }
+	for (ai = 1; ai < argc; ai++)
+		if (strcmp(argv[ai], "-d") == 0) direct = 1;
+
+	if (direct) {
+		if (fd < 0) { perror("open /dev/mem"); return 1; }
+		m = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+			 TRNG_BASE);
+		if (m == MAP_FAILED) { perror("mmap"); return 1; }
+		g_m = m;
+	} else {
+		sec_open();
+		m = NULL;
+	}
 
 	/* 使能，等启动健康检测过 */
-	*(volatile uint32_t *)(m + REG_CTRL) = 1;
+	wrreg(REG_CTRL, 1);
 	for (spins = 0; spins < 100000000UL; spins++) {
-		uint32_t st = *(volatile uint32_t *)(m + REG_STATUS);
+		uint32_t st = rdreg(REG_STATUS);
 		if (st & ST_STARTUP) break;
 	}
 	{
-		uint32_t st = *(volatile uint32_t *)(m + REG_STATUS);
+		uint32_t st = rdreg(REG_STATUS);
 		printf("STATUS=0x%08x  ready=%d startup=%d alarm=%d raw_valid=%d\n",
 		       st, !!(st & ST_READY), !!(st & ST_STARTUP),
 		       !!(st & ST_ALARM), !!(st & ST_RAW_VALID));
@@ -89,9 +151,9 @@ int main(int argc, char **argv)
 	/* 尽量快地抽 —— FIFO 只有 64 字深，慢了就丢样本（丢是设计如此，见文件头）*/
 	spins = 0;
 	while (got < want) {
-		uint32_t st = *(volatile uint32_t *)(m + REG_STATUS);
+		uint32_t st = rdreg(REG_STATUS);
 		if (st & ST_RAW_VALID) {
-			buf[got++] = *(volatile uint32_t *)(m + REG_RAW);
+			buf[got++] = rdreg(REG_RAW);
 		} else if (++spins > 2000000000UL) {
 			fprintf(stderr, "等不到样本，只取到 %lu 字\n", got);
 			break;
@@ -106,7 +168,7 @@ int main(int argc, char **argv)
 
 	/* 采集期间健康检测有没有报警 —— 报警了这份数据就不能用来评估 */
 	{
-		uint32_t st = *(volatile uint32_t *)(m + REG_STATUS);
+		uint32_t st = rdreg(REG_STATUS);
 		printf("采集后 STATUS=0x%08x alarm=%d rct=%d apt=%d\n", st,
 		       !!(st & ST_ALARM), !!(st & (1u << 3)), !!(st & (1u << 4)));
 		if (st & ST_ALARM)

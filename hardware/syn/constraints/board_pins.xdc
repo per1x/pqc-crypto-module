@@ -20,3 +20,7 @@ set_property IOSTANDARD  LVCMOS33 [get_ports {fan}]
 # 不设 output delay 是有意的：给它编一个约束反而是在假装知道负载的时序。
 # 它是寄存器直出，与外面没有同步关系。
 set_false_path -to [get_ports {fan}]
+
+# 保持时间的余量不在这里设 —— 见 impl_bitstream.tcl 的 hold_unc。
+# 放在 tcl 里是有原因的：那边的断言要用**同一个数**去算有效余量，
+# 两处各写一份就会算重（这一版就栽过：报告出来的 WHS 已经扣过不确定度了）。

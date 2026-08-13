@@ -1,0 +1,36 @@
+########## 立刻采（含启动暂态）
+=== 采集端写进文件头的口径 ===
+  #SP800-90B-restart-matrix rows=1000 cols=1000
+  #restart=TRNG-ZEROIZE (noise source stopped+restarted, NOT a power-on reset; chip stayed powered, temperature unchanged)
+  #tap=RAW (pre-conditioning, src_valid/src_bit)
+  #binary payload follows: rows x ceil(cols/8) bytes, MSB-first within each byte
+
+=== 1000 x 1000 ===
+按行（一次重启之内）  最小 0.728758  中位 0.857945
+按列（跨重启同一位置）最小 -0.000000  中位 0.855337
+H_restart = min(行, 列) = -0.000000 比特/样本
+
+列熵低于 0.5 的列（前 20 个）： 0(-0.000) 1(0.297) 2(0.164) 3(0.069) 5(0.494) 6(0.404) 7(0.026) 9(0.001) 10(0.023) 11(0.272) 13(0.468) 14(0.345) 17(0.449) 18(0.296) 20(0.247) 23(0.397) 24(0.496) 30(0.377) 31(0.484) 34(0.419)
+整体 1 占比 0.498198
+
+H_原始（顺序采集） = 0.871234
+判据：H_restart >= H_原始/2 = 0.435617  →  **不通过**
+
+########## 运行态（startup_done 之后 + 抽干 FIFO）
+=== 采集端写进文件头的口径 ===
+  #SP800-90B-restart-matrix rows=1000 cols=1000
+  #restart=TRNG-ZEROIZE (noise source stopped+restarted, NOT a power-on reset; chip stayed powered, temperature unchanged)
+  #tap=RAW (pre-conditioning, src_valid/src_bit)
+  #sampling=AFTER startup_done AND draining 128 raw words (operational: these are samples produced after the startup health test passed)
+  #binary payload follows: rows x ceil(cols/8) bytes, MSB-first within each byte
+
+=== 1000 x 1000 ===
+按行（一次重启之内）  最小 0.757464  中位 0.857945
+按列（跨重启同一位置）最小 0.745427  中位 0.860558
+H_restart = min(行, 列) = 0.745427 比特/样本
+
+列熵低于 0.5 的列（前 20 个）： 无
+整体 1 占比 0.500279
+
+H_原始（顺序采集） = 0.871234
+判据：H_restart >= H_原始/2 = 0.435617  →  **通过**
