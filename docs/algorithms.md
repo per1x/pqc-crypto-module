@@ -28,7 +28,7 @@ expected value comes from outside the module; see
 | Function | Standard | Use | Implementation | Note |
 |---|---|---|---|---|
 | Shamir secret sharing over GF(256) | — | M-of-N backup and recovery | `src/backup/shamir.c` | Information-theoretic; the GF(256) multiply is constant-time. Share checksums are unkeyed and detect corruption, not tampering. |
-| Random bit generation | — | Seeds, nonces, recovery master key | `RAND_bytes` (OpenSSL) | The OpenSSL DRBG. A hardware noise source with SP 800-90B health tests exists in RTL (`hardware/rtl/trng/`) but is not wired into the software path. |
+| Random bit generation | — | Seeds, nonces, recovery master key | `RAND_bytes` (OpenSSL) | The OpenSSL DRBG. The hardware noise source (`hardware/rtl/trng/`) is built and running on the board — 1,048,576 pre-conditioning samples give **H = 0.871234 bits/sample** by the SP 800-90B non-IID estimators — but the **software** path in `src/` still uses the DRBG; only the FPGA line consumes the hardware source. |
 
 ## Hardware implementations
 

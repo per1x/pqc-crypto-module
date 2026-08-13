@@ -3,21 +3,32 @@
 # pqc-crypto-module
 
 A post-quantum cryptographic module prototype: key storage, slot management, backup
-and recovery, tamper-evident audit logging, and a PKCS#11 v3.2 front end — plus the
-RTL and simulation harness for moving the arithmetic cores into an FPGA.
+and recovery, tamper-evident audit logging, and a PKCS#11 v3.2 front end — plus a
+complete hardware crypto engine in programmable logic, **built and validated on real
+silicon** (Xilinx XCZU3EG).
 
-> **Status: research prototype.** The security boundary is a process address space,
-> not hardware. Do not use this to protect anything real. See
-> [Security model and limitations](#security-model-and-limitations).
+> **Status: research prototype.** Two lines live in this repository and their security
+> boundaries differ:
+>
+> - **Software line** (`src/`, `cli/`, `demo/`): the boundary is a process address
+>   space, not hardware. See [Security model and limitations](#security-model-and-limitations).
+> - **FPGA line** (branch `zu3eg-fpga-crypto`): the boundary is an AxPROT-gated AXI
+>   firewall in programmable logic, and it has been **proven in both directions on the
+>   board** — the secure world (EL3) reads a `SECURE_ONLY=1` core, the normal world is
+>   refused at the bus. See
+>   [密码机原型-说明文档.md](docs/密码机原型-说明文档.md) ([PDF](docs/密码机原型-说明文档.pdf)).
+>
+> Neither is a certified module. Do not use this to protect anything real.
 
 ## Overview
 
 Post-quantum algorithms are standardised (FIPS 203 / 204), but the surrounding
 machinery — how keys are stored, wrapped, backed up, revoked, and exposed to
 applications — is where a cryptographic module actually lives or dies. This project
-builds that machinery around ML-KEM and ML-DSA, in the shape a real device would take,
-so that the software can later be lifted onto a Zynq-class SoC with the algorithm cores
-in programmable logic.
+builds that machinery around ML-KEM and ML-DSA, in the shape a real device would take.
+The algorithm cores have since been lifted onto a Zynq UltraScale+ SoC: ML-KEM
+512/768/1024, AES-128/256, SM4, SM3, a ring-oscillator TRNG, a key vault and the access
+boundary now run in programmable logic on real hardware.
 
 Two consequences of that goal explain most of the design:
 
@@ -28,8 +39,8 @@ Two consequences of that goal explain most of the design:
   vtable (`pqc_backend_t`) and, below it, an AXI-style register interface
   (`accel_transport_t`). Four transports implement that interface identically: a
   software stub, a Verilator-simulated RTL backend, the same RTL driven over real
-  AXI4-Lite and AXI4-Stream transactions, and — once there is a board — `/dev/mem` +
-  `mmap`. Swapping between them changes nothing above the seam.
+  AXI4-Lite and AXI4-Stream transactions, and `/dev/mem` + `mmap` on the board.
+  Swapping between them changes nothing above the seam.
 
 Every cryptographic operation on the live path uses
 [liboqs](https://github.com/open-quantum-safe/liboqs) or OpenSSL; no primitive is
@@ -148,10 +159,17 @@ software.
 ├── tests/              Unit, integration, KAT, and fuzz targets
 ├── demo/               PKCS#11 provider demos (Python, Java)
 ├── hardware/
-│   ├── rtl/            Verilog sources: mlkem/, mldsa/, keccak/, bus/, trng/
-│   ├── tb/cocotb/      cocotb testbenches and simulation-only top levels
+│   ├── rtl/            Verilog sources: mlkem/, mldsa/, keccak/, sym/, bus/, trng/, board/
+│   ├── tb/cocotb/      cocotb testbenches (174 tests) and simulation-only top levels
+│   ├── tb/lint/        Vendor-primitive stubs — lint only, never synthesised
 │   ├── model/          Python reference model, vector export, independent oracles
-│   └── syn/            Vivado out-of-context synthesis scripts and constraints
+│   └── syn/            Vivado scripts: out-of-context synthesis and the full
+│                       RTL-to-bitstream implementation flow (with boot-time assertions)
+├── fpga/fan_ctrl/      PL fan temperature control — deliberately separate from the
+│                       crypto RTL; same bitstream, no shared signals
+├── board/              On-board test programs, payloads, and the PL harness
+│                       (every command that touches the PL goes through it)
+├── boot/atf/           ATF/BL31 patches: the EL3 SiP used to close the access-gate proof
 ├── tools/              Vector fetching, benchmarks, profiling, regression scripts
 ├── third_party/        Vendored OASIS PKCS#11 v3.2 headers (unmodified)
 └── docs/               Architecture, PKCS#11, register map, algorithms, security policy, testing
@@ -170,6 +188,8 @@ software.
 | [testing.md](docs/testing.md) · [中文](docs/testing.zh-CN.md) | What is tested, by what means, and how to reproduce every number quoted here |
 | [deployment.md](docs/deployment.md) · [中文](docs/deployment.zh-CN.md) | Deployment on an intranet Linux host, including obtaining every dependency offline |
 | [zynq-port.zh-CN.md](docs/zynq-port.zh-CN.md) (中文) | Porting to a Zynq UltraScale+ MPSoC: staging and dependencies, mapping the software boundary onto silicon, irreversible steps |
+| **[密码机原型-说明文档.md](docs/密码机原型-说明文档.md)** (中文, [PDF](docs/密码机原型-说明文档.pdf)) | **The FPGA line's delivery document**: architecture, code guide, every test result with the raw logs embedded, and a per-item blocked list |
+| [fpga-进展.md](docs/fpga-进展.md) (中文) | Stage-by-stage engineering log for the FPGA line (S1–S7, P6, P7): what was built, what broke, and why each assertion exists |
 | [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
 | [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
 
@@ -305,25 +325,32 @@ Two habits run throughout the test sources:
 
 ## Roadmap
 
-Software work that does not require a board is largely complete. What remains is
-hardware-dependent:
+Most of what this section used to list as future work has been done on branch
+`zu3eg-fpga-crypto` and validated on an XCZU3EG board. Kept here with the outcome
+attached, so the claims can be checked rather than believed:
 
-1. A complete ML-KEM / ML-DSA dataflow in RTL. The arithmetic cores, the samplers, the
-   encoders, and the bus interface all exist; what is missing is the sequencer that
-   chains them into whole operations, replacing the software stub mode by mode through
-   the register interface that is already in place.
-2. Synthesis and timing closure on a target part; the out-of-context scripts in
-   `hardware/syn/` are ready but have never been run.
-3. Move the key derivation root into eFUSE/BBRAM/PUF and the security boundary into
-   programmable logic.
-4. A ring-oscillator noise source feeding `trng_health`, with an SP 800-90B entropy
-   assessment, replacing `RAND_bytes`. The health tests exist and are verified in
-   simulation; the noise source itself does not.
-5. Measured end-to-end speedup on the target platform — the only place a real number
-   can come from.
+| Was | Now |
+|---|---|
+| A complete ML-KEM dataflow in RTL — "what is missing is the sequencer" | **Done.** ML-KEM 512/768/1024 KeyGen/Encaps/Decaps, byte-exact against NIST ACVP vectors **on silicon** (20/20). Parameter set selected by a register field; lengths are derived in RTL, so software cannot report a wrong one |
+| Synthesis and timing closure — "scripts are ready but have never been run" | **Done.** Full RTL-to-bitstream flow. 35173 LUT (49.85 %), 25824 FF, 15.5 BRAM, 140 DSP, **WNS +3.469 ns / WHS +0.011 ns** @ 75 MHz |
+| Security boundary into programmable logic | **Done.** AxPROT-gated AXI firewall, key vault whose keys leave only over a private wire. Proven both directions on the board: EL3 reads a `SECURE_ONLY=1` core, EL1-NS is refused (SIGBUS/DECERR), while the *same* normal world reads a `SECURE_ONLY=0` core — so the difference is the gate, not reachability |
+| Key derivation root into eFUSE / BBRAM / PUF | **Not done, and not planned on this board.** eFUSE is irreversible and there is only one board; BBRAM needs JTAG. See the blocked list in the delivery document |
+| A ring-oscillator noise source with an SP 800-90B assessment | **Done.** 1,048,576 **pre-conditioning** samples exported from the board; SP 800-90B non-IID estimators give **H = 0.871234 bits/sample**. The measurement then invalidated the health-test cutoffs that had been assumed from H = 0.5 — the APT test turned out never to fire — and both were recomputed |
+| Measured end-to-end speedup | **Measured.** ML-KEM-512 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps); 768 and 1024 scale ≈ 1 : 1.5 : 2.1, matching the k = 2/3/4 workload |
 
-Each step replaces a software mode with a hardware one through the register interface
-that already exists, so the layers above are unaffected.
+Still open, with the reason attached:
+
+1. **ML-DSA whole cores.** The operators exist (13 modules, verified against the
+   reference model) but are not chained into KeyGen/Sign/Verify.
+2. **Boot-time persistence of the PL configuration** — needs JTAG, because the only
+   remaining clean route writes the golden `BOOT.BIN`.
+3. **XMPU/XPPU configuration.** Measured from the board: all 149 configuration
+   registers are refused to the normal world (bus error, not a kernel restriction), so
+   configuring them requires a secure-world master. Only the minimal secure payload
+   needed for the gate proof was built.
+4. **Power/EM side channels.** Not attempted, and not claimed. The constant-time work
+   covers timing only, and was checked on the board (median difference 0.000 % between
+   the valid and implicit-reject Decaps paths).
 
 ## License
 

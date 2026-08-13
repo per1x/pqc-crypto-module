@@ -3,7 +3,14 @@
 # Hardware
 
 RTL sources, verification, the reference model that produces golden vectors, and
-synthesis scripts. Everything here runs in simulation — no board has been involved.
+synthesis scripts.
+
+> **This directory is no longer simulation-only.** On branch `zu3eg-fpga-crypto` these
+> sources are synthesised into a bitstream and run on an XCZU3EG board: ML-KEM
+> 512/768/1024 match NIST ACVP vectors byte-for-byte **on silicon**, and the AXI
+> firewall's access gate has been proven in both directions. The simulation harness
+> described below is still the first gate — 174 cocotb tests — but it is no longer the
+> last one. See [../docs/密码机原型-说明文档.md](../docs/密码机原型-说明文档.md).
 
 ```
 hardware/
