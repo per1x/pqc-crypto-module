@@ -470,6 +470,22 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 
 		if (q->len != 16)
 			return SDR_INARGERR;
+		/* ⚠️ alg 和 slot 必须在这里挡住，因为 **RTL 是静默截断的**：
+		 * sym_axi 里是 `alg <= wr_data[1:0]`、槽号 3 位。于是
+		 *   alg=4 → 按 0（AES-128）算，alg=7 → 按 3（SM3）算，
+		 *   槽 200 → 按槽 0 算。
+		 * 不报错、不卡住，**只是算的不是你要的东西** —— 这是最坏的一类
+		 * 失败：调用方拿到一个看着完全正常的密文，而它来自另一个算法
+		 * 或另一把密钥。
+		 *
+		 * alg 只放 0/1/2（AES-128 / AES-256 / SM4）。RTL 的 2'd3 是 SM3，
+		 * 那是个杂凑，走分组密码这条路（装密钥 → 出 16 字节密文）本身
+		 * 就没有意义，不能从这个接口进去。
+		 *
+		 * 这一条也顺带把 OP_IMPORT_KEY 与本 case 的不一致抹平了 ——
+		 * 那边一直校验 slot<=7，这边以前没有。 */
+		if (q->a0 > 2 || slot > 7)
+			return SDR_INARGERR;
 		if (sym_block(q->a0, slot, (int)dec, pay, out))
 			return SDR_HARDFAIL;
 		*out_len = 16;

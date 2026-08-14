@@ -36,6 +36,8 @@
 | RAZ/WI 边界反证，真硅 | 6 / 6 —— 每个 `SECURE_ONLY=1` 的核在放着 `0x00010000` 的地址上读回 0；`SECURE_ONLY=0` 的对照读到真值 | `board/logs/RESULT_secneg.txt` |
 | **任何用户态程序都崩不了板**，真硅 | 11 / 11 —— 九类地址各读写 2000 次（共 36,000 笔），板子活着 | `board/logs/RESULT_nocrash.txt` |
 | 网络穿过 PL 重配 | eth1（PS GEM）在解绑驱动 + 装载密码位流全程不掉 | `board/logs/deadman_eth1.log` |
+| 线协议畸形输入 | 26 / 26 —— 没有一条请求能让服务卡住、死掉、或被悄悄算成别的东西 | `service/wire_fuzz.py` |
+| TCP 远程调用 | 另一台机器完成完整 KEM + SM4；错口令/短口令/无口令全部拒绝 | `service/sdf_demo.c` |
 
 ## 原则
 

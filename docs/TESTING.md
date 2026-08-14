@@ -37,6 +37,8 @@ repository.
 | RAZ/WI boundary counter-proof, on silicon | 6 / 6 — every `SECURE_ONLY=1` core reads back 0 where `0x00010000` lives; the `SECURE_ONLY=0` control reads its real value | `board/logs/RESULT_secneg.txt` |
 | **No user-space program can crash the board**, on silicon | 11 / 11 — nine address classes, 2000 reads + 2000 writes each (36,000 accesses), board alive | `board/logs/RESULT_nocrash.txt` |
 | Network survives PL reconfiguration | eth1 (PS GEM) stays up across driver unbind + crypto bitstream load | `board/logs/deadman_eth1.log` |
+| Malformed wire requests | 26 / 26 — no request hangs the service, kills it, or is silently computed as something else | `service/wire_fuzz.py` |
+| Remote call over TCP | full KEM + SM4 from another machine; wrong/short/absent token all refused | `service/sdf_demo.c` |
 
 ## Principles
 
