@@ -5,6 +5,6 @@ the_ROM_image:
 	[destination_device=pl] /home/build/pqc-hsm-fpga/hardware/syn/impl/zu3eg_hsm.bit
 	[destination_cpu=a53-0, exception_level=el-3, trustzone] /home/build/wdt_patch/atf_secmmio/zynqmp/debug/bl31/bl31.elf
 	[destination_cpu=a53-0, exception_level=el-1, trustzone] /home/build/wdt_patch/images/tee_load_quiet.elf
-	[destination_cpu=a53-0, load=0x00100000] /home/build/petalinux/images/linux/system.dtb
+	[destination_cpu=a53-0, load=0x00100000] /home/build/pqc-hsm-fpga/boot/persist/j1_nopl.dtb
 	[destination_cpu=a53-0, exception_level=el-2] /home/build/petalinux/images/linux/u-boot.elf
 }

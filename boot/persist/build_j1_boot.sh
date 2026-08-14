@@ -31,6 +31,26 @@
 # ⚠️ J1 镜像装了密码 PL → **eth0 没了**（eth0 在厂家 PL 里）。所以它起来之后
 #    **不能 SSH**，验证走 JTAG console + /dev/secmmio。这是有意的：送检形态
 #    本就该是安全世界驱动、普通世界零可达。
+# ============================================================================
+# 【设备树必须与位流配套 —— 一次 SError panic 换来的】
+# ============================================================================
+# 第一版直接用了 golden 的 system.dtb，板子起来立刻 panic：
+#     xgpio_of_probe → gpiochip_add_data_with_key
+#       → el1_error → do_serror → arm64_serror_panic → panic
+# 那份设备树描述的是**厂家 PL**（AXI Ethernet、四个 GPIO、两个串口、
+# VDMA、MIPI…共十几个节点，全在 0x8000_0000 段）。J1 换成密码位流之后
+# 这些外设一个都不存在，驱动一探测就撞上 AXI 防火墙 —— 而写是 posted 的，
+# DECERR 以 SError 回来，内核只能 panic。**这正是 docs/REGISTERS.md 首屏
+# 那条 hazard 的另一种触发方式**：这次发起访问的不是我们的测试程序，是内核
+# 自己的驱动。
+#
+# 所以 J1 用一份**配套的设备树** j1_nopl.dtb：整个 amba_pl@0 子树连同指向它
+# 的别名一起删掉。密码核不需要设备树节点 —— 它们由 /dev/secmmio 经 EL3 访问。
+#
+# ⚠️ **后果要写在明处：J1 形态没有网络。** eth0（AXI Ethernet）在厂家 PL 里，
+#    密码 PL 里没有以太网，这不是可以补上的东西。J1/送检形态的验证只能走
+#    串口 + /dev/secmmio。这与"普通世界零可达"的送检口径是一致的，
+#    但它意味着**日常开发不要用 J1 镜像**，开发用 golden + 运行时装位流。
 set -e
 source /tools/Xilinx/Vitis/2020.1/settings64.sh
 BIF=/home/build/pqc-hsm-fpga/boot/persist/boot_j1_pl.bif
