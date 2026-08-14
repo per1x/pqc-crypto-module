@@ -289,8 +289,11 @@ int main(void)
 			tv >> 16, tv & 0xFFFF);
 		fprintf(rep, "        mlkem 防火墙违规  读 %u / 写 %u\n",
 			mv >> 16, mv & 0xFFFF);
-		fprintf(rep, "        xbar  译码违规    %u（16 位饱和）\n",
-			xv & 0xFFFF);
+		/* A_XBAR_VIOL 与各核 A_VIOL 同一布局：{读[31:16], 写[15:0]}。
+		 * 第一版只打了低 16 位却把标签写成"译码违规"，看着像总数
+		 * 其实只有写的那一半 —— 和前面 SIGBUS 只记总数是同一类错误。 */
+		fprintf(rep, "        xbar  译码违规    读 %u / 写 %u（各自 16 位饱和）\n",
+			xv >> 16, xv & 0xFFFF);
 		if ((tv & 0xFFFF) && (xv & 0xFFFF))
 			ok("安全世界读到了非零的违规计数 —— 痕迹留下了");
 		else
