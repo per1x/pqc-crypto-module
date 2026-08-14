@@ -68,6 +68,11 @@
 #define TR_CTRL   (S_TRNG + 0x00)
 #define TR_STATUS (S_TRNG + 0x04)
 #define TR_RDATA  (S_TRNG + 0x08)
+#define TR_VERSION (S_TRNG + 0x20)   /* 非零常量，用作"这条路通不通"的判据 */
+
+/* 所有核的 VERSION 都是这个值（见各 *_axi.v 的 VERSION 参数）。
+ * 它非零，这一点正是 RAZ/WI 之后"被拒 = 读回 0"这个判据成立的前提。 */
+#define CORE_VERSION 0x00010000u
 #define TRS_DVALID (1u << 1)
 #define TRS_STARTUP (1u << 5)
 
@@ -141,15 +146,51 @@ static int hw_wr(unsigned off, uint32_t v)
 	return ioctl(sec_fd, SECMMIO_WR, &op) < 0 ? -1 : 0;
 }
 
+/* 本次请求里硬件访问是否已经失败过。
+ *
+ * ============================================================================
+ * 【为什么需要这个标志：一次真实的失控】
+ * ============================================================================
+ * 原来的 rd() 把 ioctl 失败吞掉、返回 0，而下面每个等待都是
+ * `for (spin = 0; spin < 20000000L; spin++) if (rd(...) & BIT) break;`。
+ *
+ * 于是硬件一旦不可达（实测：BOOT.BIN 里的 BL31 没带那个 SiP，每一笔 SMC
+ * 都被拒），每个等待都要空转两千万次、**每一次都写一行日志** —— 一个
+ * 本该立刻返回"硬件失败"的请求，变成了刷屏 + 跑满一个核。
+ *
+ * 这不是"错误处理不够漂亮"，是**演示形态的可用性问题**：板子看着活着、
+ * SSH 进得去，但 load 常驻 1.0、日志把 SD 卡写满，而真正的原因藏在
+ * 两千万行重复里。
+ *
+ * 所以：**失败要粘住，并且立刻停下。**
+ *   · 任何一笔读写失败都置位；
+ *   · 所有自旋等待都以它为退出条件 —— 硬件没了就别再等了；
+ *   · 每个请求开头清零、结尾检查，把 SDR_HARDFAIL 如实报给调用方；
+ *   · 日志每个请求最多一行。
+ */
+static int hw_fault;
+
 static uint32_t rd(unsigned off)
 {
 	uint32_t v = 0;
 
-	if (hw_rd(off, &v))
-		logf_("读 0x%08lx 被 EL3 白名单拒", PL_BASE + off);
+	if (hw_rd(off, &v)) {
+		if (!hw_fault)          /* 每个请求只记一行，不刷屏 */
+			logf_("读 0x%08lx 失败（EL3 拒绝或 SiP 不存在），"
+			      "本次请求判为硬件失败", PL_BASE + off);
+		hw_fault = 1;
+	}
 	return v;
 }
-static void wr(unsigned off, uint32_t v) { (void)hw_wr(off, v); }
+static void wr(unsigned off, uint32_t v)
+{
+	if (hw_wr(off, v)) {
+		if (!hw_fault)
+			logf_("写 0x%08lx 失败（EL3 拒绝或 SiP 不存在），"
+			      "本次请求判为硬件失败", PL_BASE + off);
+		hw_fault = 1;
+	}
+}
 
 /* ---- TRNG ---- */
 static int trng_bytes(uint8_t *out, uint32_t n)
@@ -158,13 +199,13 @@ static int trng_bytes(uint8_t *out, uint32_t n)
 	long spin;
 
 	wr(TR_CTRL, 1);
-	for (spin = 0; spin < 20000000L; spin++)
+	for (spin = 0; spin < 20000000L && !hw_fault; spin++)
 		if (rd(TR_STATUS) & TRS_STARTUP)
 			break;
 	if (!(rd(TR_STATUS) & TRS_STARTUP))
 		return -1;
 	while (got < n) {
-		for (spin = 0; spin < 20000000L; spin++)
+		for (spin = 0; spin < 20000000L && !hw_fault; spin++)
 			if (rd(TR_STATUS) & TRS_DVALID)
 				break;
 		if (!(rd(TR_STATUS) & TRS_DVALID))
@@ -245,7 +286,7 @@ static int sym_block(uint32_t alg, uint32_t slot, int dec,
 	if (!(rd(SY_STATUS) & SYS_KVOK))
 		return -1;
 	wr(SY_CMD, 1);
-	for (spin = 0; spin < 200000L; spin++)
+	for (spin = 0; spin < 200000L && !hw_fault; spin++)
 		if (rd(SY_STATUS) & SYS_KRDY)
 			break;
 	if (!(rd(SY_STATUS) & SYS_KRDY))
@@ -255,7 +296,7 @@ static int sym_block(uint32_t alg, uint32_t slot, int dec,
 		   ((uint32_t)in[4*i] << 24) | ((uint32_t)in[4*i+1] << 16) |
 		   ((uint32_t)in[4*i+2] << 8) | in[4*i+3]);
 	wr(SY_CMD, 2);
-	for (spin = 0; spin < 200000L; spin++)
+	for (spin = 0; spin < 200000L && !hw_fault; spin++)
 		if (rd(SY_STATUS) & SYS_DONE)
 			break;
 	if (!(rd(SY_STATUS) & SYS_DONE))
@@ -469,6 +510,28 @@ int main(int argc, char **argv)
 	if (sec_fd < 0) { logf_("打不开 /dev/secmmio：%s", strerror(errno)); return 2; }
 	if (ioctl(sec_fd, SECMMIO_ARM) < 0) { logf_("SECMMIO_ARM 失败"); return 2; }
 
+	/* ---- 启动自检：读一个核的 VERSION，确认这条路真的通到硬件 ----
+	 *
+	 * 少了这一步，"daemon 起来了" 只说明它打开了几个文件描述符。
+	 * 实测踩过：BOOT.BIN 里的 BL31 没带 SiP，/dev/secmmio 照样存在
+	 * （模块自己建的节点），daemon 照常监听，开机脚本照常报 READY=yes，
+	 * 直到第一个客户端连上来才发现一笔都发不出去。
+	 *
+	 * 判据用 VERSION 而不是"ioctl 没报错"：它是个非零常量，
+	 * 读到它等于证明了整条链（SMC → EL3 白名单 → AXI → 核）都是通的。 */
+	{
+		uint32_t ver = 0;
+
+		hw_fault = 0;
+		if (hw_rd(TR_VERSION, &ver) || ver != CORE_VERSION) {
+			logf_("自检失败：读 TRNG VERSION 得到 0x%08x（应为 0x%08x）。"
+			      "多半是当前 BOOT.BIN 的 BL31 没有那个 SiP —— "
+			      "拒绝启动，免得对外假装就绪。", ver, CORE_VERSION);
+			return 2;
+		}
+		logf_("自检通过：TRNG VERSION = 0x%08x，EL3 通路可用", ver);
+	}
+
 	signal(SIGPIPE, SIG_IGN);
 	unlink(PQCS_SOCK_PATH);
 	srv = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -499,7 +562,18 @@ int main(int argc, char **argv)
 			if (q.len && read_all(c, pay, q.len))
 				break;
 			rp.magic = PQCS_MAGIC;
+			/* 每个请求独立判定硬件是否可用：清零 → 处理 → 检查。
+			 * 不这么做的话，一次失败会永久污染后面所有请求；
+			 * 而硬件确实可能恢复（比如运行时重新装载了位流）。 */
+			hw_fault = 0;
 			rp.status = handle_op(&q, pay, out, &rp.len);
+			if (hw_fault && rp.status == SDR_OK) {
+				/* handle_op 里那些 rd() 返回的 0 是假数据，
+				 * 照它算出来的结果**必须**判失败 ——
+				 * 悄悄返回一个基于全 0 的"成功"是最坏的结局。 */
+				rp.status = SDR_HARDFAIL;
+				rp.len = 0;
+			}
 			if (write_all(c, &rp, sizeof rp))
 				break;
 			if (rp.len && write_all(c, out, rp.len))
