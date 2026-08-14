@@ -1,19 +1,20 @@
 ==== 反证：普通世界直接读 SECURE_ONLY=1 的核 ====
-本程序**一笔写都不发**（写的 DECERR 是 SError，接不住）。
+判据：被拒的读回 0（RAZ/WI），而各核真实 VERSION = 0x00010000。
+本程序仍然一笔写都不发 —— 边界证明用不着写，写侧的"不崩板"由 hsm_nocrash 单独证。
 
 [对照：先证明这条路本身是通的]
-  PASS  风扇观测口 (槽 5，SECURE_ONLY=0) 读到 0x00010000 —— /dev/mem 这条路是通的，PL 也在
+  PASS  风扇观测口 (槽 5，SECURE_ONLY=0) 读到真值 0x00010000 —— /dev/mem 这条路是通的，PL 也在，而且这个值不是 0
 
-[四个功能核 + 金丝雀：每一次都必须被拒]
-  PASS  trng_axi VERSION      (槽 0，SECURE_ONLY=1) 被总线拒（DECERR/SIGBUS）
-  PASS  key_vault_axi VERSION (槽 1，SECURE_ONLY=1) 被总线拒（DECERR/SIGBUS）
-  PASS  sym_axi VERSION       (槽 2，SECURE_ONLY=1) 被总线拒（DECERR/SIGBUS）
-  PASS  mlkem_axi VERSION     (槽 3，SECURE_ONLY=1) 被总线拒（DECERR/SIGBUS）
-  PASS  金丝雀 VERSION        (槽 4，SECURE_ONLY=1) 被总线拒（DECERR/SIGBUS）
+[四个功能核 + 金丝雀：每一次都必须读回 0]
+  PASS  trng_axi VERSION      (槽 0，SECURE_ONLY=1) 读回 0（真值应为 0x00010000）—— 事务到得了，值拿不到
+  PASS  key_vault_axi VERSION (槽 1，SECURE_ONLY=1) 读回 0（真值应为 0x00010000）—— 事务到得了，值拿不到
+  PASS  sym_axi VERSION       (槽 2，SECURE_ONLY=1) 读回 0（真值应为 0x00010000）—— 事务到得了，值拿不到
+  PASS  mlkem_axi VERSION     (槽 3，SECURE_ONLY=1) 读回 0（真值应为 0x00010000）—— 事务到得了，值拿不到
+  PASS  金丝雀 VERSION        (槽 4，SECURE_ONLY=1) 读回 0（真值应为 0x00010000）—— 事务到得了，值拿不到
 
 ================================
 通过 6，失败 0
 
 与正向那一半合起来才是完整命题：
   正向 hsm_kem3 / hsm_hwtest（经 /dev/secmmio 由 EL3 发）跑通全部 KAT；
-  反向 本程序：同一批地址从普通世界读，全部被拒。
+  反向 本程序：同一批地址从普通世界读，全部读回 0。

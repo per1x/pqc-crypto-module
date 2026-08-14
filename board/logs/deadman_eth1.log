@@ -1,0 +1,9 @@
+[11:59:52] === 开始 bit=/media/sd-mmcblk1p2/hsm/zu3eg_hsm_new.bit 宽限=240s ===
+[11:59:52] eth1 现状:           inet addr:192.168.50.175  Bcast:192.168.50.255  Mask:255.255.255.0
+[11:59:53] 已解绑 8 个 PL 驱动（eth0 在其中，eth1 不在）
+Time taken to load BIN is 2696.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+[11:59:59] 装载后 state=operating（退出码不看，见上）
+[11:59:59] eth1 载入后: carrier=1           inet addr:192.168.50.175  Bcast:192.168.50.255  Mask:255.255.255.0
+[12:00:00] 等 240s：从 eth1 连进来 touch /media/sd-mmcblk1p2/hsm/PL_KEEP 就留下，否则回滚
+[12:00:24] === 收到 KEEP，保留密码位流。结束 ===

@@ -34,7 +34,9 @@ repository.
 | ASan + UBSan / TSan / `leaks` | clean · 0 races · 0 leaks | `docs/USAGE.md` |
 | libFuzzer | 1.38 M executions, no crashes | `./tools/fuzz.sh` |
 | aarch64 Linux (GCC 12) | clean | `./tools/aarch64_test.sh` |
-| **RAZ/WI on silicon** | **not yet run** — bitstream built and simulated, board unreachable (SSH key lost to a power cycle) | `board/src/hsm_nocrash.c`, `hsm_secneg.c` |
+| RAZ/WI boundary counter-proof, on silicon | 6 / 6 — every `SECURE_ONLY=1` core reads back 0 where `0x00010000` lives; the `SECURE_ONLY=0` control reads its real value | `board/logs/RESULT_secneg.txt` |
+| **No user-space program can crash the board**, on silicon | 11 / 11 — nine address classes, 2000 reads + 2000 writes each (36,000 accesses), board alive | `board/logs/RESULT_nocrash.txt` |
+| Network survives PL reconfiguration | eth1 (PS GEM) stays up across driver unbind + crypto bitstream load | `board/logs/deadman_eth1.log` |
 
 ## Principles
 

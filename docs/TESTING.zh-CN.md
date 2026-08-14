@@ -33,7 +33,9 @@
 | ASan + UBSan / TSan / `leaks` | 全过 · 0 竞争 · 0 泄漏 | `docs/USAGE.zh-CN.md` |
 | libFuzzer | 138 万次执行，无崩溃 | `./tools/fuzz.sh` |
 | aarch64 Linux（GCC 12） | 全过 | `./tools/aarch64_test.sh` |
-| **RAZ/WI 上板复验** | **还没跑** —— 位流已出、仿真已过，板子够不到（SSH key 没扛过断电） | `board/src/hsm_nocrash.c`、`hsm_secneg.c` |
+| RAZ/WI 边界反证，真硅 | 6 / 6 —— 每个 `SECURE_ONLY=1` 的核在放着 `0x00010000` 的地址上读回 0；`SECURE_ONLY=0` 的对照读到真值 | `board/logs/RESULT_secneg.txt` |
+| **任何用户态程序都崩不了板**，真硅 | 11 / 11 —— 九类地址各读写 2000 次（共 36,000 笔），板子活着 | `board/logs/RESULT_nocrash.txt` |
+| 网络穿过 PL 重配 | eth1（PS GEM）在解绑驱动 + 装载密码位流全程不掉 | `board/logs/deadman_eth1.log` |
 
 ## 原则
 

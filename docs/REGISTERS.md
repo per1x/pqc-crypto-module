@@ -26,10 +26,10 @@ discarded** (RAZ/WI) — no side effect, and no bus error.
 >   (or no bitstream loaded).
 > * **Nothing you write can break the board.** No user-space program, no driver,
 >   and no mistyped address can make the kernel see a bus error. This is
->   established in simulation (`test_xbar`, `test_firewall`, `test_trng_axi`).
->   `board/src/hsm_nocrash.c` is the on-silicon counterpart — nine classes of
->   address, two thousand reads and writes each — but **it has not been run on
->   the board yet**; see [TESTING.md](TESTING.md#on-silicon-results).
+>   established in simulation (`test_xbar`, `test_firewall`, `test_trng_axi`)
+>   **and on silicon**: `hsm_nocrash` hammers nine classes of address with 2000
+>   reads and 2000 writes each — 36,000 accesses — and the board stays up
+>   (`board/logs/RESULT_nocrash.txt`).
 > * **The cost is that a wrong address is now silent.** It reads 0 instead of
 >   faulting. The compensation is the violation counters (`VIOL` on each core,
 >   `XBAR_VIOL` for the decoder) — but **only the secure world can read them**;

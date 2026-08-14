@@ -16,8 +16,8 @@
 >   core, so a zero means refused (or no bitstream loaded). Do not look for an
 >   error code — there isn't one.
 > * **Nothing you write from user space can take the board down.** This is
->   deliberate, and established in simulation; the on-silicon check
->   (`hsm_nocrash`) is written but **not yet run**. Earlier
+>   deliberate, and verified both in simulation and on silicon — `hsm_nocrash`
+>   lands 36,000 refused accesses and the board stays up. Earlier
 >   revisions answered DECERR, and because AXI writes are posted that came back
 >   as an **SError** the kernel could only panic — one wrong address cost a power
 >   cycle. That is gone.

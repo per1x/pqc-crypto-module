@@ -132,22 +132,61 @@ static void drain(void)
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
-struct site { unsigned long off; const char *what; };
+struct site {
+	unsigned long off;
+	const char *what;
+	/* 期望在 CPU 层就产生对齐异常（SIGBUS），事务根本不上总线。
+	 * 见下面 hammer() 里的说明 —— 这与 RAZ/WI 是两码事，必须分开判。 */
+	int expect_align_fault;
+};
 
+/* SIGBUS 必须**按地点**记，不能只记一个总数。
+ *
+ * 第一版就是记总数，结果报了"4000 次 SIGBUS"却指不出是谁 —— 而
+ * 4000 = 2000×2 恰好是一个地点的读加写，也就是说那个数字本身已经在提示
+ * 答案了，只是报告的粒度不够，看不出来。粒度不够的报告比没有报告更坏：
+ * 它把一个具体的、可解释的现象包装成了一个笼统的失败。 */
 static void hammer(const char *title, const struct site *s, size_t n)
 {
 	size_t i;
-	int j;
+	int j, before;
 
 	fprintf(rep, "\n[%s]\n", title);
 	for (i = 0; i < n; i++) {
+		before = n_sigbus;
 		for (j = 0; j < ROUNDS; j++) {
 			wr_hammer(s[i].off, 0xDEADBEEFU ^ (uint32_t)j);
 			(void)rd_safe(s[i].off, NULL);
 		}
 		drain();
-		ok("%s：读写各 %d 次，全程无总线错误，进程还活着",
-		   s[i].what, ROUNDS);
+		int got = n_sigbus - before;
+
+		if (s[i].expect_align_fault) {
+			/* aarch64 上 /dev/mem 映出来的是 **Device 内存**，
+			 * 它不支持非对齐访问：CPU 在发出总线事务**之前**就抛
+			 * 对齐异常，内核转成 SIGBUS。
+			 *
+			 * 所以这里的 SIGBUS **不是**总线在报错，RAZ/WI 也没
+			 * 失效 —— 事务压根没走到 fabric。而且这条路径同样安全：
+			 * 对齐异常是同步的、精确的，程序接得住，不会变成 SError。
+			 *
+			 * 反过来说，如果这里**没有** SIGBUS，才该警惕：那意味着
+			 * 非对齐访问真的发出去了，得看译码器怎么处理它。 */
+			if (got == 2 * ROUNDS)
+				ok("%s：读写各 %d 次，%d 次 SIGBUS —— "
+				   "这是 CPU 的对齐异常（Device 内存不支持非对齐），"
+				   "事务没上总线，与 RAZ/WI 无关；同步可捕获，崩不了板",
+				   s[i].what, ROUNDS, got);
+			else
+				bad("%s：期望 %d 次对齐异常，实得 %d 次",
+				    s[i].what, 2 * ROUNDS, got);
+		} else if (got == 0) {
+			ok("%s：读写各 %d 次，全程无总线错误，进程还活着",
+			   s[i].what, ROUNDS);
+		} else {
+			bad("%s：出现 %d 次 SIGBUS —— 总线仍在报错，"
+			    "RAZ/WI 在这个地址上没生效", s[i].what, got);
+		}
 	}
 }
 
@@ -184,18 +223,18 @@ int main(void)
 	/* ① 防火墙拒的：四个功能核 + 金丝雀。地址都是各核合法的 VERSION 偏移，
 	 *    所以被拒的一定是 AxPROT 门控，不是译码 —— 两类分开测才说得清。 */
 	static const struct site refused[] = {
-		{ 0x00020, "trng_axi VERSION      (槽 0，防火墙拒)" },
-		{ 0x10000, "key_vault_axi VERSION (槽 1，防火墙拒)" },
-		{ 0x20000, "sym_axi VERSION       (槽 2，防火墙拒)" },
-		{ 0x30000, "mlkem_axi VERSION     (槽 3，防火墙拒)" },
-		{ 0x40000, "金丝雀 VERSION        (槽 4，防火墙拒)" },
+		{ 0x00020, "trng_axi VERSION      (槽 0，防火墙拒)", 0 },
+		{ 0x10000, "key_vault_axi VERSION (槽 1，防火墙拒)", 0 },
+		{ 0x20000, "sym_axi VERSION       (槽 2，防火墙拒)", 0 },
+		{ 0x30000, "mlkem_axi VERSION     (槽 3，防火墙拒)", 0 },
+		{ 0x40000, "金丝雀 VERSION        (槽 4，防火墙拒)", 0 },
 	};
 	/* ② 译码器判"没有这个地址"的四类，与 axi4lite_xbar 的 hit_of() 一一对应 */
 	static const struct site nohit[] = {
-		{ 0x10110, "槽内偏移高位非零 0x8001_0110（镜像地址）" },
-		{ 0x60000, "槽号越界 0x8006_0000（只有 6 个槽）" },
-		{ 0x100004,"aperture 以外 0x8010_0004" },
-		{ 0x10005, "未对齐 0x8001_0005" },
+		{ 0x10110, "槽内偏移高位非零 0x8001_0110（镜像地址）", 0 },
+		{ 0x60000, "槽号越界 0x8006_0000（只有 6 个槽）", 0 },
+		{ 0x100004,"aperture 以外 0x8010_0004", 0 },
+		{ 0x10005, "未对齐 0x8001_0005", 1 },
 	};
 	struct sigaction sa;
 	uint32_t v, tv, mv, xv;
@@ -232,12 +271,6 @@ int main(void)
 	       refused, sizeof refused / sizeof refused[0]);
 	hammer("② 译码器判\"没有这个地址\"的四类",
 	       nohit, sizeof nohit / sizeof nohit[0]);
-
-	if (n_sigbus == 0)
-		ok("全程 0 次 SIGBUS —— 被拒的读也没有产生总线错误");
-	else
-		bad("出现了 %d 次 SIGBUS —— 读还在报错，RAZ/WI 没完全生效",
-		    n_sigbus);
 
 	/* 留痕：从安全世界读计数器。普通世界读同样的地址只会得到 0 —— 这正是
 	 * 我们要的：证据存在，但制造证据的人看不到也擦不掉。 */

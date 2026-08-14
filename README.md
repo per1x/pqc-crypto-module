@@ -69,9 +69,9 @@ product is named `zu3eg_hsm_dev.bit`. Same RTL, one parameter apart.
 
 > ⚠️ **A refused access reads back 0; it does not raise an error.** The
 > firewall and the address decoder are RAZ/WI, so no user-space program can
-> take the board down with a bad address — deliberate, and established in
-> simulation (the on-silicon check is written but not yet run). The flip side is
-> that a mistyped address is silent; check `VERSION`
+> take the board down with a bad address — deliberate, and verified on silicon
+> (36,000 refused accesses, board still up). The flip side is that a mistyped
+> address is silent; check `VERSION`
 > (`0x0001_0000` on every core) rather than looking for an error code. Details
 > in [docs/REGISTERS.md](docs/REGISTERS.md).
 
