@@ -50,6 +50,27 @@
 // 从机自己的防火墙仍然保留窗口检查（axi4lite_firewall 的 ADDR_MASK）——
 // 两道都在，是纵深，不是重复；而且从机现在拿到的地址确实经过了这里的筛选。
 //
+// ============================================================================
+// 【不命中怎么回应：RAZ/WI，不是 DECERR】
+// ============================================================================
+// 地址不命中时**读回 0、写丢弃，响应一律 OKAY**，不产生任何总线错误。
+//
+// 第一版回 DECERR。那是"正确"的 AXI 语义，但它让**任何一次走错地址的访问
+// 都能把板子搞崩**：读的 DECERR 还能被 SIGBUS 接住，而**写是 posted 的**，
+// 错误以 SError 回来，aarch64 的内核只能 panic —— 代价是一次断电。
+//
+// 这不是假想。实测踩过：设备树里留着厂家 PL 的 GPIO 节点，换成密码位流之后
+// 内核的 xgpio_of_probe 去探测一个不存在的槽，**本模块判"无此地址"回
+// DECERR**，当场 SError panic。也就是说，触发它的不是攻击者，是内核自己的
+// 驱动 —— 一次设备树与位流不配套就够了。
+//
+// 密码机不该有"用户态一个手滑就得断电"这种性质。所以改成 RAZ/WI：
+// 安全性一点不减（事务照样到不了任何从机），只是总线不再报错。
+//
+// 代价：走错地址变安静了。补偿是下面那个违规计数器（接进 SECURE_ONLY=1 的
+// 从机，只有安全世界读得到），以及"所有从机 VERSION 都非零，读到 0 就是
+// 没命中"这个显眼信号。
+//
 // 单笔在途：一次只处理一个读事务和一个写事务。控制总线上这样够了，
 // 而且**"一次只有一笔"本身就消掉了乱序与响应错配这一整类 bug**。
 `default_nettype none
@@ -107,9 +128,24 @@ module axi4lite_xbar #(
     input  wire [32*NS-1:0] m_rdata,
     input  wire [2*NS-1:0]  m_rresp,
     input  wire [NS-1:0]    m_rvalid,
-    output reg  [NS-1:0]    m_rready
+    output reg  [NS-1:0]    m_rready,
+
+    // ---- 审计：没命中任何槽的访问次数（各自饱和于 0xFFFF）----
+    // RAZ/WI 之后走错地址不再报错，所以必须在别处留痕，否则"从没走错过"
+    // 和"走错过一千次"长得一模一样。接到 SECURE_ONLY=1 的从机上，
+    // 只有安全世界读得到。
+    //
+    // ⚠️ 读写分成两个计数器，不是为了信息量 —— 它们在**两个不同的 always 块**
+    //    里，一个 reg 让两个块驱动是多驱动。第一版就是一个 reg，Icarus 里
+    //    "最后写的赢"照样跑过了全部用例，**Vivado 综合当场 CRITICAL WARNING
+    //    + opt_design 失败**。也就是说那一版仿真验的是一个造不出来的电路。
+    //    分开之后布局正好与各从机的 A_VIOL（{读, 写}）一致。
+    output reg  [15:0]      decode_viol_wr_count,
+    output reg  [15:0]      decode_viol_rd_count
 );
-    localparam [1:0] RESP_OKAY = 2'b00, RESP_DECERR = 2'b11;
+    // 只有 OKAY。被拒/没命中也回 OKAY —— DECERR 这条路已经没有了，
+    // 所以连常量都不留：留着会让人以为某个分支还会用到它。
+    localparam [1:0] RESP_OKAY = 2'b00;
 
     // 所有从机拿到同一份地址/数据，靠 valid 选中谁 —— 省掉 NS 份多路选择器
     reg  [OFF_BITS-1:0] aw_addr_r, ar_addr_r;
@@ -183,6 +219,7 @@ module axi4lite_xbar #(
             m_awvalid <= {NS{1'b0}}; m_wvalid <= {NS{1'b0}};
             m_bready <= {NS{1'b0}};
             s_bvalid <= 1'b0; s_bresp <= RESP_OKAY;
+            decode_viol_wr_count <= 16'd0;
         end else begin
             case (wst)
             W_IDLE: begin
@@ -251,8 +288,11 @@ module axi4lite_xbar #(
             end
 
             // 没命中任何从机：就地回 DECERR，事务**不往下游发**
+            // 没命中：**丢弃写、回 OKAY**（见文件头）。事务从没往下游发过。
             W_ERR: begin
-                s_bresp  <= RESP_DECERR;
+                s_bresp  <= RESP_OKAY;
+                if (decode_viol_wr_count != 16'hFFFF)
+                    decode_viol_wr_count <= decode_viol_wr_count + 16'd1;
                 s_bvalid <= 1'b1;
                 wst      <= W_RESP;
             end
@@ -280,6 +320,7 @@ module axi4lite_xbar #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rst_st <= R_IDLE;
+            decode_viol_rd_count <= 16'd0;
             ar_addr_r <= {OFF_BITS{1'b0}}; ar_prot_r <= 3'd0;
             ar_sel <= 3'd0; ar_hit <= 1'b0;
             m_arvalid <= {NS{1'b0}}; m_rready <= {NS{1'b0}};
@@ -319,9 +360,12 @@ module axi4lite_xbar #(
             end
 
             // 没命中：回 0 + DECERR，且**没有任何从机被访问过**
+            // 没命中：**回 0 + OKAY**，且没有任何从机被访问过。
             R_ERR: begin
                 s_rdata  <= 32'd0;
-                s_rresp  <= RESP_DECERR;
+                s_rresp  <= RESP_OKAY;
+                if (decode_viol_rd_count != 16'hFFFF)
+                    decode_viol_rd_count <= decode_viol_rd_count + 16'd1;
                 s_rvalid <= 1'b1;
                 rst_st   <= R_RESP;
             end

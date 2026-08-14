@@ -11,6 +11,17 @@
 # 第二道用 Icarus Verilog 的语法检查，它与 Verilator 的实现不同，
 # 能捕到另一批问题；两个仿真器在位宽截断上的语义差异本身也是一道交叉验证。
 #
+# ⚠️ 这两道都拦不住的一类：**同一时钟域下的多驱动**。
+#    一个 reg 被两个 `always @(posedge clk)` 块赋值时：
+#      · Verilator 的 MULTIDRIVEN 只在两个块的**时钟不同**时才报，同钟不报；
+#      · Icarus 直接按"最后执行的赋值赢"跑，仿真结果看着完全正常；
+#      · **Vivado 综合会 CRITICAL WARNING 并让 opt_design 失败。**
+#    也就是说这一类的唯一守门人是综合，不是 lint 也不是仿真。
+#    踩过一次：axi4lite_xbar 的违规计数器最初是一个 reg，读写两条通道各在
+#    自己的 always 块里加它 —— 全套 cocotb 用例（含专门测这个计数器的两条）
+#    全绿，综合当场拒收。所以"仿真过了"不等于"造得出来"，
+#    **改完 RTL 一定要跑一次 tools/rtl_synth_check.sh 或整片综合。**
+#
 # 前置：verilator（brew install verilator）、iverilog（brew install icarus-verilog）
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

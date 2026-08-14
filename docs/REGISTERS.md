@@ -8,32 +8,63 @@ cocotb testbench.
 
 All registers are 32 bits and word-aligned. Every slave sits behind
 `axi4lite_firewall`; addresses outside a slave's window, and non-secure accesses
-to a `SECURE_ONLY=1` instance, are answered DECERR with no side effect.
+to a `SECURE_ONLY=1` instance, **read back zero and have their writes
+discarded** (RAZ/WI) — no side effect, and no bus error.
 
-> ### ⚠️ Read this before writing any register
+> ### ⚠️ What a refused access looks like: zeros, not an error
 >
 > **The default bitstream (`zu3eg_hsm.bit`) gives the normal world *zero*
 > reachability.** All four functional slaves are built with `SECURE_ONLY=1`, so
 > every access from Linux — which always carries `AxPROT[1]=1` — is refused at
 > the bus. Only the secure world (EL3, via the BL31 SiP) can drive them.
 >
-> **Never issue a write you expect to be refused.** A refused read returns
-> DECERR synchronously and Linux turns it into `SIGBUS`, which a program can
-> catch. A refused *write* is different: AXI writes are posted, so the error
-> comes back later as an **SError**, which belongs to no instruction and which
-> the kernel can only answer with a panic. **The cost is a power cycle**, and on
-> this board a power cycle clears `CSU_MULTI_BOOT`.
+> A refused access is **RAZ/WI**: **the read returns 0, the write is discarded,
+> the response is always OKAY, and no bus error is raised.** Consequences:
 >
-> Programs that write registers (`hsm_hwtest`, `hsm_kem3`) must therefore run
-> against the **development** bitstream, not the default one:
+> * **To tell whether an access was refused, look at the data, not the response
+>   code.** Every core's `VERSION` reads `0x0001_0000`, so a `0` means refused
+>   (or no bitstream loaded).
+> * **Nothing you write can break the board.** No user-space program, no driver,
+>   and no mistyped address can make the kernel see a bus error. This is
+>   established in simulation (`test_xbar`, `test_firewall`, `test_trng_axi`).
+>   `board/src/hsm_nocrash.c` is the on-silicon counterpart — nine classes of
+>   address, two thousand reads and writes each — but **it has not been run on
+>   the board yet**; see [TESTING.md](TESTING.md#on-silicon-results).
+> * **The cost is that a wrong address is now silent.** It reads 0 instead of
+>   faulting. The compensation is the violation counters (`VIOL` on each core,
+>   `XBAR_VIOL` for the decoder) — but **only the secure world can read them**;
+>   from the normal world those two addresses also read 0.
+>
+> #### Why not DECERR
+>
+> DECERR is the "correct" AXI semantic and was what the first version did. It
+> was replaced because of an asymmetry: a refused *read* is a synchronous abort
+> that Linux turns into `SIGBUS`, which a program can catch, whereas a refused
+> *write* is **posted** — the error comes back later as an **SError**, belongs
+> to no instruction, and the kernel can only answer it with a panic. **The cost
+> is a power cycle**, and on this board a power cycle clears `CSU_MULTI_BOOT`.
+>
+> Triggering it does not take malice. It happened once for real: the device tree
+> still described the factory PL's GPIO, so after loading the crypto bitstream
+> the kernel's own `xgpio_of_probe` reached for a peripheral that wasn't there
+> and panicked on the spot. **A crypto module should not have the property that
+> one slip in user space costs a power cycle**, so this changed.
+>
+> Security is unchanged: writes still never reach a slave, reads still never
+> return key material — word for word what DECERR gave. Only the bus error is
+> gone.
+>
+> #### `PQC_DEV_OPEN=1` now exists for one reason only
 >
 > ```
 > PQC_DEV_OPEN=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 > ```
 >
-> That build sets `SECURE_ONLY=0` on the functional slaves and is named
-> `zu3eg_hsm_dev.bit` so the two can never be confused. It is a debug form, not
-> the shipping one.
+> That build sets `SECURE_ONLY=0` on the functional slaves (producing
+> `zu3eg_hsm_dev.bit`) so the **normal world can run the KATs directly**, which
+> is convenient for debugging. It is no longer needed to avoid crashing on a
+> refused write — that restriction is gone. It is a debug form, not the shipping
+> one.
 
 - [Slot map](#slot-map)
 - [`trng_axi`](#trng_axi--slot-0)
@@ -78,6 +109,9 @@ status. RTL `hardware/rtl/trng/trng_axi.v`, tests
 | `0x24` | `PARAM0` | R | `{DECIM, NUM_RO, RATE_LANES, OUT_LANES}`, one byte each |
 | `0x28` | `PARAM1` | R | `{APT_CUTOFF[15:0], RCT_CUTOFF[15:0]}` |
 | `0x2C` | `PARAM2` | R | `{STARTUP_SAMPLES[15:0], APT_WINDOW[15:0]}` |
+| `0x30` | `RAW` | R | Raw noise tap, non-empty only when `RAW_TAP=1` |
+| `0x34` | `DROPS` | R | Sample-FIFO overflow count |
+| `0x38` | `VIOL` | R | `{refused reads[31:16], refused writes[15:0]}`, saturating |
 
 `STATUS`: `[0]` READY (startup passed, no alarm, not wiping), `[1]` DATA_VALID,
 `[2]` ALARM (latched), `[3]` RCT_ALARM, `[4]` APT_ALARM, `[5]` STARTUP_DONE,
@@ -105,7 +139,7 @@ see [TESTING.md](TESTING.md#entropy).
 
 ## `key_vault_axi` — slot 1
 
-Window `0x00`–`0x3F`; anything beyond is DECERR. RTL
+Window `0x00`–`0x3F`; anything beyond reads 0 and discards writes. RTL
 `hardware/rtl/bus/key_vault_axi.v`, tests
 `hardware/tb/cocotb/test_key_vault.py`.
 
@@ -203,6 +237,7 @@ RTL `hardware/rtl/bus/mlkem_axi.v`, tests
 | `0x20` | `OUT_RD` | RW | Output read pointer |
 | `0x24` | `VIOL_CNT` | R | Firewall violation counters |
 | `0x28` | `PARAM0` | R | Capability word |
+| `0x2C` | `XBAR_VIOL` | R | **Decoder** violations — accesses that hit no slot at all |
 
 **Everything goes in through one buffer, in the order the standard defines it**,
 because the three cores' input shapes are entirely different and one register
@@ -337,5 +372,25 @@ would strand masters that do not know the convention.
 pops the TRNG FIFO — otherwise a non-secure read that gets no data could still
 drain the entropy pool.
 
-**DECERR, never OKAY-with-zero.** Silently returning zeros would let the normal
-world believe it had read something.
+**RAZ/WI, not DECERR — and this used to say the opposite.** The old rule here
+read *"DECERR, never OKAY-with-zero: silently returning zeros would let the
+normal world believe it had read something."* That worry is real and it has not
+gone away; it was outweighed. A DECERR on a *posted write* returns as an SError
+and panics the kernel, so under the old rule any mistyped address cost a power
+cycle. Un-crashability won.
+
+Three things keep the old worry in check:
+
+* **`STATUS` reads 0 too**, so `ENABLED` and `READY` are both clear — any
+  consumer that checks readiness before taking data (which is the correct way to
+  write one anyway) sees "not ready" and never reaches the zeros.
+* **`VERSION` reads 0**, and it is a nonzero constant on every core. That is the
+  loudest available "you were refused" signal, and it is what the boundary
+  counter-proof now keys on.
+* **The violation counters record it**, readable only from the secure world.
+
+What is genuinely lost: a consumer that checks neither readiness nor version and
+just reads `RDATA` now gets zeros instead of an error. Such a consumer was
+already broken — it would mishandle a real underrun the same way — but the
+failure has moved from "the bus stops you" to "you have to write it correctly."
+That is a real trade, stated here rather than buried.

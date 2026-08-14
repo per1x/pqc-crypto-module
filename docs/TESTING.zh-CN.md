@@ -17,7 +17,7 @@
 
 | 检查项 | 结果 | 位置 |
 |---|---|---|
-| cocotb RTL 回归 | 197 个测试，0 失败 | `./tools/rtl_sim.sh` |
+| cocotb RTL 回归 | 200 个测试，0 失败 | `./tools/rtl_sim.sh` |
 | Verilator `-Wall` + Icarus lint | 70 个模块，0 警告 | `./tools/rtl_lint.sh` |
 | Yosys 可综合性 | 68 个模块，全部可综合 | `./tools/rtl_synth_check.sh` |
 | ML-KEM 512/768/1024 对照 NIST ACVP，真硅上 | 20 / 20 逐字节一致 | `board/logs/RESULT_seckem3.txt` |
@@ -28,11 +28,12 @@
 | TRNG 最小熵 | H = 0.871234 bit/sample | `tools/sp800_90b.py` |
 | SP 800-90B 重启测试 | H_restart = 0.745427，通过 | `board/logs/RESULT_restart.txt` |
 | Decaps 时序，合法 vs 隐式拒绝 | 中位差 0.000 % | `board/logs/RESULT_seckem3.txt` |
-| 经 SDF 接口的端到端 | 通过，另加 6/6 DECERR 反证 | `board/logs/RESULT_service.txt` |
+| 经 SDF 接口的端到端 | 通过，另加 6/6 反证（测于 RAZ/WI 之前，当时记录为 DECERR） | `board/logs/RESULT_service.txt` |
 | `ctest`（主机软件） | 46 / 46，4109 条断言 | `ctest --test-dir build` |
 | ASan + UBSan / TSan / `leaks` | 全过 · 0 竞争 · 0 泄漏 | `docs/USAGE.zh-CN.md` |
 | libFuzzer | 138 万次执行，无崩溃 | `./tools/fuzz.sh` |
 | aarch64 Linux（GCC 12） | 全过 | `./tools/aarch64_test.sh` |
+| **RAZ/WI 上板复验** | **还没跑** —— 位流已出、仿真已过，板子够不到（SSH key 没扛过断电） | `board/src/hsm_nocrash.c`、`hsm_secneg.c` |
 
 ## 原则
 
@@ -58,7 +59,7 @@
 
 ## RTL 验证
 
-跨 26 个顶层的 197 个 cocotb 测试，在 Icarus Verilog 下运行：
+跨 26 个顶层的 200 个 cocotb 测试，在 Icarus Verilog 下运行：
 
 | 组 | 测试 |
 |---|---|
@@ -114,7 +115,12 @@ GB/T 32907 A.1，SM3 对照 GB/T 32905 A.1。
 之后：
 
 - *地址混叠*，13/13——五次正向读成功；八个镜像地址（+0x110、+0x100、+0x1100、
-  +0xFF00、+0x8000、孔径之外、槽位 6、槽位 7）全部 DECERR。
+  +0xFF00、+0x8000、孔径之外、槽位 6、槽位 7）全部被拒。
+
+  > **这次测量早于 RAZ/WI 改动**，所以它当时记录到的是那八个地址回 DECERR/SIGBUS。
+  > 用例断言的"被拒"本身没变，变的只是观测量（现在是读回 0）。
+  > **在 RAZ/WI 位流上重跑这一条还欠着** —— 板子的 SSH key 没扛过上次断电。
+  > 新观测量由仿真覆盖（`test_xbar` 8/8，含 64 KB 全扫）。
 - *清零*，4/4——`STATUS.WIPING` 置起，持续 112.5 µs，对照理论值 109.2 µs
   （8192 个周期 @ 75 MHz；差值是轮询开销），之后 `OUT_LEN = IN_PTR = 0`，且相同
   输入重现出 2432 个完全一致的字节。
@@ -141,12 +147,18 @@ GB/T 32907 A.1，SM3 对照 GB/T 32905 A.1。
 
 | | |
 |---|---|
-| CLB LUT | 35,611 / 70,560 (50.47 %) |
-| 寄存器 | 25,916 (18.36 %) |
+| CLB LUT | 35,659 / 70,560 (50.54 %) |
+| 寄存器 | 25,977 (18.41 %) |
 | Block RAM | 15.5 / 216 (7.18 %) |
 | DSP | 140 / 360 (38.89 %) |
 | 外部引脚 | 1（风扇，`AA11`） |
-| WNS / 有效保持余量 | +3.504 ns / +0.110 ns @ 75 MHz |
+| WNS / 有效保持余量 | +3.325 ns / +0.110 ns @ 75 MHz |
+
+RAZ/WI 那次改动的增量：**+48 LUT、+61 寄存器，DSP 与 BRAM 不变。** 那是四个新增的
+16 位饱和计数器（译码器读/写、TRNG 读/写）连同它们的寄存器读出通路 —— RAZ/WI 的
+响应本身其实比 DECERR **更省**，它把一个响应码多路选择器换成了一个常量。
+有效保持余量没变，仍是 +0.110 ns；建立余量从 +3.504 降到 +3.325 ns，
+对 13.3 ns 的周期仍有 3.3 ns 富余。
 
 这套流程在构建机上是确定性的：lint 清理（位宽修正与死代码删除）前后跑出来的资源
 与时序结果逐比特一致，这本来就是应该的——Vivado 本来就会删死代码，而位宽修正不会
@@ -210,7 +222,7 @@ samples/s 下意味着每 0.11 s 一次误报——**α 必须按采样率来选
 本节中没有任何一项需要板子。
 
 ```bash
-./tools/rtl_sim.sh                     # 197 个 cocotb 测试
+./tools/rtl_sim.sh                     # 200 个 cocotb 测试
 ./tools/rtl_lint.sh                    # Verilator -Wall + Icarus
 ./tools/rtl_synth_check.sh             # Yosys 可综合性
 python3 tools/sp800_90b.py --selftest  # 复现规范中的算例

@@ -95,14 +95,20 @@ module mlkem_axi #(
     output wire        s_axi_rvalid,
     input  wire        s_axi_rready,
 
-    input  wire        tamper
+    input  wire        tamper,
+
+    // 译码器（axi4lite_xbar）的"没命中任何槽"计数。
+    // 从这里出口，是因为本从机 SECURE_ONLY=1 —— **只有安全世界读得到**。
+    // 译码器改 RAZ/WI 之后走错地址不再报错，这个计数是唯一的痕迹。
+    input  wire [31:0] xbar_viol_count
 );
     localparam [1:0] RESP_OKAY = 2'b00, RESP_SLVERR = 2'b10;
 
     localparam [3:0] A_VERSION = 4'h0, A_CTRL   = 4'h1, A_STATUS = 4'h2,
                      A_MODE    = 4'h3, A_INDATA = 4'h4, A_INPTR  = 4'h5,
                      A_OUTDATA = 4'h6, A_OUTLEN = 4'h7, A_OUTRD  = 4'h8,
-                     A_VIOL    = 4'h9, A_PARAM0 = 4'hA;
+                     A_VIOL    = 4'h9, A_PARAM0 = 4'hA,
+                     A_XBAR_VIOL = 4'hB;
 
     localparam [1:0] M_KEYGEN = 2'd0, M_ENCAPS = 2'd1, M_DECAPS = 2'd2;
 
@@ -489,6 +495,10 @@ module mlkem_axi #(
                 A_OUTLEN:  f_rdata <= {19'd0, out_len};
                 A_OUTRD:   f_rdata <= {19'd0, out_rd};
                 A_VIOL:    f_rdata <= {viol_rd_count, viol_wr_count};
+                // 译码违规数。注意这**不是**本核的防火墙拒的，是上游译码器
+                // 判"根本没有这个地址"的次数 —— 借这个 SECURE_ONLY=1 的
+                // 窗口出口，普通世界读不到。
+                A_XBAR_VIOL: f_rdata <= xbar_viol_count;
                 A_PARAM0:  f_rdata <= 32'h2000_2000;    // 两块 8 KB 缓冲
                 default:   f_rdata <= 32'd0;
                 endcase

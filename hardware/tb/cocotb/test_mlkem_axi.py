@@ -40,6 +40,21 @@ PSET = {"ML-KEM-512": 0, "ML-KEM-768": 1, "ML-KEM-1024": 2}
 
 PROT_SECURE, PROT_NONSEC = 0b000, 0b010
 RESP_OKAY, RESP_SLVERR, RESP_DECERR = 0, 2, 3
+# ============================================================================
+# 【"被拒"在总线上长什么样：RAZ/WI，不是 DECERR】
+# ============================================================================
+# 防火墙拒绝一笔访问时**读回 0、写丢弃，响应仍是 OKAY** —— 不产生总线错误。
+# 改动的理由在 hardware/rtl/bus/axi4lite_firewall.v 的文件头：DECERR 的
+# posted 写会以 SError 回来，aarch64 的内核只能 panic，于是"写错一个地址"
+# 的代价是一次断电。
+#
+# 用例里一律写 RESP_REFUSED，不写具体码值 —— **"被拒长什么样"是 RTL 的策略，
+# 不该抄进每一条断言**。抄进去的后果这次已经见过了：策略一改，几十条断言
+# 全得跟着动，而它们本来一条都不该动（它们要证的是"被拒了"，不是"回了 3"）。
+#
+# ⚠️ 读的断言必须**同时**查 rdata == 0。RAZ/WI 之后响应码不再区分放行与拒绝，
+#    数据才是。只查 resp 的读用例现在等于什么都没查。
+RESP_REFUSED = RESP_OKAY
 
 
 async def reset(dut):
@@ -243,9 +258,9 @@ async def test_firewall_and_zeroize(dut):
     assert got == ek + dk
 
     # non-secure：读写都 DECERR
-    _, r = await rd(dut, OUT_LEN, PROT_NONSEC)
-    assert r == RESP_DECERR, "non-secure 读没被拦"
-    assert await wr(dut, CTRL, C_ZEROIZE, PROT_NONSEC) == RESP_DECERR, \
+    rv, r = await rd(dut, OUT_LEN, PROT_NONSEC)
+    assert r == RESP_REFUSED and rv == 0, f"non-secure 读没被拦：0x{rv:08x}"
+    assert await wr(dut, CTRL, C_ZEROIZE, PROT_NONSEC) == RESP_REFUSED, \
         "non-secure 写没被拦"
 
     # 被拦的那笔没有副作用：输出还在，还读得出来
@@ -253,8 +268,8 @@ async def test_firewall_and_zeroize(dut):
     assert n == len(ek) + len(dk), "non-secure 的写把输出缓冲清掉了"
 
     # 越界地址
-    _, r = await rd(dut, 0x80)
-    assert r == RESP_DECERR, "越界地址没被拦"
+    rv, r = await rd(dut, 0x80)
+    assert r == RESP_REFUSED and rv == 0, f"越界地址没被拦：0x{rv:08x}"
 
     # secure 的 zeroize：缓冲区清空。
     # 擦 8192 个地址要 8192 拍，这期间设备**拒绝一切写并回 SLVERR** ——
@@ -432,8 +447,9 @@ async def test_tamper_wipes_bram_and_blocks_output(dut):
     # 擦除期间：OUT_DATA 不给任何东西
     # （tamper 之后防火墙已锁存，读会 DECERR —— 这本身也是要证的：
     #  被 tamper 的模块对总线是完全关闭的，不只是"输出为 0"）
-    _, r = await rd(dut, OUT_DATA)
-    assert r == RESP_DECERR, "tamper 之后 OUT_DATA 还能读"
+    rv, r = await rd(dut, OUT_DATA)
+    assert r == RESP_REFUSED and rv == 0, \
+        f"tamper 之后 OUT_DATA 还能读到 0x{rv:08x} —— 这正是 RAZ/WI 必须回 0 的原因"
 
     # 等擦完（tamper 后总线关了，只能看内部的 wiping —— 这一处是唯一
     # 无法从软件侧观测的，因为软件侧此时已经被整体拒绝了）

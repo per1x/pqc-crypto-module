@@ -19,7 +19,7 @@
 | Target security level | The hardware boundary exists and is enforced; a level-3 claim would additionally require physical tamper response, a device-bound key derivation root, and algorithm certificates — see §10 |
 | Embodiment | FPGA bitstream on an XCZU3EG (AXU3EGB board), driven over AXI4 from a Cortex-A53 running Linux; host side is a shared library (`pqchsm-pkcs11`) plus a daemon and CLI |
 | Cryptographic boundary | The programmable logic: ML-KEM 512/768/1024, AES-128/256, SM4, SM3, the ring-oscillator TRNG, the key vault, and the AxPROT-gated AXI firewall that encloses them |
-| Boundary enforcement | `axi4lite_firewall` refuses any transaction with `AxPROT[1]=1` to a `SECURE_ONLY=1` slave (DECERR). Proven in both directions on silicon — see the evidence below |
+| Boundary enforcement | `axi4lite_firewall` refuses any transaction with `AxPROT[1]=1` to a `SECURE_ONLY=1` slave: the read returns 0, the write is discarded, no bus error is raised (RAZ/WI). Proven in both directions on silicon — see the evidence below |
 | Tested operational environment | XCZU3EG (`xazu3eg-sfvc784-1-i`) at 75 MHz, Linux 5.4 on the Cortex-A53; host tooling on macOS arm64 and Debian aarch64 (GCC 12) |
 
 **Boundary enforcement evidence.** Measured on the board, one run, one bitstream,
@@ -28,7 +28,7 @@ one address:
 | | `0x8004_0000` (`SECURE_ONLY=1`) | `0x8003_0000` (`SECURE_ONLY=0`) |
 |---|---|---|
 | Secure world, EL3 (`AxPROT[1]=0`) | reads `0x00010000` | reads `0x00010000` |
-| Normal world, EL1-NS (`AxPROT[1]=1`) | **refused — SIGBUS / DECERR** | reads `0x00010000` |
+| Normal world, EL1-NS (`AxPROT[1]=1`) | **refused** (logged as DECERR/SIGBUS; the current RAZ/WI bitstream refuses by reading back `0`) | reads `0x00010000` |
 
 The right-hand column is the control: the same normal world reads a non-gated core
 successfully, so the refusal on the left is the gate and not an unreachable address.

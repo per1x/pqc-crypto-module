@@ -43,6 +43,21 @@ ALG_AES128, ALG_AES256, ALG_SM4, ALG_SM3 = 0, 1, 2, 3
 
 PROT_SECURE, PROT_NONSEC = 0b000, 0b010
 RESP_OKAY, RESP_DECERR = 0, 3
+# ============================================================================
+# 【"被拒"在总线上长什么样：RAZ/WI，不是 DECERR】
+# ============================================================================
+# 防火墙拒绝一笔访问时**读回 0、写丢弃，响应仍是 OKAY** —— 不产生总线错误。
+# 改动的理由在 hardware/rtl/bus/axi4lite_firewall.v 的文件头：DECERR 的
+# posted 写会以 SError 回来，aarch64 的内核只能 panic，于是"写错一个地址"
+# 的代价是一次断电。
+#
+# 用例里一律写 RESP_REFUSED，不写具体码值 —— **"被拒长什么样"是 RTL 的策略，
+# 不该抄进每一条断言**。抄进去的后果这次已经见过了：策略一改，几十条断言
+# 全得跟着动，而它们本来一条都不该动（它们要证的是"被拒了"，不是"回了 3"）。
+#
+# ⚠️ 读的断言必须**同时**查 rdata == 0。RAZ/WI 之后响应码不再区分放行与拒绝，
+#    数据才是。只查 resp 的读用例现在等于什么都没查。
+RESP_REFUSED = RESP_OKAY
 
 
 class Bus:
@@ -288,11 +303,11 @@ async def test_tamper_takes_down_both(dut):
     await Timer(1, unit="ns")
 
     assert int(dut.vault_tampered.value) == 1, "tamper 没被锁存"
-    _, r = await rd(vault, V_VALID_MAP)
-    assert r == RESP_DECERR, "tamper 之后密钥仓还能读"
-    _, r = await rd(sym, S_STATUS)
-    assert r == RESP_DECERR, "tamper 之后对称核还能读"
-    assert await wr(sym, S_CMD, CMD_BLOCK) == RESP_DECERR, "tamper 之后还能下命令"
+    d, r = await rd(vault, V_VALID_MAP)
+    assert r == RESP_REFUSED and d == 0, f"tamper 之后密钥仓还能读：0x{d:08x}"
+    d, r = await rd(sym, S_STATUS)
+    assert r == RESP_REFUSED and d == 0, f"tamper 之后对称核还能读：0x{d:08x}"
+    assert await wr(sym, S_CMD, CMD_BLOCK) == RESP_REFUSED, "tamper 之后还能下命令"
 
     await reset(dut)
     assert int(dut.vault_tampered.value) == 0, "复位后该恢复"
@@ -310,10 +325,10 @@ async def test_nonsecure_refused(dut):
     vault, sym = Bus(dut, "vault"), Bus(dut, "sym")
 
     await vault_load(vault, 6, AES128_KEY)
-    assert await wr(vault, V_CTRL, 1, PROT_NONSEC) == RESP_DECERR
-    assert await wr(sym, S_CTRL, 1, PROT_NONSEC) == RESP_DECERR
+    assert await wr(vault, V_CTRL, 1, PROT_NONSEC) == RESP_REFUSED
+    assert await wr(sym, S_CTRL, 1, PROT_NONSEC) == RESP_REFUSED
     d, r = await rd(sym, S_STATUS, PROT_NONSEC)
-    assert r == RESP_DECERR and d == 0
+    assert r == RESP_REFUSED and d == 0
 
     # 被拦下的那几笔没有副作用：密钥还在，还能加密
     assert await sym_block(sym, ALG_AES128, 6, AES_PT) == AES128_CT

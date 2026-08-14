@@ -12,21 +12,27 @@
 // "跑通了"也可能只是因为门根本没关。这个程序就是那一半：
 //
 //   · 对四个功能核（trng / key_vault / sym / mlkem）各读一个 VERSION，
-//     **每一次都必须 DECERR**；
-//   · 对照：风扇观测口（槽 5，SECURE_ONLY=0）必须**读得到** ——
-//     否则"全都读不到"可能只是 PL 没配置、或 /dev/mem 这条路本身断了，
+//     **每一次都必须读回 0**（各核真实的 VERSION 都是 0x0001_0000）；
+//   · 对照：风扇观测口（槽 5，SECURE_ONLY=0）必须读到**真值** ——
+//     否则"全都是 0"可能只是 PL 没配置、或 /dev/mem 这条路本身断了，
 //     那样的话上面四条什么都证明不了。
 //
 // ============================================================================
-// 【为什么一笔写都不发】
+// 【判据从 "DECERR" 换成了 "读回 0" —— 而且这一条更强】
 // ============================================================================
-// 读的 DECERR 是**同步**外部中止，精确落在那条读指令上 → SIGBUS → siglongjmp
-// 回得来。写是 **posted** 的：指令早退休了，错误以 **SError** 回来，
-// 不属于任何一条指令，内核只能 panic。而那时密码 bitstream 正载着，
-// eth0 的 MAC 在厂家 PL 里根本不存在 —— 网络、harness 恢复、sysrq 看门狗
-// 一起没了。这条代价是一次断电，不再交第二次。
+// 防火墙改成 RAZ/WI 之后（理由见 hardware/rtl/bus/axi4lite_firewall.v 文件头：
+// DECERR 的 posted 写会以 SError 打穿内核），被拒的读回 OKAY + 数据 0，
+// 不再产生总线错误，所以 SIGBUS 那条判据失效了。
 //
-// **所以这个程序只读。** 写侧的拒绝语义由仿真判。
+// 换上来的判据不是退而求其次：
+//   · DECERR 只证明"这个地址给不了你东西" —— 地址根本不存在时也是 DECERR，
+//     所以它区分不了"门关着"和"后面压根没东西"；
+//   · **"读回 0" 同时证明两件事**：事务确实到达了那个从机（路是通的、
+//     核确实在那儿），以及它确实被拒了（拿到的不是 0x0001_0000）。
+//     一个空地址给不出这个结果。
+//
+// SIGBUS 处理仍然留着：现在它是**兜底断言**——如果哪一次真的弹了 SIGBUS，
+// 说明 RAZ/WI 没生效，那本身就是要报出来的事实。
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <setjmp.h>
@@ -38,6 +44,10 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+/* 五个核的 VERSION 都是这个值。"读到 0" 之所以能当判据，
+ * 全靠它非零 —— 哪天有人把某个核的 VERSION 改成 0，这个反证就失效了。 */
+#define VERSION_TRUE 0x00010000U
 
 #define PL_BASE   0x80000000UL
 #define PL_SPAN   0x00060000UL
@@ -108,22 +118,32 @@ int main(void)
 	if (pl == MAP_FAILED) { perror("mmap"); return 1; }
 
 	fprintf(rep, "==== 反证：普通世界直接读 SECURE_ONLY=1 的核 ====\n");
-	fprintf(rep, "本程序**一笔写都不发**（写的 DECERR 是 SError，接不住）。\n\n");
+	fprintf(rep, "判据：被拒的读回 0（RAZ/WI），而各核真实 VERSION = 0x%08x。\n",
+		VERSION_TRUE);
+	fprintf(rep, "本程序仍然一笔写都不发 —— 边界证明用不着写，"
+		     "写侧的\"不崩板\"由 hsm_nocrash 单独证。\n\n");
 
 	fprintf(rep, "[对照：先证明这条路本身是通的]\n");
 	v = rd_safe(0x50000, &good);      /* 风扇观测口，SECURE_ONLY=0 */
-	if (good)
-		ok("风扇观测口 (槽 5，SECURE_ONLY=0) 读到 0x%08x —— "
-		   "/dev/mem 这条路是通的，PL 也在", v);
+	if (!good)
+		bad("读风扇观测口弹了 SIGBUS —— 总线还在报错，RAZ/WI 没生效");
+	else if (v == VERSION_TRUE)
+		ok("风扇观测口 (槽 5，SECURE_ONLY=0) 读到真值 0x%08x —— "
+		   "/dev/mem 这条路是通的，PL 也在，而且这个值不是 0", v);
 	else
-		bad("连 SECURE_ONLY=0 的风扇口都读不到 —— "
-		    "PL 没配置或路径本身断了，下面的结果什么都证明不了");
+		bad("风扇观测口读到 0x%08x，既不是真值也不是被拒 —— "
+		    "PL 没配置或位流不对，下面的结果什么都证明不了", v);
 
-	fprintf(rep, "\n[四个功能核 + 金丝雀：每一次都必须被拒]\n");
+	fprintf(rep, "\n[四个功能核 + 金丝雀：每一次都必须读回 0]\n");
 	for (i = 0; i < sizeof(sec) / sizeof(sec[0]); i++) {
 		v = rd_safe(sec[i].off, &good);
 		if (!good)
-			ok("%s 被总线拒（DECERR/SIGBUS）", sec[i].name);
+			bad("%s 弹了 SIGBUS —— 门是关着的，但总线仍在报错，"
+			    "RAZ/WI 没生效（这会让任何一次误写都打穿内核）",
+			    sec[i].name);
+		else if (v == 0)
+			ok("%s 读回 0（真值应为 0x%08x）—— 事务到得了，值拿不到",
+			   sec[i].name, VERSION_TRUE);
 		else
 			bad("%s **读到了 0x%08x** —— 门没关上", sec[i].name, v);
 	}
@@ -132,7 +152,7 @@ int main(void)
 	fprintf(rep, "通过 %d，失败 %d\n", n_pass, n_fail);
 	fprintf(rep, "\n与正向那一半合起来才是完整命题：\n"
 		     "  正向 hsm_kem3 / hsm_hwtest（经 /dev/secmmio 由 EL3 发）跑通全部 KAT；\n"
-		     "  反向 本程序：同一批地址从普通世界读，全部被拒。\n");
+		     "  反向 本程序：同一批地址从普通世界读，全部读回 0。\n");
 	fflush(rep);
 	return n_fail ? 1 : 0;
 }

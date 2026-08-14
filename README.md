@@ -26,7 +26,7 @@ Every number in this repository comes from **the real device**, not simulation.
 | **Security boundary** | AXI firewall gating on `AxPROT[1]`, proven in both directions on the board: the secure world reads a `SECURE_ONLY=1` core, the normal world is refused at the bus |
 | **Standard front end** | SDF-style (GM/T 0018) C library and a PKCS#11 v3.2 module, so an application never sees a register |
 
-Fits in **half the device**: 35,611 LUT (50.5 %), 140 DSP, 15.5 BRAM,
+Fits in **half the device**: 35,659 LUT (50.5 %), 140 DSP, 15.5 BRAM,
 WNS +3.504 ns @ 75 MHz.
 
 ## Architecture
@@ -67,11 +67,13 @@ A second configuration exists for development — `PQC_DEV_OPEN=1` sets the
 functional slaves to `SECURE_ONLY=0` so Linux can drive them directly, and its
 product is named `zu3eg_hsm_dev.bit`. Same RTL, one parameter apart.
 
-> ⚠️ **Against the default bitstream, never issue a write you expect to be
-> refused.** A refused read is a synchronous DECERR → `SIGBUS`, catchable. A
-> refused write is posted and comes back as an **SError**, which the kernel can
-> only answer with a panic — the cost is a power cycle. Details in
-> [docs/REGISTERS.md](docs/REGISTERS.md).
+> ⚠️ **A refused access reads back 0; it does not raise an error.** The
+> firewall and the address decoder are RAZ/WI, so no user-space program can
+> take the board down with a bad address — deliberate, and established in
+> simulation (the on-silicon check is written but not yet run). The flip side is
+> that a mistyped address is silent; check `VERSION`
+> (`0x0001_0000` on every core) rather than looking for an error code. Details
+> in [docs/REGISTERS.md](docs/REGISTERS.md).
 
 Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 register-level contract: [docs/REGISTERS.md](docs/REGISTERS.md).
@@ -87,7 +89,7 @@ cd pqc-crypto-module
 python3 -m venv .venv-rtl && ./.venv-rtl/bin/pip install cocotb
 brew install icarus-verilog verilator      # or your distro's packages
 
-./tools/rtl_sim.sh          # 197 cocotb tests against the RTL
+./tools/rtl_sim.sh          # 200 cocotb tests against the RTL
 ./tools/rtl_lint.sh         # Verilator -Wall + Icarus, 70 modules, zero warnings
 ./tools/rtl_synth_check.sh  # Yosys synthesisability
 ```
@@ -146,12 +148,12 @@ Measured on the device, in the configuration described in
 | ML-KEM 512/768/1024 vs NIST ACVP, on silicon | 20 / 20 byte-exact |
 | Board self-test (symmetric, SM, boundary, AxPROT, TRNG) | 24 / 24 |
 | Key vault counter-proof — 256 bytes scanned on each of two slaves | key words appear **0** times; ciphertext correct |
-| AxPROT gate, both directions *(measured on the development bitstream, where a `SECURE_ONLY=0` control exists)* | EL3 reads `SECURE_ONLY=1`; EL1-NS refused (DECERR); same EL1-NS reads `SECURE_ONLY=0` |
+| AxPROT gate, both directions *(measured on the development bitstream, where a `SECURE_ONLY=0` control exists; taken before the RAZ/WI change, so refusal was logged as DECERR)* | EL3 reads `SECURE_ONLY=1`; EL1-NS refused at the same address; same EL1-NS reads a `SECURE_ONLY=0` core successfully |
 | Default (shipping) bitstream — normal world reachability | 0 of 5 cores readable; 6 / 6 refused |
 | TRNG min-entropy, 1,048,576 pre-conditioning samples | H = 0.871234 bit/sample → RCT 47, APT 672 |
 | Decaps timing, valid vs implicit-reject, 200 runs each | median difference 0.000 % |
 | ML-KEM-512 throughput @ 75 MHz | 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps) |
-| cocotb regression · Verilator lint · Yosys | 197 tests · 70 modules, 0 warnings · all synthesise |
+| cocotb regression · Verilator lint · Yosys | 200 tests · 70 modules, 0 warnings · all synthesise |
 
 Method and raw logs: [docs/TESTING.md](docs/TESTING.md); on-board captures are
 kept verbatim under [board/logs/](board/logs/).

@@ -13,9 +13,31 @@
 // AXI 的 AxPROT[1] 是 NS 位：0 = secure，1 = non-secure。ZynqMP 的 PS 会把
 // 发起访问的 master 的安全属性透到这一位上，PL 侧可以直接判。
 //
-// SECURE_ONLY=1 时，non-secure 的读写一律返回 **DECERR**，且**不产生任何副作用**
-// —— 尤其是不弹 FIFO。返回 DECERR 而不是 OKAY+0 是有意的：静默返回 0 会让
-// 普通世界以为自己拿到了随机数，而 0 是最糟的"随机数"。报错让它立刻知道。
+// SECURE_ONLY=1 时，non-secure 的读写一律被拒，且**不产生任何副作用**
+// —— 尤其是不弹 FIFO。
+//
+// 【被拒时回什么：从 DECERR 改成了 OKAY + 0（RAZ/WI）】
+// 原来这里回 DECERR，理由写的是"静默返回 0 会让普通世界以为自己拿到了随机数，
+// 而 0 是最糟的随机数"。**这个顾虑本身没错，但它被一个更大的问题压过去了**：
+//
+//   DECERR 的写在 aarch64 上是 posted 的，错误以 **SError** 回来 —— 不属于
+//   任何一条指令，内核只能 panic。于是"往被拒的地址写一次"的代价是一次断电。
+//   而触发它的不必是攻击者：内核自己的驱动探测一个不存在的外设就够了（实测过）。
+//
+// 一个密码机不该有"用户态一个手滑就得断电"这种性质，所以两害相权改成 RAZ/WI。
+//
+// 原来那个顾虑用三条补偿，不是靠祈祷：
+//   ① **STATUS 也读回 0**，于是 ST_ENABLED=0、ST_READY=0 —— 任何一个先查
+//      READY 再取数的消费者（正确的写法本来就该这样）立刻看到"没就绪"，
+//      拿不到那个 0；
+//   ② **VERSION 读回 0**，而它是非零常量。这是最显眼的"你被拒了"的信号，
+//      连"读到 0" 都变成了可判定的证据 —— 边界的反向证明现在就用这一条；
+//   ③ 违规计数（A_VIOL）留痕，且**只有安全世界读得到**。
+//
+// 说清代价：一个既不查 READY 也不查 VERSION、闷头读 RDATA 的消费者，
+// 现在会拿到全 0 而不是一个错误。这样的消费者本来就是坏的（它对
+// 真实的 underrun 也一样会拿到坏数），但这条风险确实从"总线替你挡住"
+// 变成了"消费者自己得写对"。写在这里，不藏。
 //
 // 这一层是**纵深防御的最内层，不是唯一一层**。真正的隔离还要靠：
 //   · XMPU/XPPU 在 PS 侧拦住到这段地址的非法访问（在 master 那端就挡掉）；
@@ -56,7 +78,7 @@
 
 module trng_axi #(
     parameter [31:0]  VERSION         = 32'h0001_0000,
-    parameter integer SECURE_ONLY     = 1,     // 1 = non-secure 访问返回 DECERR
+    parameter integer SECURE_ONLY     = 1,     // 1 = non-secure 访问被拒（RAZ/WI）
 
     // 透传给 trng_top
     parameter integer NUM_RO          = 8,
@@ -110,14 +132,23 @@ module trng_axi #(
     output wire        trng_alarm
 );
     localparam [1:0] RESP_OKAY   = 2'b00;
-    localparam [1:0] RESP_DECERR = 2'b11;
 
     localparam [3:0] A_CTRL    = 4'h0, A_STATUS  = 4'h1, A_RDATA   = 4'h2,
                      A_HEALTH  = 4'h3, A_APTIDX  = 4'h4, A_STARTUP = 4'h5,
                      A_BLOCKS  = 4'h6, A_WORDS   = 4'h7, A_VERSION = 4'h8,
                      A_PARAM0  = 4'h9, A_PARAM1  = 4'hA, A_PARAM2  = 4'hB,
                      A_RAW     = 4'hC,   // 原始噪声，RAW_TAP=1 时才有东西
-                     A_DROPS   = 4'hD;   // 取样 FIFO 溢出计数
+                     A_DROPS   = 4'hD,   // 取样 FIFO 溢出计数
+                     A_VIOL    = 4'hE;   // 被门控拒掉的访问次数（读写合计，饱和）
+
+    // RAZ/WI 之后被拒的访问在总线上不留任何痕迹，所以必须在这里留。
+    // 本从机 SECURE_ONLY=1，于是这个计数**只有安全世界读得到** ——
+    // 攻击者既看不到自己被记了多少次，也擦不掉。
+    //
+    // 读写分成两个计数器不是为了信息量，是因为它们在**两个不同的 always 块**里 ——
+    // 一个 reg 让两个块驱动是多驱动，综合器会直接报错。分开之后布局也正好与
+    // 其他从机的 A_VIOL（{读, 写}）一致。
+    reg [15:0] viol_wr_count, viol_rd_count;
 
     // ---- TRNG 本体 ----
     reg         reg_enable;
@@ -187,6 +218,7 @@ module trng_axi #(
             w_strb        <= 4'd0;
             s_axi_bvalid  <= 1'b0;
             s_axi_bresp   <= RESP_OKAY;
+            viol_wr_count <= 16'd0;
             reg_enable    <= 1'b1;   // 上电即开始暖机：启动健康检测本来就要时间
             pulse_zeroize <= 1'b0;
             pulse_clear   <= 1'b0;
@@ -209,8 +241,12 @@ module trng_axi #(
                 aw_hold      <= 1'b0;
                 w_hold       <= 1'b0;
                 s_axi_bvalid <= 1'b1;
-                // 被门控的写：握手照常完成（否则总线挂死），但报 DECERR 且不落笔
-                s_axi_bresp  <= wr_permit ? RESP_OKAY : RESP_DECERR;
+                // 被门控的写：握手照常完成（否则总线挂死），**回 OKAY 但不落笔**。
+                // 回 OKAY 不是"当它成功了" —— 下面 wr_permit 那个条件保证了
+                // 一个比特都没写进去。变的只是总线上不产生错误（见文件头）。
+                s_axi_bresp  <= RESP_OKAY;
+                if (!wr_permit && (viol_wr_count != 16'hFFFF))
+                    viol_wr_count <= viol_wr_count + 16'd1;
 
                 if (wr_permit && (wr_addr[5:2] == A_CTRL) && wr_strb[0]) begin
                     reg_enable    <= wr_data[0];
@@ -261,6 +297,7 @@ module trng_axi #(
         if (!rst_n) begin
             s_axi_rvalid <= 1'b0;
             s_axi_rresp  <= RESP_OKAY;
+            viol_rd_count <= 16'd0;
             s_axi_rdata  <= 32'd0;
             underrun     <= 1'b0;
         end else begin
@@ -270,12 +307,17 @@ module trng_axi #(
 
             if (ar_go) begin
                 s_axi_rvalid <= 1'b1;
-                s_axi_rresp  <= ar_permit ? RESP_OKAY : RESP_DECERR;
+                s_axi_rresp  <= RESP_OKAY;
 
                 if (!ar_permit) begin
+                    // RAZ：回 0。**下面那一整个 case 一条都不执行**，
+                    // 所以 FIFO 不弹、计数不动、什么副作用都没有。
                     s_axi_rdata <= 32'd0;
+                    if (viol_rd_count != 16'hFFFF)
+                        viol_rd_count <= viol_rd_count + 16'd1;
                 end else begin
                     case (s_axi_araddr[5:2])
+                    A_VIOL:    s_axi_rdata <= {viol_rd_count, viol_wr_count};
                     A_CTRL:    s_axi_rdata <= {31'd0, reg_enable};
                     A_STATUS:  s_axi_rdata <= status_word;
                     A_RDATA: begin

@@ -6,13 +6,17 @@
     参数回读口与 RTL 实际参数一致（驱动启动自测就靠这个口）。
 
 二、**AxPROT 门控 —— "只让安全 master 访问"的硬件落点**：
-    · non-secure（AxPROT[1]=1）的读写一律 DECERR，不是 OKAY+0；
+    · non-secure（AxPROT[1]=1）的读写一律被拒 —— **读回 0、写不落笔**
+      （RAZ/WI；为什么不是 DECERR，见 trng_axi.v 文件头）；
     · **被挡掉的读绝不能弹 FIFO**。这一条单列出来测，是因为它是最容易写错、
-      后果又最实际的一个：如果 DECERR 的读仍然弹出，普通世界虽然拿不到数，
+      后果又最实际的一个：如果被拒的读仍然弹出，普通世界虽然拿不到数，
       却获得了一个"反复读就能把熵池抽干"的手段 —— 拿不到随机数和让别人也
       拿不到随机数，是两个不同的攻击，后者一样致命。
-    · secure（AxPROT[1]=0）的访问必须正常。少了这一条，一个恒为 DECERR 的
-      实现也能通过前两条。
+      **RAZ/WI 之后这一条比以前更要紧**：响应码不再区分放行与拒绝，
+      "没弹 FIFO" 成了唯一能证明"事务真的没往下走"的观测点。
+    · secure（AxPROT[1]=0）的访问必须正常。少了这一条，一个恒为拒绝的
+      实现也能通过前两条 —— 而 RAZ/WI 之后"恒为拒绝"和"工作正常但值是 0"
+      在响应码上长得一模一样，所以这一条现在是必需的，不是补充。
 """
 import cocotb
 from cocotb.clock import Clock
@@ -20,6 +24,7 @@ from cocotb.triggers import RisingEdge, Timer
 
 # 寄存器偏移，与 trng_axi.v 的表一致
 CTRL, STATUS, RDATA, HEALTH = 0x00, 0x04, 0x08, 0x0C
+VIOL = 0x38          # A_VIOL：{读违规[31:16], 写违规[15:0]}
 APTIDX, STARTUP, BLOCKS, WORDS = 0x10, 0x14, 0x18, 0x1C
 VERSION, PARAM0, PARAM1, PARAM2 = 0x20, 0x24, 0x28, 0x2C
 
@@ -30,6 +35,21 @@ PROT_SECURE = 0b000     # AxPROT[1]=0
 PROT_NONSEC = 0b010     # AxPROT[1]=1
 
 RESP_OKAY, RESP_DECERR = 0, 3
+# ============================================================================
+# 【"被拒"在总线上长什么样：RAZ/WI，不是 DECERR】
+# ============================================================================
+# 防火墙拒绝一笔访问时**读回 0、写丢弃，响应仍是 OKAY** —— 不产生总线错误。
+# 改动的理由在 hardware/rtl/bus/axi4lite_firewall.v 的文件头：DECERR 的
+# posted 写会以 SError 回来，aarch64 的内核只能 panic，于是"写错一个地址"
+# 的代价是一次断电。
+#
+# 用例里一律写 RESP_REFUSED，不写具体码值 —— **"被拒长什么样"是 RTL 的策略，
+# 不该抄进每一条断言**。抄进去的后果这次已经见过了：策略一改，几十条断言
+# 全得跟着动，而它们本来一条都不该动（它们要证的是"被拒了"，不是"回了 3"）。
+#
+# ⚠️ 读的断言必须**同时**查 rdata == 0。RAZ/WI 之后响应码不再区分放行与拒绝，
+#    数据才是。只查 resp 的读用例现在等于什么都没查。
+RESP_REFUSED = RESP_OKAY
 
 DECIM = 8
 STARTUP_SAMPLES = 1024
@@ -231,16 +251,24 @@ async def test_nonsecure_access_is_refused(dut):
     for addr, name in ((VERSION, "VERSION"), (STATUS, "STATUS"),
                        (RDATA, "RDATA"), (PARAM1, "PARAM1")):
         data, resp = await axi_read(dut, addr, prot=PROT_NONSEC)
-        assert resp == RESP_DECERR, f"non-secure 读 {name} 返回了 resp={resp}"
+        assert resp == RESP_REFUSED, f"non-secure 读 {name} 返回了 resp={resp}"
         assert data == 0, f"non-secure 读 {name} 返回了数据 0x{data:08x}"
 
     resp = await axi_write(dut, CTRL, 0x0, prot=PROT_NONSEC)
-    assert resp == RESP_DECERR, "non-secure 写 CTRL 没有被拒"
+    assert resp == RESP_REFUSED, "non-secure 写 CTRL 没有被拒"
 
     # 而且写没有落笔：ENABLE 仍应为高
     st, _ = await axi_read(dut, STATUS)
     assert st & ST_ENABLED, "non-secure 的写虽然报了 DECERR，但把 ENABLE 关掉了"
-    dut._log.info("non-secure 的读写全部 DECERR，且写没有产生副作用")
+    # 违规计数：RAZ/WI 之后总线上不留痕，这个计数器是唯一的证据，
+    # 而且它自己也只有 secure 读得到 —— 用 secure 读它。
+    viol, resp = await axi_read(dut, VIOL)
+    assert resp == RESP_OKAY, "secure 读 VIOL 应当正常"
+    v_rd, v_wr = viol >> 16, viol & 0xFFFF
+    assert v_rd == 4, f"4 笔被拒的读应当记 4，记了 {v_rd}"
+    assert v_wr == 1, f"1 笔被拒的写应当记 1，记了 {v_wr}"
+    dut._log.info(f"non-secure 的读写全部被拒（读回 0、写无副作用），"
+                  f"违规计数 读{v_rd}/写{v_wr}")
 
 
 @cocotb.test()
@@ -260,8 +288,9 @@ async def test_refused_read_does_not_pop_fifo(dut):
     before, _ = await axi_read(dut, WORDS)
 
     for _ in range(16):
-        _, resp = await axi_read(dut, RDATA, prot=PROT_NONSEC)
-        assert resp == RESP_DECERR
+        data, resp = await axi_read(dut, RDATA, prot=PROT_NONSEC)
+        assert resp == RESP_REFUSED
+        assert data == 0, f"被拒的读回了随机数 0x{data:08x}"
 
     after, _ = await axi_read(dut, WORDS)
     assert after == before, (

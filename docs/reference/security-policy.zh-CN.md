@@ -17,7 +17,7 @@
 | 目标安全等级 | 硬件边界已存在并生效；要主张 3 级还需物理防拆响应、设备绑定的密钥派生根与算法证书——见 §10 |
 | 形态 | XCZU3EG（AXU3EGB 板）上的 FPGA bitstream，由跑 Linux 的 Cortex-A53 经 AXI4 驱动；主机侧是共享库（`pqchsm-pkcs11`）加守护进程与命令行工具 |
 | 密码边界 | 可编程逻辑：ML-KEM 512/768/1024、AES-128/256、SM4、SM3、环形振荡器 TRNG、密钥仓，以及把它们围起来的按 AxPROT 门控的 AXI 防火墙 |
-| 边界如何生效 | `axi4lite_firewall` 对 `SECURE_ONLY=1` 的从机拒绝任何 `AxPROT[1]=1` 的事务（DECERR）。已在真硅上双向证明——见下方证据 |
+| 边界如何生效 | `axi4lite_firewall` 对 `SECURE_ONLY=1` 的从机拒绝任何 `AxPROT[1]=1` 的事务：读回 0、写被丢弃、不产生总线错误（RAZ/WI）。已在真硅上双向证明——见下方证据 |
 | 已测试的运行环境 | XCZU3EG（`xazu3eg-sfvc784-1-i`）@75 MHz，Cortex-A53 上 Linux 5.4；主机侧工具在 macOS arm64 与 Debian aarch64（GCC 12） |
 
 **边界生效的证据。** 板上实测，同一次运行、同一份 bitstream、同一个地址：
@@ -25,7 +25,7 @@
 | | `0x8004_0000`（`SECURE_ONLY=1`） | `0x8003_0000`（`SECURE_ONLY=0`） |
 |---|---|---|
 | 安全世界 EL3（`AxPROT[1]=0`） | 读到 `0x00010000` | 读到 `0x00010000` |
-| 普通世界 EL1-NS（`AxPROT[1]=1`） | **被拒 —— SIGBUS / DECERR** | 读到 `0x00010000` |
+| 普通世界 EL1-NS（`AxPROT[1]=1`） | **被拒**（日志记为 DECERR/SIGBUS；当前 RAZ/WI 位流以读回 `0` 的方式拒绝） | 读到 `0x00010000` |
 
 右边一列是对照：同一个普通世界能成功读到未设门控的核，所以左边那格的拒绝来自
 门控，而不是地址不可达。安全世界那一侧是一个最小的 EL3 负载——给 BL31 加的一个

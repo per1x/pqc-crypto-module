@@ -24,7 +24,7 @@ ARM 核上的 Linux 只是发命令的那一侧。
 | **安全边界** | AXI 防火墙按 `AxPROT[1]` 门控，已在板上双向证明：安全世界读得到 `SECURE_ONLY=1` 的核，普通世界在总线上被拒 |
 | **标准前端** | SDF 风格（GM/T 0018）C 库与 PKCS#11 v3.2 模块，应用永远不必直接面对寄存器 |
 
-占用**半块器件**：35,611 LUT（50.5 %）、140 DSP、15.5 BRAM，
+占用**半块器件**：35,659 LUT（50.5 %）、140 DSP、15.5 BRAM，
 75 MHz 下 WNS +3.504 ns。
 
 ## 架构
@@ -69,7 +69,7 @@ cd pqc-crypto-module
 python3 -m venv .venv-rtl && ./.venv-rtl/bin/pip install cocotb
 brew install icarus-verilog verilator      # or your distro's packages
 
-./tools/rtl_sim.sh          # 197 cocotb tests against the RTL
+./tools/rtl_sim.sh          # 200 cocotb tests against the RTL
 ./tools/rtl_lint.sh         # Verilator -Wall + Icarus, 70 modules, zero warnings
 ./tools/rtl_synth_check.sh  # Yosys synthesisability
 ```
@@ -125,11 +125,11 @@ SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 此后不可读出      
 | ML-KEM 512/768/1024 对照 NIST ACVP，真硅上 | 20 / 20 逐字节一致 |
 | 板上自检（对称、SM、边界、AxPROT、TRNG） | 24 / 24 |
 | 密钥仓反证——两个从机各扫 256 字节 | 密钥的字出现 **0** 次；密文正确 |
-| AxPROT 门控，双向 | EL3 读到 `SECURE_ONLY=1`；EL1-NS 被拒（DECERR）；同一个 EL1-NS 读得到 `SECURE_ONLY=0` |
+| AxPROT 门控，双向（测于 RAZ/WI 改动之前，当时记为 DECERR） | EL3 读 `SECURE_ONLY=1` 得到 `0x0001_0000`；EL1-NS 读同一地址被拒；同一个 EL1-NS 能读到 `SECURE_ONLY=0` 的核 |
 | TRNG 最小熵，1,048,576 个调节前样本 | H = 0.871234 bit/sample → RCT 47、APT 672 |
 | Decaps 时序，有效密文 vs 隐式拒绝，各 200 次 | 中位数差异 0.000 % |
 | ML-KEM-512 吞吐 @ 75 MHz | 924 / 1339 / 1018 ops/s（KeyGen / Encaps / Decaps） |
-| cocotb 回归 · Verilator lint · Yosys | 197 项测试 · 70 个模块，0 条告警 · 全部可综合 |
+| cocotb 回归 · Verilator lint · Yosys | 200 项测试 · 70 个模块，0 条告警 · 全部可综合 |
 
 方法与原始日志见 [docs/TESTING.zh-CN.md](docs/TESTING.zh-CN.md)；板上抓取的输出
 原样保存在 [board/logs/](board/logs/) 下。

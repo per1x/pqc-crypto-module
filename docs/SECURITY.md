@@ -24,11 +24,11 @@ metadata, wrapping, PKCS#11 — runs *outside* it.
 Three mechanisms make up the boundary:
 
 1. **`axi4lite_firewall`** gates every slave on `AxPROT[1]`. A slave built with
-   `SECURE_ONLY=1` accepts only secure transactions and answers everything else
-   with DECERR.
+   `SECURE_ONLY=1` accepts only secure transactions; everything else reads back
+   zero and has its writes discarded, with no bus error raised (RAZ/WI).
 2. **`axi4lite_xbar` decodes fully.** Aperture high bits, slot number, in-slot
    offset high bits and 32-bit alignment must all hold, or the transaction is
-   refused in place. There are no mirror addresses.
+   refused in place — same RAZ/WI response. There are no mirror addresses.
 3. **`key_vault` has no read path.** Keys go in over the bus and come out only
    on private `use_key` wires into the cipher cores. This is a structural
    property of the RTL, not a permission check.
@@ -83,9 +83,24 @@ All on the real device.
 
 **The gate works, in both directions.** The secure world (EL3, `AxPROT[1] = 0`)
 reads a `SECURE_ONLY=1` core and gets `VERSION = 0x00010000`. The normal world
-(EL1-NS, `AxPROT[1] = 1`) is refused at the bus with DECERR/SIGBUS — while that
-*same* normal world reads a `SECURE_ONLY=0` core successfully. Both halves are
-needed: the second is what rules out "the address was simply unreachable".
+(EL1-NS, `AxPROT[1] = 1`) is refused at the same address — while that *same*
+normal world reads a `SECURE_ONLY=0` core successfully. Both halves are needed:
+the second is what rules out "the address was simply unreachable".
+
+> **How refusal is observed changed after this measurement was taken.** The run
+> above predates the RAZ/WI change and recorded DECERR/SIGBUS. The firewall now
+> answers a refusal with data `0` and no bus error, so on the current bitstream
+> the same experiment reads **0** where `0x00010000` lives.
+>
+> The new criterion is the stronger of the two, which is why it was adopted
+> rather than merely tolerated: DECERR cannot distinguish "the gate is closed"
+> from "there is nothing at this address at all", since an empty address also
+> answers DECERR. Reading `0` where a nonzero constant lives proves **both**
+> halves at once — the transaction reached that slave, and the value was
+> withheld.
+>
+> **Re-running the two-directional measurement on the RAZ/WI bitstream is
+> pending.** Simulation covers the new observable.
 
 > **Which bitstream this evidence comes from, stated precisely.** The
 > two-directional proof needs a `SECURE_ONLY=0` core to serve as the control, so

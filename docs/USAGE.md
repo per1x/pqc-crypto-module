@@ -2,30 +2,31 @@
 
 # Usage
 
-> ### ⚠️ Read this before writing any register
+> ### ⚠️ A refused access reads back 0 — it does not raise an error
 >
 > **The default bitstream (`zu3eg_hsm.bit`) gives the normal world *zero*
 > reachability.** All four functional slaves are built with `SECURE_ONLY=1`, so
 > every access from Linux — which always carries `AxPROT[1]=1` — is refused at
 > the bus. Only the secure world (EL3, via the BL31 SiP) can drive them.
 >
-> **Never issue a write you expect to be refused.** A refused read returns
-> DECERR synchronously and Linux turns it into `SIGBUS`, which a program can
-> catch. A refused *write* is different: AXI writes are posted, so the error
-> comes back later as an **SError**, which belongs to no instruction and which
-> the kernel can only answer with a panic. **The cost is a power cycle**, and on
-> this board a power cycle clears `CSU_MULTI_BOOT`.
+> Refusal is **RAZ/WI**: the read returns 0, the write is discarded, the
+> response is OKAY, and no bus error is raised. So:
 >
-> Programs that write registers (`hsm_hwtest`, `hsm_kem3`) must therefore run
-> against the **development** bitstream, not the default one:
+> * **`VERSION` reading `0` is how you tell.** It is `0x0001_0000` on every
+>   core, so a zero means refused (or no bitstream loaded). Do not look for an
+>   error code — there isn't one.
+> * **Nothing you write from user space can take the board down.** This is
+>   deliberate, and established in simulation; the on-silicon check
+>   (`hsm_nocrash`) is written but **not yet run**. Earlier
+>   revisions answered DECERR, and because AXI writes are posted that came back
+>   as an **SError** the kernel could only panic — one wrong address cost a power
+>   cycle. That is gone.
+> * **A mistyped address is now silent.** The compensation is the violation
+>   counters, which only the secure world can read.
 >
-> ```
-> PQC_DEV_OPEN=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
-> ```
->
-> That build sets `SECURE_ONLY=0` on the functional slaves and is named
-> `zu3eg_hsm_dev.bit` so the two can never be confused. It is a debug form, not
-> the shipping one.
+> `PQC_DEV_OPEN=1` still builds `zu3eg_hsm_dev.bit` with `SECURE_ONLY=0` so the
+> normal world can drive the cores directly for debugging — but it is no longer
+> required merely to write safely.
 
 - [Simulation and static checks](#simulation-and-static-checks)
 - [Host software](#host-software)
@@ -156,7 +157,9 @@ compute anything itself. Every correct value it prints came out of the FPGA.
 ```
 
 In the same run, a counter-proof program reads the five cores directly from the
-normal world and gets **6/6 DECERR**. The application works; bypassing the
+normal world and gets **6/6 refused**. (Measured before the RAZ/WI change, so
+the log records DECERR; on the current bitstream the same refusals read back 0.)
+The application works; bypassing the
 service layer to touch the hardware does not.
 
 ## PKCS#11 demos

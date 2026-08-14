@@ -25,6 +25,21 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 RESP_OKAY, RESP_DECERR = 0, 3
+# ============================================================================
+# 【"被拒"在总线上长什么样：RAZ/WI，不是 DECERR】
+# ============================================================================
+# 防火墙拒绝一笔访问时**读回 0、写丢弃，响应仍是 OKAY** —— 不产生总线错误。
+# 改动的理由在 hardware/rtl/bus/axi4lite_firewall.v 的文件头：DECERR 的
+# posted 写会以 SError 回来，aarch64 的内核只能 panic，于是"写错一个地址"
+# 的代价是一次断电。
+#
+# 用例里一律写 RESP_REFUSED，不写具体码值 —— **"被拒长什么样"是 RTL 的策略，
+# 不该抄进每一条断言**。抄进去的后果这次已经见过了：策略一改，几十条断言
+# 全得跟着动，而它们本来一条都不该动（它们要证的是"被拒了"，不是"回了 3"）。
+#
+# ⚠️ 读的断言必须**同时**查 rdata == 0。RAZ/WI 之后响应码不再区分放行与拒绝，
+#    数据才是。只查 resp 的读用例现在等于什么都没查。
+RESP_REFUSED = RESP_OKAY
 PROT_SECURE, PROT_NONSEC = 0b000, 0b010
 
 
@@ -197,9 +212,9 @@ async def test_nonsecure_refused(dut):
 
     dut.s_awprot.value = PROT_NONSEC
     dut.s_arprot.value = PROT_NONSEC
-    assert await write_with_tamper_at(dut, 0x10, 1, None) == RESP_DECERR
-    resp, _ = await read_with_tamper_at(dut, 0x10, None)
-    assert resp == RESP_DECERR
+    assert await write_with_tamper_at(dut, 0x10, 1, None) == RESP_REFUSED
+    resp, data = await read_with_tamper_at(dut, 0x10, None)
+    assert resp == RESP_REFUSED and data == 0
     assert rec.touched() == 0, f"non-secure 到了下游：{rec.writes} {rec.reads}"
 
     dut._log.info("non-secure 被拒，下游零次被访问")
@@ -209,7 +224,7 @@ async def test_nonsecure_refused(dut):
 async def test_tamper_one_cycle_early_write(dut):
     """对照档：tamper 早一拍 —— 旧 RTL 也拒，用来隔离变量"""
     rec = await setup(dut)
-    assert await write_with_tamper_at(dut, 0x10, 0x1234, -1) == RESP_DECERR
+    assert await write_with_tamper_at(dut, 0x10, 0x1234, -1) == RESP_REFUSED
     assert rec.touched() == 0, f"tamper 早一拍还是到了下游：{rec.writes}"
     dut._log.info("tamper 早一拍：拒，且下游没被碰到")
 
@@ -225,7 +240,7 @@ async def test_tamper_same_cycle_write(dut):
     assert rec.touched() == 0, (
         f"tamper 同拍的写**穿过了防火墙**，下游收到 {rec.writes} —— "
         "这就是那一拍宽的 TOCTOU 窗口")
-    assert resp == RESP_DECERR, f"tamper 同拍的写回了 {resp}，应当 DECERR"
+    assert resp == RESP_REFUSED, f"tamper 同拍的写回了 {resp}，应当 DECERR"
     dut._log.info("tamper 同拍的写：拒，下游零次被访问")
 
 
@@ -240,7 +255,7 @@ async def test_tamper_same_cycle_read(dut):
     assert rec.touched() == 0, (
         f"tamper 同拍的读**穿过了防火墙**，下游被读了 {rec.reads} —— "
         "被保护的寄存器在这一拍里是可读的")
-    assert resp == RESP_DECERR, f"tamper 同拍的读回了 {resp}，应当 DECERR"
+    assert resp == RESP_REFUSED, f"tamper 同拍的读回了 {resp}，应当 DECERR"
     assert data == 0, f"tamper 同拍的读还带回了数据 0x{data:08x}"
     dut._log.info("tamper 同拍的读：拒，下游零次被访问，也没带回数据")
 
@@ -255,9 +270,9 @@ async def test_tamper_latches_forever(dut):
     assert int(dut.tamper_latched.value) == 1, "tamper 没被锁存"
 
     for _ in range(4):
-        assert await write_with_tamper_at(dut, 0x20, 0x2, None) == RESP_DECERR
+        assert await write_with_tamper_at(dut, 0x20, 0x2, None) == RESP_REFUSED
         resp, _ = await read_with_tamper_at(dut, 0x20, None)
-        assert resp == RESP_DECERR
+        assert resp == RESP_REFUSED
     assert rec.touched() == 0, f"锁存之后还有事务到了下游：{rec.writes} {rec.reads}"
 
     dut._log.info("tamper 锁存之后，后续读写全部被拒")

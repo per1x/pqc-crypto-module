@@ -35,6 +35,21 @@ ST_READY, ST_TAMPER, ST_DENY = 1 << 0, 1 << 1, 1 << 2
 
 PROT_SECURE, PROT_NONSEC = 0b000, 0b010
 RESP_OKAY, RESP_DECERR = 0, 3
+# ============================================================================
+# 【"被拒"在总线上长什么样：RAZ/WI，不是 DECERR】
+# ============================================================================
+# 防火墙拒绝一笔访问时**读回 0、写丢弃，响应仍是 OKAY** —— 不产生总线错误。
+# 改动的理由在 hardware/rtl/bus/axi4lite_firewall.v 的文件头：DECERR 的
+# posted 写会以 SError 回来，aarch64 的内核只能 panic，于是"写错一个地址"
+# 的代价是一次断电。
+#
+# 用例里一律写 RESP_REFUSED，不写具体码值 —— **"被拒长什么样"是 RTL 的策略，
+# 不该抄进每一条断言**。抄进去的后果这次已经见过了：策略一改，几十条断言
+# 全得跟着动，而它们本来一条都不该动（它们要证的是"被拒了"，不是"回了 3"）。
+#
+# ⚠️ 读的断言必须**同时**查 rdata == 0。RAZ/WI 之后响应码不再区分放行与拒绝，
+#    数据才是。只查 resp 的读用例现在等于什么都没查。
+RESP_REFUSED = RESP_OKAY
 
 WORDS = 8
 
@@ -238,17 +253,18 @@ async def test_tamper_wipes_and_latches(dut):
     assert int(dut.vault_tampered.value) == 1, "tamper 该被锁存"
 
     # tamper 之后防火墙一律拒绝 —— 连 STATUS 都读不了，这是 fail-closed
-    _, resp = await axi_read(dut, STATUS)
-    assert resp == RESP_DECERR, "tamper 之后读也该被防火墙拦下"
+    data, resp = await axi_read(dut, STATUS)
+    assert resp == RESP_REFUSED and data == 0, \
+        f"tamper 之后读也该被防火墙拦下，却拿到 0x{data:08x}"
 
     # 软件想装新密钥：被拒
-    assert await axi_write(dut, SLOT_SEL, 1) == RESP_DECERR
-    assert await axi_write(dut, KEY_IN, 0xDEADBEEF) == RESP_DECERR
+    assert await axi_write(dut, SLOT_SEL, 1) == RESP_REFUSED
+    assert await axi_write(dut, KEY_IN, 0xDEADBEEF) == RESP_REFUSED
     key, valid = await read_use_key(dut, 1)
     assert valid == 0 and key == 0, "tamper 之后仍然装进去了"
 
     # 软件想清掉 tamper：没有这个路径。CTRL.ZEROIZE 也被拦下。
-    assert await axi_write(dut, CTRL, CTRL_ZEROIZE) == RESP_DECERR
+    assert await axi_write(dut, CTRL, CTRL_ZEROIZE) == RESP_REFUSED
     assert int(dut.vault_tampered.value) == 1, "tamper 被软件清掉了"
 
     # 只有复位能恢复
@@ -276,9 +292,9 @@ async def test_nonsecure_blocked_without_side_effects(dut):
     zc_before, _ = await axi_read(dut, ZERO_CNT)
 
     for _ in range(4):
-        assert await axi_write(dut, CTRL, CTRL_ZEROIZE, PROT_NONSEC) == RESP_DECERR
-        assert await axi_write(dut, SLOT_CTRL, SC_ERASE, PROT_NONSEC) == RESP_DECERR
-        assert await axi_write(dut, SLOT_SEL, 7, PROT_NONSEC) == RESP_DECERR
+        assert await axi_write(dut, CTRL, CTRL_ZEROIZE, PROT_NONSEC) == RESP_REFUSED
+        assert await axi_write(dut, SLOT_CTRL, SC_ERASE, PROT_NONSEC) == RESP_REFUSED
+        assert await axi_write(dut, SLOT_SEL, 7, PROT_NONSEC) == RESP_REFUSED
 
     key, valid = await read_use_key(dut, 2)
     assert valid == 1 and as_words(key) == words, "non-secure 的写把密钥擦了"
@@ -291,7 +307,7 @@ async def test_nonsecure_blocked_without_side_effects(dut):
 
     # non-secure 的读同样 DECERR 且返回 0
     data, resp = await axi_read(dut, VALID_MAP, PROT_NONSEC)
-    assert resp == RESP_DECERR and data == 0, f"non-secure 读到了 0x{data:08x}"
+    assert resp == RESP_REFUSED and data == 0, f"non-secure 读到了 0x{data:08x}"
 
     # 违规留痕：12 次写 + 1 次读
     vc, _ = await axi_read(dut, VIOL_CNT)
@@ -368,7 +384,8 @@ async def test_address_window(dut):
     vc0, _ = await axi_read(dut, VIOL_CNT)
     for addr in (0x40, 0x80, 0xC0, 0xFC):
         data, resp = await axi_read(dut, addr)
-        assert resp == RESP_DECERR, f"越界地址 0x{addr:02x} 没被拦"
+        assert resp == RESP_REFUSED, f"越界地址 0x{addr:02x} 没被拦"
+        assert data == 0, f"越界地址 0x{addr:02x} 回了 0x{data:08x}，应当是 0"
         assert data == 0, f"越界读返回了 0x{data:08x}"
     vc1, _ = await axi_read(dut, VIOL_CNT)
     assert (vc1 >> 16) - (vc0 >> 16) == 4, "越界读没被计数"

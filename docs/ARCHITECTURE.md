@@ -71,7 +71,8 @@ Base `0x8000_0000`, slot selected by `addr[18:16]`, 64 KB per slot.
 **The decode is one-to-one: a register has exactly one address that reaches
 it.** `axi4lite_xbar` checks the aperture high bits, the slot number, the high
 bits of the in-slot offset and 32-bit alignment; all four must hold or the
-transaction is refused **in place** with DECERR and the slave sees nothing.
+transaction is refused **in place** — read returns 0, write is discarded — and
+the slave sees nothing.
 
 That strictness is not cosmetic. No PS-side protection unit covers this window —
 UG1085 v2.5 puts `0x8000_0000` outside XPPU's aperture table and off the
@@ -79,17 +80,28 @@ FPD_XMPU path — so the decode plus the firewall in the PL is the *only*
 enforcement layer on this route. Mirror addresses would be thousands of
 equivalent entrances to the one defence, each returning OKAY and leaving no
 trace. `test_xbar` sweeps a whole 64 KB slot word by word: exactly the 64
-addresses `0x00`–`0xFC` are reachable, the other 16,320 all DECERR.
+addresses `0x00`–`0xFC` are reachable, the other 16,320 all read back 0.
 
-**Why the functional slaves are `SECURE_ONLY=0`.** Linux runs in the normal
-world, so every transaction it issues through `/dev/mem` carries
-`AxPROT[1] = 1`. Setting all four functional slaves to 1 would leave Linux
-unable to read a single register — the build could then prove "everything is
-refused" but nothing about whether the algorithms are correct. So the functional
-cores are open, and a canary instance differing in **only** that one parameter
-sits at slot 4. Every time it is refused, that is the AxPROT gate demonstrably
-working against a real non-secure master. A production build sets all four to 1
-and is driven from the secure world.
+**All four functional slaves are `SECURE_ONLY=1`, and how that came about.**
+Linux runs in the normal world, so every transaction it issues through
+`/dev/mem` carries `AxPROT[1] = 1`. With all four set to 1, Linux cannot read a
+single register of the crypto cores.
+
+The first build deliberately did *not* do that. It set the four functional
+slaves to `SECURE_ONLY=0` so Linux could drive the KATs directly, and put a
+canary instance — differing in **only** that one parameter — at slot 4 to
+demonstrate the gate. That build proved two real things (the algorithms are
+correct on silicon; the AxPROT gate works against a genuine non-secure master)
+but left a gap: **the thing shown to be protected was the empty canary, not the
+crypto cores themselves.**
+
+The current build closes it. All four are `SECURE_ONLY=1`, and the whole KAT
+suite is driven from the **secure world** instead — a patched BL31 exposes a
+restricted secure-MMIO SiP whose whitelist covers exactly these cores' legal
+register offsets (`boot/atf/patch_atf_secmmio.py`), and the normal-world test
+program routes every core access through it via SMC. The canary stays at slot 4
+as a same-parameter control. `PQC_DEV_OPEN=1` still produces the old open build
+(`zu3eg_hsm_dev.bit`) for debugging.
 
 ## Clocking and reset
 
@@ -163,13 +175,26 @@ can retrieve one. Related rules:
   that never happened.
 
 `axi4lite_firewall` gates each slave. With `SECURE_ONLY=1` it requires
-`AxPROT[1] == 0` and otherwise returns DECERR. Two details matter:
+`AxPROT[1] == 0`; anything else reads back 0 and has its write discarded, with
+no bus error (RAZ/WI). Two details matter:
 
 - **Refused reads never pop the FIFO.** Otherwise a non-secure read that gets no
   data could still consume random words — a way for the normal world to drain
-  the entropy pool.
-- **DECERR, not OKAY-with-zero.** Returning zeros silently would let the normal
-  world believe it had read something. Refusal has to be visible.
+  the entropy pool. This matters *more* under RAZ/WI, not less: the response
+  code no longer distinguishes allowed from refused, so "the FIFO did not move"
+  is the observable that proves the transaction went nowhere.
+- **RAZ/WI, not DECERR — and this bullet used to say the opposite.** The old
+  rule was *"DECERR, not OKAY-with-zero: refusal has to be visible."* It was
+  overruled by a worse failure: a refused **write** is posted, so its DECERR
+  comes back as an SError, and the kernel can only panic — one mistyped address,
+  one power cycle. The board took that hit once from the kernel's own GPIO
+  probe, not from an attacker.
+
+  Refusal is still visible, just not through the response code: every `VERSION`
+  is a nonzero constant, so reading `0` *is* the signal, and the violation
+  counters (secure-world-readable only) keep the audit trail. What is genuinely
+  given up is diagnosability of a mistyped address — traded for the property
+  that **no user-space program can take the board down**.
 
 ## Entropy source
 

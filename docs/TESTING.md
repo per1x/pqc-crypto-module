@@ -18,7 +18,7 @@ repository.
 
 | Check | Result | Where |
 |---|---|---|
-| cocotb RTL regression | 197 tests, 0 failures | `./tools/rtl_sim.sh` |
+| cocotb RTL regression | 200 tests, 0 failures | `./tools/rtl_sim.sh` |
 | Verilator `-Wall` + Icarus lint | 70 modules, 0 warnings | `./tools/rtl_lint.sh` |
 | Yosys synthesisability | 68 modules, all synthesise | `./tools/rtl_synth_check.sh` |
 | ML-KEM 512/768/1024 vs NIST ACVP, on silicon | 20 / 20 byte-exact | `board/logs/RESULT_seckem3.txt` |
@@ -29,11 +29,12 @@ repository.
 | TRNG min-entropy | H = 0.871234 bit/sample | `tools/sp800_90b.py` |
 | SP 800-90B restart test | H_restart = 0.745427, pass | `board/logs/RESULT_restart.txt` |
 | Decaps timing, valid vs implicit-reject | median difference 0.000 % | `board/logs/RESULT_seckem3.txt` |
-| End-to-end through the SDF interface | pass, plus 6/6 DECERR counter-proof | `board/logs/RESULT_service.txt` |
+| End-to-end through the SDF interface | pass, plus 6/6 counter-proof (measured pre-RAZ/WI, so recorded as DECERR) | `board/logs/RESULT_service.txt` |
 | `ctest` (host software) | 46 / 46, 4109 assertions | `ctest --test-dir build` |
 | ASan + UBSan / TSan / `leaks` | clean · 0 races · 0 leaks | `docs/USAGE.md` |
 | libFuzzer | 1.38 M executions, no crashes | `./tools/fuzz.sh` |
 | aarch64 Linux (GCC 12) | clean | `./tools/aarch64_test.sh` |
+| **RAZ/WI on silicon** | **not yet run** — bitstream built and simulated, board unreachable (SSH key lost to a power cycle) | `board/src/hsm_nocrash.c`, `hsm_secneg.c` |
 
 ## Principles
 
@@ -68,7 +69,7 @@ key was never loaded.
 
 ## RTL verification
 
-197 cocotb tests across 26 top levels, run under Icarus Verilog:
+200 cocotb tests across 26 top levels, run under Icarus Verilog:
 
 | Group | Tests |
 |---|---|
@@ -130,7 +131,14 @@ decode, the erase machine and the TRNG sampling FIFO:
 
 - *Address aliasing*, 13/13 — five positive reads succeed; eight mirror
   addresses (+0x110, +0x100, +0x1100, +0xFF00, +0x8000, outside the aperture,
-  slot 6, slot 7) all DECERR.
+  slot 6, slot 7) are all refused.
+
+  > **This measurement predates the RAZ/WI change**, so what it actually
+  > recorded was DECERR/SIGBUS on those eight. The refusal itself is what the
+  > test asserts and that is unchanged; only the observable differs (they now
+  > read back 0). **Re-running it on the RAZ/WI bitstream is pending** — the
+  > board's SSH key did not survive the last power cycle. Simulation covers the
+  > new observable (`test_xbar`, 8/8, including the exhaustive 64 KB sweep).
 - *Zeroize*, 4/4 — `STATUS.WIPING` asserts, holds 112.5 µs against a theoretical
   109.2 µs (8192 cycles @ 75 MHz; the difference is polling overhead), and
   afterwards `OUT_LEN = IN_PTR = 0` with the same input reproducing 2432
@@ -160,12 +168,19 @@ sets, matching the k = 2/3/4 workload — which is the part that means something
 
 | | |
 |---|---|
-| CLB LUTs | 35,611 / 70,560 (50.47 %) |
-| Registers | 25,916 (18.36 %) |
+| CLB LUTs | 35,659 / 70,560 (50.54 %) |
+| Registers | 25,977 (18.41 %) |
 | Block RAM | 15.5 / 216 (7.18 %) |
 | DSP | 140 / 360 (38.89 %) |
 | External pins | 1 (fan, `AA11`) |
-| WNS / effective hold margin | +3.504 ns / +0.110 ns @ 75 MHz |
+| WNS / effective hold margin | +3.325 ns / +0.110 ns @ 75 MHz |
+
+Delta from the RAZ/WI change: **+48 LUT, +61 registers, no change to DSP or
+BRAM.** That is the four new saturating 16-bit counters (decoder read/write,
+TRNG read/write) plus their register read paths — the RAZ/WI response itself is
+*cheaper* than DECERR was, since it replaces a response-code multiplexer with a
+constant. Effective hold margin is unchanged at +0.110 ns; setup fell from
++3.504 to +3.325 ns, still 3.3 ns of slack against a 13.3 ns period.
 
 The flow is deterministic on the build machine: lint cleanup (width fixes and
 dead-code removal) before and after produced bit-identical resource and timing
@@ -242,7 +257,7 @@ Sanitiser and platform runs: ASan + UBSan clean; ThreadSanitizer 0 races
 Nothing in this section needs the board.
 
 ```bash
-./tools/rtl_sim.sh                     # 197 cocotb tests
+./tools/rtl_sim.sh                     # 200 cocotb tests
 ./tools/rtl_lint.sh                    # Verilator -Wall + Icarus
 ./tools/rtl_synth_check.sh             # Yosys synthesisability
 python3 tools/sp800_90b.py --selftest  # reproduce the specification's worked examples

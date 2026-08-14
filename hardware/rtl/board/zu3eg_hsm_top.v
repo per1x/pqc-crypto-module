@@ -58,14 +58,32 @@
 //
 // 两条一起才是完整的命题：
 //   · **正向**：SECURE_ONLY=1 的全功能核，由安全世界端到端跑完整套 KAT；
-//   · **反向**：同一套地址从普通世界直接读，全部 DECERR。
-//
-// ⚠️ 反向只读、不写。普通世界写一个被拒的地址，DECERR 是 posted 的，
-//    在 aarch64 上以 SError 回来 —— 内核只能 panic。这条代价是一次断电。
-//    会写的旧程序（hsm_hwtest / hsm_kem3）**不能**对着这一版 bitstream 跑。
+//   · **反向**：同一套地址从普通世界直接读，**全部读回 0**（而各核真实的
+//     VERSION 都是非零常量）—— 见下面 RAZ/WI 那段，判据从 DECERR 改成了
+//     "读回 0"，且这一条更强：它同时证明路是通的、值是拿不到的。
 //
 // 槽 4 的金丝雀保留：它现在是"同参数下的同类项"，用来说明槽 0..3 的拒绝
 // 不是因为核坏了。风扇（槽 5）保持 0 —— 它不在密码边界内，也不该在。
+//
+// ============================================================================
+// 【RAZ/WI：被拒的访问不产生总线错误 —— 任何程序都崩不了这块板】
+// ============================================================================
+// 防火墙（axi4lite_firewall）和译码器（axi4lite_xbar）被拒时**读回 0、
+// 写丢弃、响应一律 OKAY**。两个文件的头部各有一段完整理由，这里只记结论
+// 和它改变了什么。
+//
+// 起因是 DECERR 的一个不对称：读的 DECERR 是同步中止，程序还接得住；
+// **写是 posted 的**，错误以 SError 回来，aarch64 的内核只能 panic。
+// 于是"写一个不该写的地址"的代价是一次断电 —— 而且触发它的不必是攻击者：
+// 实测过内核自己的 xgpio_of_probe 探测一个不存在的槽就打穿了。
+//
+// 三个连带的变化：
+//   ① 反向证明的判据从 "DECERR" 变成 "**读回 0**"（各核 VERSION 均非零），
+//      更强，理由见上面「反向」那条；
+//   ② 反向**读写都能做了** —— 会写的旧程序（hsm_hwtest / hsm_kem3）
+//      现在对着这一版 bitstream 跑也不会再把板子搞崩；
+//   ③ 走错地址变安静了，所以补了计数器：防火墙的在各从机 A_VIOL，
+//      译码器的在槽 3 的 0x2C。**两者都只有安全世界读得到。**
 //
 // ============================================================================
 // 【为什么没有 pqc_accel_axi】
@@ -308,6 +326,12 @@ module zu3eg_hsm_top (
     wire [NS-1:0]    x_bvalid, x_bready, x_arvalid, x_arready;
     wire [NS-1:0]    x_rvalid, x_rready;
 
+    // 译码违规计数：出口在槽 3（mlkem_axi，SECURE_ONLY=1）的 0x2C。
+    // 走 RAZ/WI 之后没命中不再报错，这是唯一留下的痕迹，所以出口必须
+    // 是安全世界才读得到的地方。打包成 {读, 写}，与各从机 A_VIOL 同一布局。
+    wire [15:0] xbar_viol_wr, xbar_viol_rd;
+    wire [31:0] xbar_viol_count = {xbar_viol_rd, xbar_viol_wr};
+
     axi4lite_xbar #(.AW(40), .NS(NS), .SEL_LSB(16)) u_xbar (
         .clk(clk_sys), .rst_n(rst_n),
         .s_awaddr(m_awaddr), .s_awprot(m_awprot),
@@ -327,7 +351,9 @@ module zu3eg_hsm_top (
         .m_araddr(x_araddr), .m_arprot(x_arprot),
         .m_arvalid(x_arvalid), .m_arready(x_arready),
         .m_rdata(x_rdata), .m_rresp(x_rresp),
-        .m_rvalid(x_rvalid), .m_rready(x_rready));
+        .m_rvalid(x_rvalid), .m_rready(x_rready),
+        .decode_viol_wr_count(xbar_viol_wr),
+        .decode_viol_rd_count(xbar_viol_rd));
 
     // ================= 槽 0：TRNG =================
     wire trng_ready, trng_alarm;
@@ -387,12 +413,17 @@ module zu3eg_hsm_top (
         .s_axi_arvalid(x_arvalid[3]), .s_axi_arready(x_arready[3]),
         .s_axi_rdata(x_rdata[32*3 +: 32]), .s_axi_rresp(x_rresp[2*3 +: 2]),
         .s_axi_rvalid(x_rvalid[3]), .s_axi_rready(x_rready[3]),
-        .tamper(tamper));
+        .tamper(tamper), .xbar_viol_count(xbar_viol_count));
 
     // ================= 槽 4：金丝雀（SECURE_ONLY=1）=================
     // 与槽 1 同一个模块，只差 SECURE_ONLY。板上的 Linux 是非安全 master，
-    // 对它的每一次读写都必须回 DECERR —— 那就是 AxPROT 门控在真硬件上
-    // 生效的直接证据。它的 use 口不接任何东西：这个实例只用来被拒绝。
+    // 它对这个槽的每一次访问都会被 AxPROT 门控拒掉。
+    //
+    // ⚠️ 判据在防火墙改 RAZ/WI 之后变了：**不再是 DECERR，而是"读回 0"**。
+    //    这一条其实更强 —— key_vault_axi 的 VERSION 是非零常量，所以
+    //    "读到 0" 同时证明了两件事：事务确实到达了本槽（路是通的），
+    //    以及它确实被拒了（拿到的不是真寄存器值）。DECERR 只能证明后者。
+    //    它的 use 口不接任何东西：这个实例只用来被拒绝。
     key_vault_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL), .SLOTS(8), .SLOT_BITS(3), .WORDS(8))
     u_canary (
         .clk(clk_sys), .rst_n(rst_n),
