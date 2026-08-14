@@ -148,6 +148,15 @@ if [ -x "$D/pqchsm_fpgad" ]; then
     if [ -S /tmp/pqchsm_fpgad.sock ]; then   # 见 service/wire.h
         say "daemon 已起"
         st "DAEMON=ok"
+        # TCP 前端是**可选**的：有口令文件才监听（fail-closed，见 wire.h）。
+        # 所以这里如实报"有没有在听"，而不是假定它一定在。
+        if busybox netstat -ltn 2>/dev/null | grep -q ":9797 "; then
+            st "TCP=9797 远程可用"
+        elif [ -f "$D/hsm_token" ]; then
+            st "TCP=fail 有口令文件但没监听上"
+        else
+            st "TCP=off 没有 hsm_token，只提供本机 socket"
+        fi
         st "READY=yes"
     else
         say "!!! daemon 起来了但没看到 socket"

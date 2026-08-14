@@ -1,7 +1,12 @@
 // sdf_demo —— 一个**独立的应用程序**，像调用真正的密码机一样调用它
 //
 //   编译：cc -o sdf_demo sdf_demo.c -L. -lsdfe
-//   运行：./sdf_demo
+//   本机运行：./sdf_demo
+//   远程运行：./sdf_demo <板子IP> <口令> [端口]
+//
+// **本机和远程走的是同一段代码**：只有开设备那一行不同，从第 [1] 步开始
+// 一个字都不变。这不是省事，这是要展示的性质本身 ——
+// 调用方不需要知道密码机在本机还是在网络另一头。
 //
 // 这个文件里**没有任何硬件细节**：没有寄存器、没有 /dev/mem、没有 SMC。
 // 它只认 sdfe.h 里那十来个函数。请求经
@@ -11,6 +16,7 @@
 // 这正是"能像密码机一样被调用"的意思：换一块密码机、换一套硬件，
 // 只要还实现这套接口，这个文件一个字都不用改。
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "sdfe.h"
@@ -27,7 +33,7 @@ static void hex(const char *tag, const unsigned char *p, unsigned n)
 	printf("\n");
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	SDFE_HANDLE dev, ses;
 	unsigned char rnd[32], ek[1600], ct[1600], ss1[32], ss2[32];
@@ -40,7 +46,16 @@ int main(void)
 
 	printf("=== 应用程序：通过 SDF 风格接口使用密码机 ===\n\n");
 
-	if ((rv = SDFE_OpenDevice(&dev)) != SDR_OK) {
+	if (argc >= 3) {
+		int port = argc >= 4 ? atoi(argv[3]) : 0;
+
+		printf("[连接] 远程 %s:%d\n", argv[1], port ? port : 9797);
+		rv = SDFE_OpenDeviceRemote(&dev, argv[1], port, argv[2]);
+	} else {
+		printf("[连接] 本机\n");
+		rv = SDFE_OpenDevice(&dev);
+	}
+	if (rv != SDR_OK) {
 		printf("打开设备失败：%s\n", SDFE_StrError(rv)); return 1;
 	}
 	if ((rv = SDFE_OpenSession(dev, &ses)) != SDR_OK) {

@@ -46,6 +46,7 @@ extern "C" {
 #define SDR_INARGERR      (SDR_BASE + 0x04)
 #define SDR_KEYNOTEXIST   (SDR_BASE + 0x05)
 #define SDR_HARDFAIL      (SDR_BASE + 0x06)
+#define SDR_AUTHFAIL      (SDR_BASE + 0x07)   /* 远程连接口令不对 */
 
 typedef void *SDFE_HANDLE;
 
@@ -61,6 +62,11 @@ typedef void *SDFE_HANDLE;
 
 /* ---- 设备与会话 ---- */
 int SDFE_OpenDevice(SDFE_HANDLE *phDev);
+/* 远程打开：连另一台机器上的密码机（内网演示）。
+ * token 是预共享口令，与板上 /media/sd-mmcblk1p2/hsm/hsm_token 一致。
+ * 之后所有 SDFE_* 调用与本机完全一样 —— 调用方不需要知道自己是远程的。 */
+int SDFE_OpenDeviceRemote(SDFE_HANDLE *phDev, const char *host,
+                          int port, const char *token);
 int SDFE_CloseDevice(SDFE_HANDLE hDev);
 int SDFE_OpenSession(SDFE_HANDLE hDev, SDFE_HANDLE *phSession);
 int SDFE_CloseSession(SDFE_HANDLE hSession);

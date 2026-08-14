@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -76,6 +79,63 @@ int SDFE_OpenDevice(SDFE_HANDLE *phDev)
 	if (connect(d->fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
 		close(d->fd); free(d);
 		return SDR_OPENDEVICE;
+	}
+	*phDev = d;
+	return SDR_OK;
+}
+
+/* 远程打开：连另一台机器上的密码机。
+ *
+ * 连上之后先发一条 OP_AUTH。**这一步失败就把 fd 关掉、返回错误** ——
+ * 不留一个"连上了但没认证"的半开句柄：那种句柄的后续调用会一条条被
+ * 服务端拒绝并断开，报出来的错是 COMMFAIL，把真正的原因（口令不对）
+ * 藏起来了。
+ *
+ * 除了这个函数，远程和本机对调用方**完全一样** —— 上层不需要知道
+ * 自己在跟谁说话，这正是把认证放在 OpenDevice 而不是每次调用里的理由。 */
+int SDFE_OpenDeviceRemote(SDFE_HANDLE *phDev, const char *host,
+			  int port, const char *token)
+{
+	struct dev *d;
+	struct sockaddr_in sa;
+	struct pqcs_req q;
+	struct pqcs_resp rp;
+	size_t tl;
+	int one = 1;
+
+	if (!phDev || !host || !token)
+		return SDR_INARGERR;
+	tl = strlen(token);
+	if (tl < 8 || tl > PQCS_TOKEN_MAX)
+		return SDR_INARGERR;
+
+	d = calloc(1, sizeof *d);
+	if (!d)
+		return SDR_UNKNOWERR;
+	d->fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (d->fd < 0) { free(d); return SDR_OPENDEVICE; }
+
+	memset(&sa, 0, sizeof sa);
+	sa.sin_family = AF_INET;
+	sa.sin_port = htons((uint16_t)(port ? port : PQCS_TCP_PORT));
+	if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
+		close(d->fd); free(d); return SDR_INARGERR;
+	}
+	if (connect(d->fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
+		close(d->fd); free(d); return SDR_OPENDEVICE;
+	}
+	setsockopt(d->fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+
+	q.magic = PQCS_MAGIC; q.op = OP_AUTH; q.a0 = 0; q.a1 = 0;
+	q.len = (uint32_t)tl;
+	if (rw_all(d->fd, &q, sizeof q, 1) ||
+	    rw_all(d->fd, (void *)token, tl, 1) ||
+	    rw_all(d->fd, &rp, sizeof rp, 0)) {
+		close(d->fd); free(d); return SDR_COMMFAIL;
+	}
+	if (rp.magic != PQCS_MAGIC || rp.status != SDR_OK) {
+		close(d->fd); free(d);
+		return rp.status == SDR_AUTHFAIL ? SDR_AUTHFAIL : SDR_COMMFAIL;
 	}
 	*phDev = d;
 	return SDR_OK;
@@ -213,6 +273,7 @@ const char *SDFE_StrError(int rv)
 	case SDR_INARGERR:    return "参数错误";
 	case SDR_KEYNOTEXIST: return "句柄不存在";
 	case SDR_HARDFAIL:    return "硬件运算失败";
+	case SDR_AUTHFAIL:    return "远程口令不对";
 	default:              return "未知错误";
 	}
 }

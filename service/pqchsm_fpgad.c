@@ -41,7 +41,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -51,11 +55,18 @@
 #include "wire.h"
 #include "../board/kmod/secmmio_uapi.h"
 
+/* ⚠️ 这几个码**走在线上**（pqcs_resp.status），所以它们其实是协议的一部分，
+ *    却在这里和 sdfe.h 里各存了一份 —— 正是 wire.h 文件头警告的那种双份定义。
+ *    对不上的症状是"客户端把成功当失败"，不是编译错误。
+ *    改动任何一个都必须两边一起改；新增的 SDR_AUTHFAIL 也是。
+ *    （彻底的做法是把它们挪进 wire.h，但那会让公开头文件 sdfe.h 依赖内部
+ *      线格式头，是另一次接口取舍，不在这批里做。） */
 #define SDR_OK          0x00000000u
 #define SDR_UNKNOWERR   0x01000001u
 #define SDR_COMMFAIL    0x01000003u
 #define SDR_INARGERR    0x01000004u
 #define SDR_KEYNOTEXIST 0x01000005u
+#define SDR_AUTHFAIL    0x01000007u
 #define SDR_HARDFAIL    0x01000006u
 
 #define PL_BASE   0x80000000UL
@@ -126,6 +137,26 @@ static void logf_(const char *fmt, ...)
 	va_end(ap);
 	fputc('\n', stderr);
 	fflush(stderr);
+}
+
+/* ---- 远程口令 ---- */
+static uint8_t token[PQCS_TOKEN_MAX + 1];
+static size_t  token_len;
+static int     tcp_srv = -1;
+
+/* 定长比较，不因第一个不同的字节在哪儿而提前返回。
+ *
+ * 口令是短的、可以被反复试的，而"第几个字节开始不对"这种时间差在局域网上
+ * 是测得出来的 —— 一次朴素的 memcmp 就把 128 字节的搜索空间降成 128×256 次
+ * 尝试。这一行的代价是零，不写才是需要解释的那个选择。 */
+static int ct_eq(const uint8_t *a, const uint8_t *b, size_t n)
+{
+	uint8_t d = 0;
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		d |= (uint8_t)(a[i] ^ b[i]);
+	return d == 0;
 }
 
 /* ---- 硬件访问：每一笔都经 EL3 ---- */
@@ -532,6 +563,31 @@ int main(int argc, char **argv)
 		logf_("自检通过：TRNG VERSION = 0x%08x，EL3 通路可用", ver);
 	}
 
+	/* ---- 远程口令：读得到就开 TCP，读不到就**不开** ----
+	 *
+	 * fail-closed 是有意的：一个能驱动密码机的端口裸奔在内网上，
+	 * 比"远程功能用不了"糟得多。所以没有口令文件时，daemon 照常
+	 * 提供本机 UNIX socket，只是不监听 TCP，并在日志里说清楚原因。 */
+	{
+		int tf = open(PQCS_TOKEN_PATH, O_RDONLY);
+
+		if (tf >= 0) {
+			ssize_t n = read(tf, token, sizeof token - 1);
+
+			close(tf);
+			while (n > 0 && (token[n-1] == '\n' || token[n-1] == '\r'))
+				n--;            /* 文件末尾的换行不算口令的一部分 */
+			if (n >= 8) {
+				token_len = (size_t)n;
+				token[n] = 0;
+			} else {
+				logf_("口令文件短于 8 字节，当作没有；不监听 TCP");
+			}
+		} else {
+			logf_("没有 %s，不监听 TCP（只提供本机 socket）", PQCS_TOKEN_PATH);
+		}
+	}
+
 	signal(SIGPIPE, SIG_IGN);
 	unlink(PQCS_SOCK_PATH);
 	srv = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -544,17 +600,77 @@ int main(int argc, char **argv)
 	}
 	chmod(PQCS_SOCK_PATH, 0600);
 	listen(srv, 8);
+
+	if (token_len) {
+		struct sockaddr_in in4;
+		int one = 1;
+
+		tcp_srv = socket(AF_INET, SOCK_STREAM, 0);
+		if (tcp_srv >= 0) {
+			setsockopt(tcp_srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+			memset(&in4, 0, sizeof in4);
+			in4.sin_family = AF_INET;
+			in4.sin_addr.s_addr = htonl(INADDR_ANY);
+			in4.sin_port = htons(PQCS_TCP_PORT);
+			if (bind(tcp_srv, (struct sockaddr *)&in4, sizeof in4) < 0 ||
+			    listen(tcp_srv, 8) < 0) {
+				logf_("TCP 监听失败：%s", strerror(errno));
+				close(tcp_srv); tcp_srv = -1;
+			} else {
+				logf_("TCP 监听 :%d（需要口令）", PQCS_TCP_PORT);
+			}
+		}
+	}
 	logf_("就绪：%s（每一笔核访问都经 EL3 发出）", PQCS_SOCK_PATH);
 
 	for (;;) {
-		int c = accept(srv, NULL, NULL);
+		int c, is_tcp = 0, authed = 0;
 		struct pqcs_req q;
 		struct pqcs_resp rp;
 		static uint8_t pay[PQCS_MAXPAY], out[PQCS_MAXPAY];
+		fd_set rfds;
+		int mx = srv;
 
+		/* 两个监听口一起等。**一次只处理一个连接** —— 硬件序列必须
+		 * 串行化（见文件头），并发在这里没有任何好处，只会带来交错。 */
+		FD_ZERO(&rfds);
+		FD_SET(srv, &rfds);
+		if (tcp_srv >= 0) {
+			FD_SET(tcp_srv, &rfds);
+			if (tcp_srv > mx) mx = tcp_srv;
+		}
+		if (select(mx + 1, &rfds, NULL, NULL, NULL) < 0)
+			continue;
+
+		if (tcp_srv >= 0 && FD_ISSET(tcp_srv, &rfds)) {
+			struct sockaddr_in peer;
+			socklen_t pl = sizeof peer;
+
+			c = accept(tcp_srv, (struct sockaddr *)&peer, &pl);
+			is_tcp = 1;
+			if (c >= 0)
+				logf_("远程连上 %s:%d", inet_ntoa(peer.sin_addr),
+				      ntohs(peer.sin_port));
+		} else {
+			c = accept(srv, NULL, NULL);
+			if (c >= 0)
+				logf_("本机客户端连上");
+		}
 		if (c < 0)
 			continue;
-		logf_("客户端连上");
+
+		if (is_tcp) {
+			/* 超时是**可用性**要求，不是安全要求：服务是单线程的，
+			 * 一个连上就不说话（或者网络中断）的远程客户端，会把
+			 * 后面所有人一起挡住。演示里这表现为"密码机忽然没反应了"。
+			 * 有了超时，最坏情况是卡 10 秒而不是永远。 */
+			struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+			int one = 1;
+
+			setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+			setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+			setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+		}
 		/* 一次一个连接、一条一条处理 —— 硬件序列必须串行化（见文件头） */
 		while (read_all(c, &q, sizeof q) == 0) {
 			if (q.magic != PQCS_MAGIC || q.len > PQCS_MAXPAY)
@@ -562,6 +678,31 @@ int main(int argc, char **argv)
 			if (q.len && read_all(c, pay, q.len))
 				break;
 			rp.magic = PQCS_MAGIC;
+
+			/* ---- TCP：先认口令，认过之前什么都不给做 ---- */
+			if (is_tcp && !authed) {
+				if (q.op != OP_AUTH) {
+					logf_("远程未认证就发 op=%u，断开", q.op);
+					break;
+				}
+				rp.len = 0;
+				if (q.len == token_len && q.len <= PQCS_MAXPAY &&
+				    ct_eq(pay, token, token_len)) {
+					authed = 1;
+					rp.status = SDR_OK;
+					logf_("远程认证通过");
+				} else {
+					rp.status = SDR_AUTHFAIL;
+					logf_("远程口令不对，断开");
+				}
+				write_all(c, &rp, sizeof rp);
+				if (!authed)
+					break;
+				continue;
+			}
+			/* 本机 socket 是 0600 的，能连上就已经是 root；
+			 * 对它要求口令没有增加任何东西，只会让本机工具更难用。 */
+
 			/* 每个请求独立判定硬件是否可用：清零 → 处理 → 检查。
 			 * 不这么做的话，一次失败会永久污染后面所有请求；
 			 * 而硬件确实可能恢复（比如运行时重新装载了位流）。 */
