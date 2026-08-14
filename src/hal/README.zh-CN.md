@@ -26,7 +26,7 @@ AXI 风格的寄存器表，含 `CTRL`、`STATUS`、`MODE`、`PARAM`、`IN_LEN`�
 | `verilator/ntt_sim.cpp` | 对 Verilated `ntt_core` 的 C 包装 |
 | `verilator/keccak_sim.cpp` | 对 Verilated `keccak_f1600` 的 C 包装 |
 | `accel_mmap.c` | 打真 PL 的 `/dev/mem` + `mmap` transport。物理基址未在构建时给出时返回 `NULL`。 |
-| `hwrng.c` | PL 熵源（`trng_axi`）驱动，照 `docs/trng-register-map.zh-CN.md` 的契约实现 |
+| `hwrng.c` | PL 熵源（`trng_axi`）驱动，照 `docs/REGISTERS.zh-CN.md` 的契约实现 |
 | `hwrng_stub.c` | `trng_axi` 寄存器语义的软件模型。FIFO 由 OpenSSL 填 —— 模拟的是**接口**，不是熵。 |
 | `hwrng_mmap.c` | PL 里 TRNG 的 `/dev/mem` + `mmap` transport |
 
@@ -78,4 +78,4 @@ Verilator transport 实现了 `NTT_FWD`、`NTT_INV` 与 `KECCAK_F1600`。其余�
 `tests/unit/test_accel.c` 对两个 NTT 方向以及整条 SHA3/SHAKE 路径断言这一点，并将
 后者与 OpenSSL 交叉比对。同样的要求也将适用于真实硬件 transport。
 
-本层如何嵌入模块整体，参见 [docs/architecture.zh-CN.md](../../docs/architecture.zh-CN.md)。
+本层如何嵌入模块整体，参见 [docs/ARCHITECTURE.zh-CN.md](../../docs/ARCHITECTURE.zh-CN.md)。

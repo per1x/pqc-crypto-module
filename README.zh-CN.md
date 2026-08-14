@@ -2,325 +2,209 @@
 
 # pqc-crypto-module
 
-后量子密码模块原型：密钥存储、槽位管理、备份与恢复、防篡改审计日志、PKCS#11 v3.2
-前端，以及一台跑在可编程逻辑里、**已在真硅上做出来并验证过**的硬件密码机
-（Xilinx XCZU3EG）。
+一台跑在 Xilinx Zynq UltraScale+ **XCZU3EG** 可编程逻辑里的后量子 + SM 系列
+**硬件密码模块原型**。密码核、噪声源、密钥仓与访问边界全部位于 FPGA 逻辑之中；
+ARM 核上的 Linux 只是发命令的那一侧。
 
-> **状态：研究原型。** 密码边界是**硬件**——可编程逻辑里一道按 AxPROT 门控的
-> AXI 防火墙——并且**在板上双向证明过**：安全世界（EL3）读得到 `SECURE_ONLY=1`
-> 的核，普通世界在总线上被拒，而同一个普通世界能成功读到 `SECURE_ONLY=0` 的核。
->
-> 主机软件（`src/`、`cli/`、`demo/`）是这道边界**之外**的控制面：槽位、会话、
-> keystore 文件、备份与恢复、PKCS#11 前端。什么跨过边界、什么不跨，在
-> [安全模型与局限](#安全模型与局限)里逐条说准——包括**目前仍然跨**的那些。
->
-> 这不是经过认证的模块，请勿用于保护真实资产。完整方法与原始日志见
-> [密码机原型-说明文档.md](docs/密码机原型-说明文档.md)（[PDF](docs/密码机原型-说明文档.pdf)）。
+本仓库里的每一个数字都来自**真实设备**，不是仿真。
 
-## 概述
+> **状态：研究原型。** 未认证、未加固、不可用于生产。见
+> [状态与局限](#状态与局限)——差距是列出来的，不是藏起来的。
 
-后量子算法已经标准化（FIPS 203 / 204），但真正决定一个密码模块成败的是它周边的
-机制——密钥如何存储、包裹、备份、吊销，以及如何暴露给应用。本项目围绕 ML-KEM 与
-ML-DSA 构建这套机制，并按真实设备的形态组织，使这部分软件今后可以整体迁移到
-Zynq 级 SoC 上，由可编程逻辑承载算法核。
+---
 
-这个目标带来两条贯穿全局的设计约束：
+## 能做什么
 
-- **一切经由句柄。** `include/pqchsm/` 中没有任何 API 返回私钥材料。密钥库、槽位
-  管理器与 PKCS#11 前端全部基于不透明句柄工作，因此今后收紧安全边界不会影响任何
-  调用方。
-- **硬件接缝从第一天起就存在。** 密码运算经过一层 vtable（`pqc_backend_t`），其下
-  是 AXI 风格的寄存器接口（`accel_transport_t`）。四种 transport 以完全相同的方式
-  实现该接口：软件桩、Verilator 仿真的 RTL 后端、经真实 AXI4-Lite 与 AXI4-Stream
-  事务驱动同一批 RTL 的后端，以及在有硬件之后的 `/dev/mem` + `mmap`。
-  在它们之间切换不会改变接缝之上的任何代码。
+| | |
+|---|---|
+| **后量子 KEM** | ML-KEM-512 / 768 / 1024（FIPS 203），KeyGen / Encaps / Decaps 全流程在 RTL 中实现——**在真硅上**与 NIST ACVP 向量逐字节一致 |
+| **对称与 SM 系列** | AES-128/256、SM4、SM3——对照 FIPS 197、GB/T 32907、GB/T 32905 校验 |
+| **真随机源** | 8 环形振荡器熵源，SP 800-90B 健康测试（RCT/APT），SHA-3 海绵调节。实测最小熵 **H = 0.871 bit/sample** |
+| **硬件密钥仓** | 对称密钥经总线进入，只能沿一条通往密码核的专用线离开。**RTL 中不存在读出路径** |
+| **安全边界** | AXI 防火墙按 `AxPROT[1]` 门控，已在板上双向证明：安全世界读得到 `SECURE_ONLY=1` 的核，普通世界在总线上被拒 |
+| **标准前端** | SDF 风格（GM/T 0018）C 库与 PKCS#11 v3.2 模块，应用永远不必直接面对寄存器 |
 
-运行路径上的每一次密码运算都由 [liboqs](https://github.com/open-quantum-safe/liboqs)
-或 OpenSSL 完成，没有自行实现的生产用原语。仓库中确实存在手写的 NTT 与 Keccak 实现
-（`src/hal/accel_stub.c`、`hardware/model/`），但它们仅作为 RTL 对拍的参照物，绝不
-用于保护密钥材料。正确性以 NIST ACVP 向量为准。
+占用**半块器件**：35,611 LUT（50.5 %）、140 DSP、15.5 BRAM，
+75 MHz 下 WNS +3.504 ns。
 
 ## 架构
 
 ```
-                PKCS#11 v3.2 共享库          (src/p11)
-                守护进程 / CLI / 管理工具    (cli)
- ──────────────────────────────────────────────────────────────────
-  槽位管理器      密钥库          备份 / 恢复          审计链
-  (src/slot)      (src/store)     (src/backup)         (src/audit)
-    状态机、      AES-256-GCM     GF(256) 上的         SHA3-256 哈希链
-    会话、        包裹、          Shamir M-of-N，      + ML-DSA 锚点
-    句柄、        原子写          设备绑定 KEK           签名
-    访问控制                      与可迁移 BEK
- ──────────────────────────────────────────────────────────────────
-                  pqc_backend_t vtable  (include/pqchsm/pqc.h)
-                             │
-             ┌───────────────┴────────────────┐
-       liboqs 后端                      寄存器接口后端
-       (src/crypto)                    (src/hal/pqc_accel.c)
-                                               │
-                             accel_transport_t (include/pqchsm/accel.h)
-                                               │
-            ┌──────────────┬───────────┴───────────┬──────────────┐
-          软件桩       Verilator RTL         AXI over RTL        mmap
-     (accel_stub.c) (accel_verilator.c)     (accel_axi.c)   (accel_mmap.c)
-                            │                     │
-                    hardware/rtl 算法核   hardware/rtl/bus/pqc_accel_axi
-                                          （AXI4-Lite + AXI4-Stream）
+   ┌──────────────────────── PS · Cortex-A53 ────────────────────────┐
+   │  application ──▶ libsdfe (SDF-style)  ──▶ pqchsm_fpgad          │
+   │                                              │                  │
+   │  ······················· normal world ·······│················  │
+   │                                       /dev/secmmio  →  EL3 SiP  │
+   └──────────────────────────────────────────────│──────────────────┘
+                       M_AXI_HPM0_LPD  (AXI4, AxPROT[1] = security bit)
+                                                  ▼
+   ┌──────────────────────── PL · FPGA fabric ───────────────────────┐
+   │              axi4lite_xbar  (full decode, one address per reg)  │
+   │   ┌──────┬──────────┬──────────┬──────────┬─────────┬────────┐  │
+   │   │ slot0│  slot1   │  slot2   │  slot3   │  slot4  │ slot5  │  │
+   │   │ trng │key_vault │   sym    │  mlkem   │ canary  │  fan   │  │
+   │   │      │          │AES/SM4/  │ 512/768/ │ SECURE_ │ observe│  │
+   │   │      │          │   SM3    │   1024   │ ONLY=1  │  only  │  │
+   │   └──────┴────┬─────┴────▲─────┴──────────┴─────────┴────────┘  │
+   │               └──────────┘  use_key: private wire, not the bus  │
+   │      every slot sits behind axi4lite_firewall (AxPROT gate)     │
+   └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 密钥层级
+每个 slot 占 64 KB，位于 `0x8000_0000 + slot × 0x1_0000`。slot 4 是密钥仓的
+第二个实例，与前一个**仅有** `SECURE_ONLY=1` 之差；它存在的全部意义就是被拒绝，
+正是这一点把"门控有效"变成了证据。
 
-设备绑定的根密钥（`KDR`，当前为桩——见局限）派生出 **KEK**，用于包裹静态密钥。备份
-则使用 **BEK**，它由随机生成的恢复主密钥派生，并以 GF(256) 上的 Shamir 方案拆分，
-乘法为常数时间实现。两者分开是有意为之：KEK 包裹的材料不能离开设备，BEK 包裹的材料
-可迁移到替换设备，而某个槽位是否参与备份需要显式选择。
+完整细节：[docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) ·
+寄存器级契约：[docs/REGISTERS.zh-CN.md](docs/REGISTERS.zh-CN.md)。
 
-### 审计链
+## 快速开始
 
-每次状态转换都追加一条记录，其哈希覆盖前一条记录的哈希。纯哈希链只能保证篡改会向后
-传播，因此链头还会用 ML-DSA 设备身份密钥签名并锚定到设备之外——否则重写整个文件是
-无法察觉的。
+本节所有内容都不需要板子。
 
-### 硬件接缝
+```bash
+git clone https://github.com/per1x/pqc-crypto-module
+cd pqc-crypto-module
 
-`accel.h` 在编写任何 RTL 之前就固定了寄存器表（`CTRL`、`STATUS`、`MODE`、`PARAM`、
-`IN_LEN`、`OUT_LEN`、`ERRCODE`），使接口层面的错误在软件阶段就暴露。这份契约现在
-在硬件侧同样落地：`pqc_accel_axi` 用 AXI4-Lite 承载控制、AXI4-Stream 承载成块数据，
-[docs/register-map.zh-CN.md](docs/register-map.zh-CN.md) 写明了两侧共同遵循的语义
-——START 自清、DONE 电平锁存、状态寄存器由硬件写而软件只读。
+python3 -m venv .venv-rtl && ./.venv-rtl/bin/pip install cocotb
+brew install icarus-verilog verilator      # or your distro's packages
 
-RTL 覆盖两个算法的算术部分以及总线接口，全部为可推断的纯 Verilog-2001：
-未实例化任何厂商原语，因此同一份源码可原样综合到 Xilinx、Intel 或 Lattice。
+./tools/rtl_sim.sh          # 197 cocotb tests against the RTL
+./tools/rtl_lint.sh         # Verilator -Wall + Icarus, 70 modules, zero warnings
+./tools/rtl_synth_check.sh  # Yosys synthesisability
+```
 
-| 分组 | 核 |
+构建主机软件及其 PKCS#11 模块（CMake ≥ 3.20、OpenSSL 3、liboqs）：
+
+```bash
+./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+Bitstream（Vivado 2020.1，约 35 分钟，目标器件 `xazu3eg-sfvc784-1-i`）：
+
+```bash
+vivado -mode batch -source hardware/syn/impl_bitstream.tcl
+```
+
+### 像调用密码机一样调用它
+
+`service/` 给应用提供的是一台真实密码机所暴露的接口。演示程序**只**链接
+`libsdfe`——完全不链接任何密码库——因此它打印出的任何正确结果都只可能来自 FPGA。
+
+```c
+#include "sdfe.h"
+
+SDFE_HANDLE dev, ses;
+uint8_t ek[1600], ct[1600], ss[32];
+uint32_t ek_len = sizeof ek, ct_len = sizeof ct, ss_len = sizeof ss, kh;
+
+SDFE_OpenDevice(&dev);
+SDFE_OpenSession(dev, &ses);
+
+SDFE_GenerateRandom(ses, 32, ss);                    /* 环形振荡器 TRNG       */
+SDFE_GenerateKeyPair_MLKEM(ses, SDFE_MLKEM_768,      /* dk 不会到达这里       */
+                           ek, &ek_len, &kh);
+SDFE_Encapsulate_MLKEM(ses, SDFE_MLKEM_768, ek, ek_len,
+                       ss, &ss_len, ct, &ct_len);
+SDFE_Decapsulate_MLKEM(ses, kh, ct, ct_len, ss, &ss_len);   /* 按句柄 */
+
+SDFE_ImportKey(ses, /*slot*/ 3, key, 16);            /* 写入密钥仓——         */
+SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 此后不可读出          */
+```
+
+构建并运行：`make -C service && ./service/sdf_demo`。
+接口参考：[docs/API.zh-CN.md](docs/API.zh-CN.md)。
+
+## 证据
+
+在 [docs/SECURITY.zh-CN.md](docs/SECURITY.zh-CN.md) 所述的配置下，于设备上实测。
+
+| 检查项 | 结果 |
 |---|---|
-| ML-KEM | `ntt_core`（7 层，1153 周期）、`mlkem_basemul`、`mlkem_compress`/`decompress`、`mlkem_cbd2`/`cbd3`、`mlkem_rej_pair`/`rej_uniform`、`mlkem_encode12`/`decode12` |
-| ML-DSA | `mldsa_ntt_core`（8 层，正 1025 / 逆 1281 周期）、`mldsa_mont_reduce`、`mldsa_reduce32`、`mldsa_caddq`、`mldsa_power2round`、`mldsa_decompose`、`mldsa_make_hint`/`use_hint`、`mldsa_rej_uniform`/`rej_eta` |
-| Keccak | `keccak_f1600`（单轮迭代，24 周期） |
-| 总线 | `axi4lite_regs`、`pqc_accel_axi` |
-| 噪声源 | `trng_health`（SP 800-90B 的重复计数与自适应比例检测） |
+| ML-KEM 512/768/1024 对照 NIST ACVP，真硅上 | 20 / 20 逐字节一致 |
+| 板上自检（对称、SM、边界、AxPROT、TRNG） | 24 / 24 |
+| 密钥仓反证——两个从机各扫 256 字节 | 密钥的字出现 **0** 次；密文正确 |
+| AxPROT 门控，双向 | EL3 读到 `SECURE_ONLY=1`；EL1-NS 被拒（DECERR）；同一个 EL1-NS 读得到 `SECURE_ONLY=0` |
+| TRNG 最小熵，1,048,576 个调节前样本 | H = 0.871234 bit/sample → RCT 47、APT 672 |
+| Decaps 时序，有效密文 vs 隐式拒绝，各 200 次 | 中位数差异 0.000 % |
+| ML-KEM-512 吞吐 @ 75 MHz | 924 / 1339 / 1018 ops/s（KeyGen / Encaps / Decaps） |
+| cocotb 回归 · Verilator lint · Yosys | 197 项测试 · 70 个模块，0 条告警 · 全部可综合 |
 
-SHA3 与 SHAKE 的海绵结构在 C 侧实现、置换交给硬件，因此整条 SHA3/SHAKE 路径都能跑
-在仿真 RTL 上，并与 OpenSSL 逐字节比对。完整的 ML-KEM 与 ML-DSA 操作没有硬件实现，
-加速器对这些模式明确报"不支持"，而不是悄悄用软件顶替。
+方法与原始日志见 [docs/TESTING.zh-CN.md](docs/TESTING.zh-CN.md)；板上抓取的输出
+原样保存在 [board/logs/](board/logs/) 下。
 
-## 特性
+## 状态与局限
 
-- **ML-KEM-512/768/1024 与 ML-DSA-44/65/87**，以 390 条 NIST ACVP 向量逐字节验证
-  （向量固定到特定的 ACVP-Server commit）。
-- **槽位/令牌/对象/会话模型**，含显式状态转换表、基于角色的访问控制、PIN 锁定，以及
-  使旧句柄立即失效的世代计数器。
-- **加密密钥库**——AES-256-GCM 包裹、元数据作为 AAD、整文件 KMAC，以及
-  `tmp → fsync → rename → fsync(dir)` 的原子写。
-- **跨设备的 M-of-N 备份与恢复**，并以每槽位策略控制某把密钥是否允许进入备份。
-- **防篡改审计日志**，含 ML-DSA 锚点签名。
-- **安全密钥注入**——用设备自身的 ML-KEM 公钥封装一次性会话密钥，明文密钥材料不出现
-  在链路上。
-- **PKCS#11 v3.2 前端**，暴露原生的 `CKM_ML_KEM` / `CKM_ML_DSA` 机制，其中
-  `C_EncapsulateKey` / `C_DecapsulateKey` 经 `C_GetInterface` 获取。
-- **带独立验证的 RTL 核**——cocotb 测试台对照公开的 Keccak 全零置换向量以及
-  `hashlib`/OpenSSL，而不仅仅是本项目自己的参考模型。
+关于本项目**不**做什么的准确陈述。
+
+- **ML-KEM 私钥会离开硬件。** `KeyGen` 经 AXI 返回 `ek ‖ dk`，因为对照 ACVP 向量
+  校验必须如此。守护进程留下 `dk`，交给应用的是一个句柄，所以它不会离开*接口*
+  ——但"私钥永不离开硬件"目前还不成立，本项目也不这么主张。密钥仓里的对称密钥
+  是另一回事：那些确实没有读出路径。
+- **root 仍然能驱动硬件。** EL3 SiP 暴露的是白名单内的 MMIO 读写，操作序列在普通
+  世界里拼装。普通世界*读*不到密钥材料；但它仍然能装载并使用密钥仓槽位。要堵上
+  这一点，需要一个以操作为粒度的 SiP。
+- **密钥派生根是个桩。** `src/crypto/kdr.c` 里放的是一个固定常量。真实设备会从
+  eFUSE、BBRAM 或 PUF 取它；在这块板上，eFUSE 是不可逆的而手头只有一块板，BBRAM
+  又需要 JTAG。因此设备绑定并不是真的。
+- **没有 SM2 核。** SM4 与 SM3 有；SM2 非对称算法没有。
+- **这是一个安全原型，不是一个快的原型。** 吞吐数字包含逐字节的软件 AXI 流量，
+  公布它们是为了给出各参数集之间 1 : 1.5 : 2.1 的比例，而不是作为性能主张。
+- **功耗与电磁侧信道是有意排除在范围之外的。** 常数时间方面的工作只覆盖时序。
+  没有侧信道测试台就无法验证掩码，而交付未经验证的掩码比不做掩码更糟。
+- **ML-DSA 只有算子。** 十三个模块已对照参考模型验证，但没有串成完整的
+  KeyGen/Sign/Verify 核。
+- **有两件事需要 JTAG**：把 PL 配置固化进黄金 `BOOT.BIN`，以及基于 BBRAM 的
+  安全启动。
+- **PS 侧的 XMPU/XPPU 用不上。** UG1085 对此有定论：没有任何 PS 保护单元覆盖
+  `0x8000_0000` 这个 PL 窗口。PL 里的防火墙是这条路径上唯一的执行点——这也正是
+  地址译码一一对应、不设镜像的原因。
 
 ## 仓库结构
 
 ```
-├── include/pqchsm/     公共头文件——全部 API 面。私钥不跨越它。
-├── src/
-│   ├── crypto/         liboqs 绑定、KDF、密钥派生根（KDR）
-│   ├── slot/           槽位状态机、会话、元数据、持久化
-│   ├── store/          AES-256-GCM 包裹、密钥库文件格式
-│   ├── backup/         Shamir 拆分、备份与恢复、密钥注入
-│   ├── audit/          哈希链与 ML-DSA 锚定
-│   ├── hal/            加速器抽象：软件桩、Verilator、寄存器语义
-│   ├── p11/            PKCS#11 v3.2 共享库
-│   ├── proto/          TLV 命令协议
-│   └── util/           安全清零、锁页分配、KAT 解析
-├── cli/                守护进程、客户端 CLI、管理工具
-├── tests/              单元、集成、KAT 与 fuzz 靶子
-├── demo/               PKCS#11 provider 演示（Python、Java）
-├── hardware/
-│   ├── rtl/            Verilog 源码：mlkem/、mldsa/、keccak/、bus/、trng/
-│   ├── tb/cocotb/      cocotb 测试台与仅供仿真的汇总顶层
-│   ├── model/          Python 参考模型、向量导出、独立预言机
-│   └── syn/            Vivado out-of-context 综合脚本与约束
-├── tools/              向量获取、基准测试、剖析、回归脚本
-├── third_party/        vendored 的 OASIS PKCS#11 v3.2 头文件（未作修改）
-└── docs/               架构、PKCS#11、寄存器映射、算法清单、安全策略、测试说明
+hardware/rtl/       Verilog-2001 crypto cores: mlkem/ mldsa/ keccak/ sym/ trng/ bus/ board/
+hardware/platform/  Non-crypto fabric logic (fan control) — same bitstream, no shared signals
+hardware/tb/        cocotb testbenches, simulation tops, lint-only vendor stubs
+hardware/model/     Python reference model, independent oracles, vector export
+hardware/syn/       Vivado out-of-context synthesis and the RTL-to-bitstream flow
+service/            SDF-style client library, daemon, and a hardware-only demo
+boot/atf/           BL31 patches: the EL3 SiP that gives the secure world a path to the PL
+board/              On-board programs, harness, kernel modules, and raw result logs
+include/ src/ cli/  Host software: keystore, slots, backup, audit, PKCS#11 front end
+tee/                OP-TEE trusted application (separate line of work)
+tests/              Host-software unit, integration, KAT and fuzz targets
+tools/              Regression scripts, SP 800-90B estimators, static analysers
+docs/               Architecture, API, security model, testing, register maps
 ```
 
 ## 文档
 
-| 文档 | 内容 |
+| | |
 |---|---|
-| [docs/architecture.zh-CN.md](docs/architecture.zh-CN.md) | 分层、密钥层级、密钥库格式、审计链、硬件抽象、密钥注入 |
-| [docs/pkcs11.zh-CN.md](docs/pkcs11.zh-CN.md) | 机制、对象模型、厂商属性、密钥导入、KEM 操作、配置 |
-| [docs/constant-time.zh-CN.md](docs/constant-time.zh-CN.md) | 常量时间审计的范围与方法、发现、清零检查、不作断言的部分、如何复现 |
-| [docs/register-map.zh-CN.md](docs/register-map.zh-CN.md) | 加速器寄存器契约：地址映射、行为条款、数据面、操作码 |
-| [docs/algorithms.zh-CN.md](docs/algorithms.zh-CN.md) | 算法清单、参数集、密钥与敏感安全参数清单、验证证据 |
-| [docs/security-policy.zh-CN.md](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 安全策略草稿，附显式差距清单 |
-| [docs/testing.zh-CN.md](docs/testing.zh-CN.md) | 测了什么、用什么手段、此处引用的每个数字如何复现 |
-| [docs/deployment.zh-CN.md](docs/deployment.zh-CN.md) | 内网 Linux 部署，含离线获取全部依赖的做法 |
-| [docs/zynq-port.zh-CN.md](docs/zynq-port.zh-CN.md) | 移植到 Zynq UltraScale+ MPSoC：阶段划分、软件边界到硅片边界的映射、不可逆步骤 |
-| **[docs/密码机原型-说明文档.md](docs/密码机原型-说明文档.md)**（[PDF](docs/密码机原型-说明文档.pdf)） | **FPGA 线的交付文档**：架构、代码导览、每一项测试结果连同原始日志、逐条注明原因的受阻清单 |
-| [docs/fpga-进展.md](docs/fpga-进展.md) | FPGA 线的逐阶段工程日志（S1–S7、P6、P7）：做了什么、哪里坏过、每条断言是拿什么换来的 |
-| [hardware/README.md](hardware/README.md) | RTL 模块、验证策略、仿真器选择 |
-| [demo/README.md](demo/README.md) | provider 演示与客户端库兼容性 |
+| [ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) | 分层、地址映射、时钟、密钥层级、硬件接缝 |
+| [API.zh-CN.md](docs/API.zh-CN.md) | SDF 风格接口与 PKCS#11 v3.2 前端 |
+| [SECURITY.zh-CN.md](docs/SECURITY.zh-CN.md) | 信任边界、威胁模型、什么已证明、什么没有 |
+| [REGISTERS.zh-CN.md](docs/REGISTERS.zh-CN.md) | 每个 AXI 从机的寄存器契约 |
+| [TESTING.zh-CN.md](docs/TESTING.zh-CN.md) | 测什么、用什么手段测、如何复现 |
+| [USAGE.zh-CN.md](docs/USAGE.zh-CN.md) | 构建、运行、部署，以及如何驱动板子 |
+| [reference/](docs/reference/) | 安全策略草稿、离线部署、常量时间审计、移植计划 |
 
-## 构建
+英文版本以去掉 `.zh-CN` 后缀的同名文件并列存放。架构、API、寄存器、安全与测试
+另有一份合订 PDF——[设计与验证参考](docs/reference/design-validation.zh-CN.pdf)，
+26 页，由 `./tools/pdf/build-pdf.sh` 从同一批 Markdown 重出，因此两者不会互相
+漂移。
 
-依赖：CMake ≥ 3.20、C11 编译器、OpenSSL 3、liboqs。
+## 参与贡献
 
-```bash
-brew install liboqs openssl@3 cmake        # macOS
-# Debian/Ubuntu：liboqs 从源码构建；其余用 libssl-dev、cmake、ninja-build
-```
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。报告漏洞前请先读
+[SECURITY.md](SECURITY.md)——但请注意这是一个原型，上面列出的已知差距已经是
+已知的。
 
-```bash
-./tools/fetch_vectors.sh                   # 下载并展平 NIST ACVP 向量
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
+## 许可证
 
-可选组件是探测而非必需。没有 Verilator 时，仿真 RTL 后端不会被编入，
-`accel_transport_verilator()` 返回 `NULL`；需要 `cocotb`、`iverilog` 或
-`pkcs11-tool` 的测试会自行跳过并给出说明，而不是失败。
+[Apache-2.0](LICENSE)——选它而不选 MIT，是因为它有明确的专利授权与专利反制条款；
+专利在这个领域是真实的风险敞口，而 MIT 对此只字未提。
 
-### 补充检查
-
-```bash
-python3 tools/ct_audit.py      # 常量时间源码审计（--self-test 跑规则自检）
-python3 tools/check_zeroize.py # zeroize 结构性检查（--self-test 跑规则自检）
-./tools/rtl_sim.sh          # cocotb 回归（Icarus Verilog）
-./tools/aarch64_test.sh     # 在 aarch64 Linux 容器中从零构建并回归
-./tools/fuzz.sh             # libFuzzer 靶子（需要 LLVM clang）
-./tools/profile.sh          # 采样剖析
-./build/pqchsm-bench        # 算法级性能基线
-./build/pqchsm-prim-bench   # 单次原语代价与实测 RTL 周期数
-```
-
-## 运行演示
-
-两个演示都驱动共享库走完整生命周期：初始化令牌、设置 PIN、登录、在槽位中生成 ML-DSA
-与 ML-KEM 密钥、签名与验签、读取属性、枚举对象。
-
-```bash
-cmake --build build --target pqchsm-p11
-
-# Python，经 PyKCS11
-python3 -m venv .venv-p11 && ./.venv-p11/bin/pip install -q PyKCS11
-./.venv-p11/bin/python demo/python/pqchsm_demo.py
-
-# Java，经 JDK 22+ 的 FFM API（无外部依赖）
-java --enable-native-access=ALL-UNNAMED demo/java/PqcHsmDemo.java \
-     "$PWD/build/pqchsm-pkcs11.dylib"
-```
-
-两者都直接使用低层 PKCS#11 绑定。**未**使用高层 provider 框架，因为它们尚不支持这些
-机制——详情与验证程序见 [demo/README.md](demo/README.md)。
-
-## 安全模型与局限
-
-这是一个原型。以下是对它做什么、不做什么的准确陈述。
-
-**密码边界是硬件。** ML-KEM 三核、对称核（AES-128/256、SM4、SM3）、环形振荡器
-TRNG、密钥仓与 AXI 防火墙都在 FPGA 的可编程逻辑里。防火墙按 `AxPROT[1]` 门控，
-而这道门在板上**双向**证明过：安全世界（EL3，`AxPROT[1]=0`）读 `SECURE_ONLY=1`
-的核得到 `0x00010000`；普通世界（EL1-NS，`AxPROT[1]=1`）在总线上被拒
-（SIGBUS/DECERR）——而**同一个**普通世界能成功读到 `SECURE_ONLY=0` 的核，
-所以差别来自门控，不是地址不可达。
-
-**什么跨过这道边界、什么不跨——这里说准，因为很容易过度声称。**
-
-- **装进密钥仓的对称密钥不跨。** 实测方式是扫两个从机各 256 字节（48 个读得到、
-  80 个被防火墙拒）：密钥的四个字**一个都没出现**，而这些密钥算出的密文是正确的。
-  两条缺一不可——单独任何一条都证明不了。
-- **ML-KEM 私钥目前是跨的。** `KeyGen` 经 AXI 返回 `ek ‖ dk`，因为对 NIST ACVP
-  向量就需要它。生产形态应当把 `dk` 留在边界内、或只以包裹形式送出。这是接口
-  设计的取舍，不是防火墙失效，但本项目没有改它。
-- **主机侧的密钥处理在边界之外。** keystore 文件及其 AES-GCM 封装、槽位元数据、
-  PKCS#11 层都跑在主机软件里。对这一部分：运算期间明文密钥材料存在于进程内存中，
-  缓冲区会被清零并尽可能 `mlock`，但无法抵御能读取该地址空间的攻击者。常量时间与
-  清零审计覆盖了什么、以及更要紧的**没有**覆盖什么，记在
-  [constant-time.zh-CN.md](docs/constant-time.zh-CN.md)。
-
-**主机侧的密钥派生根是桩。** `src/crypto/kdr.c` 中是一个固定的 32 字节常量，字面
-内容为 `PQC-HSM STUB KDR -- NOT SECRET!!`。真实设备上该值来自 eFUSE、BBRAM 或 PUF。
-这块板上两者都不可用：eFUSE 不可逆而只有一块板，BBRAM 需要 JTAG。所以设备绑定
-并不成立——这是一条被明确记录的边界，不是疏漏。
-
-**常量时间的工作只覆盖计时。** 板上核对过：合法密文与隐式拒绝两条 Decaps 路径
-各跑 200 次，中位耗时相对差 0.000%。功耗与电磁侧信道**没有**处理，也不声称做了。
-
-**其它已知缺口。** 审计模块假设单写者，不对文件加锁。Shamir 分片校验和无密钥，能检出
-损坏而非篡改。SO PIN 失败只计数不锁定槽位——锁定会使设备变砖，兜底手段是 M-of-N
-恢复。`CKM_HASH_ML_DSA_*` 未实现，因此 PKCS#11 的多段签名会缓冲整条消息，而不是流式
-推进摘要。
-
-## 测试
-
-| 检查项 | 结果 |
-|---|---|
-| `ctest` | 45 / 45 |
-| 断言总数 | 4059 |
-| NIST ACVP 向量 | 390 条逐字节通过，60 条显式跳过 |
-| ASan + UBSan | 45 / 45 |
-| ThreadSanitizer | 0 竞争（以移除锁作反证：报告 9 处） |
-| macOS `leaks` | 0 泄漏 |
-| libFuzzer | 138 万次执行，无崩溃 |
-| aarch64 Linux（GCC 12） | 45 / 45 |
-| cocotb RTL 回归 | 26 个顶层共 156 个测试 |
-| RTL lint（Verilator `-Wall` + Icarus） | 31 个模块，0 条告警 |
-| RTL 可综合性（Yosys） | 31 个模块全部可综合 |
-
-测试源码中贯穿两条做法：
-
-- **独立预言机。** 不因为结果与本项目自己的模型一致就认为它正确。KMAC 对照 NIST 文档、
-  OpenSSL 以及另一份独立的 Keccak；NTT 对照完全不触碰旋转因子表的 schoolbook 负循环
-  卷积，并通过重建 ML-KEM 密钥生成、逐字节重现 ACVP 的 `ek`/`dk` 来验证；Keccak 对照
-  公开的全零置换向量以及 `hashlib`/OpenSSL。
-- **把纪律写成结构性检查。** 功能测试看不见的性质 —— 密钥派生根没有读出接口、`src/`
-  里没有秘密相关的分支与下标、每个密钥字段都在销毁函数里被清零 —— 都写成接进 `ctest`
-  的扫描器，而且每个扫描器都要先在合成样本上自检通过，才允许报告"扫描干净"。
-  参见 [constant-time.zh-CN.md](docs/constant-time.zh-CN.md)。
-- **反证。** 通过刻意破坏并确认测试失败来验证断言本身有效——扰动一个旋转因子、丢掉一层
-  NTT、翻转 Keccak 轮常数的一个比特、在 TSan 下移除一把锁、加入一个假的密钥读回函数、
-  对一个刻意提前退出的比较做同样的时序检验、探测一个根本没清零的栈帧。
-
-## 做到了什么，没做到什么
-
-下面每一条都带着它的证据，好让这些说法是**可核对的**而不是需要相信的。方法与原始
-日志见[密码机原型-说明文档.md](docs/密码机原型-说明文档.md)（[PDF](docs/密码机原型-说明文档.pdf)）。
-
-| 能力 | 状态与证据 |
-|---|---|
-| 用 RTL 实现完整 ML-KEM 数据流 | **已完成。** ML-KEM 512/768/1024 的 KeyGen/Encaps/Decaps，**在真硅上**对 NIST ACVP 官方向量逐字节一致（20/20）。参数集由寄存器字段选择，长度在 RTL 里算出来，所以软件报不错 |
-| 在目标器件上综合与时序收敛 | **已完成。** 从 RTL 到 bitstream 的完整流程。35592 LUT（50.44%）、25916 寄存器、15.5 BRAM、140 DSP，**WNS +3.174 ns / WHS +0.001 ns** @75 MHz |
-| 安全边界落在可编程逻辑里 | **已完成。** 按 AxPROT 门控的 AXI 防火墙，密钥仓的密钥只走专线出去。板上双向证明：EL3 读得到 `SECURE_ONLY=1` 的核，EL1-NS 被拒（SIGBUS/DECERR），而**同一个**普通世界读得到 `SECURE_ONLY=0` 的核——所以差别来自门控，不是地址不可达 |
-| 密钥派生根落在 eFUSE/BBRAM/PUF | **未做，且在这块板上不打算做。** eFUSE 不可逆而只有一块板；BBRAM 需要 JTAG。见说明文档里的受阻清单 |
-| 环形振荡器噪声源 + SP 800-90B 熵评估 | **已完成。** 从板上导出 1,048,576 个**调理前**样本，按 SP 800-90B 非 IID 估计器算得 **H = 0.871234 比特/样本**。健康检测阈值（RCT 47、APT 672）就是按这个实测值定的；若按 H=0.5 假设去定，APT 那道检测根本不会触发 |
-| 端到端吞吐 | **已测。** ML-KEM-512 为 924 / 1339 / 1018 次每秒（KeyGen/Encaps/Decaps）；768 与 1024 的比例约 1 : 1.5 : 2.1，与 k=2/3/4 的工作量相符 |
-
-仍然开放的，各自注明原因：
-
-1. **ML-DSA 整核。** 算子已实现（13 个模块，对参考模型验证过），但没有串成
-   KeyGen/Sign/Verify。
-2. **PL 配置的开机持久化** —— 需要 JTAG，因为剩下唯一干净的做法要写黄金 `BOOT.BIN`。
-3. ~~**XMPU/XPPU 的实际配置。**~~ **已结案：结构上不适用。** UG1085 v2.5 的
-   地址表定论——XPPU 的 aperture 穷举里没有 `0x8000_0000`（表 16-10），
-   而 FPD_XMPU 不在 `M_AXI_HPM0_LPD` 这条路径上（p1092：访问 PL "without the
-   FPD"）。也就是说 PS 侧根本没有能覆盖 PL 窗口的保护单元。
-   这反过来加固了架构：**PL 内那道 AxPROT 门控防火墙是这条路由上唯一的强制层**，
-   也正因如此地址译码必须一一对应、不留镜像。详见说明文档 5.5。
-   （顺带查清：这块板上 PS 侧保护单元完全未配置——XPPU `CTRL=0`、许可表 400 条
-   全是复位默认值。与上面那条无关，即便配起来也够不到 PL。）
-4. **功耗/电磁侧信道。** 没做，也不声称做了。常数时间那部分只覆盖计时，
-   并且在板上核对过（合法密文与隐式拒绝两条路径的中位耗时相对差 0.000%）。
-
-## 许可
-
-[Apache-2.0](LICENSE)。选择它而非 MIT，是因为它带有显式的专利授权与专利报复终止条款
-（第 3 条）；专利在这个领域是真实存在的风险面，而 MIT 对此完全沉默。
-
-`third_party/pkcs11-v3.2/` 下的三个头文件是 OASIS 文档，按其自身条款原样收录。
+`third_party/pkcs11-v3.2/` 收录了三个 OASIS 头文件，按其各自的条款原样引入。

@@ -1,6 +1,6 @@
 /* hwrng.c —— 硬件熵源驱动
  *
- * 严格照 docs/trng-register-map.zh-CN.md 的行为契约实现。那份文档是 PL 侧
+ * 严格照 docs/REGISTERS.zh-CN.md 的行为契约实现。那份文档是 PL 侧
  * trng_axi 与这里的共同约定，RTL 侧由 test_trng_axi.py 验证，软件侧由
  * tests/unit/test_hwrng.c 验证 —— 两边验的是同一张表。
  *

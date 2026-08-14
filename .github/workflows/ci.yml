@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, zu3eg-fpga-crypto]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rtl:
+    name: RTL — lint, simulate, synthesise
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RTL toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            verilator iverilog yosys python3-venv
+
+      - name: Create the cocotb environment
+        run: |
+          python3 -m venv .venv-rtl
+          ./.venv-rtl/bin/pip install --quiet cocotb
+
+      # Every module lints as its own top level, so modules nothing
+      # instantiates are still checked. Zero warnings is the bar.
+      - name: Lint
+        run: ./tools/rtl_lint.sh
+
+      - name: Synthesisability
+        run: ./tools/rtl_synth_check.sh
+
+      - name: cocotb regression
+        run: ./tools/rtl_sim.sh
+
+  host:
+    name: Host software — build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build libssl-dev
+
+      # liboqs is not packaged; build the pinned release from source.
+      - name: Build liboqs
+        run: |
+          git clone --depth 1 --branch 0.16.0 \
+            https://github.com/open-quantum-safe/liboqs /tmp/liboqs
+          cmake -S /tmp/liboqs -B /tmp/liboqs/build -GNinja \
+            -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_SHARED_LIBS=ON
+          cmake --build /tmp/liboqs/build --target install
+          sudo ldconfig
+
+      - name: Fetch ACVP vectors
+        run: ./tools/fetch_vectors.sh
+
+      - name: Build
+        run: |
+          cmake -S . -B build -GNinja
+          cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  static:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Each scanner self-tests on synthetic samples first: one that cannot
+      # find anything proves nothing when it reports a clean scan.
+      - name: Constant-time source audit
+        run: |
+          python3 tools/ct_audit.py --self-test
+          python3 tools/ct_audit.py
+
+      - name: Zeroization structure check
+        run: |
+          python3 tools/check_zeroize.py --self-test
+          python3 tools/check_zeroize.py
+
+      - name: SP 800-90B estimators against the specification's worked examples
+        run: python3 tools/sp800_90b.py --selftest
+
+  service:
+    name: Service layer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build daemon, client library and demo
+        run: make -C service

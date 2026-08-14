@@ -22,8 +22,8 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # 文件名之间必须用空格连接：yosys 的 -p 脚本按行拆命令，换行会被当成新命令
-# 风扇温控在 hardware/rtl/ 之外（fpga/fan_ctrl/），一样要过可综合性检查。
-RTL_FILES=$(find "$ROOT/hardware/rtl" "$ROOT/fpga/fan_ctrl" -name '*.v' 2>/dev/null | sort | tr '\n' ' ')
+# 风扇温控在 hardware/rtl/ 之外（hardware/platform/fan_ctrl/），一样要过可综合性检查。
+RTL_FILES=$(find "$ROOT/hardware/rtl" "$ROOT/hardware/platform/fan_ctrl" -name '*.v' 2>/dev/null | sort | tr '\n' ' ')
 
 command -v yosys >/dev/null 2>&1 || { echo "SKIP: 没装 yosys（brew install yosys）"; exit 0; }
 

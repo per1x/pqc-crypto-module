@@ -1,13 +1,13 @@
 /* test_hwrng.c —— 硬件熵源驱动的契约测试
  *
- * 验的是 docs/trng-register-map.zh-CN.md 里那份行为契约的**软件侧**。
+ * 验的是 docs/REGISTERS.zh-CN.md 里那份行为契约的**软件侧**。
  * RTL 侧由 hardware/tb/cocotb/test_trng_axi.py 验同一份契约。两边对着同一张
  * 表各写各的，接口层面的分歧在无板阶段就会暴露 —— 这正是先定寄存器表、
  * 再写假外设那套做法的收益。
  *
  * 注意这里**不测熵**。transport 是软件模型，FIFO 由 OpenSSL 填，
  * 测出来的"随机性"只反映 OpenSSL，与 PL 里那颗 TRNG 毫无关系。
- * 真正的熵评估只能在硅上做，见 docs/fpga-进展.md 里那节警告。
+ * 真正的熵评估只能在硅上做，见 docs/TESTING.md 里那节警告。
  */
 #include "testlib.h"
 

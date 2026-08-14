@@ -1,8 +1,8 @@
 /* hwrng_mmap.c —— 经 /dev/mem + mmap 访问 PL 里的 trng_axi
  *
  * 【状态】这条 transport 未在硬件上跑过 —— 但 PL 里的 trng_axi 跑过：
- * 板上取过 512 KiB 原始熵做 SP 800-90B 评估（见 docs/密码机原型-说明文档.md），
- * 用的是 board/trngraw.c 那条直接 mmap 的路。这里差的是把两端接上。
+ * 板上取过 512 KiB 原始熵做 SP 800-90B 评估（见 docs/SECURITY.md），
+ * 用的是 board/src/trngraw.c 那条直接 mmap 的路。这里差的是把两端接上。
  *
  * 启用它需要一个由地址分配决定的数值：
  *

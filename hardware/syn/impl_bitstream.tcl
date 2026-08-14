@@ -71,18 +71,18 @@ foreach d {common mlkem mldsa keccak trng sym bus board} {
     }
 }
 
-# 风扇温控在 rtl/ 之外（fpga/fan_ctrl/），因为它**不是密码逻辑** —— 目录分开
+# 风扇温控在 rtl/ 之外（hardware/platform/fan_ctrl/），因为它**不是密码逻辑** —— 目录分开
 # 是为了让"风扇不碰密码的任何信号"这件事在文件系统上就看得见。
 # 但 PL 只有一份、运行时载进去的那一个 bitstream 就是全部，所以它和密码核
 # 必须进同一个 bitstream。
-set fanfiles [glob -nocomplain $root/../fpga/fan_ctrl/*.v]
+set fanfiles [glob -nocomplain $root/platform/fan_ctrl/*.v]
 if {[llength $fanfiles] == 0} {
-    puts "错误：fpga/fan_ctrl/ 下一个文件都没读到"
+    puts "错误：hardware/platform/fan_ctrl/ 下一个文件都没读到"
     puts "      —— 那样 fan 端口会没有驱动，AA11 悬空，风扇行为不可预测。"
     exit 1
 }
 read_verilog -sv $fanfiles
-puts "读入 fpga/fan_ctrl：[llength $fanfiles] 个文件"
+puts "读入 hardware/platform/fan_ctrl：[llength $fanfiles] 个文件"
 
 # ---- 管脚约束 ----------------------------------------------------------------
 # 必须在 synth_design 之前读：综合要知道 fan 这个端口的 I/O 标准才能推 IOB。
@@ -138,7 +138,7 @@ if {[llength $smon] == 0} {
 set simdev [get_property SIM_DEVICE [lindex $smon 0]]
 if {$simdev ne "ZYNQ_ULTRASCALE"} {
     puts "错误：SYSMONE4 的 SIM_DEVICE = $simdev，应当是 ZYNQ_ULTRASCALE"
-    puts "      （在 fpga/fan_ctrl/fan_sysmon.v 里显式写死，别靠默认值）"
+    puts "      （在 hardware/platform/fan_ctrl/fan_sysmon.v 里显式写死，别靠默认值）"
     exit 1
 }
 puts "断言通过：SYSMONE4 SIM_DEVICE = $simdev"

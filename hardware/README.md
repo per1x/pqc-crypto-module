@@ -9,21 +9,26 @@ synthesis scripts.
 > sources are synthesised into a bitstream and run on an XCZU3EG board: ML-KEM
 > 512/768/1024 match NIST ACVP vectors byte-for-byte **on silicon**, and the AXI
 > firewall's access gate has been proven in both directions. The simulation harness
-> described below is still the first gate — 174 cocotb tests — but it is no longer the
-> last one. See [../docs/密码机原型-说明文档.md](../docs/密码机原型-说明文档.md).
+> described below is still the first gate — 197 cocotb tests — but it is no longer the
+> last one. See [../docs/SECURITY.md](../docs/SECURITY.md).
 
 ```
 hardware/
-├── rtl/
-│   ├── mlkem/      mont_reduce.v, butterfly.v, ntt_core.v, basemul.v,
-│   │               compress.v, sample.v, pack.v
-│   ├── mldsa/      mont_reduce.v, reduce.v, butterfly.v, ntt_core.v,
-│   │               rounding.v, sample.v
-│   ├── keccak/     keccak_f1600.v
-│   └── bus/        axi4lite_regs.v, pqc_accel_axi.v
+├── rtl/            Cryptographic RTL
+│   ├── mlkem/      NTT, base multiply, reduction, sampling, compression,
+│   │               packing, and whole KeyGen / Encaps / Decaps cores
+│   ├── mldsa/      ML-DSA operators — NTT, rounding, hints, sampling
+│   ├── keccak/     keccak_f1600.v, sha3_core.v
+│   ├── sym/        aes_core.v, sbox.v, sm4_core.v, sm3_core.v
+│   ├── trng/       ring_osc, source, health (RCT/APT), conditioning, AXI
+│   ├── bus/        firewall, key_vault, and the per-core AXI wrappers
+│   ├── board/      axi4lite_xbar.v, zu3eg_hsm_top.v
+│   └── common/     ram_dp.v, sync_fifo.v
+├── platform/       Non-crypto fabric logic (fan control) — see its README
 ├── tb/cocotb/      cocotb testbenches, simulation-only top levels, Makefile
+├── tb/lint/        Vendor-primitive stubs — lint only, never synthesised
 ├── model/          Python reference model, vector export, independent oracles
-└── syn/            Vivado out-of-context synthesis scripts and constraints
+└── syn/            Vivado out-of-context synthesis and the bitstream flow
 ```
 
 Every module is plain inferrable Verilog-2001. No vendor primitive is instantiated
@@ -110,7 +115,7 @@ cycles in total, against roughly 20700 for the NTTs. The bottleneck is elsewhere
 and status registers, AXI4-Stream for bulk data, and the algorithm cores underneath. The
 register semantics it implements are the ones `include/pqchsm/accel.h` was written
 against — START self-clearing, DONE latched as a level, status registers written by
-hardware and read-only to software. [docs/register-map.md](../docs/register-map.md) is
+hardware and read-only to software. [docs/REGISTERS.md](../docs/REGISTERS.md) is
 the contract; `test_axi.py` verifies it clause by clause with a hand-written bus
 functional model and no third-party AXI library.
 
@@ -204,5 +209,5 @@ execute exactly as written while synthesis produces different hardware.
 
 Scripts are in `syn/`. Vivado is not installed on the Mac, so they run on the build
 machine (Vivado 2020.1); the utilisation and Fmax figures in
-[docs/fpga-进展.md](../docs/fpga-进展.md) all come from there, post-route.
+[docs/TESTING.md](../docs/TESTING.md) all come from there, post-route.
 See [syn/README.md](syn/README.md).

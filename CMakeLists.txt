@@ -302,7 +302,7 @@ if(Python3_Interpreter_FOUND)
 
   # 常量时间源码审计：秘密相关的分支 / 下标 / 除法 / 非常量时间比较。
   # 先跑自检（合成样本上验证四条规则确有区分能力），再扫真实源码 ——
-  # 顺序不能反：一个扫不出东西的扫描器，扫出"没问题"毫无意义。见 docs/constant-time.md。
+  # 顺序不能反：一个扫不出东西的扫描器，扫出"没问题"毫无意义。见 docs/reference/constant-time.md。
   add_test(NAME ct_audit_self_test COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/ct_audit.py --self-test)
   add_test(NAME ct_audit COMMAND ${Python3_EXECUTABLE}

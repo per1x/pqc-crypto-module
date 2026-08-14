@@ -2,7 +2,7 @@
  *
  * 与 test_accel.c 的分工：那里验证"寄存器语义在 C 里成立"，这里验证
  * "同一套语义在真实总线事务上成立"。命令要经过 AXI4-Lite 的读写握手与
- * AXI4-Stream 的数据包，走的是 docs/register-map.md 里那份契约。
+ * AXI4-Stream 的数据包，走的是 docs/REGISTERS.md 里那份契约。
  *
  * 三条判据：
  *   1. 软件桩与仿真 RTL 后端算出来的结果**逐字节相同**；

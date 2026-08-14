@@ -15,7 +15,7 @@
  *   mmap       /dev/mem + mmap 打真 PL             —— 需要板子上的物理地址
  *
  * 四者实现同一张 accel_transport_t，pqc_accel.c 之上完全不区分。
- * axi 与 mmap 走的是同一份寄存器映射契约（docs/register-map.md），
+ * axi 与 mmap 走的是同一份寄存器映射契约（docs/REGISTERS.md），
  * 区别只在事务怎么发出去。
  *
  * 【寄存器表】
@@ -116,7 +116,7 @@ const accel_transport_t *accel_transport_verilator(void);
 
 /* Verilator 仿真：经 AXI4-Lite 控制面与 AXI4-Stream 数据面驱动 pqc_accel_axi。
  * 与 verilator transport 跑的是同一批算法核，区别在于要走完整的总线事务，
- * 因此它同时验证 docs/register-map.md 那份契约在软件侧成立。
+ * 因此它同时验证 docs/REGISTERS.md 那份契约在软件侧成立。
  * 没编 Verilator 支持时返回 NULL。 */
 const accel_transport_t *accel_transport_axi(void);
 

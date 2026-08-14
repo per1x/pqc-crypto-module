@@ -21,7 +21,7 @@
  *
  * 【结论的边界】
  * 本用例量的是本仓库自己的比较原语。liboqs 与 OpenSSL 内部的时序特性不在这里
- * 的量程之内，见 docs/constant-time.md。
+ * 的量程之内，见 docs/reference/constant-time.md。
  */
 #include "testlib.h"
 #include "pqchsm/util.h"

@@ -187,7 +187,7 @@ design_1_wrapper	ps_block
 // 出厂原样是 `assign fan = 1'b1;`（已注释掉），也就是把风扇钉死在满速。
 //
 // 这一版换成按结温调速。RTL 与密码 bitstream 里用的是**同一份文件**
-// （fpga/fan_ctrl/），那一份在板上带 AXI 观测口验证过温度→占空比确实跟随；
+// （hardware/platform/fan_ctrl/），那一份在板上带 AXI 观测口验证过温度→占空比确实跟随；
 // 这里不再加观测口，是有意的：**这个 bitstream 是要进 BOOT.BIN 开机就跑的**，
 // 改动越小越好，BD 一点都不动。要看温度，从 PS 侧的 AMS/hwmon 读即可，
 // 那条路不需要动硬件。

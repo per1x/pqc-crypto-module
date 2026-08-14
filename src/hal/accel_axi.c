@@ -2,7 +2,7 @@
  *
  * 这是三个 transport 里离真板最近的一个：它不直接握手算法核的私有端口，
  * 而是发真正的 AXI4-Lite 读写事务与 AXI4-Stream 数据包，走的是
- * docs/register-map.md 定义的那份契约。换到真板上时，替换的只是
+ * docs/REGISTERS.md 定义的那份契约。换到真板上时，替换的只是
  * "AXI 事务怎么发出去"这一层（仿真 → /dev/mem + mmap 或内核驱动），
  * 本文件的命令时序原样保留。
  *

@@ -5,7 +5,7 @@
 Out-of-context synthesis scripts producing utilisation and timing reports.
 
 > **Status: in use.** Vivado is not installed on the Mac, so this runs on the build
-> machine (Vivado 2020.1). Every utilisation and Fmax figure in `docs/fpga-进展.md`
+> machine (Vivado 2020.1). Every utilisation and Fmax figure in `docs/TESTING.md`
 > comes from it, taken **post-route** — post-synthesis WNS is usually optimistic.
 
 ```bash

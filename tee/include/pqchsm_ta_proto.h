@@ -3,7 +3,7 @@
  * 本头文件同时被 TA(tee/ta/) 与普通世界客户端(tee/host/) 包含，
  * 是安全边界两侧唯一的协议事实来源。改动必须两侧同步。
  *
- * 设计见 docs/tee-protocol.zh-CN.md。要点：
+ * 设计见 docs/reference/tee-protocol.zh-CN.md。要点：
  *   - 私钥材料不出 TA：KEYGEN 返回 (公钥, 包裹后的私钥 blob)，
  *     SIGN/DECAPS 以 blob 为输入，TA 内解包即用即焚。
  *   - 包裹格式复用 include/pqchsm/wrap.h 的 PWRP（AES-256-GCM），

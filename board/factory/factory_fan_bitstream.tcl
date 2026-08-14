@@ -33,7 +33,7 @@
 
 set proj  /home/build/factory_vivado/board_test.xpr
 set src   /home/build/factory_vivado/board_test.srcs/sources_1/new
-set fanrtl /home/build/pqc-hsm-fpga/fpga/fan_ctrl
+set fanrtl /home/build/pqc-hsm-fpga/hardware/platform/fan_ctrl
 
 # ---- 备份上一版产物 ----------------------------------------------------------
 set prev /home/build/factory_vivado/board_test.runs/impl_1/top.bit

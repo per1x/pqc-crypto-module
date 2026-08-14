@@ -544,7 +544,7 @@ def falsify() -> bool:
 
     # Encrypt 的矩阵不转置 —— 也就是 XOF 头写成和 KeyGen 一样的 ρ‖j‖i。
     # 这样照样能算出合法密文，只是不是 ML-KEM 的那一个；只有锚在外部向量上
-    # 才抓得到。RTL 侧同一个坑见 docs/fpga-进展.md 的 S4 一节。
+    # 才抓得到。RTL 侧同一个坑见 docs/TESTING.md 的 S4 一节。
     orig_sample_ntt = globals()["sample_ntt"]
     globals()["sample_ntt"] = lambda rho, i, j: orig_sample_ntt(rho, j, i)
     checks.append(("Encrypt 的矩阵忘了转置", not oracle_e_quiet()))

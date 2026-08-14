@@ -5,7 +5,7 @@
  * 它暴露与 PL 里 trng_axi 完全相同的寄存器语义（暖机 → READY → 读 RDATA 弹字），
  * 内部用软件随机源填 FIFO。真板到手后换成 /dev/mem + mmap，**上层一行不改**。
  *
- * 寄存器表与行为契约的权威文档是 docs/trng-register-map.zh-CN.md，
+ * 寄存器表与行为契约的权威文档是 docs/REGISTERS.zh-CN.md，
  * RTL 侧由 hardware/tb/cocotb/test_trng_axi.py 逐条验证，
  * 软件侧由 tests/unit/test_hwrng.c 对着同一份契约验证。
  * 两边跑的是同一张表 —— 这正是无板阶段能清掉接口 bug 的原因。
@@ -115,7 +115,7 @@ int hwrng_is_hardware(void);
  * 成功返回 HWRNG_OK。驱动初始化时必须调，失败就不该往下用。 */
 int hwrng_selftest(void);
 
-/* 取 n 字节。严格照 docs/trng-register-map.zh-CN.md 的契约：
+/* 取 n 字节。严格照 docs/REGISTERS.zh-CN.md 的契约：
  * 每次读 RDATA 之前先查 DATA_VALID，取完之后复查 UNDERRUN 与 ALARM，
  * 任一置位则**整批作废**（缓冲区清零）并返回 HWRNG_ERR_ALARM。
  * 成功返回 HWRNG_OK。 */

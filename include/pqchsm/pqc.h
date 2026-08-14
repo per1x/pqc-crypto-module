@@ -8,7 +8,7 @@
  * 已备接口：pqc_backend_accel()   —— AXI-Lite 寄存器驱动 PL 硬件核
  *
  * 注意「硬件核」不是设想：ML-KEM 512/768/1024 已在 PL 里跑通并对 NIST ACVP
- * 向量逐字节一致（见 docs/密码机原型-说明文档.md）。板上驱动它们的是 board/
+ * 向量逐字节一致（见 docs/SECURITY.md）。板上驱动它们的是 board/
  * 下的独立程序；把 src/ 这条 transport 接到同一批核上是尚未做的一步。
  *
  * 设计约束（为硬件后端预留）：

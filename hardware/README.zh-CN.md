@@ -7,21 +7,26 @@ RTL 源码、验证环境、生成黄金向量的参考模型，以及综合脚�
 > **本目录已经不只是仿真了。** 在分支 `zu3eg-fpga-crypto` 上，这些源码被综合成
 > bitstream 并跑在一块 XCZU3EG 板子上：ML-KEM 512/768/1024 **在真硅上**与 NIST ACVP
 > 向量逐字节一致，AXI 防火墙的访问门控也已双向证明。下面描述的仿真环境仍然是第一道
-> 门（174 个 cocotb 测试），但不再是最后一道。
-> 见 [../docs/密码机原型-说明文档.md](../docs/密码机原型-说明文档.md)。
+> 门（197 个 cocotb 测试），但不再是最后一道。
+> 见 [../docs/SECURITY.zh-CN.md](../docs/SECURITY.zh-CN.md)。
 
 ```
 hardware/
-├── rtl/
-│   ├── mlkem/      mont_reduce.v、butterfly.v、ntt_core.v、basemul.v、
-│   │               compress.v、sample.v、pack.v
-│   ├── mldsa/      mont_reduce.v、reduce.v、butterfly.v、ntt_core.v、
-│   │               rounding.v、sample.v
-│   ├── keccak/     keccak_f1600.v
-│   └── bus/        axi4lite_regs.v、pqc_accel_axi.v
+├── rtl/            密码逻辑
+│   ├── mlkem/      NTT、基乘、约减、采样、压缩、编解码，
+│   │               以及 KeyGen / Encaps / Decaps 三个整核
+│   ├── mldsa/      ML-DSA 算子：NTT、舍入、提示位、采样
+│   ├── keccak/     keccak_f1600.v、sha3_core.v
+│   ├── sym/        aes_core.v、sbox.v、sm4_core.v、sm3_core.v
+│   ├── trng/       环振源、健康检测（RCT/APT）、调理、FIFO、AXI 封装
+│   ├── bus/        防火墙、密钥仓、各核的 AXI 封装
+│   ├── board/      axi4lite_xbar.v、zu3eg_hsm_top.v
+│   └── common/     ram_dp.v、sync_fifo.v
+├── platform/       非密码的织构逻辑（风扇温控），见该目录的 README
 ├── tb/cocotb/      cocotb 测试台、仅供仿真的汇总顶层、Makefile
+├── tb/lint/        厂商原语空壳，只进 lint，不参与综合
 ├── model/          Python 参考模型、向量导出、独立预言机
-└── syn/            Vivado out-of-context 综合脚本与约束
+└── syn/            Vivado out-of-context 综合与出 bitstream 的完整流程
 ```
 
 所有模块都是可推断的纯 Verilog-2001，未实例化任何厂商原语，因此同一份源码可原样综合
@@ -102,7 +107,7 @@ SM4 的解密是同一条通路倒着用轮密钥，一分钱不用多花。
 `pqc_accel_axi` 是系统视角下的加速器：控制/状态寄存器走 AXI4-Lite，成块数据走
 AXI4-Stream，底下挂算法核。它实现的正是 `include/pqchsm/accel.h` 当初据以编写的那套
 寄存器语义——START 自清、DONE 电平锁存、状态寄存器由硬件写而软件只读。
-[docs/register-map.zh-CN.md](../docs/register-map.zh-CN.md) 是这份契约，
+[docs/REGISTERS.zh-CN.md](../docs/REGISTERS.zh-CN.md) 是这份契约，
 `test_axi.py` 用手写的总线功能模型逐条验证，不引入任何第三方 AXI 库。
 
 算法核同样通过这套寄存器接口由 C 侧驱动，因此同一份 RTL 既被 cocotb 对拍，
@@ -180,5 +185,5 @@ Verilator 的 2-state 语义与 Icarus 的 4-state 语义在位宽截断上并�
 ## 综合
 
 脚本位于 `syn/`。Mac 上没有 Vivado，所以它们在构建机（Vivado 2020.1）上跑；
-[docs/fpga-进展.md](../docs/fpga-进展.md) 里的资源占用与 Fmax 数字全部出自那里，
+[docs/TESTING.zh-CN.md](../docs/TESTING.zh-CN.md) 里的资源占用与 Fmax 数字全部出自那里，
 且都是布线后的值。参见 [syn/README.zh-CN.md](syn/README.zh-CN.md)。

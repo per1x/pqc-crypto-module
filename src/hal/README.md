@@ -28,7 +28,7 @@ mistakes surface in software rather than during board bring-up.
 | `verilator/ntt_sim.cpp` | C wrapper around the Verilated `ntt_core` |
 | `verilator/keccak_sim.cpp` | C wrapper around the Verilated `keccak_f1600` |
 | `accel_mmap.c` | `/dev/mem` + `mmap` transport for real programmable logic. Returns `NULL` unless the physical base addresses are supplied at build time. |
-| `hwrng.c` | Driver for the PL entropy source (`trng_axi`), following the contract in `docs/trng-register-map.zh-CN.md` |
+| `hwrng.c` | Driver for the PL entropy source (`trng_axi`), following the contract in `docs/REGISTERS.md` |
 | `hwrng_stub.c` | Software model of `trng_axi`'s register semantics. FIFO filled by OpenSSL — this models the *interface*, not entropy. |
 | `hwrng_mmap.c` | `/dev/mem` + `mmap` transport for the PL TRNG |
 
@@ -85,5 +85,5 @@ register interface. `tests/unit/test_accel.c` asserts this for both NTT directio
 for the whole SHA3/SHAKE path, and cross-checks the latter against OpenSSL. The same
 requirement will apply to a real hardware transport.
 
-See [docs/architecture.md](../../docs/architecture.md) for how this layer fits into the
+See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for how this layer fits into the
 rest of the module.

@@ -17,8 +17,8 @@ RTL_SYM       := $(PWD)/../../rtl/sym
 # 板级顶层那一层里唯一的纯 RTL：地址译码。厂商原语在 zu3eg_hsm_top，
 # 那个进 lint 不进 cocotb；xbar 没有原语依赖，所以能直接对拍。
 RTL_BOARD     := $(PWD)/../../rtl/board
-# 风扇控制在 fpga/fan_ctrl/ —— 与密码核代码分开放，但同一个 bitstream
-RTL_FAN       := $(PWD)/../../../fpga/fan_ctrl
+# 风扇控制在 hardware/platform/fan_ctrl/ —— 与密码核代码分开放，但同一个 bitstream
+RTL_FAN       := $(PWD)/../../platform/fan_ctrl
 
 # 用法：make MODULE=test_ops TOPLEVEL=mont_reduce
 MODULE   ?= test_ops

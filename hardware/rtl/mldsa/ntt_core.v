@@ -22,7 +22,7 @@
 // 一个蝶形也因此拆成两拍（S_RD 发地址 / S_WB 拿数算完写回），
 // 正变换 1025 → 2049 cycles，逆变换 1281 → 2561 cycles。
 // 理由与 ML-KEM 侧那一版相同：256×32 的寄存器阵列加多个组合读口，
-// 综合出来是几万个 LUT 的选择树，一颗 ZU3EG 放不下 —— 见 docs/fpga-进展.md 的 S3。
+// 综合出来是几万个 LUT 的选择树，一颗 ZU3EG 放不下 —— 见 docs/TESTING.md 的 S3。
 `default_nettype none
 
 module mldsa_ntt_core (

@@ -1,7 +1,7 @@
 # ooc_synth.tcl —— out-of-context 综合，出资源与时序报告
 #
 # ⚠️ **需要 AMD Vivado**（免费版即可）。Mac 上没有，所以本脚本在构建机
-#    （Vivado 2020.1）上跑；docs/fpga-进展.md 里的资源与 Fmax 数字都出自它。
+#    （Vivado 2020.1）上跑；docs/TESTING.md 里的资源与 Fmax 数字都出自它。
 #
 #      vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top>
 #      # 例：vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xazu3eg-sfvc784-1-i mlkem_encaps

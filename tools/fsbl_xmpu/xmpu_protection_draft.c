@@ -7,7 +7,7 @@
  *
  * 寄存器事实来源：QEMU ZynqMP XMPU 设备模型（xlnx-zynqmp-xmpu.c，由寄存器
  * 规范自动生成）+ PMUFW xpfw_xpu.c + XAPP1320。设计文档：
- * docs/xmpu-xppu-isolation.zh-CN.md。
+ * docs/SECURITY.zh-CN.md。
  *
  * ⚠️ 必须先有看门狗+黄金镜像回退再上板：配错 XMPU 会拦死 DDR 流量。
  * ⚠️ 本文件是草案：尚未上板验证，位定义上板前按 UG1087 复核一遍。

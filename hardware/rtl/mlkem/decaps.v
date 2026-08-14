@@ -289,7 +289,7 @@ module mlkem_decaps #(
     // ================= w = v − NTT⁻¹(ŝᵀû)，再 Compress₁ =================
     // 三级流水，不是为了吞吐是为了时序：decompress 一次乘法、barrett 两次、
     // compress 又一次，四级 DSP 串起来在这颗片子上跑不到 100 MHz
-    // （encaps 的输出尾巴就是这么栽的，见 docs/fpga-进展.md 的 S4b）。
+    // （encaps 的输出尾巴就是这么栽的，见 docs/TESTING.md 的 S4b）。
     reg signed [15:0] v_r, su_r, w_r;
     wire signed [15:0] w_bar;
     barrett_reduce u_w_br (.a(v_r - su_r), .r(w_bar));

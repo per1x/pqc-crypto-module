@@ -31,7 +31,7 @@
 //    这样两条路的 Montgomery 因子不会各写一遍、各错一遍。
 //
 // 基乘沿用 basemul.v 的 _head/_tail 两半并在中间插一级寄存器 ——
-// 理由与代价见 mlkem_keygen 的注释和 docs/fpga-进展.md 的 S4 一节。
+// 理由与代价见 mlkem_keygen 的注释和 docs/TESTING.md 的 S4 一节。
 `default_nettype none
 
 module mlkem_encaps #(

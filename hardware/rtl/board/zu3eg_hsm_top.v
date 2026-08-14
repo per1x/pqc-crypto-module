@@ -10,7 +10,7 @@
 //                                                             └─ 0x8005_0000 风扇观测口
 //
 //   另有一条**完全不经过 AXI** 的通路：SYSMONE4 ──▶ fan_ctrl ──▶ AA11。
-//   风扇不依赖软件，理由见 fpga/fan_ctrl/fan_ctrl.v 的文件头。
+//   风扇不依赖软件，理由见 hardware/platform/fan_ctrl/fan_ctrl.v 的文件头。
 //
 // ============================================================================
 // 【时钟：为什么要分频，为什么用 BUFGCE_DIV 而不是 MMCM】
@@ -87,10 +87,10 @@
 //
 // 风扇和密码核在同一个 bitstream 里，是因为 **PL 只有一份**：运行时载进去的
 // 那一个 bitstream 就是全部，分成两个"设计"没有意义（载了谁另一个就没了）。
-// 但**代码是分开的**（fpga/fan_ctrl/ vs hardware/rtl/）：风扇不碰密码的任何
+// 但**代码是分开的**（hardware/platform/fan_ctrl/ vs hardware/rtl/）：风扇不碰密码的任何
 // 信号，密码也不碰风扇的，两边只共用时钟和复位。
 module zu3eg_hsm_top (
-    output wire fan          // AA11，低=转（见 fpga/fan_ctrl/fan_ctrl.v）
+    output wire fan          // AA11，低=转（见 hardware/platform/fan_ctrl/fan_ctrl.v）
 );
     // ========================================================================
     // 【PQC_CHARACTERIZE：表征构建，不是产品形态】

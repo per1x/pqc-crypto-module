@@ -11,7 +11,7 @@
  *
  * 这两个地址由具体器件的地址分配决定，因此这里不写死任何取值。
  * 本项目的目标器件 XCZU3EG 上，PS 的 M_AXI_HPM0_LPD 窗口是 0x8000_0000-0x9FFF_FFFF，
- * 各密码从机按 64 KB 分槽落在其中（见 docs/密码机原型-说明文档.md 的地址映射）。未定义时
+ * 各密码从机按 64 KB 分槽落在其中（见 docs/SECURITY.md 的地址映射）。未定义时
  * accel_transport_mmap() 返回 NULL，如实反映"这条路没有可用的目标"。
  * 定义方式是构建时传入，例如
  *
@@ -19,7 +19,7 @@
  *                                        -DPQCHSM_ACCEL_MMAP_BUF=0x80030010"
  *
  * 【与其它 transport 的关系】
- * 命令时序与 accel_axi.c 完全相同，遵循同一份 docs/register-map.md 契约：
+ * 命令时序与 accel_axi.c 完全相同，遵循同一份 docs/REGISTERS.md 契约：
  * 写 MODE / IN_LEN → 送数据 → 写 CTRL.START → 轮询 STATUS.DONE → 取结果。
  * 区别只在事务怎么发出去：仿真里是驱动 Verilator 模型的端口，这里是对
  * mmap 出来的地址做 volatile 读写。

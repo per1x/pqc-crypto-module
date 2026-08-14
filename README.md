@@ -2,381 +2,224 @@
 
 # pqc-crypto-module
 
-A post-quantum cryptographic module prototype: key storage, slot management, backup
-and recovery, tamper-evident audit logging, and a PKCS#11 v3.2 front end — plus a
-complete hardware crypto engine in programmable logic, **built and validated on real
-silicon** (Xilinx XCZU3EG).
+A post-quantum + SM-series **hardware security module prototype** running in the
+programmable logic of a Xilinx Zynq UltraScale+ **XCZU3EG**. The cryptographic
+cores, the noise source, the key vault and the access boundary all live in FPGA
+fabric; Linux on the ARM cores is only the side that issues commands.
 
-> **Status: research prototype.** The cryptographic boundary is **hardware** — an
-> AxPROT-gated AXI firewall in programmable logic — and it has been **proven in both
-> directions on the board**: the secure world (EL3) reads a `SECURE_ONLY=1` core, the
-> normal world is refused at the bus, and that same normal world reads a
-> `SECURE_ONLY=0` core successfully.
->
-> The host software (`src/`, `cli/`, `demo/`) is the control plane **outside** that
-> boundary: slots, sessions, the keystore file, backup and recovery, and the PKCS#11
-> front end. What does and does not cross the boundary is stated precisely under
-> [Security model and limitations](#security-model-and-limitations) — including the
-> parts that still do.
->
-> This is not a certified module. Do not use it to protect anything real. Full method
-> and raw logs: [密码机原型-说明文档.md](docs/密码机原型-说明文档.md)
-> ([PDF](docs/密码机原型-说明文档.pdf)).
+Every number in this repository comes from **the real device**, not simulation.
 
-## Overview
+> **Status: research prototype.** Not certified, not hardened, not for
+> production. See [Status and limitations](#status-and-limitations) — the gaps
+> are listed, not hidden.
 
-Post-quantum algorithms are standardised (FIPS 203 / 204), but the surrounding
-machinery — how keys are stored, wrapped, backed up, revoked, and exposed to
-applications — is where a cryptographic module actually lives or dies. This project
-builds that machinery around ML-KEM and ML-DSA, in the shape a real device would take.
-The algorithm cores have since been lifted onto a Zynq UltraScale+ SoC: ML-KEM
-512/768/1024, AES-128/256, SM4, SM3, a ring-oscillator TRNG, a key vault and the access
-boundary now run in programmable logic on real hardware.
+---
 
-Two consequences of that goal explain most of the design:
+## What it does
 
-- **Everything is behind a handle.** No API in `include/pqchsm/` returns private key
-  material. The keystore, the slot manager, and the PKCS#11 front end all operate on
-  opaque handles, so tightening the boundary later does not change any caller.
-- **The hardware seam exists from day one.** Cryptographic operations go through a
-  vtable (`pqc_backend_t`) and, below it, an AXI-style register interface
-  (`accel_transport_t`). Four transports implement that interface identically: a
-  software stub, a Verilator-simulated RTL backend, the same RTL driven over real
-  AXI4-Lite and AXI4-Stream transactions, and `/dev/mem` + `mmap` on the board.
-  Swapping between them changes nothing above the seam.
+| | |
+|---|---|
+| **Post-quantum KEM** | ML-KEM-512 / 768 / 1024 (FIPS 203), full KeyGen / Encaps / Decaps in RTL — byte-exact against NIST ACVP vectors **on silicon** |
+| **Symmetric & SM-series** | AES-128/256, SM4, SM3 — checked against FIPS 197, GB/T 32907, GB/T 32905 |
+| **True random source** | 8-ring-oscillator entropy source, SP 800-90B health tests (RCT/APT), SHA-3 sponge conditioning. Measured min-entropy **H = 0.871 bit/sample** |
+| **Hardware key vault** | Symmetric keys enter over the bus and leave only over a private wire to the cipher cores. There is **no read path in the RTL** |
+| **Security boundary** | AXI firewall gating on `AxPROT[1]`, proven in both directions on the board: the secure world reads a `SECURE_ONLY=1` core, the normal world is refused at the bus |
+| **Standard front end** | SDF-style (GM/T 0018) C library and a PKCS#11 v3.2 module, so an application never sees a register |
 
-Every cryptographic operation on the live path uses
-[liboqs](https://github.com/open-quantum-safe/liboqs) or OpenSSL; no primitive is
-hand-rolled for production use. The hand-written NTT and Keccak implementations that do
-exist (`src/hal/accel_stub.c`, `hardware/model/`) serve only as reference points for
-RTL comparison and are never used to protect key material. Correctness is pinned to
-NIST ACVP vectors.
+Fits in **half the device**: 35,611 LUT (50.5 %), 140 DSP, 15.5 BRAM,
+WNS +3.504 ns @ 75 MHz.
 
 ## Architecture
 
 ```
-                PKCS#11 v3.2 shared library  (src/p11)
-                Daemon / CLI / admin tools   (cli)
- ──────────────────────────────────────────────────────────────────
-  slot manager    keystore      backup / recovery    audit chain
-  (src/slot)      (src/store)   (src/backup)         (src/audit)
-    FSM,          AES-256-GCM   Shamir M-of-N        SHA3-256 chain
-    sessions,     wrapping,     over GF(256),        + ML-DSA anchor
-    handles,      atomic        device-bound KEK       signing
-    ACLs          file I/O      vs portable BEK
- ──────────────────────────────────────────────────────────────────
-                  pqc_backend_t vtable  (include/pqchsm/pqc.h)
-                             │
-             ┌───────────────┴────────────────┐
-       liboqs backend                  register-interface backend
-       (src/crypto)                    (src/hal/pqc_accel.c)
-                                               │
-                             accel_transport_t (include/pqchsm/accel.h)
-                                               │
-            ┌──────────────┬───────────┴───────────┬──────────────┐
-      software stub   Verilator RTL          AXI over RTL        mmap
-     (accel_stub.c) (accel_verilator.c)     (accel_axi.c)   (accel_mmap.c)
-                            │                     │
-                   hardware/rtl cores    hardware/rtl/bus/pqc_accel_axi
-                                          (AXI4-Lite + AXI4-Stream)
+   ┌──────────────────────── PS · Cortex-A53 ────────────────────────┐
+   │  application ──▶ libsdfe (SDF-style)  ──▶ pqchsm_fpgad          │
+   │                                              │                  │
+   │  ······················· normal world ·······│················  │
+   │                                       /dev/secmmio  →  EL3 SiP  │
+   └──────────────────────────────────────────────│──────────────────┘
+                       M_AXI_HPM0_LPD  (AXI4, AxPROT[1] = security bit)
+                                                  ▼
+   ┌──────────────────────── PL · FPGA fabric ───────────────────────┐
+   │              axi4lite_xbar  (full decode, one address per reg)  │
+   │   ┌──────┬──────────┬──────────┬──────────┬─────────┬────────┐  │
+   │   │ slot0│  slot1   │  slot2   │  slot3   │  slot4  │ slot5  │  │
+   │   │ trng │key_vault │   sym    │  mlkem   │ canary  │  fan   │  │
+   │   │      │          │AES/SM4/  │ 512/768/ │ SECURE_ │ observe│  │
+   │   │      │          │   SM3    │   1024   │ ONLY=1  │  only  │  │
+   │   └──────┴────┬─────┴────▲─────┴──────────┴─────────┴────────┘  │
+   │               └──────────┘  use_key: private wire, not the bus  │
+   │      every slot sits behind axi4lite_firewall (AxPROT gate)     │
+   └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Key hierarchy
+Each slot is 64 KB at `0x8000_0000 + slot × 0x1_0000`. Slot 4 is a second
+instance of the key vault differing **only** in `SECURE_ONLY=1`; its entire
+purpose is to be refused, which is what turns "the gate works" into evidence.
 
-A device-bound root (`KDR`, currently a stub — see limitations) derives a **KEK** that
-wraps keys at rest. Backup instead uses a **BEK** derived from a randomly generated
-recovery master key, split with Shamir's scheme over GF(256) using a constant-time
-multiply. The distinction is deliberate: KEK-wrapped material cannot leave the device,
-BEK-wrapped material is portable to a replacement device, and a slot must opt in to
-being backed up at all.
+Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
+register-level contract: [docs/REGISTERS.md](docs/REGISTERS.md).
 
-### Audit chain
+## Quick start
 
-Every state transition appends a record whose hash covers the previous record's hash.
-A pure hash chain only guarantees that tampering propagates forward, so the chain head
-is additionally signed with an ML-DSA device identity key and anchored outside the
-device — otherwise rewriting the whole file is undetectable.
+No board is needed for anything in this section.
 
-### Hardware seam
+```bash
+git clone https://github.com/per1x/pqc-crypto-module
+cd pqc-crypto-module
 
-`accel.h` fixes the register map (`CTRL`, `STATUS`, `MODE`, `PARAM`, `IN_LEN`,
-`OUT_LEN`, `ERRCODE`) before any RTL was written, so interface bugs surface in software
-first. That contract is now implemented in hardware as well: `pqc_accel_axi` exposes it
-over AXI4-Lite for control and AXI4-Stream for bulk data, and
-[docs/register-map.md](docs/register-map.md) states the semantics both sides are
-written against — START self-clearing, DONE latched as a level, status registers
-written by hardware and read-only to software.
+python3 -m venv .venv-rtl && ./.venv-rtl/bin/pip install cocotb
+brew install icarus-verilog verilator      # or your distro's packages
 
-The RTL covers the arithmetic of both algorithms plus the bus interface. It is plain
-inferrable Verilog-2001 throughout: no vendor primitive is instantiated anywhere, so
-the same sources target Xilinx, Intel, or Lattice unchanged.
+./tools/rtl_sim.sh          # 197 cocotb tests against the RTL
+./tools/rtl_lint.sh         # Verilator -Wall + Icarus, 70 modules, zero warnings
+./tools/rtl_synth_check.sh  # Yosys synthesisability
+```
 
-| Group | Cores |
+To build the host software and its PKCS#11 module (CMake ≥ 3.20, OpenSSL 3,
+liboqs):
+
+```bash
+./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+Bitstream (Vivado 2020.1, ~35 min, target `xazu3eg-sfvc784-1-i`):
+
+```bash
+vivado -mode batch -source hardware/syn/impl_bitstream.tcl
+```
+
+### Calling it like a crypto module
+
+`service/` gives an application the interface a real HSM exposes. The demo links
+**only** `libsdfe` — no crypto library at all — so any correct answer it prints
+can only have come from the FPGA.
+
+```c
+#include "sdfe.h"
+
+SDFE_HANDLE dev, ses;
+uint8_t ek[1600], ct[1600], ss[32];
+uint32_t ek_len = sizeof ek, ct_len = sizeof ct, ss_len = sizeof ss, kh;
+
+SDFE_OpenDevice(&dev);
+SDFE_OpenSession(dev, &ses);
+
+SDFE_GenerateRandom(ses, 32, ss);                    /* ring-oscillator TRNG  */
+SDFE_GenerateKeyPair_MLKEM(ses, SDFE_MLKEM_768,      /* dk never reaches here */
+                           ek, &ek_len, &kh);
+SDFE_Encapsulate_MLKEM(ses, SDFE_MLKEM_768, ek, ek_len,
+                       ss, &ss_len, ct, &ct_len);
+SDFE_Decapsulate_MLKEM(ses, kh, ct, ct_len, ss, &ss_len);   /* by handle */
+
+SDFE_ImportKey(ses, /*slot*/ 3, key, 16);            /* into the key vault —  */
+SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* unreadable afterwards */
+```
+
+Build and run: `make -C service && ./service/sdf_demo`.
+Interface reference: [docs/API.md](docs/API.md).
+
+## Evidence
+
+Measured on the device, in the configuration described in
+[docs/SECURITY.md](docs/SECURITY.md).
+
+| Check | Result |
 |---|---|
-| ML-KEM | `ntt_core` (7-layer, 1153 cycles), `mlkem_basemul`, `mlkem_compress`/`decompress`, `mlkem_cbd2`/`cbd3`, `mlkem_rej_pair`/`rej_uniform`, `mlkem_encode12`/`decode12` |
-| ML-DSA | `mldsa_ntt_core` (8-layer, 1025 forward / 1281 inverse), `mldsa_mont_reduce`, `mldsa_reduce32`, `mldsa_caddq`, `mldsa_power2round`, `mldsa_decompose`, `mldsa_make_hint`/`use_hint`, `mldsa_rej_uniform`/`rej_eta` |
-| Keccak | `keccak_f1600` (single-round iterative, 24 cycles) |
-| Bus | `axi4lite_regs`, `pqc_accel_axi` |
-| Noise source | `trng_health` (SP 800-90B repetition-count and adaptive-proportion tests) |
+| ML-KEM 512/768/1024 vs NIST ACVP, on silicon | 20 / 20 byte-exact |
+| Board self-test (symmetric, SM, boundary, AxPROT, TRNG) | 24 / 24 |
+| Key vault counter-proof — 256 bytes scanned on each of two slaves | key words appear **0** times; ciphertext correct |
+| AxPROT gate, both directions | EL3 reads `SECURE_ONLY=1`; EL1-NS refused (DECERR); same EL1-NS reads `SECURE_ONLY=0` |
+| TRNG min-entropy, 1,048,576 pre-conditioning samples | H = 0.871234 bit/sample → RCT 47, APT 672 |
+| Decaps timing, valid vs implicit-reject, 200 runs each | median difference 0.000 % |
+| ML-KEM-512 throughput @ 75 MHz | 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps) |
+| cocotb regression · Verilator lint · Yosys | 197 tests · 70 modules, 0 warnings · all synthesise |
 
-SHA3 and SHAKE are built as a sponge in C on top of the permutation, so the entire
-SHA3/SHAKE path can be run against simulated RTL and compared byte-for-byte with
-OpenSSL. Complete ML-KEM and ML-DSA operations have no hardware implementation; the
-accelerator reports "unsupported" for those modes rather than silently substituting
-software.
+Method and raw logs: [docs/TESTING.md](docs/TESTING.md); on-board captures are
+kept verbatim under [board/logs/](board/logs/).
 
-## Features
+## Status and limitations
 
-- **ML-KEM-512/768/1024 and ML-DSA-44/65/87**, verified against 390 NIST ACVP vectors
-  byte-for-byte (vectors pinned to a specific ACVP-Server commit).
-- **Slot/token/object/session model** with an explicit FSM transition table, role-based
-  access control, PIN lockout, and generation counters that invalidate stale handles.
-- **Encrypted keystore** — AES-256-GCM wrapping with metadata as AAD, whole-file KMAC,
-  and atomic `tmp → fsync → rename → fsync(dir)` writes.
-- **M-of-N backup and recovery** across devices, with per-slot policy controlling
-  whether a key may be backed up at all.
-- **Tamper-evident audit log** with ML-DSA anchor signing.
-- **Secure key injection** — a one-time session key is encapsulated to the device's own
-  ML-KEM public key, so plaintext key material never appears on the wire.
-- **PKCS#11 v3.2 front end** exposing native `CKM_ML_KEM` / `CKM_ML_DSA` mechanisms,
-  including `C_EncapsulateKey` / `C_DecapsulateKey` reachable via `C_GetInterface`.
-- **RTL cores with independent verification** — cocotb testbenches check against the
-  published Keccak all-zero permutation vector and against `hashlib`/OpenSSL, not only
-  against this project's own reference model.
+Accurate statements about what this does **not** do.
+
+- **ML-KEM private keys leave the hardware.** `KeyGen` returns `ek ‖ dk` over
+  AXI, because checking against ACVP vectors requires it. The daemon keeps `dk`
+  and hands the application a handle, so it does not leave the *interface* — but
+  "the private key never leaves the hardware" is not yet true, and is not
+  claimed. Symmetric keys in the key vault are a different case: those genuinely
+  have no read path.
+- **root can still drive the hardware.** The EL3 SiP exposes whitelisted MMIO
+  reads and writes, with the operation sequence assembled in the normal world.
+  The normal world cannot *read* key material; it can still load and use key
+  vault slots. Closing that needs an operation-granularity SiP.
+- **The key derivation root is a stub.** `src/crypto/kdr.c` holds a fixed
+  constant. A real device takes it from eFUSE, BBRAM or a PUF; on this board
+  eFUSE is irreversible with a single board available, and BBRAM needs JTAG.
+  Device binding is therefore not real.
+- **No SM2 core.** SM4 and SM3 are present; the SM2 asymmetric algorithm is not.
+- **This is a security prototype, not a fast one.** Throughput figures include
+  per-byte software AXI traffic and are published for the 1 : 1.5 : 2.1 ratio
+  across parameter sets, not as a performance claim.
+- **Power and EM side channels are out of scope, deliberately.** Constant-time
+  work covers timing only. Masking cannot be validated without a side-channel
+  bench, and shipping unvalidated masking is worse than shipping none.
+- **ML-DSA is operators only.** Thirteen modules verified against the reference
+  model, not chained into whole KeyGen/Sign/Verify cores.
+- **Two items need JTAG**: persisting the PL configuration into the golden
+  `BOOT.BIN`, and BBRAM-backed secure boot.
+- **PS-side XMPU/XPPU does not apply.** UG1085 settles it: no PS protection unit
+  covers the `0x8000_0000` PL window. The firewall in the PL is the only
+  enforcement point on this path — which is why the address decode is one-to-one
+  with no mirrors.
 
 ## Repository layout
 
 ```
-├── include/pqchsm/     Public headers — the API surface. No private key crosses it.
-├── src/
-│   ├── crypto/         liboqs binding, KDF, key derivation root (KDR)
-│   ├── slot/           Slot FSM, sessions, metadata, persistence
-│   ├── store/          AES-256-GCM wrapping, keystore file format
-│   ├── backup/         Shamir splitting, backup/restore, key injection
-│   ├── audit/          Hash chain and ML-DSA anchoring
-│   ├── hal/            Accelerator abstraction: stub, Verilator, register semantics
-│   ├── p11/            PKCS#11 v3.2 shared library
-│   ├── proto/          TLV command protocol
-│   └── util/           Secure zeroing, locked allocation, KAT parsing
-├── cli/                Daemon, client CLI, admin tool
-├── tests/              Unit, integration, KAT, and fuzz targets
-├── demo/               PKCS#11 provider demos (Python, Java)
-├── hardware/
-│   ├── rtl/            Verilog sources: mlkem/, mldsa/, keccak/, sym/, bus/, trng/, board/
-│   ├── tb/cocotb/      cocotb testbenches (197 tests) and simulation-only top levels
-│   ├── tb/lint/        Vendor-primitive stubs — lint only, never synthesised
-│   ├── model/          Python reference model, vector export, independent oracles
-│   └── syn/            Vivado scripts: out-of-context synthesis and the full
-│                       RTL-to-bitstream implementation flow (with boot-time assertions)
-├── fpga/fan_ctrl/      PL fan temperature control — deliberately separate from the
-│                       crypto RTL; same bitstream, no shared signals
-├── board/              On-board test programs, payloads, and the PL harness
-│                       (every command that touches the PL goes through it)
-├── boot/atf/           ATF/BL31 patches: the EL3 SiP used to close the access-gate proof
-├── tools/              Vector fetching, benchmarks, profiling, regression scripts
-├── third_party/        Vendored OASIS PKCS#11 v3.2 headers (unmodified)
-└── docs/               Architecture, PKCS#11, register map, algorithms, security policy, testing
+hardware/rtl/       Verilog-2001 crypto cores: mlkem/ mldsa/ keccak/ sym/ trng/ bus/ board/
+hardware/platform/  Non-crypto fabric logic (fan control) — same bitstream, no shared signals
+hardware/tb/        cocotb testbenches, simulation tops, lint-only vendor stubs
+hardware/model/     Python reference model, independent oracles, vector export
+hardware/syn/       Vivado out-of-context synthesis and the RTL-to-bitstream flow
+service/            SDF-style client library, daemon, and a hardware-only demo
+boot/atf/           BL31 patches: the EL3 SiP that gives the secure world a path to the PL
+board/              On-board programs, harness, kernel modules, and raw result logs
+include/ src/ cli/  Host software: keystore, slots, backup, audit, PKCS#11 front end
+tee/                OP-TEE trusted application (separate line of work)
+tests/              Host-software unit, integration, KAT and fuzz targets
+tools/              Regression scripts, SP 800-90B estimators, static analysers
+docs/               Architecture, API, security model, testing, register maps
 ```
 
 ## Documentation
 
-| Document | Contents |
+| | |
 |---|---|
-| [architecture.md](docs/architecture.md) · [中文](docs/architecture.zh-CN.md) | Layering, key hierarchy, keystore format, audit chain, hardware abstraction, key injection |
-| [pkcs11.md](docs/pkcs11.md) · [中文](docs/pkcs11.zh-CN.md) | Mechanisms, object model, vendor attributes, key import, KEM operations, configuration |
-| [constant-time.md](docs/constant-time.md) · [中文](docs/constant-time.zh-CN.md) | Constant-time audit scope and method, findings, zeroization checks, what is not claimed, how to reproduce |
-| [register-map.md](docs/register-map.md) · [中文](docs/register-map.zh-CN.md) | The accelerator register contract: address map, behavioural clauses, data plane, operation codes |
-| [algorithms.md](docs/algorithms.md) · [中文](docs/algorithms.zh-CN.md) | Algorithm inventory, parameter sets, key and SSP inventory, validation evidence |
-| [security-policy.md](docs/security-policy.md) · [中文](docs/security-policy.zh-CN.md) | FIPS 140-3 / GM/T 0028 security policy draft, with an explicit gap list |
-| [testing.md](docs/testing.md) · [中文](docs/testing.zh-CN.md) | What is tested, by what means, and how to reproduce every number quoted here |
-| [deployment.md](docs/deployment.md) · [中文](docs/deployment.zh-CN.md) | Deployment on an intranet Linux host, including obtaining every dependency offline |
-| [zynq-port.zh-CN.md](docs/zynq-port.zh-CN.md) (中文) | Porting to a Zynq UltraScale+ MPSoC: staging and dependencies, mapping the software boundary onto silicon, irreversible steps |
-| **[密码机原型-说明文档.md](docs/密码机原型-说明文档.md)** (中文, [PDF](docs/密码机原型-说明文档.pdf)) | **The FPGA line's delivery document**: architecture, code guide, every test result with the raw logs embedded, and a per-item blocked list |
-| [fpga-进展.md](docs/fpga-进展.md) (中文) | Stage-by-stage engineering log for the FPGA line (S1–S7, P6, P7): what was built, what broke, and why each assertion exists |
-| [hardware/README.md](hardware/README.md) | RTL modules, verification strategy, simulator choice |
-| [demo/README.md](demo/README.md) | Provider demos and client-library compatibility |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, address map, clocking, key hierarchy, hardware seam |
+| [API.md](docs/API.md) | SDF-style interface and PKCS#11 v3.2 front end |
+| [SECURITY.md](docs/SECURITY.md) | Trust boundary, threat model, what is proven, what is not |
+| [REGISTERS.md](docs/REGISTERS.md) | Register contract for every AXI slave |
+| [TESTING.md](docs/TESTING.md) | What is tested, by what means, how to reproduce it |
+| [USAGE.md](docs/USAGE.md) | Building, running, deploying, and driving the board |
+| [reference/](docs/reference/) | Security policy draft, offline deployment, constant-time audit, port plan |
 
-## Building
+Chinese versions live beside each file as `*.zh-CN.md`. Architecture, API,
+registers, security and testing are also published together as a single PDF —
+[设计与验证参考](docs/reference/design-validation.zh-CN.pdf), 26 pages — built
+from those same Markdown files by `./tools/pdf/build-pdf.sh`, so the two cannot
+drift apart.
 
-Requirements: CMake ≥ 3.20, a C11 compiler, OpenSSL 3, and liboqs.
+## Contributing
 
-```bash
-brew install liboqs openssl@3 cmake        # macOS
-# Debian/Ubuntu: liboqs from source; libssl-dev, cmake, ninja-build for the rest
-```
-
-```bash
-./tools/fetch_vectors.sh                   # download and flatten NIST ACVP vectors
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
-
-Optional components are detected, not required. Without Verilator the simulated RTL
-backend is simply not compiled in and `accel_transport_verilator()` returns `NULL`;
-tests that need `cocotb`, `iverilog`, or `pkcs11-tool` skip themselves with a message
-rather than failing.
-
-### Additional checks
-
-```bash
-python3 tools/ct_audit.py      # constant-time source audit (--self-test for the controls)
-python3 tools/check_zeroize.py # zeroization structure check (--self-test for the controls)
-./tools/rtl_sim.sh          # cocotb regression (Icarus Verilog)
-./tools/aarch64_test.sh     # full rebuild and regression in an aarch64 Linux container
-./tools/fuzz.sh             # libFuzzer targets (requires LLVM clang)
-./tools/profile.sh          # sampling profile
-./build/pqchsm-bench        # algorithm-level baseline
-./build/pqchsm-prim-bench   # per-primitive cost and measured RTL cycle counts
-```
-
-## Running the demos
-
-Both demos drive the shared library through the full lifecycle: initialise the token,
-set PINs, log in, generate ML-DSA and ML-KEM keys into slots, sign and verify, read
-attributes, and enumerate objects.
-
-```bash
-cmake --build build --target pqchsm-p11
-
-# Python, via PyKCS11
-python3 -m venv .venv-p11 && ./.venv-p11/bin/pip install -q PyKCS11
-./.venv-p11/bin/python demo/python/pqchsm_demo.py
-
-# Java, via the JDK 22+ FFM API (no external dependency)
-java --enable-native-access=ALL-UNNAMED demo/java/PqcHsmDemo.java \
-     "$PWD/build/pqchsm-pkcs11.dylib"
-```
-
-Both use the low-level PKCS#11 binding directly. Higher-level provider frameworks are
-**not** used, because they do not yet support these mechanisms — see
-[demo/README.md](demo/README.md) for details and for a probe that demonstrates it.
-
-## Security model and limitations
-
-This is a prototype. The following are accurate statements about what it does and does
-not do.
-
-**The cryptographic boundary is hardware.** The ML-KEM cores, the symmetric cores
-(AES-128/256, SM4, SM3), the ring-oscillator TRNG, the key vault and the AXI firewall
-all live in the FPGA's programmable logic. The firewall gates on `AxPROT[1]`, and the
-gate has been proven in **both** directions on the board: the secure world (EL3,
-`AxPROT[1]=0`) reads a `SECURE_ONLY=1` core and gets `0x00010000`; the normal world
-(EL1-NS, `AxPROT[1]=1`) is refused at the bus (SIGBUS/DECERR) — while that *same*
-normal world reads a `SECURE_ONLY=0` core successfully, so the difference is the gate
-and not an unreachable address.
-
-**What does and does not cross that boundary — stated precisely, because it is easy to
-over-claim.**
-
-- **Symmetric keys loaded into the key vault do not cross it.** Measured by scanning
-  256 bytes of each of two slaves (48 readable, 80 refused by the firewall): not one of
-  the key's four words appeared anywhere, while the ciphertext those keys produced was
-  correct. Both halves are needed — either alone proves nothing.
-- **ML-KEM private keys currently do cross it.** `KeyGen` returns `ek ‖ dk` over AXI,
-  because that is what checking against NIST ACVP vectors requires. A production form
-  would keep `dk` inside the boundary or export it only wrapped. This is an interface
-  decision, not a firewall failure, and it is not fixed here.
-- **Host-side key handling is outside the boundary.** The keystore file, its AES-GCM
-  wrapping, slot metadata and the PKCS#11 layer run in host software. For those,
-  plaintext key material exists in process memory, buffers are zeroed and `mlock`-ed
-  where possible, and nothing defends against an attacker who can read that address
-  space. [constant-time.md](docs/constant-time.md) records what the constant-time and
-  zeroization audits cover and — more usefully — what they do not.
-
-**The host-side key derivation root is a stub.** `src/crypto/kdr.c` contains a fixed
-32-byte constant whose literal text reads `PQC-HSM STUB KDR -- NOT SECRET!!`. A real
-device takes this from eFUSE, BBRAM, or a PUF. On this board neither is available:
-eFUSE is irreversible and there is only one board, BBRAM needs JTAG. Device binding is
-therefore not real, and that is a deliberate, recorded limit rather than an oversight.
-
-**The constant-time work covers timing only.** Checked on the board: the valid and
-implicit-reject Decaps paths differ by 0.000 % at the median over 200 runs each. Power
-and electromagnetic side channels are **not** addressed and are not claimed.
-
-**Other known gaps.** The audit module assumes a single writer and does not lock the
-file. Shamir share checksums are unkeyed: they detect corruption, not tampering. SO PIN
-failures increment a counter but do not lock the slot — locking it would brick the
-device, and the fallback is M-of-N recovery. `CKM_HASH_ML_DSA_*` is not implemented, so
-PKCS#11 multi-part signing buffers the whole message rather than streaming a digest.
-
-## Testing
-
-| Check | Result |
-|---|---|
-| `ctest` | 45 / 45 |
-| Assertions | 4059 |
-| NIST ACVP vectors | 390 byte-exact, 60 explicitly skipped |
-| ASan + UBSan | 45 / 45 |
-| ThreadSanitizer | 0 races (validated by removing locks: 9 reported) |
-| macOS `leaks` | 0 leaks |
-| libFuzzer | 1.38 M executions, no crashes |
-| aarch64 Linux (GCC 12) | 45 / 45 |
-| cocotb RTL regression | 156 tests across 26 top levels |
-| RTL lint (Verilator `-Wall` + Icarus) | 31 modules, 0 warnings |
-| RTL synthesisability (Yosys) | 31 modules, all synthesise |
-
-Two habits run throughout the test sources:
-
-- **Independent oracles.** A result is not trusted because it matches this project's own
-  model. KMAC is checked against the NIST document, OpenSSL, and a separate Keccak. The
-  NTT is checked against a schoolbook negacyclic convolution that never touches the
-  twiddle table, and by reconstructing ML-KEM key generation and reproducing ACVP
-  `ek`/`dk` byte-for-byte. Keccak is checked against the published all-zero permutation
-  vector and against `hashlib`/OpenSSL.
-- **Structural checks over habits.** Properties that no functional test can see —
-  the key derivation root having no read-back interface, no secret-dependent branch or
-  index in `src/`, every key-material field wiped by its destructor — are expressed as
-  scanners wired into `ctest`, each of which self-tests on synthetic samples before it
-  is allowed to report a clean scan. See [constant-time.md](docs/constant-time.md).
-- **Negative controls.** Assertions are validated by breaking something and confirming
-  the test fails — perturbing a twiddle factor, dropping an NTT layer, flipping a bit in
-  a Keccak round constant, removing a lock under TSan, adding a fake key-readback
-  function, timing a deliberately early-returning comparison, probing a stack frame
-  that was never wiped.
-
-## What is built, and what is not
-
-Every claim below is attached to its evidence, so it can be checked rather than
-believed. Method and raw logs:
-[密码机原型-说明文档.md](docs/密码机原型-说明文档.md)
-([PDF](docs/密码机原型-说明文档.pdf)).
-
-| Capability | Status and evidence |
-|---|---|
-| A complete ML-KEM dataflow in RTL | **Done.** ML-KEM 512/768/1024 KeyGen/Encaps/Decaps, byte-exact against NIST ACVP vectors **on silicon** (20/20). Parameter set selected by a register field; lengths are derived in RTL, so software cannot report a wrong one |
-| Synthesis and timing closure on the target device | **Done.** Full RTL-to-bitstream flow. 35592 LUT (50.44 %), 25916 FF, 15.5 BRAM, 140 DSP, **WNS +3.174 ns / WHS +0.001 ns** @ 75 MHz |
-| Security boundary in programmable logic | **Done.** AxPROT-gated AXI firewall, key vault whose keys leave only over a private wire. Proven both directions on the board: EL3 reads a `SECURE_ONLY=1` core, EL1-NS is refused (SIGBUS/DECERR), while the *same* normal world reads a `SECURE_ONLY=0` core — so the difference is the gate, not reachability |
-| Key derivation root in eFUSE / BBRAM / PUF | **Not done, and not planned on this board.** eFUSE is irreversible and there is only one board; BBRAM needs JTAG. See the blocked list in the delivery document |
-| A ring-oscillator noise source with an SP 800-90B assessment | **Done.** 1,048,576 **pre-conditioning** samples exported from the board; SP 800-90B non-IID estimators give **H = 0.871234 bits/sample**. The measured value sets the health-test cutoffs (RCT 47, APT 672); cutoffs assumed from H = 0.5 would have left the APT test unable to fire |
-| End-to-end throughput | **Measured.** ML-KEM-512 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps); 768 and 1024 scale ≈ 1 : 1.5 : 2.1, matching the k = 2/3/4 workload |
-
-Still open, with the reason attached:
-
-1. **ML-DSA whole cores.** The operators exist (13 modules, verified against the
-   reference model) but are not chained into KeyGen/Sign/Verify.
-2. **Boot-time persistence of the PL configuration** — needs JTAG, because the only
-   remaining clean route writes the golden `BOOT.BIN`.
-3. ~~**XMPU/XPPU configuration.**~~ **Closed: structurally not applicable.** UG1085
-   v2.5 settles it — XPPU's aperture table (Table 16-10) enumerates every aperture and
-   `0x8000_0000` is in none of them, and FPD_XMPU is not on the `M_AXI_HPM0_LPD` path
-   (p1092: the PL is reached "without the FPD"). No PS-side protection unit covers the
-   PL window at all. That reinforces the architecture rather than exposing a gap:
-   **the AxPROT-gated firewall in the PL is the only enforcement point on this
-   routing**, which is exactly why the address decode must be one-to-one with no
-   mirrors. See §5.5 of the delivery document.
-   (Incidentally measured: PS-side protection on this board is entirely unconfigured —
-   XPPU `CTRL=0`, all 400 permission entries at their reset default. Unrelated to the
-   above: even configured, it would not reach the PL.)
-4. **Power/EM side channels.** Not attempted, and not claimed. The constant-time work
-   covers timing only, and was checked on the board (median difference 0.000 % between
-   the valid and implicit-reject Decaps paths).
+See [CONTRIBUTING.md](CONTRIBUTING.md). To report a vulnerability, read
+[SECURITY.md](SECURITY.md) first — but note that this is a prototype, and the
+known gaps above are already known.
 
 ## License
 
-[Apache-2.0](LICENSE). Chosen over MIT for its explicit patent grant and patent
-retaliation clause ; patents are a real exposure in this field and MIT is silent on
-them.
+[Apache-2.0](LICENSE) — chosen over MIT for its explicit patent grant and patent
+retaliation clause; patents are a real exposure in this field and MIT is silent
+on them.
 
-The three headers under `third_party/pkcs11-v3.2/` are OASIS documents, included
-unmodified under their own terms.
+`third_party/pkcs11-v3.2/` contains three OASIS headers, included unmodified
+under their own terms.

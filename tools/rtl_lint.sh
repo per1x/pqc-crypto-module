@@ -14,9 +14,9 @@
 # 前置：verilator（brew install verilator）、iverilog（brew install icarus-verilog）
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# 风扇温控在 hardware/rtl/ 之外（fpga/fan_ctrl/，与密码逻辑分开），但它一样
+# 风扇温控在 hardware/rtl/ 之外（hardware/platform/fan_ctrl/，与密码逻辑分开），但它一样
 # 要过 lint —— 风扇写错不会崩，只会安静地让芯片变热，更需要静态检查兜着。
-RTL_FILES=$(find "$ROOT/hardware/rtl" "$ROOT/fpga/fan_ctrl" -name '*.v' 2>/dev/null | sort)
+RTL_FILES=$(find "$ROOT/hardware/rtl" "$ROOT/hardware/platform/fan_ctrl" -name '*.v' 2>/dev/null | sort)
 # 厂商原语的空壳（BUFGCE_DIV / SYSMONE4 / zynq_ultra_ps_e_0）。
 # 少了它，Verilator 对**每一个**模块都报 MODMISSING —— 它是把命令行上所有
 # 文件一起看的，一个缺失模块就能让整仓 lint 全红，等于没有 lint。

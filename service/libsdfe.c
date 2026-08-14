@@ -93,7 +93,7 @@ int SDFE_CloseDevice(SDFE_HANDLE hDev)
 }
 
 /* 会话：本原型里一个连接就是一个会话，句柄直接透传。
- * 真正的多会话在 daemon 侧（见 docs/服务层设计.md §5）。 */
+ * 真正的多会话在 daemon 侧（见 docs/API.md §5）。 */
 int SDFE_OpenSession(SDFE_HANDLE hDev, SDFE_HANDLE *phSession)
 {
 	if (!hDev || !phSession)

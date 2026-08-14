@@ -9,7 +9,7 @@
  * 普通世界内核可信；若 REE 内核被完全攻陷，它可以重放/滥用 TA 服务
  * （但私钥明文仍不出 TA）。即"防普通世界应用，不防普通世界内核"。
  *
- * 命令协议见 tee/include/pqchsm_ta_proto.h 与 docs/tee-protocol.zh-CN.md。
+ * 命令协议见 tee/include/pqchsm_ta_proto.h 与 docs/reference/tee-protocol.zh-CN.md。
  */
 #include <tee_api.h>
 #include <string.h>
