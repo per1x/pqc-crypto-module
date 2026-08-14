@@ -224,3 +224,8 @@ lint_off -rule UNUSEDPARAM -file "*/hardware/tb/lint/vendor_stubs.v"
 // 而槽跨度是 4096，所以寻址只用低 12 位。高两位结构上恒为 0：
 // dk 最长 3168 字节，偏移到不了 4096。
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v" -match "*'dk_off'*"
+
+// ML-DSA 打包器的输入口固定 13 位（三种位宽里最宽的那个），而每个例化只用
+// 低 W 位：t₁ 用 10、t₀ 用 13、s 用 3 或 4。端口不随 W 收窄是有意的 ——
+// 三个封装模块共用同一个 bitpack，收窄就得为每种位宽各写一份端口表。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/pack.v" -match "*'in_val'*"

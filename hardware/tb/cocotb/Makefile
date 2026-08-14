@@ -42,6 +42,7 @@ VERILOG_SOURCES = \
   $(RTL_MLDSA)/reduce.v \
   $(RTL_MLDSA)/butterfly.v \
   $(RTL_MLDSA)/ntt_core.v \
+  $(RTL_MLDSA)/pack.v \
   $(RTL_MLDSA)/rounding.v \
   $(RTL_MLDSA)/sample.v \
   $(RTL_FAN)/fan_ctrl.v \

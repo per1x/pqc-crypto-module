@@ -43,6 +43,27 @@ run() { # run <MODULE> <TOPLEVEL> [PARAM_D]
   esac
 }
 
+# 一个 MODULE 里的用例分属不同顶层时用这个：多带一个用例名做过滤。
+# 打包那三个模块就是这种情况 —— 共用一份测试文件，但 t₁/t₀/η 各是一个顶层，
+# 不过滤的话每个顶层都会去跑另外两个的用例，全都报失败。
+run_one() { # run_one <MODULE> <TOPLEVEL> <TESTCASE> [标签]
+  local label="${4:-$3}"
+  rm -rf sim_build results.xml
+  if ! COCOTB_TEST_FILTER="$3" make -s MODULE="$1" TOPLEVEL="$2" >"$LOG" 2>&1; then
+    printf '  ✗ %-18s %-24s （make 失败）\n' "$1" "$label"; fail=1; return
+  fi
+  local line
+  line="$(grep -oE 'TESTS=[0-9]+ PASS=[0-9]+ FAIL=[0-9]+ SKIP=[0-9]+' "$LOG" | tail -1)"
+  if [ -z "$line" ]; then
+    printf '  ✗ %-18s %-24s （没拿到结果行）\n' "$1" "$label"; fail=1; return
+  fi
+  total=$((total + $(printf '%s' "$line" | sed -E 's/TESTS=([0-9]+).*/\1/')))
+  case "$line" in
+    *"FAIL=0"*) printf '  ✓ %-18s %-24s %s\n' "$1" "$label" "$line" ;;
+    *)          printf '  ✗ %-18s %-24s %s\n' "$1" "$label" "$line"; fail=1 ;;
+  esac
+}
+
 echo "cocotb 对拍（Icarus Verilog）"
 echo
 echo "  ML-KEM 算子与数据通路"
@@ -65,6 +86,9 @@ echo
 echo "  ML-DSA 算子与数据通路"
 run test_mldsa_units tb_mldsa_units
 run test_mldsa_ntt   mldsa_ntt_core
+run_one test_mldsa_pack mldsa_polyt1_pack   test_polyt1_pack   "polyt1 (10 位)"
+run_one test_mldsa_pack mldsa_polyt0_pack   test_polyt0_pack   "polyt0 (13 位)"
+run_one test_mldsa_pack mldsa_polyeta_pack  test_polyeta_pack  "polyeta (η=2)"
 
 echo
 echo "  Keccak"
