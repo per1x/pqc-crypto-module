@@ -126,6 +126,31 @@ module zu3eg_hsm_top (
     localparam [15:0] F_OT_ON = 16'd46108, F_OT_OFF = 16'd45326; // 80 / 74°C
 `endif
 
+    // ========================================================================
+    // 【SECURE_ONLY_FUNCTIONAL：送检位流与开发位流是同一份 RTL 的两个配置】
+    // ========================================================================
+    // 默认（不定义 PQC_DEV_OPEN）= **1**，也就是送检口径：四个功能从机全部
+    // 只接受安全事务，普通世界零可达，整套 KAT 由安全世界经 BL31 的 SiP 驱动。
+    //
+    // 定义 PQC_DEV_OPEN 之后 = 0：功能从机对普通世界开放，Linux 能直连跑 KAT。
+    // 这是**开发/调试**用的形态，产物另起名字（zu3eg_hsm_dev.bit），
+    // 免得和送检位流混在一起。
+    //
+    // 为什么要做成开关而不是改一行参数：这两种形态**都需要长期存在**
+    // （一个用来送检，一个用来在没有安全世界的环境里复现算法），而它们只差
+    // 这一个参数。写成两份 RTL 必然分叉；写成硬编码则每次切换都要改源码，
+    // 于是文档必然有一版是错的 —— 独立评审的 H1 就是这么发生的：
+    // RTL 早已切到全 1，而三份面向使用者的文档还在描述上一版位流。
+    //
+    // ⚠️ 无论哪个配置，**普通世界都不要对被拒地址发写**：写的 DECERR 是
+    //    posted 的，在 aarch64 上以 SError 回来，内核只能 panic，代价是一次
+    //    断电。这条也写进了 docs/REGISTERS.md 与 docs/USAGE.md 的首屏。
+`ifdef PQC_DEV_OPEN
+    localparam integer SECURE_ONLY_FUNCTIONAL = 0;
+`else
+    localparam integer SECURE_ONLY_FUNCTIONAL = 1;
+`endif
+
     // ================= PS =================
     wire        pl_clk0;
     wire        pl_resetn0;
@@ -306,7 +331,7 @@ module zu3eg_hsm_top (
 
     // ================= 槽 0：TRNG =================
     wire trng_ready, trng_alarm;
-    trng_axi #(.SECURE_ONLY(1), .RAW_TAP(RAW_TAP_EN)) u_trng (
+    trng_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL), .RAW_TAP(RAW_TAP_EN)) u_trng (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*0 +: 8]), .s_axi_awprot(x_awprot[3*0 +: 3]),
         .s_axi_awvalid(x_awvalid[0]), .s_axi_awready(x_awready[0]),
@@ -324,7 +349,7 @@ module zu3eg_hsm_top (
     // ================= 槽 1 与 2：密钥仓 + 对称核 =================
     // 这两个是一体的（密钥从 use 口直接进对称核），所以用 sym_vault_top
     wire vault_tampered;
-    sym_vault_top #(.SECURE_ONLY(1)) u_symvault (
+    sym_vault_top #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL)) u_symvault (
         .clk(clk_sys), .rst_n(rst_n), .tamper(tamper),
         .vault_awaddr(x_awaddr[8*1 +: 8]), .vault_awprot(x_awprot[3*1 +: 3]),
         .vault_awvalid(x_awvalid[1]), .vault_awready(x_awready[1]),
@@ -350,7 +375,7 @@ module zu3eg_hsm_top (
         .vault_tampered(vault_tampered));
 
     // ================= 槽 3：ML-KEM =================
-    mlkem_axi #(.SECURE_ONLY(1)) u_mlkem (
+    mlkem_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL)) u_mlkem (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*3 +: 8]), .s_axi_awprot(x_awprot[3*3 +: 3]),
         .s_axi_awvalid(x_awvalid[3]), .s_axi_awready(x_awready[3]),
@@ -368,7 +393,7 @@ module zu3eg_hsm_top (
     // 与槽 1 同一个模块，只差 SECURE_ONLY。板上的 Linux 是非安全 master，
     // 对它的每一次读写都必须回 DECERR —— 那就是 AxPROT 门控在真硬件上
     // 生效的直接证据。它的 use 口不接任何东西：这个实例只用来被拒绝。
-    key_vault_axi #(.SECURE_ONLY(1), .SLOTS(8), .SLOT_BITS(3), .WORDS(8))
+    key_vault_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL), .SLOTS(8), .SLOT_BITS(3), .WORDS(8))
     u_canary (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*4 +: 8]), .s_axi_awprot(x_awprot[3*4 +: 3]),

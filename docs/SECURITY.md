@@ -87,6 +87,15 @@ reads a `SECURE_ONLY=1` core and gets `VERSION = 0x00010000`. The normal world
 *same* normal world reads a `SECURE_ONLY=0` core successfully. Both halves are
 needed: the second is what rules out "the address was simply unreachable".
 
+> **Which bitstream this evidence comes from, stated precisely.** The
+> two-directional proof needs a `SECURE_ONLY=0` core to serve as the control, so
+> it was taken on a build that has one. **The default (shipping) bitstream has
+> no such core** — all four functional slaves are `SECURE_ONLY=1` and the normal
+> world reaches none of them. On that build the measurement is one-directional
+> by construction: 6 / 6 refused, with the secure world driving the full KAT
+> suite successfully at the same time. Both results are real; neither is
+> evidence for the other's configuration.
+
 **Symmetric keys do not cross the boundary.** 256 bytes were scanned on each of
 two slaves — 48 readable, 80 refused by the firewall. Not one of the key's four
 words appeared anywhere, while the ciphertext produced with those keys was

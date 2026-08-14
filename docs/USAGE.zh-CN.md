@@ -2,6 +2,28 @@
 
 # 使用
 
+> ### ⚠️ 写任何寄存器之前先看这一段
+>
+> **默认位流（`zu3eg_hsm.bit`）对普通世界是零可达的。** 四个功能从机都按
+> `SECURE_ONLY=1` 综合，而 Linux 发出的每一笔事务 `AxPROT[1]` 恒为 1，
+> 因此在总线上一律被拒。只有安全世界（EL3，经 BL31 的 SiP）驱动得了它们。
+>
+> **绝对不要发一笔你预期会被拒的写。** 被拒的**读**是同步的 DECERR，
+> Linux 转成 `SIGBUS`，程序接得住；被拒的**写**不一样：AXI 的写是 posted 的，
+> 错误过一会儿才以 **SError** 回来，它不属于任何一条指令，内核只能 panic。
+> **代价是一次断电**，而这块板断电会清掉 `CSU_MULTI_BOOT`。
+>
+> 所以会写寄存器的程序（`hsm_hwtest`、`hsm_kem3`）必须对着**开发位流**跑，
+> 不是默认那份：
+>
+> ```
+> PQC_DEV_OPEN=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
+> ```
+>
+> 那份构建把功能从机设成 `SECURE_ONLY=0`，产物叫 `zu3eg_hsm_dev.bit`，
+> 名字不同就不会拿错。它是调试形态，不是交付形态。
+
+
 - [仿真与静态检查](#仿真与静态检查)
 - [主机软件](#主机软件)
 - [Bitstream](#bitstream)

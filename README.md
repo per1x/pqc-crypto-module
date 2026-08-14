@@ -45,17 +45,33 @@ WNS +3.504 ns @ 75 MHz.
    │   ┌──────┬──────────┬──────────┬──────────┬─────────┬────────┐  │
    │   │ slot0│  slot1   │  slot2   │  slot3   │  slot4  │ slot5  │  │
    │   │ trng │key_vault │   sym    │  mlkem   │ canary  │  fan   │  │
-   │   │      │          │AES/SM4/  │ 512/768/ │ SECURE_ │ observe│  │
-   │   │      │          │   SM3    │   1024   │ ONLY=1  │  only  │  │
+   │   │      │          │AES/SM4/  │ 512/768/ │ same as │ observe│  │
+   │   │      │          │   SM3    │   1024   │ slot 1  │  only  │  │
+   │   │      SECURE_ONLY=1 (default build)              │ =0     │  │
    │   └──────┴────┬─────┴────▲─────┴──────────┴─────────┴────────┘  │
    │               └──────────┘  use_key: private wire, not the bus  │
    │      every slot sits behind axi4lite_firewall (AxPROT gate)     │
    └─────────────────────────────────────────────────────────────────┘
 ```
 
-Each slot is 64 KB at `0x8000_0000 + slot × 0x1_0000`. Slot 4 is a second
-instance of the key vault differing **only** in `SECURE_ONLY=1`; its entire
-purpose is to be refused, which is what turns "the gate works" into evidence.
+Each slot is 64 KB at `0x8000_0000 + slot × 0x1_0000`.
+
+**In the default build all four functional slaves are `SECURE_ONLY=1`** — the
+normal world cannot reach any of them, and the whole KAT suite is driven from
+the secure world through the BL31 SiP. Slot 4 remains a second key-vault
+instance; under this configuration it is a like-for-like control that shows a
+refusal is the gate's doing and not a broken core. The fan (slot 5) stays 0: it
+is not inside the cryptographic boundary and should not be.
+
+A second configuration exists for development — `PQC_DEV_OPEN=1` sets the
+functional slaves to `SECURE_ONLY=0` so Linux can drive them directly, and its
+product is named `zu3eg_hsm_dev.bit`. Same RTL, one parameter apart.
+
+> ⚠️ **Against the default bitstream, never issue a write you expect to be
+> refused.** A refused read is a synchronous DECERR → `SIGBUS`, catchable. A
+> refused write is posted and comes back as an **SError**, which the kernel can
+> only answer with a panic — the cost is a power cycle. Details in
+> [docs/REGISTERS.md](docs/REGISTERS.md).
 
 Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 register-level contract: [docs/REGISTERS.md](docs/REGISTERS.md).
@@ -130,7 +146,8 @@ Measured on the device, in the configuration described in
 | ML-KEM 512/768/1024 vs NIST ACVP, on silicon | 20 / 20 byte-exact |
 | Board self-test (symmetric, SM, boundary, AxPROT, TRNG) | 24 / 24 |
 | Key vault counter-proof — 256 bytes scanned on each of two slaves | key words appear **0** times; ciphertext correct |
-| AxPROT gate, both directions | EL3 reads `SECURE_ONLY=1`; EL1-NS refused (DECERR); same EL1-NS reads `SECURE_ONLY=0` |
+| AxPROT gate, both directions *(measured on the development bitstream, where a `SECURE_ONLY=0` control exists)* | EL3 reads `SECURE_ONLY=1`; EL1-NS refused (DECERR); same EL1-NS reads `SECURE_ONLY=0` |
+| Default (shipping) bitstream — normal world reachability | 0 of 5 cores readable; 6 / 6 refused |
 | TRNG min-entropy, 1,048,576 pre-conditioning samples | H = 0.871234 bit/sample → RCT 47, APT 672 |
 | Decaps timing, valid vs implicit-reject, 200 runs each | median difference 0.000 % |
 | ML-KEM-512 throughput @ 75 MHz | 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps) |

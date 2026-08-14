@@ -2,6 +2,28 @@
 
 # 寄存器参考
 
+> ### ⚠️ 写任何寄存器之前先看这一段
+>
+> **默认位流（`zu3eg_hsm.bit`）对普通世界是零可达的。** 四个功能从机都按
+> `SECURE_ONLY=1` 综合，而 Linux 发出的每一笔事务 `AxPROT[1]` 恒为 1，
+> 因此在总线上一律被拒。只有安全世界（EL3，经 BL31 的 SiP）驱动得了它们。
+>
+> **绝对不要发一笔你预期会被拒的写。** 被拒的**读**是同步的 DECERR，
+> Linux 转成 `SIGBUS`，程序接得住；被拒的**写**不一样：AXI 的写是 posted 的，
+> 错误过一会儿才以 **SError** 回来，它不属于任何一条指令，内核只能 panic。
+> **代价是一次断电**，而这块板断电会清掉 `CSU_MULTI_BOOT`。
+>
+> 所以会写寄存器的程序（`hsm_hwtest`、`hsm_kem3`）必须对着**开发位流**跑，
+> 不是默认那份：
+>
+> ```
+> PQC_DEV_OPEN=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
+> ```
+>
+> 那份构建把功能从机设成 `SECURE_ONLY=0`，产物叫 `zu3eg_hsm_dev.bit`，
+> 名字不同就不会拿错。它是调试形态，不是交付形态。
+
+
 软件与设计中每一个 AXI 从机之间的契约。两侧都照着本文档编写，其中每一条都由
 cocotb testbench 单独验证。
 
@@ -148,7 +170,7 @@ SLOT_CTRL = LOCK         optional; afterwards it can be neither written nor eras
 | `0x20`–`0x2C` | `DIN0..3` | W | 输入分组；`DIN0` 为最高的 32 位 |
 | `0x30`–`0x3C` | `DOUT0..3` | R | 输出分组 |
 | `0x40`–`0x5C` | `DIGEST0..7` | R | SM3 摘要 |
-| `0x60` | `PARAM0` | R | 支持算法位图 |
+| `0x70` | `PARAM0` | R | 支持算法位图 |
 
 ## `mlkem_axi` — 槽位 3
 

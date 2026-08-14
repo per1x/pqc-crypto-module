@@ -2,6 +2,31 @@
 
 # Usage
 
+> ### ⚠️ Read this before writing any register
+>
+> **The default bitstream (`zu3eg_hsm.bit`) gives the normal world *zero*
+> reachability.** All four functional slaves are built with `SECURE_ONLY=1`, so
+> every access from Linux — which always carries `AxPROT[1]=1` — is refused at
+> the bus. Only the secure world (EL3, via the BL31 SiP) can drive them.
+>
+> **Never issue a write you expect to be refused.** A refused read returns
+> DECERR synchronously and Linux turns it into `SIGBUS`, which a program can
+> catch. A refused *write* is different: AXI writes are posted, so the error
+> comes back later as an **SError**, which belongs to no instruction and which
+> the kernel can only answer with a panic. **The cost is a power cycle**, and on
+> this board a power cycle clears `CSU_MULTI_BOOT`.
+>
+> Programs that write registers (`hsm_hwtest`, `hsm_kem3`) must therefore run
+> against the **development** bitstream, not the default one:
+>
+> ```
+> PQC_DEV_OPEN=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
+> ```
+>
+> That build sets `SECURE_ONLY=0` on the functional slaves and is named
+> `zu3eg_hsm_dev.bit` so the two can never be confused. It is a debug form, not
+> the shipping one.
+
 - [Simulation and static checks](#simulation-and-static-checks)
 - [Host software](#host-software)
 - [Bitstream](#bitstream)

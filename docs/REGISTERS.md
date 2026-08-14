@@ -10,6 +10,31 @@ All registers are 32 bits and word-aligned. Every slave sits behind
 `axi4lite_firewall`; addresses outside a slave's window, and non-secure accesses
 to a `SECURE_ONLY=1` instance, are answered DECERR with no side effect.
 
+> ### ⚠️ Read this before writing any register
+>
+> **The default bitstream (`zu3eg_hsm.bit`) gives the normal world *zero*
+> reachability.** All four functional slaves are built with `SECURE_ONLY=1`, so
+> every access from Linux — which always carries `AxPROT[1]=1` — is refused at
+> the bus. Only the secure world (EL3, via the BL31 SiP) can drive them.
+>
+> **Never issue a write you expect to be refused.** A refused read returns
+> DECERR synchronously and Linux turns it into `SIGBUS`, which a program can
+> catch. A refused *write* is different: AXI writes are posted, so the error
+> comes back later as an **SError**, which belongs to no instruction and which
+> the kernel can only answer with a panic. **The cost is a power cycle**, and on
+> this board a power cycle clears `CSU_MULTI_BOOT`.
+>
+> Programs that write registers (`hsm_hwtest`, `hsm_kem3`) must therefore run
+> against the **development** bitstream, not the default one:
+>
+> ```
+> PQC_DEV_OPEN=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
+> ```
+>
+> That build sets `SECURE_ONLY=0` on the functional slaves and is named
+> `zu3eg_hsm_dev.bit` so the two can never be confused. It is a debug form, not
+> the shipping one.
+
 - [Slot map](#slot-map)
 - [`trng_axi`](#trng_axi--slot-0)
 - [`key_vault_axi`](#key_vault_axi--slot-1)
@@ -158,7 +183,7 @@ address that is gated.
 | `0x20`–`0x2C` | `DIN0..3` | W | Input block; `DIN0` is the most significant 32 bits |
 | `0x30`–`0x3C` | `DOUT0..3` | R | Output block |
 | `0x40`–`0x5C` | `DIGEST0..7` | R | SM3 digest |
-| `0x60` | `PARAM0` | R | Supported-algorithm bitmap |
+| `0x70` | `PARAM0` | R | Supported-algorithm bitmap |
 
 ## `mlkem_axi` — slot 3
 

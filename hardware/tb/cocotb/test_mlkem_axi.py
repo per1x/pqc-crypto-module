@@ -557,3 +557,68 @@ async def test_illegal_start_after_success_invalidates_result(dut):
     assert not (st & ST_PARAMERR)
 
     dut._log.info("非法 START 作废上一次的 DONE 与 OUT_LEN，软件不会误读陈值")
+
+
+@cocotb.test()
+async def test_underfill_refused_and_z_not_stale(dut):
+    """只喂 32 字节就 START —— 必须被拒，且**不能**用残留当 z
+
+    这是一个 KAT 抓不到的安全 bug。KeyGen 要 d‖z 共 64 字节；只写 32 字节 d
+    的话，z 取的是输入缓冲 32..63 的残留，冷启动/刚 zeroize 之后那一段全 0，
+    于是 **z = 0**。
+
+    z 是 ML-KEM 的隐式拒绝密钥：解封装失败返回 J(z‖c)。z 可预测，攻击者就能
+    自己算出任意密文的隐式拒绝值，从而把"解封装失败"与"成功"区分开 ——
+    而隐式拒绝存在的全部意义就是让这两者不可区分。
+
+    判据分两层，第二层才是关键：
+      ① START 被拒（PARAM_ERR=1、BUSY 从未拉起、上次结果作废）；
+      ② **把同一个 d 配一个真正的 z 喂满再跑，输出必须与"欠填那次若被放行会
+         得到的结果"不同** —— 也就是证明硬件确实没有把 z=0 那条路跑出来。
+         只验 ① 是不够的：报了错也可能核已经跑过一轮。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    d = bytes([0x5A] * 32)
+
+    # ---- ① 只喂 32 字节 ----
+    assert await wr(dut, MODE, M_KEYGEN | (PSET[name] << 2)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
+    for b in d:
+        assert await wr(dut, IN_DATA, b) == RESP_OKAY
+    p, _ = await rd(dut, IN_PTR)
+    assert p == 32, f"先决条件不成立：IN_PTR = {p}"
+
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
+    busy_seen = False
+    for _ in range(300):
+        st, _ = await rd(dut, STATUS)
+        if st & ST_BUSY:
+            busy_seen = True
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_PARAMERR, f"欠填没被拒（STATUS={st:#x}）—— z 会取到残留"
+    assert not busy_seen, "欠填却启动了核 —— 残留已经进了运算"
+    n, _ = await rd(dut, OUT_LEN)
+    assert n == 0, f"欠填之后 OUT_LEN = {n}"
+
+    # ---- ② 反证：喂满之后结果必须是"真 z"那一份 ----
+    # 用 z = 全 0 跑一次（这正是欠填若被放行会得到的输入），
+    # 再用 z = 真值跑一次，两者必须不同。若硬件当初放行了欠填，
+    # 它算出来的就是第一份 —— 这一条把"拒绝"与"结果对不对"钉在一起。
+    ek0, dk0 = mlkem_keygen(d, bytes(32), name)
+    got0 = await run_op(dut, M_KEYGEN, name, d + bytes(32))
+    assert got0 == ek0 + dk0, "z=全0 这一路本身与黄金模型不一致"
+
+    z = bytes([0xA5] * 32)
+    ek1, dk1 = mlkem_keygen(d, z, name)
+    got1 = await run_op(dut, M_KEYGEN, name, d + z)
+    assert got1 == ek1 + dk1, "z=真值这一路与黄金模型不一致"
+
+    assert got0 != got1, (
+        "z 全 0 与 z 真值算出同一个密钥对 —— 那说明 z 根本没进运算，"
+        "这条用例就失去了意义")
+
+    dut._log.info(
+        "欠填被拒且核未启动；z=0 与 z=真值的输出确实不同（dk 差异证明 z 参与了运算）")

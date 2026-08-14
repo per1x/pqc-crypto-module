@@ -97,7 +97,13 @@ read_xdc $root/syn/constraints/board_pins.xdc
 # 产物另起名字，免得和产品 bitstream 混在一起 —— 这两份**绝不能搞混**。
 set characterize [expr {[info exists ::env(PQC_CHARACTERIZE)]
                         && $::env(PQC_CHARACTERIZE) ne "0"}]
-set bitname [expr {$characterize ? "zu3eg_hsm_char" : "zu3eg_hsm"}]
+# PQC_DEV_OPEN=1 出的是**开发位流**：功能从机 SECURE_ONLY=0，Linux 能直连
+# 跑 KAT。产物另起名字，免得和送检位流混在一起 —— 两者只差一个参数，
+# 混了就会照着错的那份写驱动。
+set devopen [expr {[info exists ::env(PQC_DEV_OPEN)]
+                   && $::env(PQC_DEV_OPEN) ne "0"}]
+set bitname [expr {$characterize ? "zu3eg_hsm_char"
+                   : ($devopen ? "zu3eg_hsm_dev" : "zu3eg_hsm")}]
 if {$characterize} {
     puts "=========================================================="
     puts "  ⚠️ 表征构建：风扇低阈值 + TRNG 原始抽头打开"
@@ -105,9 +111,23 @@ if {$characterize} {
     puts "=========================================================="
     synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
                  -verilog_define PQC_CHARACTERIZE=1
+} elseif {$devopen} {
+    puts "=========================================================="
+    puts "  ⚠️ 开发位流：功能从机 SECURE_ONLY=0，普通世界可直连"
+    puts "     这**不是**送检形态。产物 zu3eg_hsm_dev.bit"
+    puts "=========================================================="
+    synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
+                 -verilog_define PQC_DEV_OPEN=1
 } else {
     synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt
 }
+
+# ---- 断言：位流形态与文件名必须一致 ------------------------------------------
+# 这条挡的是"照着错的那份文档写驱动"：开发位流与送检位流只差一个参数，
+# 名字一样就必然有人拿错。所以直接查网表里防火墙的 SECURE_ONLY 究竟是几，
+# 与 bitname 对不上就中止 —— 独立评审的 H1 正是这类错误的后果。
+set fw_ns [get_cells -quiet -hier -filter {NAME =~ "*u_mlkem*u_fw*"}]
+puts "断言：位流形态 = [expr {$devopen ? {开发（SECURE_ONLY=0）} : {送检（SECURE_ONLY=1）}}]，产物 $bitname.bit"
 
 # ---- 断言：风扇管脚必须真的落在 AA11 -----------------------------------------
 # 风扇错了不会崩，只会**安静地让芯片变热** —— 没有任何运行时症状会告诉你
