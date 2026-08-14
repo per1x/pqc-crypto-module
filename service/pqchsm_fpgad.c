@@ -1,6 +1,10 @@
 // pqchsm_fpgad —— 密码机服务 daemon：把标准接口的请求落到 FPGA 密码核上
 //
-//   pqchsm_fpgad [-f]        -f 前台运行（板上调试用）
+//   pqchsm_fpgad [-f] [-lock]
+//     -f      前台运行（板上调试用）
+//     -lock   启动时置上私钥外泄闩锁：ML-KEM 的 dk 在**硬件里**再也送不出总线。
+//             交付/演示形态用它；跑 ACVP 的 KeyGen 向量时不能用（那要核对 dk），
+//             而闩锁只有重新装载位流才解得开。
 //
 // ============================================================================
 // 【它在栈里的位置，以及为什么这一层不能省】
@@ -116,6 +120,13 @@
 #define MK_OUTLEN (S_MLKEM + 0x1C)
 #define MKC_START 1u
 #define MKC_INRST 4u
+#define MKC_DKLOCK 0x10u                 /* CTRL[4]：一次性闩锁 */
+#define MK_KEYSTAT (S_MLKEM + 0x30)
+/* MODE 里控制片内私钥金库的三个字段 */
+#define MKM_DK_TO_SLOT   0x10u           /* KeyGen：dk 进金库，不出总线 */
+#define MKM_DK_FROM_SLOT 0x20u           /* Decaps：dk 从金库取 */
+#define MKM_SLOT(s)      (((s) & 3u) << 6)
+#define PL_KEY_SLOTS     4               /* 金库有 4 个槽 */
 #define MKS_DONE  (1u << 1)
 #define MKS_PARER (1u << 5)
 
@@ -260,14 +271,14 @@ static void mlkem_len(uint32_t pset, uint32_t *ek, uint32_t *dk, uint32_t *ct)
 }
 
 /* 通用：灌输入 → 启动 → 等完成 → 取输出 */
-static int mlkem_run(uint32_t mode, uint32_t pset,
+static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 		     const uint8_t *in, uint32_t in_len,
 		     uint8_t *out, uint32_t out_cap, uint32_t *out_len)
 {
 	uint32_t i, n, st;
 	long spin;
 
-	wr(MK_MODE, mode | (pset << 2));
+	wr(MK_MODE, mode | (pset << 2) | mode_extra);
 	wr(MK_CTRL, MKC_INRST);
 	for (i = 0; i < in_len; i++)
 		wr(MK_INDATA, in[i]);
@@ -297,8 +308,19 @@ static int mlkem_run(uint32_t mode, uint32_t pset,
 }
 
 /* ---- 句柄表：dk 留在这里，不给应用 ---- */
-#define MAX_KEYS 16
-static struct { int used; uint32_t pset, dk_len; uint8_t dk[3200]; } keys[MAX_KEYS];
+/* ============================================================================
+ * 【句柄表：现在它里面没有私钥了】
+ * ============================================================================
+ * 以前这里存着 dk 本身（3200 字节一把）—— 因为 KeyGen 会把 ek‖dk 一起从
+ * OUT_DATA 交出来，dk 必须落到某个地方，而"某个地方"就是本进程的堆。
+ * 于是"私钥不出**接口**"成立（应用只拿到句柄），"私钥不出**硬件**"不成立。
+ *
+ * 现在 dk 整个留在 PL 的片内金库里，本表只记"哪个槽、什么参数集"。
+ * 句柄数因此从 16 降到 4（金库槽数），这是实打实的容量代价，
+ * 换来的是**这个进程的内存里再也没有私钥**。
+ */
+#define MAX_KEYS PL_KEY_SLOTS
+static struct { int used; uint32_t pset; } keys[MAX_KEYS];
 
 static void keys_wipe(void)
 {
@@ -377,25 +399,34 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		/* d/z 取自**硬件**熵源 —— 真密码机就该这样，不用软件 PRNG */
 		if (trng_bytes(seed, 64))
 			return SDR_HARDFAIL;
-		if (mlkem_run(0, q->a0, seed, 64, buf, sizeof buf, &n))
-			return SDR_HARDFAIL;
-		if (n != eklen + dklen)
-			return SDR_HARDFAIL;
+		/* 先挑槽：句柄**就是**金库的槽号，一一对应。
+		 * 不做映射表是有意的 —— 多一层间接就多一处可能对不上的地方，
+		 * 而这里对不上的后果是"用别人的私钥解自己的密文"。 */
 		for (h = 0; h < MAX_KEYS && keys[h].used; h++)
 			;
 		if (h == MAX_KEYS)
 			return SDR_UNKNOWERR;
+
+		/* DK_TO_SLOT：dk 直接写进 PL 的金库，**不从 OUT_DATA 出来**。
+		 * 所以下面收到的 n 应当恰好是 ek 的长度 —— 这一条要断言，
+		 * 它是"私钥没出硬件"在软件侧唯一能自己核对的证据。 */
+		if (mlkem_run(0, q->a0, MKM_DK_TO_SLOT | MKM_SLOT(h),
+			      seed, 64, buf, sizeof buf, &n))
+			return SDR_HARDFAIL;
+		if (n != eklen) {
+			logf_("KEYGEN 返回 %u 字节，应当恰好是 ek 的 %u ——"
+			      " dk 可能仍然出了总线，拒绝这次结果", n, eklen);
+			return SDR_HARDFAIL;
+		}
 		keys[h].used = 1;
 		keys[h].pset = q->a0;
-		keys[h].dk_len = dklen;
-		memcpy(keys[h].dk, buf + eklen, dklen);
-		/* 回给应用的**只有** ek 和句柄；dk 留在这里 */
 		memcpy(out, &h, 4);
 		memcpy(out + 4, buf, eklen);
 		*out_len = 4 + eklen;
 		memset(buf, 0, sizeof buf);
 		memset(seed, 0, sizeof seed);
-		logf_("KEYGEN pset=%u → 句柄 %u，ek %u 字节（dk %u 字节留在 daemon）",
+		logf_("KEYGEN pset=%u → 句柄/槽 %u，ek %u 字节"
+		      "（dk %u 字节留在片内金库，本进程没见过它）",
 		      q->a0, h, eklen, dklen);
 		return SDR_OK;
 	}
@@ -413,7 +444,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		if (trng_bytes(in, 32))
 			return SDR_HARDFAIL;
 		memcpy(in + 32, pay, eklen);
-		if (mlkem_run(1, q->a0, in, 32 + eklen, buf, sizeof buf, &n))
+		if (mlkem_run(1, q->a0, 0, in, 32 + eklen, buf, sizeof buf, &n))
 			return SDR_HARDFAIL;
 		if (n != 32 + ctlen)
 			return SDR_HARDFAIL;
@@ -430,17 +461,18 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		if (h >= MAX_KEYS || !keys[h].used)
 			return SDR_KEYNOTEXIST;
 		mlkem_len(keys[h].pset, &eklen, &dklen, &ctlen);
-		if (q->len != ctlen || dklen + ctlen > sizeof in)
+		if (q->len != ctlen || ctlen > sizeof in)
 			return SDR_INARGERR;
-		/* dk 从句柄表取，应用没见过它 */
-		memcpy(in, keys[h].dk, dklen);
-		memcpy(in + dklen, pay, ctlen);
-		if (mlkem_run(2, keys[h].pset, in, dklen + ctlen,
-			      out, PQCS_MAXPAY, &n))
+		/* **只送密文**。dk 由 PL 从自己的金库里取，一个字节都不经过总线，
+		 * 也不经过本进程 —— 这里连一个能放 dk 的缓冲区都不存在了。 */
+		memcpy(in, pay, ctlen);
+		if (mlkem_run(2, keys[h].pset,
+			      MKM_DK_FROM_SLOT | MKM_SLOT(h),
+			      in, ctlen, out, PQCS_MAXPAY, &n))
 			return SDR_HARDFAIL;
 		memset(in, 0, sizeof in);
 		*out_len = n;
-		logf_("DECAPS 句柄 %u → K %u 字节", h, n);
+		logf_("DECAPS 句柄/槽 %u → K %u 字节（dk 全程在片内）", h, n);
 		return SDR_OK;
 	}
 
@@ -531,14 +563,17 @@ static int write_all(int fd, const void *p, size_t n)
 
 int main(int argc, char **argv)
 {
-	int srv, i;
+	int srv, i, want_lock = 0;
 	struct sockaddr_un sa;
 	char st[64] = {0};
 	FILE *f;
 
-	for (i = 1; i < argc; i++)
+	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-f"))
 			fg = 1;
+		else if (!strcmp(argv[i], "-lock"))
+			want_lock = 1;
+	}
 	(void)fg;
 
 	/* 闸门：先确认 PL 已 programmed 再发第一笔 SMC（这一步不碰 PL 总线）。
@@ -577,6 +612,28 @@ int main(int argc, char **argv)
 			return 2;
 		}
 		logf_("自检通过：TRNG VERSION = 0x%08x，EL3 通路可用", ver);
+	}
+
+	/* ---- 可选：把私钥外泄闩锁置上（-lock）----
+	 *
+	 * 置上之后 ML-KEM 的 KeyGen **在硬件里**就不再把 dk 送出总线，
+	 * 无论谁怎么写 MODE 寄存器 —— 包括本 daemon 自己。这把"私钥留在片内"
+	 * 从一句实现承诺变成一条硬件性质。
+	 *
+	 * **默认不置**，因为 ACVP 的 KeyGen 向量要核对 dk：那是出厂验证必须做的
+	 * 事，而闩锁一旦置上只有重新装载位流才能解开。交付/演示形态由
+	 * hsm-boot.sh 传 -lock；跑 KAT 时不传。这个取舍写在 docs 里。 */
+	if (want_lock) {
+		uint32_t ks = 0;
+
+		hw_fault = 0;
+		wr(MK_CTRL, MKC_DKLOCK);
+		if (hw_rd(MK_KEYSTAT, &ks) || !(ks & (1u << 16))) {
+			logf_("置私钥闩锁失败（KEYSTAT=0x%08x）—— 拒绝启动，"
+			      "免得对外声称私钥出不来而其实出得来", ks);
+			return 2;
+		}
+		logf_("私钥外泄闩锁已置上：KeyGen 不会再把 dk 送出总线");
 	}
 
 	/* ---- 远程口令：读得到就开 TCP，读不到就**不开** ----

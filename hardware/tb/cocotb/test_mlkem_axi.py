@@ -346,7 +346,10 @@ def _mem_nonzero(mem):
     return bad, first
 
 
-async def _wait_wipe(dut, limit=4000):
+async def _wait_wipe(dut, limit=9000):
+    # 上限从 4000 提到 9000：加了 16 KB 的片内私钥金库之后，擦除机要走
+    # 16384 拍（原来是 8192）—— 三块 BRAM 里最大的那块决定节拍数。
+    # 每次轮询是一笔 AXI 读，占好几拍，所以 9000 次轮询足够覆盖。
     """等 WIPING 落下来，顺便断言它确实曾经高过
 
     用软件可见的 STATUS 位来等，而不是偷看内部信号 —— 板上程序能依赖的
@@ -453,7 +456,7 @@ async def test_tamper_wipes_bram_and_blocks_output(dut):
 
     # 等擦完（tamper 后总线关了，只能看内部的 wiping —— 这一处是唯一
     # 无法从软件侧观测的，因为软件侧此时已经被整体拒绝了）
-    for _ in range(9000):
+    for _ in range(20000):
         await RisingEdge(dut.clk)
         if not int(dut.wiping.value):
             break
@@ -638,3 +641,162 @@ async def test_underfill_refused_and_z_not_stale(dut):
 
     dut._log.info(
         "欠填被拒且核未启动；z=0 与 z=真值的输出确实不同（dk 差异证明 z 参与了运算）")
+
+
+# ============================================================================
+# 片内私钥金库：dk 从头到尾不越过总线
+# ============================================================================
+KEYSTAT = 0x30
+C_DK_LOCK = 1 << 4          # CTRL 的一次性闩锁
+M_DK_TO_SLOT = 1 << 4       # MODE：KeyGen 把 dk 写进金库
+M_DK_FROM_SLOT = 1 << 5     # MODE：Decaps 从金库取 dk
+
+
+def mode_word(mode, name, *, to_slot=False, from_slot=False, slot=0):
+    return (mode | (PSET[name] << 2)
+            | (M_DK_TO_SLOT if to_slot else 0)
+            | (M_DK_FROM_SLOT if from_slot else 0)
+            | (slot << 6))
+
+
+async def run_raw(dut, mword, payload, limit=400_000):
+    """和 run_op 一样，但 MODE 整字由调用方给（要用到新的那几位）"""
+    assert await wr(dut, MODE, mword) == RESP_OKAY
+    assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
+    for b in payload:
+        assert await wr(dut, IN_DATA, b) == RESP_OKAY
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
+    for _ in range(limit):
+        st, _ = await rd(dut, STATUS)
+        if st & ST_DONE:
+            break
+        if st & (1 << 5):
+            return None                      # PARAM_ERR
+    else:
+        raise AssertionError("一直没完成")
+    n, _ = await rd(dut, OUT_LEN)
+    out = bytearray()
+    for _ in range(n):
+        d, _ = await rd(dut, OUT_DATA)
+        out.append(d & 0xFF)
+    return bytes(out)
+
+
+@cocotb.test()
+async def test_dk_stays_on_chip(dut):
+    """KeyGen 存槽 → Decaps 用槽：dk 一个字节都没经过总线
+
+    这条用例的判据分两半，两半都必须成立：
+
+      · **出不来**：存槽那趟的 OUT_LEN 恰好等于 ek 的长度，一个字节不多。
+        只查"OUT_LEN 变小了"不够 —— 得钉死在 eklen 上，否则少给几个字节
+        也能通过，而那意味着 dk 的前半截仍然出来了。
+
+      · **还能用**：拿槽里的 dk 做 Decaps，解出来的 K 与 Encaps 那一端一致。
+        少了这一半，一个"把 dk 直接丢掉"的实现也能通过上一半 ——
+        那才是最容易写出来的错误版本。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    d, z = bytes([0x21] * 32), bytes([0x22] * 32)
+    ek_ref, dk_ref = mlkem_keygen(d, z, name)
+
+    # ---- KeyGen，dk 进槽 2 ----
+    out = await run_raw(dut, mode_word(0, name, to_slot=True, slot=2), d + z)
+    assert out is not None, "存槽的 KeyGen 被拒了"
+    assert len(out) == len(ek_ref), \
+        f"存槽时 OUT_LEN={len(out)}，应当恰好是 ek 的 {len(ek_ref)} 字节"
+    assert out == ek_ref, "ek 与黄金模型不一致"
+    assert dk_ref not in out, "dk 出现在了输出里"
+
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & (1 << 2), f"槽 2 没被标成有效：KEYSTAT=0x{ks:08x}"
+    assert (ks >> (4 + 2 * 2)) & 3 == PSET[name], "槽里记的参数集不对"
+
+    # ---- Encaps（用刚拿到的 ek）----
+    m = bytes([0x33] * 32)
+    kc = await run_raw(dut, mode_word(1, name), m + ek_ref)
+    assert kc is not None
+    k_enc, ct = kc[:32], kc[32:]
+
+    # ---- Decaps：只送 c，dk 由金库供 ----
+    k_dec = await run_raw(dut, mode_word(2, name, from_slot=True, slot=2), ct)
+    assert k_dec is not None, "用槽做 Decaps 被拒了"
+    assert k_dec[:32] == k_enc, "两端共享密钥不一致 —— 金库里的 dk 是坏的"
+
+    dut._log.info(f"dk 全程留在片内：OUT_LEN={len(out)}（正好 ek），"
+                  f"用槽解出的 K 与 Encaps 一致")
+
+
+@cocotb.test()
+async def test_dk_lock_is_one_way(dut):
+    """DK_LOCK 置上之后，软件再怎么写 MODE 都拿不到 dk，而且撤不回来"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    d, z = bytes([0x41] * 32), bytes([0x42] * 32)
+    ek_ref, _ = mlkem_keygen(d, z, name)
+
+    # 闩锁之前：不设 DK_TO_SLOT 就该拿到 ek‖dk（ACVP 核对靠这条路）
+    out = await run_raw(dut, mode_word(0, name), d + z)
+    assert len(out) > len(ek_ref), "闩锁之前 dk 就出不来了，那 ACVP 没法核对"
+
+    assert await wr(dut, CTRL, C_DK_LOCK) == RESP_OKAY
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & (1 << 16), "闩锁没置上"
+
+    # 闩锁之后：**同一个 MODE 字**，dk 不再出来
+    out2 = await run_raw(dut, mode_word(0, name), d + z)
+    assert len(out2) == len(ek_ref), \
+        f"闩锁之后 OUT_LEN={len(out2)}，应当只剩 ek 的 {len(ek_ref)} 字节"
+    assert out2 == ek_ref
+
+    # 撤不回来：CTRL 没有清它的位，zeroize 也不清 —— zeroize 是擦秘密，
+    # 不是撤防线。这两件事分开，是因为「擦完之后防线还在」才是想要的性质。
+    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
+    for _ in range(20000):
+        st, _ = await rd(dut, STATUS)
+        if not (st & (1 << 4)):
+            break
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & (1 << 16), "zeroize 把闩锁清掉了 —— 它不该有这个能力"
+    assert (ks & 0xF) == 0, "zeroize 之后槽的有效位应当全清"
+
+    dut._log.info("闩锁一次性生效：dk 不再出总线，zeroize 也撤不回来")
+
+
+@cocotb.test()
+async def test_decaps_from_empty_slot_refused(dut):
+    """从空槽 / 参数集不匹配的槽做 Decaps：当场拒绝，不是让它跑到超时
+
+    这条单列，是因为失败方式很要命：槽不对时长度算错，核会一直等着被喂满，
+    软件看到的是 BUSY 永远不落 —— 和"算得慢"分不开。所以必须在 START
+    那一刻判掉并报 PARAM_ERR。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    ctlen = 768
+
+    r = await run_raw(dut, mode_word(2, name, from_slot=True, slot=1),
+                      bytes(ctlen), limit=5000)
+    assert r is None, "空槽的 Decaps 居然跑起来了"
+    st, _ = await rd(dut, STATUS)
+    assert st & (1 << 5), "空槽应当报 PARAM_ERR"
+    assert not (st & 1), "空槽被拒之后不该还 BUSY"
+
+    # 参数集不匹配：往槽 0 存一个 512 的 dk，再按 768 去用它
+    d, z = bytes([0x51] * 32), bytes([0x52] * 32)
+    out = await run_raw(dut, mode_word(0, name, to_slot=True, slot=0), d + z)
+    assert out is not None
+    r = await run_raw(dut, mode_word(2, "ML-KEM-768", from_slot=True, slot=0),
+                      bytes(1088), limit=5000)
+    assert r is None, "参数集不匹配的槽居然跑起来了"
+    st, _ = await rd(dut, STATUS)
+    assert st & (1 << 5), "参数集不匹配应当报 PARAM_ERR"
+
+    dut._log.info("空槽与参数集不匹配都在 START 处被判掉，没有跑到超时")

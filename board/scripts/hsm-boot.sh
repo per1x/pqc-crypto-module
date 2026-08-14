@@ -143,7 +143,12 @@ if [ -f "$D/secmmio.ko" ]; then
 fi
 
 if [ -x "$D/pqchsm_fpgad" ]; then
-    setsid $D/pqchsm_fpgad >> $LOG 2>&1 < /dev/null &
+    # -lock：启动就把私钥外泄闩锁置上，ML-KEM 的 dk 在**硬件里**再也送不出
+    # 总线。这是交付/演示形态该有的姿态。
+    #
+    # ⚠️ 代价说清楚：闩锁只有**重新装载位流**才解得开，而 ACVP 的 KeyGen 向量
+    #    需要核对 dk。所以跑那套 KAT 之前要先重启（或重装位流）并且不带 -lock。
+    setsid $D/pqchsm_fpgad -lock >> $LOG 2>&1 < /dev/null &
     sleep 2
     if [ -S /tmp/pqchsm_fpgad.sock ]; then   # 见 service/wire.h
         say "daemon 已起"

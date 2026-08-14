@@ -219,3 +219,8 @@ lint_off -rule DECLFILENAME -file "*/hardware/tb/lint/vendor_stubs.v"
 // 但这些参数**必须存在** —— 例化处是按名字传的，少一个就报错，
 // 也就是说它们仍然在替我校验参数名的拼写。
 lint_off -rule UNUSEDPARAM -file "*/hardware/tb/lint/vendor_stubs.v"
+
+// dk 在金库里的槽内偏移算满 14 位（与 ocnt/eklen 同宽好做减法），
+// 而槽跨度是 4096，所以寻址只用低 12 位。高两位结构上恒为 0：
+// dk 最长 3168 字节，偏移到不了 4096。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v" -match "*'dk_off'*"

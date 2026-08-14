@@ -108,7 +108,7 @@ module mlkem_axi #(
                      A_MODE    = 4'h3, A_INDATA = 4'h4, A_INPTR  = 4'h5,
                      A_OUTDATA = 4'h6, A_OUTLEN = 4'h7, A_OUTRD  = 4'h8,
                      A_VIOL    = 4'h9, A_PARAM0 = 4'hA,
-                     A_XBAR_VIOL = 4'hB;
+                     A_XBAR_VIOL = 4'hB, A_KEYSTAT = 4'hC;
 
     localparam [1:0] M_KEYGEN = 2'd0, M_ENCAPS = 2'd1, M_DECAPS = 2'd2;
 
@@ -169,14 +169,62 @@ module mlkem_axi #(
         .a_we(outa_we), .a_addr(outa_addr), .a_din(outa_din), .a_dout(),
         .b_we(1'b0),    .b_addr(outb_addr), .b_din(8'd0),     .b_dout(outb_dout));
 
+    // ================= 片内私钥金库 =================
+    // ============================================================================
+    // 【它解决的是哪一句话不成立】
+    // ============================================================================
+    // 在这之前，KeyGen 把 ek‖dk 一起从 OUT_DATA 交出来，dk 由 daemon 存在自己的
+    // 进程内存里，Decaps 再把 dk 灌回来。于是"私钥不出**接口**"是成立的
+    // （应用只拿到句柄），但"私钥不出**硬件**"**不成立** —— dk 实实在在地
+    // 越过了 AXI 边界，在 DDR 里待着。文档里一直分开写这两句，就是因为这个。
+    //
+    // 现在 dk 可以整个留在片内：KeyGen 把它写进下面这块 BRAM，只交出 ek；
+    // Decaps 按槽号从这里取。**dk 一个字节都不经过总线。**
+    //
+    // 【4 个槽、每槽 4096 字节】
+    // dk 最大 3168 字节（ML-KEM-1024），跨度取 4096 是为了寻址就是拼接
+    // （{slot, offset}），不用乘法器。16 KB = 4 个 BRAM36，本设计现在只用了
+    // 216 片里的 15.5 片，这点开销买"私钥不出硬件"很划算。
+    reg         dkv_we;   reg [13:0] dkv_waddr; reg [7:0] dkv_din;
+    reg  [13:0] dkv_raddr; wire [7:0] dkv_dout;
+    ram_dp #(.DW(8), .AW(14)) u_dkvault (
+        .clk(clk),
+        .a_we(dkv_we), .a_addr(dkv_waddr), .a_din(dkv_din), .a_dout(),
+        .b_we(1'b0),   .b_addr(dkv_raddr), .b_din(8'd0),    .b_dout(dkv_dout));
+
+    // 每个槽：有没有装东西 + 装的是哪个参数集。
+    // pset 必须跟着存 —— Decaps 的长度由它算，如果软件报一个和存进去时不同的
+    // pset，长度就全错，而错法是"喂不满、永远等下去"，最难查的那种。
+    reg [3:0]  dkv_valid;
+    reg [7:0]  dkv_pset;      // 每槽 2 位
+
+    // 一次性闩锁：置上之后 KeyGen **再也不会**把 dk 送到 OUT_DATA，
+    // 无论 MODE 里怎么写。只有复位能清掉它（zeroize 都不行 —— zeroize 是
+    // "把秘密擦掉"，不是"把防线撤掉"，两件事）。
+    //
+    // 留一个能关掉的开关是有意的：ACVP 的 KeyGen 向量要核对 dk，
+    // 那是出厂验证必须做的事。但它必须是**一次性的方向** —— 演示与交付
+    // 时把闩锁一置，"私钥出不来"就从一句承诺变成了硬件性质。
+    reg        dk_lock;
+
     // ================= 控制寄存器 =================
     reg [1:0]  mode, pset;
+    // MODE 寄存器多出来的三样（这一批加的）：
+    //   [4]   DK_TO_SLOT   KeyGen：dk 写进金库，**不**从 OUT_DATA 出来
+    //   [5]   DK_FROM_SLOT Decaps：dk 从金库取，软件只需要送 c
+    //   [7:6] SLOT         用哪个槽
+    reg        dk_to_slot, dk_from_slot;
+    reg [1:0]  slot;
     reg [12:0] in_ptr, out_len, out_rd;
+    reg [13:0] ocnt;        // 本次运行核已经吐出的字节总数（含进金库的那部分）
     reg        zero_pulse;
 
     // ---- BRAM 擦除机 ----
     reg        wiping;
-    reg [12:0] wipe_addr;
+    // 14 位：三块 BRAM 里最大的是 16 KB 的私钥金库。两块 8 KB 的缓冲
+    // 只用低 13 位，于是它们会被写两遍 —— 写两遍 0 和写一遍 0 没有区别，
+    // 为此再加一个计数器不值得。
+    reg [13:0] wipe_addr;
     reg        zall_d;
 
     // ---- 非法参数 ----
@@ -240,9 +288,31 @@ module mlkem_axi #(
     // 而那时硬件照常给出一个**看起来完全合法**的密钥对。
     //
     // Encaps/Decaps 同理：喂不满时核会一直等，或者用到残留字节。
+    // KeyGen 这一趟要不要把 dk 收进金库。dk_lock 一旦置上就强制收 ——
+    // 这正是那个闩锁的全部含义：软件说了不算。
+    wire store_dk = (mode == M_KEYGEN) && (dk_to_slot || dk_lock);
+    // 核吐出的第 ocnt 个字节该进金库还是进输出缓冲：ek 在前，dk 在后。
+    wire out_to_vault = store_dk && (ocnt >= eklen);
+    // dk 在金库里的槽内偏移。单列一个中间量是因为 Verilog 不允许对括号
+    // 表达式直接做位选（(a-b)[11:0] 是语法错误）。
+    wire [13:0] dk_off = ocnt - eklen;
+
+    // Decaps 这一趟从金库取 dk。
+    wire take_dk = (mode == M_DECAPS) && dk_from_slot;
+    wire feed_from_vault = take_dk && ({1'b0, fp} < dklen);
+
     wire [13:0] need_len = (feed_len > {7'd0, pre_len}) ? feed_len
                                                        : {7'd0, pre_len};
-    wire        len_ok   = ({1'b0, in_ptr} >= need_len);
+    // 从金库取 dk 时软件只需要送 c，欠填的门槛也要跟着降 ——
+    // 否则一个完全正确的调用会被判成参数错误。
+    wire [13:0] need_eff = take_dk ? clen : need_len;
+    wire        len_ok   = ({1'b0, in_ptr} >= need_eff);
+
+    // 从金库取 dk 还要求：那个槽真的装了东西，而且**装的时候用的是同一个
+    // 参数集**。pset 不一致时长度全错，表现是"喂不满、BUSY 一直不落"，
+    // 与算得慢分不开 —— 所以在 START 那一刻就判掉。
+    wire [1:0]  slot_pset = dkv_pset[slot*2 +: 2];
+    wire        slot_ok   = !take_dk || (dkv_valid[slot] && (slot_pset == pset));
 
     // ================= 三个核 =================
     // ⚠️ DEBUG_BANK 恒为 0：多项式存储的读口在这里根本没有引出来。
@@ -339,7 +409,7 @@ module mlkem_axi #(
         // 两块并行是因为它们各自有独立的写口，没有理由排队。
         if (wiping) begin
             ina_we   = 1'b1;
-            ina_addr = wipe_addr;
+            ina_addr = wipe_addr[12:0];
             ina_din  = 8'd0;
         end else begin
             ina_we   = wr_indata;
@@ -352,22 +422,41 @@ module mlkem_axi #(
         //    照着 pre_cnt 给地址的话每个字节会被读两遍、后一半直接丢掉
         //    （表现是 ek 整个不对，而 Decaps 因为不走预读所以照样过）。
         //    喂流阶段不用提前，那里靠 fb_wait 等那一拍。
+        // 从金库取 dk 时，输入缓冲里装的只有 c，所以喂到第 fp 个字节时
+        // 该读的是 inbuf[fp - dklen]（前面 dklen 个字节由金库供）。
         inb_addr = (state == S_PRE)
                    ? (fb_wait ? 13'd0 : ({6'd0, pre_cnt} + 13'd1))
-                   : fp;
+                   : (take_dk ? (fp - dklen[12:0]) : fp);
 
         if (wiping) begin
             outa_we   = 1'b1;
-            outa_addr = wipe_addr;
+            outa_addr = wipe_addr[12:0];
             outa_din  = 8'd0;
         end else begin
-            outa_we   = (state == S_RUN) && core_ov;
-            outa_addr = out_len;
+            // 存 dk 的那一趟，超过 ek 长度的字节**不进输出缓冲** ——
+            // 它们进金库（下面那块），所以软件那边一个字节都读不到。
+            outa_we   = (state == S_RUN) && core_ov && !out_to_vault;
+            outa_addr = ocnt[12:0];
             outa_din  = core_od;
         end
 
         // 同步读要提前一拍：这一拍读命中就把地址推到下一个
         outb_addr = out_rd + {12'd0, rd_outdata};
+
+        // ---- 金库的两个口 ----
+        // 写：擦除时归擦除机；否则只在"存 dk 且已经过了 ek 那一段"时写。
+        // 地址就是 {槽号, 槽内偏移} 的拼接 —— 跨度取 4096 就是为了这里
+        // 不需要乘法。
+        if (wiping) begin
+            dkv_we    = 1'b1;
+            dkv_waddr = wipe_addr;
+            dkv_din   = 8'd0;
+        end else begin
+            dkv_we    = (state == S_RUN) && core_ov && out_to_vault;
+            dkv_waddr = {slot, dk_off[11:0]};
+            dkv_din   = core_od;
+        end
+        dkv_raddr = {slot, fp[11:0]};
     end
 
     // ================= 时序 =================
@@ -379,9 +468,13 @@ module mlkem_axi #(
             f_bvalid <= 1'b0; f_bresp <= RESP_OKAY;
             f_rvalid <= 1'b0; f_rresp <= RESP_OKAY; f_rdata <= 32'd0;
             mode <= 2'd0; pset <= 2'd1;
-            in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0;
+            dk_to_slot <= 1'b0; dk_from_slot <= 1'b0; slot <= 2'd0;
+            dkv_valid <= 4'd0; dkv_pset <= 8'd0;
+            // 复位是唯一能把闩锁放开的事件。
+            dk_lock <= 1'b0;
+            in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0; ocnt <= 14'd0;
             zero_pulse <= 1'b0;
-            wiping <= 1'b0; wipe_addr <= 13'd0; zall_d <= 1'b0;
+            wiping <= 1'b0; wipe_addr <= 14'd0; zall_d <= 1'b0;
             param_err <= 1'b0;
             state <= S_IDLE; pre_cnt <= 7'd0; fp <= 13'd0; kickdly <= 2'd0;
             seed_a <= 256'd0; seed_b <= 256'd0;
@@ -398,17 +491,21 @@ module mlkem_axi #(
             zall_d <= zeroize_all;
             if (zeroize_all && !zall_d) begin
                 wiping    <= 1'b1;
-                wipe_addr <= 13'd0;
+                wipe_addr <= 14'd0;
             end else if (wiping) begin
                 // 最后一个地址那一拍 ina_we 仍为高（组合自 wiping），
                 // 所以 0x1FFF 也真的被写了 0，一个字节都不留。
-                if (wipe_addr == 13'h1FFF) wiping <= 1'b0;
-                else                       wipe_addr <= wipe_addr + 13'd1;
+                if (wipe_addr == 14'h3FFF) wiping <= 1'b0;
+                else                       wipe_addr <= wipe_addr + 14'd1;
             end
 
             if (zeroize_all) begin
                 // 指针与并行寄存器一拍清掉；BRAM 交给上面那台擦除机。
                 in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0;
+                ocnt   <= 14'd0;
+                // 槽的有效位跟着 BRAM 一起作废。**dk_lock 不在这里** ——
+                // 它是一次性的方向，擦秘密不等于撤防线。
+                dkv_valid <= 4'd0; dkv_pset <= 8'd0;
                 seed_a <= 256'd0; seed_b <= 256'd0;
                 state  <= S_IDLE; run_done <= 1'b0;
                 param_err <= 1'b0;
@@ -431,13 +528,17 @@ module mlkem_axi #(
                     case (wr_addr[5:2])
                     A_CTRL: begin
                         if (wr_data[1]) zero_pulse <= 1'b1;
+                        // [4] DK_LOCK：一次性闩锁，写 1 置上，**没有清零路径**。
+                        // 想解开只能复位整块 PL。zeroize 都不清它 ——
+                        // zeroize 是"把秘密擦掉"，不是"把防线撤掉"。
+                        if (wr_data[4]) dk_lock <= 1'b1;
                         if (wr_data[2]) in_ptr  <= 13'd0;
                         if (wr_data[3]) out_rd  <= 13'd0;
                         // START 只在空闲时有效，且要放在最后判 ——
                         // 同一拍写 IN_RST|START 的语义是"清指针再启动"
                         if (wr_data[0] && (state == S_IDLE) && !zeroize_all
                             && !wiping) begin
-                            if (!params_ok || !len_ok) begin
+                            if (!params_ok || !len_ok || !slot_ok) begin
                                 // 参数非法**或输入没喂够**：置错误位，
                                 // **不启动任何核**。
                                 // 不启动这一点比报错更要紧 —— 启动了再报错
@@ -464,6 +565,13 @@ module mlkem_axi #(
                                 param_err <= 1'b0;
                                 out_len <= 13'd0;
                                 out_rd  <= 13'd0;
+                                // ⚠️ ocnt 必须和 out_len 一起清。漏了这一条的
+                                // 症状极具误导性：**第一次运行完全正确**
+                                // （复位后 ocnt 本来就是 0），从第二次起输出
+                                // 缓冲的写地址从上一次的末尾接着走，读出来的
+                                // 全是垃圾。仿真里表现为"KeyGen 对、Encaps 错"，
+                                // 很容易去怀疑 Encaps 核本身。
+                                ocnt    <= 14'd0;
                                 pre_cnt <= 7'd0;
                                 fp      <= 13'd0;
                                 fb_v    <= 1'b0;
@@ -475,7 +583,12 @@ module mlkem_axi #(
                             end
                         end
                     end
-                    A_MODE: begin mode <= wr_data[1:0]; pset <= wr_data[3:2]; end
+                    A_MODE: begin
+                        mode <= wr_data[1:0]; pset <= wr_data[3:2];
+                        dk_to_slot   <= wr_data[4];
+                        dk_from_slot <= wr_data[5];
+                        slot         <= wr_data[7:6];
+                    end
                     A_INDATA: if (state == S_IDLE) in_ptr <= in_ptr + 13'd1;
                     default: ;
                     endcase
@@ -499,6 +612,10 @@ module mlkem_axi #(
                 // 判"根本没有这个地址"的次数 —— 借这个 SECURE_ONLY=1 的
                 // 窗口出口，普通世界读不到。
                 A_XBAR_VIOL: f_rdata <= xbar_viol_count;
+                // [3:0] 哪些槽装了东西；[11:4] 每槽 2 位的参数集；
+                // [16] 私钥外泄闩锁（1 = KeyGen 再也不会把 dk 交出来）。
+                A_KEYSTAT: f_rdata <= {15'd0, dk_lock, 4'd0,
+                                       dkv_pset, dkv_valid};
                 A_PARAM0:  f_rdata <= 32'h2000_2000;    // 两块 8 KB 缓冲
                 default:   f_rdata <= 32'd0;
                 endcase
@@ -559,11 +676,19 @@ module mlkem_axi #(
                     end else if (fb_wait) begin
                         fb_wait <= 1'b0;
                     end else if (!fb_v && ({1'b0, fp} < feed_len)) begin
-                        fb_r <= inb_dout; fb_v <= 1'b1;
+                        // dk 从金库来还是从输入缓冲来 —— 对核而言毫无区别，
+                        // 它只看到一条字节流。这正是这个改动能这么小的原因。
+                        fb_r <= feed_from_vault ? dkv_dout : inb_dout;
+                        fb_v <= 1'b1;
                     end
 
                     // ---- 收输出流 ----
-                    if (core_ov) out_len <= out_len + 13'd1;
+                    // ocnt 数核吐出来的**全部**字节；out_len 只数**软件读得到**的
+                    // 那部分。存 dk 的那一趟，两者在 ek 结束处分岔。
+                    if (core_ov) begin
+                        ocnt <= ocnt + 14'd1;
+                        if (!out_to_vault) out_len <= out_len + 13'd1;
+                    end
 
                     if (core_dn && (kickdly == 2'd0)) begin
                         run_done <= 1'b1;
@@ -571,7 +696,18 @@ module mlkem_axi #(
                     end
                 end
 
-                S_FIN: begin out_rd <= 13'd0; state <= S_IDLE; end
+                S_FIN: begin
+                    out_rd <= 13'd0;
+                    // dk 收进金库的那一趟，到这里才把槽标成有效 ——
+                    // **中途失败的运行不该留下一个"看起来可用"的槽**，
+                    // 那会让后面的 Decaps 拿半截 dk 去算，出来的是一个
+                    // 安静的错误结果。
+                    if (store_dk) begin
+                        dkv_valid[slot] <= 1'b1;
+                        dkv_pset[slot*2 +: 2] <= pset;
+                    end
+                    state <= S_IDLE;
+                end
 
                 default: state <= S_IDLE;
                 endcase

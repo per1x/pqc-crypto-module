@@ -238,6 +238,7 @@ RTL `hardware/rtl/bus/mlkem_axi.v`, tests
 | `0x24` | `VIOL_CNT` | R | Firewall violation counters |
 | `0x28` | `PARAM0` | R | Capability word |
 | `0x2C` | `XBAR_VIOL` | R | **Decoder** violations — accesses that hit no slot at all |
+| `0x30` | `KEYSTAT` | R | `[3:0]` occupied vault slots, `[11:4]` parameter set per slot (2 bits each), `[16]` private-key export latch |
 
 **Everything goes in through one buffer, in the order the standard defines it**,
 because the three cores' input shapes are entirely different and one register

@@ -145,6 +145,8 @@ decode, the erase machine and the TRNG sampling FIFO:
   > new observable (`test_xbar`, 8/8, including the exhaustive 64 KB sweep).
 - *Zeroize*, 4/4 — `STATUS.WIPING` asserts, holds 112.5 µs against a theoretical
   109.2 µs (8192 cycles @ 75 MHz; the difference is polling overhead), and
+  *(that measurement predates the on-chip key vault; the wipe now covers a
+  third, 16 KB block and takes 16384 cycles ≈ 218 µs — re-measurement pending)*
   afterwards `OUT_LEN = IN_PTR = 0` with the same input reproducing 2432
   identical bytes.
 - *TRNG*, 3/3 — `DROPS = 0` with `BLOCKS = 17892` absorbed while nobody was
