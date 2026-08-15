@@ -545,9 +545,16 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 
 	switch (q->op) {
 	case OP_PING: {
+		/* 版本串把**每个核**的 VERSION 都报出来，这是"装上的是哪一版
+		 * bitstream"唯一不靠猜的判据：各核的 VERSION 是非零常量
+		 * (0x00010000)，而不存在的核经防火墙读回来是 0（RAZ）。
+		 *
+		 * mldsa 这一项是后加的。没有它的时候，"新 bitstream 装上了吗"
+		 * 只能靠 fpga_manager 的 state，而那个只说明"装了个东西"，
+		 * 不说明装的是哪一个 —— 两版 bitstream 的 state 都是 operating。 */
 		int n = snprintf((char *)out, PQCS_MAXPAY,
-				 "pqchsm_fpgad on FPGA  mlkem=0x%08x sym=0x%08x",
-				 rd(MK_VER), rd(SY_VER));
+				 "pqchsm_fpgad on FPGA  mlkem=0x%08x sym=0x%08x mldsa=0x%08x",
+				 rd(MK_VER), rd(SY_VER), rd(MD_VER));
 		*out_len = (uint32_t)n;
 		return SDR_OK;
 	}
