@@ -110,6 +110,8 @@ add_library(pqchsm
   src/hal/hwrng.c
   src/hal/hwrng_stub.c
   src/hal/hwrng_mmap.c
+  src/hal/hwrng_sdfe.c
+  service/libsdfe.c
   src/proto/proto.c
   src/audit/audit.c
   src/audit/anchor.c
@@ -129,6 +131,7 @@ add_library(pqchsm
 target_include_directories(pqchsm
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LIBOQS_INCLUDE_DIR}
+          ${CMAKE_CURRENT_SOURCE_DIR}/service
 )
 target_link_libraries(pqchsm PUBLIC OpenSSL::Crypto Threads::Threads PRIVATE ${LIBOQS_LIBRARY})
 if(VERILATOR_BIN)

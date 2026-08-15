@@ -92,6 +92,40 @@ typedef struct hwrng_transport {
 	uint32_t (*read_reg)(uint32_t off);
 } hwrng_transport_t;
 
+/* ---- 第二种接缝：**按字节**取，而不是按寄存器 ----
+ *
+ * 上面那个 transport 是寄存器级的，前提是调用方够得到 TRNG 的寄存器。
+ * 在交付形态里这个前提**结构上不成立**：四个密码核都是 SECURE_ONLY=1，
+ * 普通世界的每一笔访问都被 PL 的防火墙拒掉（读回 0）。寄存器级的
+ * transport 在用户态根本没法实现 —— 不是没写，是写不出来。
+ *
+ * 那条形态下唯一通向硬件熵源的路是：经 pqchsm_fpgad → /dev/secmmio →
+ * EL3 的 SiP → trng_axi。而那条路的接口是**字节**（SDFE_GenerateRandom），
+ * 不是寄存器 —— daemon 不会、也不该把任意寄存器读写代理出来，
+ * 那等于在密码边界上开一个后门。
+ *
+ * 所以这里加第二种接缝。装上字节源之后：
+ *   · hwrng_bytes() 走它；
+ *   · hwrng_available() / hwrng_is_hardware() 如实反映它；
+ *   · 那些寄存器级的接口（hwrng_status / hwrng_zeroize / 健康计数）
+ *     **不可用**，因为它们要的东西这条路上取不到。这一点没有回退：
+ *     假装能读到状态比读不到更糟。
+ */
+typedef struct hwrng_byte_source {
+	const char *name;
+	int         is_hardware;
+	/* 返回 0 成功。取不到就失败，**不许回退到软件源** ——
+	 * 静默回退会让"熵来自硬件"恰好在最要紧的时刻悄悄变成假话。 */
+	int (*bytes)(uint8_t *out, size_t n);
+} hwrng_byte_source_t;
+
+void hwrng_set_byte_source(const hwrng_byte_source_t *src);
+
+/* 经密码机服务（pqchsm_fpgad）取硬件熵源。本机走 UNIX socket；
+ * 设了 PQCHSM_SDFE_HOST + PQCHSM_SDFE_TOKEN 就走 TCP（远程演示）。 */
+const hwrng_byte_source_t *hwrng_byte_source_sdfe(void);
+const hwrng_byte_source_t *hwrng_get_byte_source(void);
+
 /* 软件模型：逐位复现 trng_axi 的寄存器语义（暖机计数、FIFO 深度、
  * 空读锁存 UNDERRUN、告警锁存、ZEROIZE 清池重跑启动检测），
  * FIFO 内容由 OpenSSL 填。始终可用。 */

@@ -37,6 +37,9 @@
 #define HWRNG_POLL_LIMIT 100000
 
 static const hwrng_transport_t *g_tr;
+/* 字节级熵源（见 hwrng.h 的说明）。与 g_tr 互斥使用：装了字节源就走它，
+ * 因为那条形态下寄存器根本够不到。 */
+static const hwrng_byte_source_t *g_bs;
 static pthread_mutex_t          g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static inline uint32_t rd(uint32_t off)
@@ -64,13 +67,28 @@ const hwrng_transport_t *hwrng_get_transport(void)
 	return g_tr;
 }
 
+void hwrng_set_byte_source(const hwrng_byte_source_t *src)
+{
+	pthread_mutex_lock(&g_lock);
+	g_bs = src;
+	pthread_mutex_unlock(&g_lock);
+}
+
+const hwrng_byte_source_t *hwrng_get_byte_source(void)
+{
+	return g_bs;
+}
+
 int hwrng_available(void)
 {
-	return g_tr != NULL;
+	return g_tr != NULL || g_bs != NULL;
 }
 
 int hwrng_is_hardware(void)
 {
+	if (g_bs) {
+		return g_bs->is_hardware;
+	}
 	return g_tr && g_tr->is_hardware;
 }
 
@@ -165,6 +183,11 @@ int hwrng_bytes(uint8_t *out, size_t n)
 {
 	if (!out || n == 0) {
 		return HWRNG_ERR_ARG;
+	}
+	/* 字节源优先：装了它就说明这条形态下寄存器够不到（见 hwrng.h）。
+	 * 它失败就返回失败，**不回退到寄存器路径、更不回退到软件源**。 */
+	if (g_bs) {
+		return g_bs->bytes(out, n) == 0 ? HWRNG_OK : HWRNG_ERR_TIMEOUT;
 	}
 	if (!g_tr) {
 		return HWRNG_ERR_ABSENT;

@@ -35,6 +35,7 @@
  */
 #include "p11_config.h"
 
+#include "pqchsm/hwrng.h"
 #include "pqchsm/keystore.h"
 #include "pqchsm/slot.h"
 #include "pqchsm/util.h"
@@ -392,6 +393,32 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 			}
 		}
 	}
+	/* ---- 熵源：PQCHSM_HWRNG=sdfe 时改由 FPGA 供随机数 ----
+	 *
+	 * 装上之后 pqc_random_bytes()（以及 liboqs 的随机源）走
+	 *   本模块 → libsdfe → pqchsm_fpgad → /dev/secmmio → EL3 → trng_axi
+	 * 也就是说 C_GenerateRandom 与所有密钥生成的随机性都来自 PL 里的环振
+	 * 噪声源，不再是 OpenSSL。
+	 *
+	 * **不设这个变量时行为一个字不变**（走软件源）—— 这条路要显式打开，
+	 * 因为它需要一台在跑的密码机；默认打开会让没有板子的人一上来就失败。
+	 *
+	 * 而一旦打开，取不到熵就是硬错误，不会悄悄回退（见 hwrng_sdfe.c）。
+	 * 这是本项目一贯的纪律：宁可停机，也不要让"熵来自硬件"这句话
+	 * 在最要紧的时刻悄悄变成假话。
+	 */
+	{
+		const char *hw = getenv("PQCHSM_HWRNG");
+
+		if (hw && !strcmp(hw, "sdfe")) {
+			hwrng_set_byte_source(hwrng_byte_source_sdfe());
+			if (!hwrng_is_hardware()) {
+				rv = CKR_DEVICE_ERROR;
+				goto out;
+			}
+		}
+	}
+
 	g_tok = hsm_token_new((size_t)g_n_slots);
 	if (!g_tok) {
 		rv = CKR_HOST_MEMORY;
