@@ -75,17 +75,31 @@ async def read_poly(dut, sel):
     return out
 
 
+_R0_REC = None
+
+
 def first_d44(deterministic=True):
+    """返回一条 **κ=0 就被接受** 的确定性 ML-DSA-44 向量。
+
+    ⑩ 的拒绝循环让 done 落在「接受轮」而不是 κ=0 轮 —— 若 κ=0 被拒，done 时读到的
+    中间量（z/w1/r0/hint/y…）是接受轮的、不是 κ=0 的。逐段用例都对 oracle 的 κ=0 轮
+    比，所以这里挑一条恰好 κ=0 就通过的向量：此时接受轮 == κ=0 轮，done 的存储就是
+    κ=0 的，用例仍成立（顺带让逐段用例只跑一轮、快）。哪条 κ=0 接受由 oracle 现算。
+    """
+    global _R0_REC
+    if _R0_REC is not None:
+        return _R0_REC
     recs = _load_records(SIGGEN_KAT)
     if not recs:
         raise AssertionError("找不到 vectors/mldsa_siggen.kat")
-    for r in recs:
-        if r["alg"] != "ML-DSA-44":
-            continue
-        if deterministic and r.get("deterministic", "") != "1":
-            continue
-        return r
-    raise AssertionError("KAT 里没有合适的 ML-DSA-44 记录")
+    cand = [r for r in recs if r["alg"] == "ML-DSA-44"
+            and (not deterministic or r.get("deterministic", "") == "1")]
+    for r in cand:
+        if not oracle_round0(r)["reject"]:      # κ=0 轮未被拒 ⇒ 接受轮就是 κ=0
+            _R0_REC = r
+            return r
+    _R0_REC = cand[0]                           # 兜底（不该发生）
+    return _R0_REC
 
 
 @cocotb.test()
@@ -103,7 +117,9 @@ async def test_sk_decode(dut):
     rec = first_d44()
     sk = bytes.fromhex(rec["sk"])
     assert len(sk) == 2560
-    await load_buf(dut, dut.sk_wr_en, dut.sk_wr_addr, dut.sk_wr_data, sk)
+    # 用完整 msg/ctx/rnd（first_d44 保证 κ=0 就接受 ⇒ done 落在 κ=0 轮），
+    # 这样 done 快且中间量存储 = κ=0。ρ/K/tr 与 msg 无关，值不受影响。
+    await preload_all(dut, rec)
     await run_to_done(dut)
 
     rho_w, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
@@ -181,7 +197,7 @@ async def test_ntt_prep(dut):
 
     rec = first_d44()
     sk = bytes.fromhex(rec["sk"])
-    await load_buf(dut, dut.sk_wr_en, dut.sk_wr_addr, dut.sk_wr_data, sk)
+    await preload_all(dut, rec)      # 完整 msg ⇒ κ=0 接受 ⇒ done 落在 κ=0 轮
     await run_to_done(dut)
 
     _, _, _, s1_w, s2_w, t0_w = sk_decode(sk, "ML-DSA-44")
