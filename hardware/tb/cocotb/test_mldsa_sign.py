@@ -482,3 +482,44 @@ async def test_r0_hint(dut):
     dut._log.info(f"⑧⑨ r₀[0..3]/hint[0..3]/权重={o['weight']} 全对上 oracle κ=0 轮；"
                   f"reject={bool(rej)}")
 
+
+async def read_sig(dut, n):
+    """done 之后经 sig 口读 n 个字节"""
+    out = bytearray()
+    for a in range(n):
+        dut.sig_addr.value = a
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        out.append(int(dut.sig_data.value) & 0xFF)
+    return bytes(out)
+
+
+@cocotb.test()
+async def test_sign_acvp_det(dut):
+    """⑩ 整体：确定性 ML-DSA-44 —— 拒绝循环跑到接受轮，σ 逐字节对上 **ACVP siggen**
+
+    这是 Sign-44 的最终判据：不再只对 oracle 的中间量，而是用 ACVP 的 sk/msg/ctx/rnd
+    驱动 RTL，读出的完整 2420 字节签名与 ACVP 期望签名逐字节一致。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    recs = [r for r in _load_records(SIGGEN_KAT)
+            if r["alg"] == "ML-DSA-44" and r.get("deterministic", "") == "1"]
+    assert recs, "找不到确定性 ML-DSA-44 向量"
+
+    n_ok = 0
+    for idx, rec in enumerate(recs):
+        await reset(dut)
+        await preload_all(dut, rec)
+        await run_to_done(dut, limit=6_000_000)
+        sig_w = bytes.fromhex(rec["sig"])
+        sig = await read_sig(dut, len(sig_w))
+        assert sig == sig_w, (
+            f"tcId={rec.get('tcid')}（第 {idx} 条）σ 与 ACVP 不一致，首个不同在字节 "
+            f"{next(i for i in range(len(sig_w)) if sig[i] != sig_w[i])}"
+            f"（len 得 {len(sig)} / 期望 {len(sig_w)}）")
+        n_ok += 1
+
+    dut._log.info(f"⑩ ML-DSA-44 确定性 siggen 全对上 ACVP：{n_ok} 条签名逐字节一致")
+

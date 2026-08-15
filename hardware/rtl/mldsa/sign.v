@@ -132,10 +132,12 @@ module mldsa_sign (
         S_H_ST   = 6'd41,
         S_H_WB   = 6'd42,    // ct0 检查 + hint + 权重
         // ⑩ 拒绝判定 + sigEncode
-        S_REJ    = 6'd43,    // 这一轮是否作废
+        S_REJ    = 6'd43,    // 这一轮是否作废：是→回 ④ 重来，否→ sigEncode
         S_SIG_CT = 6'd44,    // sig[0..31] = c̃
-        S_SIG_Z  = 6'd45,    // sig z 段：polyz_pack
-        S_SIG_H  = 6'd46,    // sig hint 段：HintBitPack
+        S_SIG_Z  = 6'd45,    // sig z 段：polyz_pack（4 条 z 连续打包）
+        S_SIG_ZD = 6'd47,    // 等 z 打包器把最后 1~2 字节吐完
+        S_HP     = 6'd46,    // HintBitPack：扫描 hint[vi]，1 的下标写进 sig
+        S_HP_CNT = 6'd48,    // 写累计计数 sig[SIG_H0+ω+vi] = hidx
         S_FIN    = 6'd63;
 
     reg [5:0] st;
@@ -365,6 +367,31 @@ module mldsa_sign (
     reg        reject;     // 本轮任一 norm / 权重越界 → 作废重来
     reg [8:0]  weight;     // hint 总权重（≤ 256×4，9 位）
 
+    // ---- ⑩ sig 输出缓冲：2420 字节；HintBitPack 的运行下标 hidx；打包落盘指针 ----
+    reg         sig_we; reg [11:0] sig_waddr; reg [7:0] sig_din;
+    wire [7:0]  sig_data_w;
+    ram_dp #(.DW(8), .AW(12)) u_sig (
+        .clk(clk), .a_we(sig_we), .a_addr(sig_waddr), .a_din(sig_din), .a_dout(),
+        .b_we(1'b0), .b_addr(sig_addr), .b_din(8'd0), .b_dout(sig_data_w));
+    assign sig_data = sig_data_w;
+
+    reg [11:0] sigptr;     // sig 落盘指针
+    reg [7:0]  hidx;       // HintBitPack 运行下标（0..ω）
+
+    // ---- z 打包器（18 位/系数，存 γ₁−z）----
+    reg         pz_clr, pz_iv;
+    wire        pz_ir, pz_ov;
+    wire [7:0]  pz_ob;
+    wire [17:0] pz_in = 18'd131072 - z_dout[17:0];   // γ₁ − z（γ₁=2¹⁷）
+    mldsa_bitpack #(.W(18), .IW(18)) u_pz (
+        .clk(clk), .rst_n(rst_n), .clr(pz_clr),
+        .in_val(pz_in), .in_valid(pz_iv), .in_ready(pz_ir),
+        .out_byte(pz_ob), .out_valid(pz_ov));
+
+    localparam [11:0] SIG_Z0 = 12'd32;           // z 段起点
+    localparam [11:0] SIG_H0 = 12'd2336;         // hint 段起点 = 32 + 4·576
+    localparam [11:0] OMEGA  = 12'd80;
+
     // 调试读口挂 b 口（done 后用，与写不重叠）。dbg_sel[4:2] 选组，[1:0] 选第几条。
     //  组（dbg_sel[5:2]）：0 s₁  1 ŷ  2 s₂  3 t₀  4 y  5 w0/r0  6 w1  7 c/ĉ
     //                     8 z  9 hint
@@ -383,7 +410,6 @@ module mldsa_sign (
         : (dbg_sel[5:2] == 4'd11) ? {23'd0, weight}       // hint 总权重
         : 32'd0;
 
-    assign sig_data = 8'd0;   // 后续段填
 
     // ================= 位解包器（skDecode）=================
     // η（3 位）用于 s₁/s₂，t₀（13 位）单独一个。喂字节 / 抽系数按 mode 二选一。
@@ -480,6 +506,7 @@ module mldsa_sign (
             un_start <= 1'b0; un_nonce <= 16'd0;
             wp_ptr <= 10'd0; sb_start <= 1'b0; ctilde <= 256'd0;
             reject <= 1'b0; weight <= 9'd0;
+            sigptr <= 12'd0; hidx <= 8'd0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
             fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
@@ -495,6 +522,8 @@ module mldsa_sign (
             sb_start <= 1'b0;
             // w₁ 打包器每吐一字节，落盘指针前进（同 KeyGen 的 pe_ptr）
             if (p6_ov) wp_ptr <= wp_ptr + 10'd1;
+            // z 打包器每吐一字节，sig 落盘指针前进（只在 z 段有效）
+            if (pz_ov) sigptr <= sigptr + 12'd1;
 
             case (st)
             S_IDLE: if (start) begin
@@ -905,10 +934,72 @@ module mldsa_sign (
                         cnt <= 8'd0; ph <= 1'b0;
                         if (vi == 3'd3) begin
                             vi <= 3'd0;
-                            st <= S_FIN;      // 本里程碑到此（⑩ 起接拒绝判定 + sigEncode）
+                            st <= S_REJ;      // ⑨ 完，进 ⑩ 拒绝判定
                         end else begin vi <= vi + 3'd1; st <= S_H_MUL; end
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
+            end
+
+            // ---------- ⑩ 拒绝判定 + sigEncode ----------
+            // reject（z/r0/ct0 越界）或 权重>ω → 本轮作废，回 ④ 重采（κ 已在 ④ 递增）。
+            S_REJ: begin
+                if (reject || (weight > 9'd80)) begin
+                    poly <= 3'd0;             // 新一轮从 r=0 开始
+                    st <= S_EM_GO;
+                end else begin
+                    cnt <= 8'd0; st <= S_SIG_CT;
+                end
+            end
+
+            // sig[0..31] = c̃（ctilde 是寄存器，直接按字节写，无同步读延迟）
+            S_SIG_CT: begin
+                if (cnt == 8'd31) begin
+                    vj <= 3'd0; cnt <= 8'd0; ph <= 1'b0; sigptr <= SIG_Z0[11:0];
+                    st <= S_SIG_Z;
+                end else begin
+                    cnt <= cnt + 8'd1;
+                end
+            end
+
+            // z 段：4 条 z 连续打包（各 576 字节字节对齐，与逐条打包等价）。
+            // 只在最开头 clr 一次（同 w₁ 的坑：换条 clr 会抹掉滞后的待吐字节）。
+            S_SIG_Z: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else if (pz_ir) begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vj == 3'd3) begin vj <= 3'd0; st <= S_SIG_ZD; end
+                        else vj <= vj + 3'd1;
+                    end else begin
+                        cnt <= cnt + 8'd1; ph <= 1'b0;
+                    end
+                end
+            end
+            // 等打包器把最后 1~2 字节吐完（sigptr 走到 hint 段起点）
+            S_SIG_ZD: if (sigptr == SIG_H0[11:0]) begin
+                vi <= 3'd0; cnt <= 8'd0; ph <= 1'b0; hidx <= 8'd0;
+                st <= S_HP;
+            end
+
+            // HintBitPack：对每个 i 扫 hint[i][0..255]，为 1 的下标顺次写进 sig；
+            // 每条末尾写累计计数。填充区靠 sig RAM 的 0 初值天然为 0。
+            S_HP: begin
+                if (!ph) begin
+                    ph <= 1'b1;                       // 摆 hint 读地址
+                end else begin
+                    if (hn_dout) hidx <= hidx + 8'd1; // 命中：写下标（组合）+ hidx++
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0; st <= S_HP_CNT;
+                    end else begin
+                        cnt <= cnt + 8'd1; ph <= 1'b0;
+                    end
+                end
+            end
+            // 写累计计数 sig[SIG_H0+ω+vi] = hidx
+            S_HP_CNT: begin
+                if (vi == 3'd3) st <= S_FIN;
+                else begin vi <= vi + 3'd1; cnt <= 8'd0; ph <= 1'b0; st <= S_HP; end
             end
 
             S_FIN: begin done <= 1'b1; st <= S_IDLE; end
@@ -986,6 +1077,8 @@ module mldsa_sign (
         wp_we = 1'b0; wp_waddr = 10'd0; wp_din = 8'd0;
         wp_raddr = (ai >= 14'd64) ? (ai[9:0] - 10'd64) : 10'd0;   // c̃ 吸收时读 w1pk
         sb_rd_addr = cnt;
+        sig_we = 1'b0; sig_waddr = 12'd0; sig_din = 8'd0;
+        pz_clr = 1'b0; pz_iv = 1'b0;
 
         // S_UNP_I：进循环前清两个累加器
         if (st == S_UNP_I) begin eu_clr = 1'b1; tu_clr = 1'b1; end
@@ -1087,6 +1180,32 @@ module mldsa_sign (
             w0_raddr = {vi[1:0], cnt};   // r0（⑧ 覆盖进 w0）
             w1_raddr = {vi[1:0], cnt};
             if (ph) begin hn_we = 1'b1; hn_waddr = {vi[1:0], cnt}; hn_din = hint_bit; end
+        end
+
+        // ⑩ sig[0..31] = c̃
+        if (st == S_SIG_CT) begin
+            sig_we = 1'b1; sig_waddr = {4'd0, cnt}; sig_din = ctilde[cnt*8 +: 8];
+        end
+        // ⑩ z 段：读 z[vj][cnt] 喂 18 位打包器；只在最开头 clr 一次
+        if (st == S_SIG_Z) begin
+            z_raddr = {vj[1:0], cnt};
+            if (!ph && cnt == 8'd0 && vj == 3'd0) pz_clr = 1'b1;
+            if (ph) pz_iv = 1'b1;
+        end
+        // z 打包器吐字节 → sig[sigptr]（S_SIG_Z / S_SIG_ZD 都可能吐）
+        if (pz_ov) begin sig_we = 1'b1; sig_waddr = sigptr; sig_din = pz_ob; end
+        // ⑩ HintBitPack 扫描：命中就把下标 cnt 写进 sig[SIG_H0+hidx]
+        if (st == S_HP) begin
+            hn_raddr = {vi[1:0], cnt};
+            if (ph && hn_dout) begin
+                sig_we = 1'b1; sig_waddr = SIG_H0 + {4'd0, hidx}; sig_din = cnt;
+            end
+        end
+        // ⑩ 每条 hint 末尾写累计计数
+        if (st == S_HP_CNT) begin
+            sig_we = 1'b1;
+            sig_waddr = SIG_H0 + OMEGA + {9'd0, vi};
+            sig_din = hidx;
         end
 
         // ③/⑤a NTT 装载：选中 store[poly] → NTT 写口（nstore：0=s₁,1=s₂,2=t₀,3=y）

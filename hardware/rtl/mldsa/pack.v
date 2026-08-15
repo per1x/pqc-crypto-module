@@ -28,13 +28,14 @@
 // 通用位打包器：每个系数 W 位，低位在前，攒够 8 位吐一个字节
 // ---------------------------------------------------------------------------
 module mldsa_bitpack #(
-    parameter integer W = 10          // 每个系数占的位数
+    parameter integer W  = 10,        // 每个系数占的位数
+    parameter integer IW = 13         // in_val 端口宽度（z 打包 W=18 时要放宽到 18）
 ) (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        clr,           // 清空累加器（每条多项式开始前拉一拍）
 
-    input  wire [12:0] in_val,        // 已经做完变换的无符号值，只看低 W 位
+    input  wire [IW-1:0] in_val,      // 已经做完变换的无符号值，只看低 W 位
     input  wire        in_valid,
     output wire        in_ready,      // 累加器满 8 位时拉低（见下面的说明）
 
