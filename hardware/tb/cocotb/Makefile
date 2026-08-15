@@ -44,6 +44,7 @@ VERILOG_SOURCES = \
   $(RTL_MLDSA)/ntt_core.v \
   $(RTL_MLDSA)/pack.v \
   $(RTL_MLDSA)/unpack.v \
+  $(RTL_MLDSA)/expand_mask.v \
   $(RTL_MLDSA)/sampler.v \
   $(RTL_MLDSA)/keygen.v \
   $(RTL_MLDSA)/sign.v \

@@ -39,7 +39,7 @@ module mldsa_sign (
 
     output reg         done,
 
-    // ---- 共享 sha3_core（同 KeyGen；本段还没用到，驱惰性值）----
+    // ---- 共享 sha3_core（FSM 与 ExpandMask 采样器按 owner 三选一，同 KeyGen）----
     output reg         sha_start,
     output reg  [7:0]  sha_rate,
     output reg  [7:0]  sha_suffix,
@@ -95,6 +95,10 @@ module mldsa_sign (
         S_NT_GO  = 5'd10,    // nt_start
         S_NT_ST  = 5'd11,    // 等 done 落一次再起
         S_NT_WB  = 5'd12,    // NTT 读口 → store[poly]
+        // ④ y = ExpandMask(ρ'', κ+r)（拒绝循环入口）
+        S_EM_GO  = 5'd13,    // 起 ExpandMask 采样器
+        S_EM_WT  = 5'd14,    // 等 em_done
+        S_EM_MV  = 5'd15,    // 采样结果 → y[poly]
         S_FIN    = 5'd31;
 
     reg [4:0] st;
@@ -148,8 +152,45 @@ module mldsa_sign (
         .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
         .rd_addr(nt_raddr), .rd_data(nt_rdata));
 
+    // ================= 海绵归属（FSM ↔ ExpandMask 采样器）=================
+    // 只在换手方空闲时切（KeyGen 坑表第 1 条）。后续段（SampleInBall / ExpandA）
+    // 再往 owner 里加成员。
+    localparam [1:0] OWN_FSM = 2'd0, OWN_EM = 2'd1;
+    reg [1:0] owner;
+
+    // FSM 自己驱动海绵时用的那组线
+    reg        fsm_ss, fsm_siv, fsm_sif, fsm_sor;
+    reg [7:0]  fsm_sr, fsm_su, fsm_sid;
+
+    // ---- ExpandMask 采样器（④：y = ExpandMask(ρ'', κ+r)）----
+    reg         em_start;
+    reg  [15:0] em_nonce;
+    wire        em_done;
+    reg  [7:0]  em_rd_addr;
+    wire signed [31:0] em_rd_data;
+    wire        em_ss, em_siv, em_sif, em_sor;
+    wire [7:0]  em_sr, em_su, em_sid;
+    mldsa_expand_mask #(.GAMMA1(1 << 17), .CBITS(18)) u_em (
+        .clk(clk), .rst_n(rst_n),
+        .start(em_start), .seed(rhopp), .nonce(em_nonce), .done(em_done),
+        .sha_start(em_ss), .sha_rate(em_sr), .sha_suffix(em_su),
+        .sha_in_valid(em_siv), .sha_in_data(em_sid), .sha_in_flush(em_sif),
+        .sha_in_ready(sha_in_ready && (owner == OWN_EM)),
+        .sha_out_valid(sha_out_valid && (owner == OWN_EM)),
+        .sha_out_ready(em_sor), .sha_out_data(sha_out_data),
+        .rd_addr(em_rd_addr), .rd_data(em_rd_data));
+
+    // ---- y 存储：ℓ 条 × 256 × 32b（④ 存，⑤ NTT 就地覆盖成 ŷ）----
+    reg         y_we; reg [9:0] y_waddr; reg signed [31:0] y_din; reg [9:0] y_raddr;
+    wire signed [31:0] y_dout;
+    ram_dp #(.DW(32), .AW(10)) u_y (
+        .clk(clk), .a_we(y_we), .a_addr(y_waddr), .a_din(y_din), .a_dout(),
+        .b_we(1'b0), .b_addr(y_raddr), .b_din(32'd0), .b_dout(y_dout));
+
     // 调试读口挂 b 口（done 后用，与写不重叠）
-    assign dbg_coef = dbg_sel[3] ? (dbg_sel[2] ? t0_dout : s2_dout) : s1_dout;
+    //   dbg_sel[4]=1 → y[dbg_sel[1:0]]（当前 κ 轮）；否则按 [3:2] 选 s₁/s₂/t₀
+    assign dbg_coef = dbg_sel[4] ? y_dout
+                    : dbg_sel[3] ? (dbg_sel[2] ? t0_dout : s2_dout) : s1_dout;
 
     assign sig_data = 8'd0;   // 后续段填
 
@@ -191,6 +232,9 @@ module mldsa_sign (
     reg [1:0]  nstore;     // 0=s₁, 1=s₂, 2=t₀
     reg        nt_lowseen; // 「done 是电平」：start 后先见它落一次再等它起
 
+    // ④ 拒绝循环用
+    reg [15:0] kappa;      // ExpandMask 的 nonce 基（每轮 +ℓ）
+
     // NTT 装载时选中的 store 数据（nstore：0=s₁,1=s₂,2=t₀）
     wire signed [31:0] store_dout =
         (nstore == 2'd0) ? s1_dout : (nstore == 2'd1) ? s2_dout : t0_dout;
@@ -231,16 +275,19 @@ module mldsa_sign (
             ai <= 14'd0; dsel <= 1'b0;
             nstore <= 2'd0; nt_lowseen <= 1'b0;
             nt_start <= 1'b0; nt_inv <= 1'b0;
+            owner <= OWN_FSM; em_start <= 1'b0; em_nonce <= 16'd0;
+            kappa <= 16'd0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
-            sha_start <= 1'b0; sha_rate <= 8'd136; sha_suffix <= 8'h1F;
-            sha_in_valid <= 1'b0; sha_in_data <= 8'd0; sha_in_flush <= 1'b0;
-            sha_out_ready <= 1'b0;
+            fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
+            fsm_siv <= 1'b0; fsm_sid <= 8'd0; fsm_sif <= 1'b0;
+            fsm_sor <= 1'b0;
         end else begin
             done <= 1'b0;
-            sha_start <= 1'b0;
-            sha_in_flush <= 1'b0;
+            fsm_ss <= 1'b0;
+            fsm_sif <= 1'b0;
             nt_start <= 1'b0;
+            em_start <= 1'b0;
 
             case (st)
             S_IDLE: if (start) begin
@@ -329,8 +376,9 @@ module mldsa_sign (
             // ---------- ② μ = H(tr‖M')，ρ'' = H(K‖rnd‖μ) ----------
             // dsel=0 算 μ，dsel=1 算 ρ''，共用这一套吸收/挤压状态。
             S_D_GO: begin
-                sha_rate <= 8'd136; sha_suffix <= 8'h1F;   // SHAKE256
-                sha_start <= 1'b1;
+                owner <= OWN_FSM;
+                fsm_sr <= 8'd136; fsm_su <= 8'h1F;   // SHAKE256
+                fsm_ss <= 1'b1;
                 ai <= 14'd0; ph <= 1'b0; cnt <= 8'd0;
                 st <= S_D_ABS;
             end
@@ -341,10 +389,10 @@ module mldsa_sign (
                 if (!ph) begin
                     ph <= 1'b1;
                 end else begin
-                    sha_in_valid <= 1'b1;
-                    sha_in_data  <= abs_byte;
-                    if (sha_in_valid && sha_in_ready) begin
-                        sha_in_valid <= 1'b0;
+                    fsm_siv <= 1'b1;
+                    fsm_sid <= abs_byte;
+                    if (fsm_siv && sha_in_ready) begin
+                        fsm_siv <= 1'b0;
                         if (abs_last) begin
                             st <= S_D_GAP;
                         end else begin
@@ -354,16 +402,16 @@ module mldsa_sign (
                 end
             end
             S_D_GAP: st <= S_D_FLU;
-            S_D_FLU: begin sha_in_flush <= 1'b1; cnt <= 8'd0; st <= S_D_SQ; end
+            S_D_FLU: begin fsm_sif <= 1'b1; cnt <= 8'd0; st <= S_D_SQ; end
 
             // 挤 64 字节，低地址先出、从高位塞右移，进 μ 或 ρ''。
             S_D_SQ: begin
-                sha_out_ready <= 1'b1;
+                fsm_sor <= 1'b1;
                 if (sha_out_valid) begin
                     if (!dsel) mu    <= {sha_out_data, mu[511:8]};
                     else       rhopp <= {sha_out_data, rhopp[511:8]};
                     if (cnt == 8'd63) begin
-                        sha_out_ready <= 1'b0;
+                        fsm_sor <= 1'b0;
                         if (!dsel) begin
                             dsel <= 1'b1;      // μ 好了，接着算 ρ''
                             st <= S_D_GO;
@@ -403,7 +451,8 @@ module mldsa_sign (
                         if (poly == 3'd3) begin
                             poly <= 3'd0;
                             if (nstore == 2'd2) begin
-                                st <= S_FIN;       // ③ 全做完（后续段接拒绝循环）
+                                kappa <= 16'd0;    // 进拒绝循环，κ 从 0 起
+                                st <= S_EM_GO;
                             end else begin
                                 nstore <= nstore + 2'd1; st <= S_NT_LD;
                             end
@@ -414,10 +463,56 @@ module mldsa_sign (
                 end
             end
 
+            // ---------- ④ y = ExpandMask(ρ'', κ+r)，r = poly = 0..ℓ-1 ----------
+            // 拒绝循环入口。本里程碑只跑 κ=0 一轮，采出 y 存好、经 dbg 验，
+            // 然后 done；⑤ 起再往下接 ŷ/w/…，并把 done 往后挪。
+            S_EM_GO: begin
+                owner <= OWN_EM;
+                em_nonce <= kappa + {13'd0, poly};
+                em_start <= 1'b1;
+                st <= S_EM_WT;
+            end
+            S_EM_WT: if (em_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_EM_MV; end
+
+            // 采样器读口同步，两拍一个系数：ph=0 摆地址，ph=1 写进 y[poly]。
+            S_EM_MV: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (poly == 3'd3) begin
+                            poly <= 3'd0;
+                            kappa <= kappa + 16'd4;   // κ += ℓ
+                            owner <= OWN_FSM;
+                            st <= S_FIN;              // 本里程碑到此（⑤ 起接下去）
+                        end else begin
+                            poly <= poly + 3'd1; st <= S_EM_GO;
+                        end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
             S_FIN: begin done <= 1'b1; st <= S_IDLE; end
             default: st <= S_IDLE;
             endcase
         end
+    end
+
+    // ================= 海绵接口三选一（组合）=================
+    always @(*) begin
+        case (owner)
+        OWN_EM: begin
+            sha_start = em_ss; sha_rate = em_sr; sha_suffix = em_su;
+            sha_in_valid = em_siv; sha_in_data = em_sid; sha_in_flush = em_sif;
+            sha_out_ready = em_sor;
+        end
+        default: begin
+            sha_start = fsm_ss; sha_rate = fsm_sr; sha_suffix = fsm_su;
+            sha_in_valid = fsm_siv; sha_in_data = fsm_sid; sha_in_flush = fsm_sif;
+            sha_out_ready = fsm_sor;
+        end
+        endcase
     end
 
     // ================= 端口/使能（组合）=================
@@ -441,8 +536,18 @@ module mldsa_sign (
 
         nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt;
 
+        y_we = 1'b0; y_waddr = 10'd0; y_din = 32'd0;
+        y_raddr = {dbg_sel[1:0], dbg_idx};    // 默认给调试口
+        em_rd_addr = cnt;
+
         // S_UNP_I：进循环前清两个累加器
         if (st == S_UNP_I) begin eu_clr = 1'b1; tu_clr = 1'b1; end
+
+        // ④ 采样结果 → y[poly]（两拍相位：ph=0 摆 em 读地址，ph=1 写 y）
+        if (st == S_EM_MV) begin
+            em_rd_addr = cnt;
+            if (ph) begin y_we = 1'b1; y_waddr = {poly[1:0], cnt}; y_din = em_rd_data; end
+        end
 
         // ③ NTT 装载：选中 store[poly] → NTT 写口
         if (st == S_NT_LD) begin

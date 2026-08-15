@@ -204,3 +204,33 @@ async def test_ntt_prep(dut):
 
     dut._log.info("③ ŝ₁/ŝ₂/t̂₀ 全部对上 ntt(sk_decode)，整条 sk→解包→NTT 链都对")
 
+
+@cocotb.test()
+async def test_expand_mask(dut):
+    """④ y = ExpandMask(ρ'', κ=0)：done 后读 y[0..3]，对 oracle 的 expand_mask（κ=0 轮）
+
+    y 是拒绝循环第一轮（κ=0）采出的 mask 多项式。这条同时验到了整条前置链：
+    sk→K/tr、μ、ρ''（ExpandMask 的种子就是 ρ''）都对，采样与 18 位解包才会对上。
+    """
+    from mldsa_oracle import expand_mask
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    rec = first_d44()
+    sk, msg, ctx, rnd = await preload_all(dut, rec)
+    await run_to_done(dut)
+
+    _, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
+    mu_w = h_shake256(tr_w + _mprime(ctx, msg), 64)
+    rhopp_w = h_shake256(key_w + rnd + mu_w, 64)
+    y_w = expand_mask(rhopp_w, 0, 1 << 17, 4)     # κ=0, γ₁=2¹⁷, ℓ=4
+
+    for j in range(4):
+        got = await read_poly(dut, 0b10000 | j)   # dbg_sel[4]=1 → y[j]
+        assert got == y_w[j], (
+            f"y[{j}] 不一致，首个不同在第 "
+            f"{next(i for i in range(256) if got[i] != y_w[j][i])} 个系数")
+
+    dut._log.info("④ y[0..3] = ExpandMask(ρ'', κ=0) 全对上 oracle（18 位解包、γ₁−v 验到）")
+
