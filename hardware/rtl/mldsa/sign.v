@@ -383,8 +383,18 @@ module mldsa_sign #(
                                             : CT0BOUND;      // γ₂（ct₀）
     wire norm_bad = (cabs >= norm_bound);
 
+    // ⑨ 的写回链原来是**一整条组合路径**：
+    //   invNTT 结果(BRAM) → reduce32 → +r0 → reduce32 → MakeHint(含 decompose)
+    //   → hint 位 → hint 存储 / weight 累加
+    // ML-DSA-87 实测这就是 Sign 的关键路径（逻辑层级 35，其中 CARRY8=15）：
+    // 单核 post-route WNS −1.611ns，三个核一起进 engine 之后掉到 −2.307ns。
+    // 从中间切一刀：ct₀ 与它的越界判定先进寄存器，下一拍再做 +r0 / reduce32 / MakeHint。
+    // 代价是 ⑨ 每个系数从 2 拍变 3 拍（只影响这一段，不影响拒绝循环的轮数）。
+    reg signed [31:0] ct0_r;    // 第 1 拍锁存的 ct₀ = reduce32(invNTT)
+    reg               nb_r;     // 同拍锁存的 ‖ct₀‖∞ 越界判定
+
     // MakeHint(a0, w1) 用 ⑨：a0 = reduce32(r0 + ct0)。r0 存在 w0 存储（⑧ 就地覆盖）。
-    wire signed [31:0] a0_in = w0_dout + comb_red;   // comb_red 此时是 ct0
+    wire signed [31:0] a0_in = w0_dout + ct0_r;      // 用**上一拍锁存**的 ct₀
     wire signed [31:0] a0_red;
     mldsa_reduce32 u_reda0 (.a(a0_in), .r(a0_red));
     wire hint_bit;
@@ -464,6 +474,7 @@ module mldsa_sign #(
     // ================= 控制寄存器 =================
     reg [7:0]  cnt;        // 头部 / 系数计数（0..127 或 0..255）
     reg        ph;         // 同步读两拍相位
+    reg [1:0]  hph;        // ⑨ 写回专用的三拍相位（那一段被切成了三拍）
     reg [3:0]  poly;       // 第几条：s₁/s₂ 段用 0..ℓ+k−1，其余段用 0..ℓ−1 或 0..k−1
     reg        t0phase;    // 0 = 正在解 s₁/s₂（3 位），1 = 正在解 t₀（13 位）
     reg [12:0] skp;        // sk 读指针（进解包器的字节）
@@ -594,7 +605,7 @@ module mldsa_sign #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; cnt <= 8'd0; ph <= 1'b0;
-            mm_last <= 1'b0;
+            mm_last <= 1'b0; hph <= 2'd0; ct0_r <= 32'sd0; nb_r <= 1'b0;
             poly <= 4'd0; t0phase <= 1'b0; skp <= 12'd0; feed <= 1'b0;
             ai <= 14'd0; hsel <= 2'd0;
             nstore <= 2'd0; nt_lowseen <= 1'b0;
@@ -1032,10 +1043,17 @@ module mldsa_sign #(
                 if (!nt_done) nt_lowseen <= 1'b1;
                 if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_H_WB; end
             end
+            // 三拍：0 摆地址 / 1 锁存 ct₀ 与越界判定 / 2 算 hint 并写回
             S_H_WB: begin
-                if (!ph) begin ph <= 1'b1; end
-                else begin
-                    if (norm_bad) reject <= 1'b1;               // ‖ct₀‖∞ ≥ γ₂
+                if (hph == 2'd0) begin
+                    hph <= 2'd1;
+                end else if (hph == 2'd1) begin
+                    ct0_r <= comb_red;                          // comb_red 此时是 ct₀
+                    nb_r  <= norm_bad;
+                    hph   <= 2'd2;
+                end else begin
+                    hph <= 2'd0;
+                    if (nb_r) reject <= 1'b1;                   // ‖ct₀‖∞ ≥ γ₂
                     if (hint_bit) weight <= weight + 11'd1;      // 累加 hint 权重
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
@@ -1298,7 +1316,8 @@ module mldsa_sign #(
             nt_raddr = cnt;
             w0_raddr = {vi[2:0], cnt};   // r0（⑧ 覆盖进 w0）
             w1_raddr = {vi[2:0], cnt};
-            if (ph) begin hn_we = 1'b1; hn_waddr = {vi[2:0], cnt}; hn_din = hint_bit; end
+            // 第 3 拍才写：hint 位这时才算得出来（ct₀ 上一拍才进寄存器）
+            if (hph == 2'd2) begin hn_we = 1'b1; hn_waddr = {vi[2:0], cnt}; hn_din = hint_bit; end
         end
 
         // ⑩ sig[0..31] = c̃
