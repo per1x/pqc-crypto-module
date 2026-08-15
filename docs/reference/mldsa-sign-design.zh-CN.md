@@ -1,5 +1,14 @@
 # ML-DSA Sign 硬核设计（FIPS 204 §6，external + pure）
 
+> **状态（ML-DSA-44）：完成，整体对上 ACVP siggen 逐字节。**
+> 逐段搭建 ①–⑩ 全部落地并各自对上 oracle 的 κ=0 轮中间量；顶层拒绝循环跑到接受轮，
+> 完整 2420 字节签名逐字节对上 **ACVP siggen**（`test_sign_acvp_det` 15 条确定性、
+> `test_sign_acvp_rnd` 15 条非确定性）。RTL：`sign.v` + 新子模块 `unpack.v`（位解包）、
+> `expand_mask.v`（ExpandMask）、`sample_in_ball.v`（SampleInBall）。
+> 途中实际踩到的坑（已修，见文末「实测坑」）：状态常量位宽、SampleInBall 常量强转、
+> w₁/z 打包器换条 clr、hint 填充区 BRAM 残留、hint 权重位宽、**吸收长度为 rate 整数倍时的 flush 时机**。
+> 65/87 参数化待做；Verify 待做。
+
 本文记录 ML-DSA Sign 硬核的设计与逐段规划，写法照抄 KeyGen 那份
 （`mldsa-keygen-design.zh-CN.md`）：**增量搭建、每加一段就对黄金模型验一段、
 绿了才提交**。黄金判据是 `hardware/model/mldsa_oracle.py` 的 `mldsa_sign()`
@@ -248,3 +257,35 @@ i 从 N−τ 到 N−1。SHAKE 是**流**：一个 136 B 块可能不够，要�
 5. 最后 `⑩` 整体对 **ACVP siggen** 逐字节（先确定性 15 条，再非确定性 15 条）。
 
 逐段验的理由同 KeyGen：整体不对时，「哪一段开始错」比任何波形都值钱。
+
+**逐段用例的一个坑（⑩ 之后才暴露）**：拒绝循环让 done 落在**接受轮**而非 κ=0 轮。
+若某向量 κ=0 被拒，done 时的中间量存储（z/w1/r0/hint/y…）是接受轮的、不是 κ=0 的，
+而逐段用例都对 oracle 的 κ=0 轮比 → 全崩。解法：逐段用例挑一条 **κ=0 就被接受** 的
+向量（`first_d44` 用 oracle 现算筛选），此时接受轮 == κ=0 轮，done 的存储就是 κ=0 的。
+另外「就地覆盖」的量（ŝ、ŷ、r₀ 覆盖 w0、ĉ 覆盖 c）在 done 读到的是覆盖后的，其原值
+正确性靠双射/后继量间接验（同 KeyGen 的做法）。
+
+---
+
+## 9. 实测坑（②–⑩ 真正踩到的，65/87 与 Verify 照着避）
+
+1. **状态常量 localparam 位宽**：状态数超过 32 后把 `reg st` 从 [4:0] 改成 [5:0]，
+   但 `localparam [4:0]` 块头忘了一起改 → S_Z_GO=6'd32 被截成 5'd0、与 S_IDLE 撞车，
+   FSM 落到 `default→S_IDLE` 卡死。**声明与常量块的位宽要一起改。**
+2. **SampleInBall 的 START_I**：`8'(256-TAU)` 这种 SV 强转在 iverilog 下不稳；用
+   `localparam integer` 中转再切片。（`8'd256-TAU` 会因 8 位回绕**恰好**=217 而蒙对，
+   更阴。）
+3. **w₁/z 流式打包器换条 clr**：每条 w₁(192B)/z(576B) 都字节对齐，4 条连续打包与逐条
+   等价；但打包器最后 1~2 字节比最后一个系数**晚出**，换条时 clr 会把它们抹掉
+   （KeyGen 靠采样间隔盖过这段滞后，Sign 各条背靠背没间隔就中招）。**只在最开头 clr 一次。**
+4. **hint 填充区 BRAM 残留**：sig RAM 无复位口（BRAM 要求），HintBitPack 只写 hidx 个
+   下标、其余靠 0 初值。但初值只在仿真开头有；连续签多条时上一条的下标残留在填充区，
+   本条权重更小就覆盖不到 → σ 从 hint 段中间对不上。**sigEncode 前显式清 ω 字节填充区。**
+5. **hint 权重位宽**：总权重最多 256·k=1024，9 位在 >511 时回绕，某些被拒轮的权重会
+   绕回 ≤ω 被误判接受。**用 11 位。**
+6. **吸收长度为 rate 整数倍时的 flush 时机**（最隐蔽）：μ 吸收长度恰是 SHAKE256 rate(136)
+   整数倍时（如 tcId=193：66+161+7933=8160=60·136），最后一字节把块填满、触发一次置换，
+   这拍 `sha_in_ready` 落下；若 `S_D_GAP` 只等一拍就拉 `in_flush`，flush 落在海绵置换中
+   （非 S_ABSORB）被整个忽略 → 永远吸不完、卡在挤压（现象：kappa=0、st=S_D_SQ 死等）。
+   **`S_D_GAP` 要等 `sha_in_ready` 重新拉高（置换完、回到 S_ABSORB）再冲刷**；非整数倍时
+   in_ready 一直高、立刻通过，行为不变。KeyGen 的吸收都是定长非整数倍，从没暴露这条。
