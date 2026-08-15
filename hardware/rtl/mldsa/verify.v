@@ -16,7 +16,24 @@
 // 端口按最终形态一次开全（sha/msg/ctx/valid/μ/tr），本段用不到的先驱惰性值。
 `default_nettype none
 
-module mldsa_verify (
+// ============================================================================
+// 【参数化：44 / 65 / 87】
+// ============================================================================
+//   ML-DSA-44  k=4 ℓ=4 τ=39 γ₁=2¹⁷ γ₂=(q−1)/88 ω=80 β=78  c̃=32 pk=1312 σ=2420
+//   ML-DSA-65  k=6 ℓ=5 τ=49 γ₁=2¹⁹ γ₂=(q−1)/32 ω=55 β=196 c̃=48 pk=1952 σ=3309
+//   ML-DSA-87  k=8 ℓ=7 τ=60 γ₁=2¹⁹ γ₂=(q−1)/32 ω=75 β=120 c̃=64 pk=2592 σ=4627
+// 分叉与 Sign 同源：γ₂ 选 use_hint 的 MODE；γ₁ 决定 z 解包位宽（18/20）；
+// γ₂ 决定 w1Encode 位宽（6/4）。存储与位宽按最大的 87 开。
+module mldsa_verify #(
+    parameter integer K    = 4,
+    parameter integer L    = 4,
+    parameter integer TAU  = 39,
+    parameter integer G1LOG = 17,
+    parameter integer MODE = 0,
+    parameter integer OMG  = 80,
+    parameter integer BETA = 78,
+    parameter integer CTB  = 32
+) (
     input  wire        clk,
     input  wire        rst_n,
 
@@ -24,10 +41,10 @@ module mldsa_verify (
 
     // ---- 输入缓冲：start 之前由测试台按字节预载 ----
     input  wire        pk_wr_en,
-    input  wire [10:0] pk_wr_addr,    // pk 1312 字节
+    input  wire [12:0] pk_wr_addr,    // pk：1312 / 1952 / 2592 字节
     input  wire [7:0]  pk_wr_data,
     input  wire        sig_wr_en,
-    input  wire [11:0] sig_wr_addr,   // σ 2420 字节
+    input  wire [12:0] sig_wr_addr,   // σ：2420 / 3309 / 4627 字节
     input  wire [7:0]  sig_wr_data,
     input  wire        msg_wr_en,
     input  wire [12:0] msg_wr_addr,   // msg ≤ 8192
@@ -54,8 +71,8 @@ module mldsa_verify (
     input  wire [7:0]  sha_out_data,
 
     // ---- 观察口（逐段验证用）----
-    output reg [255:0] ctilde,         // σ 里的 c̃
-    output reg [255:0] ctilde_p,       // 算出来的 c̃'
+    output reg [CTB*8-1:0] ctilde,     // σ 里的 c̃
+    output reg [CTB*8-1:0] ctilde_p,   // 算出来的 c̃'
     output reg [511:0] tr_out,
     output reg [511:0] mu,
     output reg         zbad,           // ‖z‖∞ ≥ γ₁−β
@@ -63,18 +80,26 @@ module mldsa_verify (
 
     // ---- 调试读口：dbg_sel[5:2] 选组，[1:0] 选第几条 ----
     //   0 z(后被 NTT 覆盖成 ẑ)  1 t₁(后 t̂₁)  2 hint 位  3 c(后 ĉ)  4 acc
-    input  wire [5:0]  dbg_sel,
+    input  wire [6:0]  dbg_sel,   // [6:3]=组，[2:0]=第几条多项式
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef
 );
     // ================= ML-DSA-44 常量 =================
-    localparam integer K = 4, L = 4, D = 13;
-    localparam [11:0] SIG_Z0 = 12'd32;      // z 段起点
-    localparam [11:0] SIG_H0 = 12'd2336;    // hint 段起点 = 32 + ℓ·576
-    localparam [7:0]  OMEGA  = 8'd80;
-    localparam [10:0] PK_T1  = 11'd32;      // pk 里 t₁ 起点
-    // ‖z‖∞ 的界：γ₁−β = 131072−78
-    localparam [31:0] ZBOUND = 32'd130994;
+    localparam integer D = 13;
+    localparam integer ZBITS  = (G1LOG == 17) ? 18 : 20;  // z 解包位宽
+    localparam integer ZB     = 256 * ZBITS / 8;          // 每条 z 字节 576/640
+    localparam integer W1BITS = (MODE == 0) ? 6 : 4;      // w1Encode 位宽
+    localparam integer W1B    = 256 * W1BITS / 8;         // 每条 w₁ 字节 192/128
+    localparam integer GAMMA1 = (1 << G1LOG);
+    localparam integer HCLR_N = K * 256 - 1;              // 清 h 的最后一个下标
+    localparam signed [31:0] G1_S = GAMMA1;
+    localparam [12:0] SIG_Z0 = CTB[12:0];                     // z 段起点 = c̃ 长度
+    localparam [12:0] SIG_H0 = CTB[12:0] + L[12:0]*ZB[12:0];  // hint 段起点
+    localparam [7:0]  OMEGA  = OMG[7:0];
+    localparam [12:0] PK_T1  = 13'd32;      // pk 里 t₁ 起点
+    // ‖z‖∞ 的界：γ₁−β
+    localparam [31:0] ZBOUND = GAMMA1 - BETA;
+    localparam [3:0] LM1 = L[3:0] - 4'd1, KM1 = K[3:0] - 4'd1;
 
     localparam [5:0]
         S_IDLE  = 6'd0,
@@ -114,12 +139,12 @@ module mldsa_verify (
     reg [5:0] st;
 
     // ================= 输入缓冲 =================
-    reg  [10:0] pk_raddr;  wire [7:0] pk_rdata;
-    ram_dp #(.DW(8), .AW(11)) u_pk (
+    reg  [12:0] pk_raddr;  wire [7:0] pk_rdata;
+    ram_dp #(.DW(8), .AW(13)) u_pk (
         .clk(clk), .a_we(pk_wr_en), .a_addr(pk_wr_addr), .a_din(pk_wr_data),
         .a_dout(), .b_we(1'b0), .b_addr(pk_raddr), .b_din(8'd0), .b_dout(pk_rdata));
-    reg  [11:0] sig_raddr; wire [7:0] sig_rdata;
-    ram_dp #(.DW(8), .AW(12)) u_sig (
+    reg  [12:0] sig_raddr; wire [7:0] sig_rdata;
+    ram_dp #(.DW(8), .AW(13)) u_sig (
         .clk(clk), .a_we(sig_wr_en), .a_addr(sig_wr_addr), .a_din(sig_wr_data),
         .a_dout(), .b_we(1'b0), .b_addr(sig_raddr), .b_din(8'd0), .b_dout(sig_rdata));
     reg  [12:0] msg_raddr; wire [7:0] msg_rdata;
@@ -132,20 +157,20 @@ module mldsa_verify (
         .a_dout(), .b_we(1'b0), .b_addr(ctx_raddr), .b_din(8'd0), .b_dout(ctx_rdata));
 
     // ================= 系数存储 =================
-    reg         z_we;  reg [9:0] z_waddr;  reg signed [31:0] z_din;  reg [9:0] z_raddr;
+    reg         z_we;  reg [10:0] z_waddr;  reg signed [31:0] z_din;  reg [10:0] z_raddr;
     wire signed [31:0] z_dout;
-    ram_dp #(.DW(32), .AW(10)) u_z (
+    ram_dp #(.DW(32), .AW(11)) u_z (
         .clk(clk), .a_we(z_we), .a_addr(z_waddr), .a_din(z_din), .a_dout(),
         .b_we(1'b0), .b_addr(z_raddr), .b_din(32'd0), .b_dout(z_dout));
-    reg         t1_we; reg [9:0] t1_waddr; reg signed [31:0] t1_din; reg [9:0] t1_raddr;
+    reg         t1_we; reg [10:0] t1_waddr; reg signed [31:0] t1_din; reg [10:0] t1_raddr;
     wire signed [31:0] t1_dout;
-    ram_dp #(.DW(32), .AW(10)) u_t1 (
+    ram_dp #(.DW(32), .AW(11)) u_t1 (
         .clk(clk), .a_we(t1_we), .a_addr(t1_waddr), .a_din(t1_din), .a_dout(),
         .b_we(1'b0), .b_addr(t1_raddr), .b_din(32'd0), .b_dout(t1_dout));
     // hint：k×256 位
-    reg         h_we;  reg [9:0] h_waddr;  reg h_din;  reg [9:0] h_raddr;
+    reg         h_we;  reg [10:0] h_waddr;  reg h_din;  reg [10:0] h_raddr;
     wire        h_dout;
-    ram_dp #(.DW(1), .AW(10)) u_h (
+    ram_dp #(.DW(1), .AW(11)) u_h (
         .clk(clk), .a_we(h_we), .a_addr(h_waddr), .a_din(h_din), .a_dout(),
         .b_we(1'b0), .b_addr(h_raddr), .b_din(1'b0), .b_dout(h_dout));
 
@@ -157,10 +182,10 @@ module mldsa_verify (
         .b_we(1'b0), .b_addr(c_raddr), .b_din(32'd0), .b_dout(c_dout));
 
     assign dbg_coef =
-          (dbg_sel[5:2] == 4'd0) ? z_dout
-        : (dbg_sel[5:2] == 4'd1) ? t1_dout
-        : (dbg_sel[5:2] == 4'd2) ? {31'd0, h_dout}
-        : (dbg_sel[5:2] == 4'd3) ? c_dout
+          (dbg_sel[6:3] == 4'd0) ? z_dout
+        : (dbg_sel[6:3] == 4'd1) ? t1_dout
+        : (dbg_sel[6:3] == 4'd2) ? {31'd0, h_dout}
+        : (dbg_sel[6:3] == 4'd3) ? c_dout
         : 32'd0;
 
     // ================= 海绵归属（FSM ↔ SampleInBall ↔ ExpandA）=================
@@ -177,7 +202,7 @@ module mldsa_verify (
     wire signed [31:0] sb_rd_data;
     wire        sb_ss, sb_siv, sb_sif, sb_sor;
     wire [7:0]  sb_sr, sb_su, sb_sid;
-    mldsa_sample_in_ball #(.TAU(39)) u_sib (
+    mldsa_sample_in_ball #(.TAU(TAU), .CTB(CTB)) u_sib (
         .clk(clk), .rst_n(rst_n),
         .start(sb_start), .seed(ctilde), .done(sb_done),
         .sha_start(sb_ss), .sha_rate(sb_sr), .sha_suffix(sb_su),
@@ -243,13 +268,13 @@ module mldsa_verify (
     wire signed [31:0] cad_out;
     mldsa_caddq u_cad (.a(nt_rdata), .r(cad_out));
     wire [5:0] uh_a1;
-    mldsa_use_hint #(.MODE(0)) u_uh (.a(cad_out), .hint(h_dout), .a1_out(uh_a1));
+    mldsa_use_hint #(.MODE(MODE)) u_uh (.a(cad_out), .hint(h_dout), .a1_out(uh_a1));
 
     // ---- w1Encode：6 位/系数打包进 w1pk ----
     reg         p6_clr, p6_iv;
     wire        p6_ir, p6_ov;
     wire [7:0]  p6_ob;
-    mldsa_bitpack #(.W(6)) u_p6 (
+    mldsa_bitpack #(.W(W1BITS)) u_p6 (
         .clk(clk), .rst_n(rst_n), .clr(p6_clr),
         .in_val({7'd0, uh_a1}), .in_valid(p6_iv), .in_ready(p6_ir),
         .out_byte(p6_ob), .out_valid(p6_ov));
@@ -258,8 +283,8 @@ module mldsa_verify (
     // z：18 位 → γ₁−v；t₁：10 位 → 直接用
     reg         zu_clr, zu_iv, zu_or;
     wire        zu_ir, zu_ov;
-    wire [17:0] zu_val;
-    mldsa_bitunpack #(.W(18)) u_zu (
+    wire [ZBITS-1:0] zu_val;
+    mldsa_bitunpack #(.W(ZBITS)) u_zu (
         .clk(clk), .rst_n(rst_n), .clr(zu_clr),
         .in_byte(sig_rdata), .in_valid(zu_iv), .in_ready(zu_ir),
         .out_val(zu_val), .out_valid(zu_ov), .out_ready(zu_or));
@@ -271,7 +296,7 @@ module mldsa_verify (
         .in_byte(pk_rdata), .in_valid(tu_iv), .in_ready(tu_ir),
         .out_val(tu_val), .out_valid(tu_ov), .out_ready(tu_or));
 
-    wire signed [31:0] z_coef  = $signed(32'sd131072) - $signed({14'd0, zu_val});
+    wire signed [31:0] z_coef  = G1_S - $signed({{(32-ZBITS){1'b0}}, zu_val});
     wire signed [31:0] t1_coef = $signed({22'd0, tu_val});
     // ‖z‖∞：z 已居中，直接取绝对值比
     wire [31:0] z_abs = z_coef[31] ? (-z_coef) : z_coef;
@@ -280,12 +305,12 @@ module mldsa_verify (
     // ================= 控制寄存器 =================
     reg [7:0]  cnt;
     reg        ph;
-    reg [2:0]  poly;
-    reg [11:0] rdp;        // 读指针（喂解包器的字节）
+    reg [3:0]  poly;
+    reg [12:0] rdp;        // 读指针（喂解包器的字节）
     reg        feed;
-    reg [9:0]  hclr;       // 清 h 的计数
+    reg [10:0] hclr;       // 清 h 的计数
     // HintBitUnpack 用
-    reg [7:0]  hcnt [0:K-1];   // 每条的累计计数
+    reg [7:0]  hcnt [0:7];   // 每条的累计计数
     reg [7:0]  hidx;           // 运行下标
     reg [7:0]  hfirst;         // 本条起点（判"严格递增"用）
     reg [7:0]  hprev;          // 上一个下标
@@ -295,10 +320,11 @@ module mldsa_verify (
     reg [13:0] ai;             // 吸收字节指针（μ 支最长 66+ctx+msg，14 位）
     reg [1:0]  hsel;           // 0 = tr(吸收 pk)，1 = μ，2 = c̃'
     reg [1:0]  nstore;         // NTT 对象：0=c, 1=z, 2=t₁
+    wire [3:0] nt_last = (nstore == 2'd1) ? LM1 : KM1;   // z 是 ℓ 条，t₁ 是 k 条
     reg        nt_lowseen;     // 「done 是电平」：先见它落一次再等它起
-    reg [2:0]  vi, vj;         // ④ 的 i / j
+    reg [3:0]  vi, vj;         // ④ 的 i / j
 
-    localparam [13:0] PKLEN = 14'd1312;
+    localparam [13:0] PKLEN = 14'd32 + K[13:0]*14'd320;
 
     // ---- tr 支的吸收源：整个 pk ----
     // ---- μ 支的吸收源：tr(64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ msg ----
@@ -321,20 +347,20 @@ module mldsa_verify (
     wire [7:0]  abs_byte  = (hsel == 2'd0) ? pk_rdata
                           : (hsel == 2'd1) ? mu_byte : ct_byte;
     wire [13:0] abs_total = (hsel == 2'd0) ? PKLEN
-                          : (hsel == 2'd1) ? thr_mu : 14'd832;
+                          : (hsel == 2'd1) ? thr_mu : (14'd64 + K[13:0]*W1B[13:0]);
     wire        abs_last  = (ai == abs_total - 14'd1);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; valid <= 1'b0;
-            cnt <= 8'd0; ph <= 1'b0; poly <= 3'd0; rdp <= 12'd0; feed <= 1'b0;
-            hclr <= 10'd0; hidx <= 8'd0; hfirst <= 8'd0; hprev <= 8'd0;
+            cnt <= 8'd0; ph <= 1'b0; poly <= 4'd0; rdp <= 13'd0; feed <= 1'b0;
+            hclr <= 11'd0; hidx <= 8'd0; hfirst <= 8'd0; hprev <= 8'd0;
             ctilde <= 256'd0; ctilde_p <= 256'd0; tr_out <= 512'd0; mu <= 512'd0;
             zbad <= 1'b0; hbad <= 1'b0;
             ai <= 14'd0; hsel <= 2'd0; nstore <= 2'd0; nt_lowseen <= 1'b0;
             owner <= OWN_FSM; sb_start <= 1'b0;
             nt_start <= 1'b0; nt_inv <= 1'b0;
-            vi <= 3'd0; vj <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0;
+            vi <= 4'd0; vj <= 4'd0; un_start <= 1'b0; un_nonce <= 16'd0;
             rho <= 256'd0; wp_ptr <= 10'd0;
             fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
             fsm_siv <= 1'b0; fsm_sid <= 8'd0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
@@ -352,7 +378,7 @@ module mldsa_verify (
             case (st)
             S_IDLE: if (start) begin
                 zbad <= 1'b0; hbad <= 1'b0; valid <= 1'b0;
-                hclr <= 10'd0; cnt <= 8'd0; ph <= 1'b0; poly <= 3'd0;
+                hclr <= 11'd0; cnt <= 8'd0; ph <= 1'b0; poly <= 4'd0;
                 st <= S_HCLR;
             end
 
@@ -361,10 +387,10 @@ module mldsa_verify (
             // 连续验多条时上一条的 1 会残留 → 上一条的 hint 泄漏进这一条，可能让
             // **本该拒绝的签名通过**（假阳性）。所以入口必须显式清 k×256 位。
             S_HCLR: begin
-                if (hclr == 10'd1023) begin
+                if (hclr == HCLR_N[10:0]) begin
                     cnt <= 8'd0; st <= S_CT;
                 end else begin
-                    hclr <= hclr + 10'd1;
+                    hclr <= hclr + 11'd1;
                 end
             end
 
@@ -373,9 +399,9 @@ module mldsa_verify (
                 if (!ph) begin
                     ph <= 1'b1;
                 end else begin
-                    ctilde <= {sig_rdata, ctilde[255:8]};
-                    if (cnt == 8'd31) begin
-                        cnt <= 8'd0; ph <= 1'b0; poly <= 3'd0; feed <= 1'b0;
+                    ctilde <= {sig_rdata, ctilde[CTB*8-1:8]};
+                    if (cnt == CTB[7:0] - 8'd1) begin
+                        cnt <= 8'd0; ph <= 1'b0; poly <= 4'd0; feed <= 1'b0;
                         rdp <= SIG_Z0;
                         st <= S_ZU;
                     end else begin
@@ -392,12 +418,12 @@ module mldsa_verify (
                     if (z_over) zbad <= 1'b1;
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0;
-                        if (poly == 3'd3) begin
-                            poly <= 3'd0; cnt <= 8'd0; ph <= 1'b0;
-                            rdp <= SIG_H0 + {4'd0, OMEGA};   // 指向计数区
+                        if (poly == LM1) begin
+                            poly <= 4'd0; cnt <= 8'd0; ph <= 1'b0;
+                            rdp <= SIG_H0 + {5'd0, OMEGA};   // 指向计数区
                             st <= S_HC;
                         end else begin
-                            poly <= poly + 3'd1;
+                            poly <= poly + 4'd1;
                         end
                     end else begin
                         cnt <= cnt + 8'd1;
@@ -406,7 +432,7 @@ module mldsa_verify (
                     if (!feed) begin
                         feed <= 1'b1;
                     end else begin
-                        if (zu_ir) rdp <= rdp + 12'd1;
+                        if (zu_ir) rdp <= rdp + 13'd1;
                         feed <= 1'b0;
                     end
                 end
@@ -417,9 +443,9 @@ module mldsa_verify (
                 if (!ph) begin
                     ph <= 1'b1;
                 end else begin
-                    hcnt[cnt[1:0]] <= sig_rdata;
+                    hcnt[cnt[2:0]] <= sig_rdata;
                     if (cnt == K[7:0] - 8'd1) begin
-                        cnt <= 8'd0; ph <= 1'b0; poly <= 3'd0;
+                        cnt <= 8'd0; ph <= 1'b0; poly <= 4'd0;
                         hidx <= 8'd0; hfirst <= 8'd0; hprev <= 8'd0;
                         rdp <= SIG_H0;
                         st <= S_HI;
@@ -434,17 +460,17 @@ module mldsa_verify (
             // 同一条内下标必须**严格递增**（hfirst 重置比较链，跨条不比 —— 漏了会把
             // 合法签名判成非法）。h[i][sig_rdata] 置 1。
             S_HI: begin
-                if (hcnt[poly[1:0]] < hidx || hcnt[poly[1:0]] > OMEGA) begin
+                if (hcnt[poly[2:0]] < hidx || hcnt[poly[2:0]] > OMEGA) begin
                     hbad <= 1'b1;
                     // 结构已非法，不再按它扫（继续跑到底，最后统一判 valid）
-                    if (poly == 3'd3) begin cnt <= 8'd0; ph <= 1'b0; st <= S_HP; end
-                    else begin poly <= poly + 3'd1; end
-                end else if (hidx == hcnt[poly[1:0]]) begin
+                    if (poly == KM1) begin cnt <= 8'd0; ph <= 1'b0; st <= S_HP; end
+                    else begin poly <= poly + 4'd1; end
+                end else if (hidx == hcnt[poly[2:0]]) begin
                     // 这一条扫完
-                    if (poly == 3'd3) begin
+                    if (poly == KM1) begin
                         cnt <= 8'd0; ph <= 1'b0; st <= S_HP;
                     end else begin
-                        poly <= poly + 3'd1;
+                        poly <= poly + 4'd1;
                         hfirst <= hidx;          // 下一条的比较链起点
                     end
                 end else begin
@@ -462,8 +488,8 @@ module mldsa_verify (
             // ---------- HintBitUnpack ③ 填充区必须全零 ----------
             S_HP: begin
                 if (hidx + cnt >= OMEGA) begin
-                    cnt <= 8'd0; ph <= 1'b0; poly <= 3'd0; feed <= 1'b0;
-                    rdp <= {1'b0, PK_T1};
+                    cnt <= 8'd0; ph <= 1'b0; poly <= 4'd0; feed <= 1'b0;
+                    rdp <= PK_T1;
                     st <= S_T1;
                 end else if (!ph) begin
                     ph <= 1'b1;
@@ -479,12 +505,12 @@ module mldsa_verify (
                     feed <= 1'b0;
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0;
-                        if (poly == 3'd3) begin
-                            poly <= 3'd0;
+                        if (poly == KM1) begin
+                            poly <= 4'd0;
                             hsel <= 2'd0;     // 进 ②：先算 tr = H(pk)
                             st <= S_D_GO;
                         end else begin
-                            poly <= poly + 3'd1;
+                            poly <= poly + 4'd1;
                         end
                     end else begin
                         cnt <= cnt + 8'd1;
@@ -493,7 +519,7 @@ module mldsa_verify (
                     if (!feed) begin
                         feed <= 1'b1;
                     end else begin
-                        if (tu_ir) rdp <= rdp + 12'd1;
+                        if (tu_ir) rdp <= rdp + 13'd1;
                         feed <= 1'b0;
                     end
                 end
@@ -539,8 +565,8 @@ module mldsa_verify (
                 if (sha_out_valid) begin
                     if (hsel == 2'd0)      tr_out   <= {sha_out_data, tr_out[511:8]};
                     else if (hsel == 2'd1) mu       <= {sha_out_data, mu[511:8]};
-                    else                   ctilde_p <= {sha_out_data, ctilde_p[255:8]};
-                    if (cnt == ((hsel == 2'd2) ? 8'd31 : 8'd63)) begin
+                    else                   ctilde_p <= {sha_out_data, ctilde_p[CTB*8-1:8]};
+                    if (cnt == ((hsel == 2'd2) ? (CTB[7:0] - 8'd1) : 8'd63)) begin
                         fsm_sor <= 1'b0;
                         if (hsel == 2'd0) begin
                             hsel <= 2'd1;          // tr 好了，接着算 μ
@@ -566,7 +592,7 @@ module mldsa_verify (
                     ph <= 1'b1;
                 end else begin
                     if (cnt == 8'd255) begin
-                        cnt <= 8'd0; ph <= 1'b0; nstore <= 2'd0; poly <= 3'd0;
+                        cnt <= 8'd0; ph <= 1'b0; nstore <= 2'd0; poly <= 4'd0;
                         st <= S_NT_LD;             // 进 ③b：ĉ = NTT(c)
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
@@ -592,19 +618,19 @@ module mldsa_verify (
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
                         if (nstore == 2'd0) begin
-                            nstore <= 2'd1; poly <= 3'd0; st <= S_NT_LD;   // 接着 z
-                        end else if (poly == 3'd3) begin
-                            poly <= 3'd0;
+                            nstore <= 2'd1; poly <= 4'd0; st <= S_NT_LD;   // 接着 z
+                        end else if (poly == nt_last) begin
+                            poly <= 4'd0;
                             if (nstore == 2'd1) begin
                                 nstore <= 2'd2; st <= S_NT_LD;             // 接着 t₁
                             end else begin
                                 // 三组 NTT 都好了，进 ④
-                                vi <= 3'd0; vj <= 3'd0; wp_ptr <= 10'd0;
+                                vi <= 4'd0; vj <= 4'd0; wp_ptr <= 10'd0;
                                 owner <= OWN_UNI;
                                 st <= S_A_GO;
                             end
                         end else begin
-                            poly <= poly + 3'd1; st <= S_NT_LD;
+                            poly <= poly + 4'd1; st <= S_NT_LD;
                         end
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
@@ -612,7 +638,9 @@ module mldsa_verify (
 
             // ---------- ④ 对每个 i：acc = Σ_j Â[i][j]∘ẑ[j] − ĉ∘t̂₁[i] ----------
             S_A_GO: begin
-                un_nonce <= {5'd0, vi, 5'd0, vj};   // 256·i + j
+                // ⚠️ vi/vj 现在是 4 位，拼接必须配成 4+4：写成 {5'd0,vi,5'd0,vj} 会是
+                // 18 位塞进 16 位、从高位截掉，nonce 全错（Â 采错 → c̃' 对不上）。
+                un_nonce <= {4'd0, vi, 4'd0, vj};   // 256·i + j
                 un_start <= 1'b1;
                 st <= S_A_WT;
             end
@@ -622,10 +650,10 @@ module mldsa_verify (
                 else begin
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
-                        if (vj == 3'd3) begin
-                            vj <= 3'd0; owner <= OWN_FSM; st <= S_CT1;
+                        if (vj == LM1) begin
+                            vj <= 4'd0; owner <= OWN_FSM; st <= S_CT1;
                         end else begin
-                            vj <= vj + 3'd1; owner <= OWN_UNI; st <= S_A_GO;
+                            vj <= vj + 4'd1; owner <= OWN_UNI; st <= S_A_GO;
                         end
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
@@ -660,12 +688,12 @@ module mldsa_verify (
                 end else if (p6_ir) begin
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
-                        if (vi == 3'd3) begin
-                            vi <= 3'd0;
+                        if (vi == KM1) begin
+                            vi <= 4'd0;
                             hsel <= 2'd2;          // 进 c̃' = H(μ‖w1pk)
                             st <= S_D_GO;
                         end else begin
-                            vi <= vi + 3'd1; vj <= 3'd0; owner <= OWN_UNI;
+                            vi <= vi + 4'd1; vj <= 4'd0; owner <= OWN_UNI;
                             st <= S_A_GO;
                         end
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
@@ -707,14 +735,14 @@ module mldsa_verify (
     // ================= 端口/使能（组合）=================
     always @(*) begin
         z_we = 1'b0; z_waddr = 10'd0; z_din = 32'd0;
-        z_raddr = {dbg_sel[1:0], dbg_idx};
+        z_raddr = {dbg_sel[2:0], dbg_idx};
         t1_we = 1'b0; t1_waddr = 10'd0; t1_din = 32'd0;
-        t1_raddr = {dbg_sel[1:0], dbg_idx};
+        t1_raddr = {dbg_sel[2:0], dbg_idx};
         h_we = 1'b0; h_waddr = 10'd0; h_din = 1'b0;
-        h_raddr = {dbg_sel[1:0], dbg_idx};
+        h_raddr = {dbg_sel[2:0], dbg_idx};
         zu_clr = 1'b0; zu_iv = 1'b0; zu_or = 1'b0;
         tu_clr = 1'b0; tu_iv = 1'b0; tu_or = 1'b0;
-        pk_raddr = rdp[10:0];
+        pk_raddr = rdp;
         sig_raddr = rdp;
         // ② μ 支按 ai 摆 ctx/msg 读地址；tr 支按 ai 读 pk
         msg_raddr = msg_off[12:0];
@@ -729,12 +757,12 @@ module mldsa_verify (
         // c̃' 吸收时读 w1pk（ai≥64 之后）
         wp_raddr = (ai >= 14'd64) ? (ai[9:0] - 10'd64) : 10'd0;
 
-        if (st == S_D_ABS && hsel == 2'd0) pk_raddr = ai[10:0];
+        if (st == S_D_ABS && hsel == 2'd0) pk_raddr = ai[12:0];
 
         // ④ MAC：Â[cnt]·ẑ[vj][cnt] 累加到 acc[cnt]（j==0 直接放，省清零）
         if (st == S_MAC) begin
             un_rd_addr = cnt;
-            z_raddr    = {vj[1:0], cnt};
+            z_raddr    = {vj[2:0], cnt};
             ac_raddr   = cnt;
             if (ph) begin
                 ac_we    = 1'b1; ac_waddr = cnt;
@@ -744,7 +772,7 @@ module mldsa_verify (
         // ④ acc −= mont(ĉ∘t̂₁[vi])
         if (st == S_CT1) begin
             c_raddr  = cnt;
-            t1_raddr = {vi[1:0], cnt};
+            t1_raddr = {vi[2:0], cnt};
             ac_raddr = cnt;
             if (ph) begin
                 ac_we = 1'b1; ac_waddr = cnt; ac_din = ac_dout - pw_mont;
@@ -758,7 +786,7 @@ module mldsa_verify (
         // ④ UseHint + 6 位打包
         if (st == S_UH) begin
             nt_raddr = cnt;
-            h_raddr  = {vi[1:0], cnt};
+            h_raddr  = {vi[2:0], cnt};
             if (!ph && cnt == 8'd0 && vi == 3'd0) p6_clr = 1'b1;   // 仅最开头清一次
             if (ph) p6_iv = 1'b1;
         end
@@ -774,8 +802,8 @@ module mldsa_verify (
         if (st == S_NT_LD) begin
             case (nstore)
                 2'd0: c_raddr  = cnt;
-                2'd1: z_raddr  = {poly[1:0], cnt};
-                default: t1_raddr = {poly[1:0], cnt};
+                2'd1: z_raddr  = {poly[2:0], cnt};
+                default: t1_raddr = {poly[2:0], cnt};
             endcase
             if (ph) begin
                 nt_we = 1'b1; nt_waddr = cnt;
@@ -790,8 +818,8 @@ module mldsa_verify (
             if (ph) begin
                 case (nstore)
                     2'd0: begin c_we = 1'b1; c_waddr = cnt; c_din = nt_rdata; end
-                    2'd1: begin z_we = 1'b1; z_waddr = {poly[1:0], cnt}; z_din = nt_rdata; end
-                    default: begin t1_we = 1'b1; t1_waddr = {poly[1:0], cnt}; t1_din = nt_rdata; end
+                    2'd1: begin z_we = 1'b1; z_waddr = {poly[2:0], cnt}; z_din = nt_rdata; end
+                    default: begin t1_we = 1'b1; t1_waddr = {poly[2:0], cnt}; t1_din = nt_rdata; end
                 endcase
             end
         end
@@ -802,35 +830,38 @@ module mldsa_verify (
         if (st == S_CT) begin zu_clr = 1'b1; tu_clr = 1'b1; end
 
         // c̃ 读 sig[cnt]
-        if (st == S_CT) sig_raddr = {4'd0, cnt};
+        if (st == S_CT) sig_raddr = {5'd0, cnt};
 
         // z 解包：抽系数写 z[poly]，否则喂字节
         if (st == S_ZU) begin
             if (zu_ov) begin
                 zu_or = 1'b1;
-                z_we = 1'b1; z_waddr = {poly[1:0], cnt}; z_din = z_coef;
+                z_we = 1'b1; z_waddr = {poly[2:0], cnt}; z_din = z_coef;
             end else if (feed) begin
                 zu_iv = 1'b1;
             end
         end
 
         // hint 计数区：sig[SIG_H0+ω+cnt]
-        if (st == S_HC) sig_raddr = SIG_H0 + {4'd0, OMEGA} + {4'd0, cnt};
+        if (st == S_HC) sig_raddr = SIG_H0 + {5'd0, OMEGA} + {5'd0, cnt};
         // hint 下标区：sig[SIG_H0+hidx]；命中就置 h[poly][sig_rdata]
         if (st == S_HI) begin
-            sig_raddr = SIG_H0 + {4'd0, hidx};
+            sig_raddr = SIG_H0 + {5'd0, hidx};
             if (ph) begin
-                h_we = 1'b1; h_waddr = {poly[1:0], sig_rdata}; h_din = 1'b1;
+                // ⚠️ 多项式下标要 3 位：写成 poly[1:0] 时 k>4 的高位被截掉 ——
+                // 65 的 poly=4/5 会绕回 0/1，把它们的 hint 位并进 poly0/poly1
+                // （读侧是 11 位、读 poly4/5 全空），c̃' 自然对不上。
+                h_we = 1'b1; h_waddr = {poly[2:0], sig_rdata}; h_din = 1'b1;
             end
         end
         // 填充区：sig[SIG_H0+hidx+cnt]
-        if (st == S_HP) sig_raddr = SIG_H0 + {4'd0, hidx} + {4'd0, cnt};
+        if (st == S_HP) sig_raddr = SIG_H0 + {5'd0, hidx} + {5'd0, cnt};
 
         // t₁ 解包：抽系数写 t1[poly]，否则喂字节
         if (st == S_T1) begin
             if (tu_ov) begin
                 tu_or = 1'b1;
-                t1_we = 1'b1; t1_waddr = {poly[1:0], cnt}; t1_din = t1_coef;
+                t1_we = 1'b1; t1_waddr = {poly[2:0], cnt}; t1_din = t1_coef;
             end else if (feed) begin
                 tu_iv = 1'b1;
             end

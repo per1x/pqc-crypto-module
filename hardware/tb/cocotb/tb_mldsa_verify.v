@@ -1,13 +1,22 @@
 // 把 mldsa_verify 接上一个 sha3_core，供 cocotb 当顶层用（增量验证）
 `default_nettype none
-module tb_mldsa_verify (
+module tb_mldsa_verify #(
+    parameter integer K    = 4,
+    parameter integer L    = 4,
+    parameter integer TAU  = 39,
+    parameter integer G1LOG = 17,
+    parameter integer MODE = 0,
+    parameter integer OMG  = 80,
+    parameter integer BETA = 78,
+    parameter integer CTB  = 32
+) (
     input  wire clk, input wire rst_n,
     input  wire        start,
     input  wire        pk_wr_en,
-    input  wire [10:0] pk_wr_addr,
+    input  wire [12:0] pk_wr_addr,
     input  wire [7:0]  pk_wr_data,
     input  wire        sig_wr_en,
-    input  wire [11:0] sig_wr_addr,
+    input  wire [12:0] sig_wr_addr,
     input  wire [7:0]  sig_wr_data,
     input  wire        msg_wr_en,
     input  wire [12:0] msg_wr_addr,
@@ -19,13 +28,13 @@ module tb_mldsa_verify (
     input  wire [7:0]  ctx_len,
     output wire        done,
     output wire        valid,
-    output wire [255:0] ctilde,
-    output wire [255:0] ctilde_p,
+    output wire [CTB*8-1:0] ctilde,
+    output wire [CTB*8-1:0] ctilde_p,
     output wire [511:0] tr_out,
     output wire [511:0] mu,
     output wire        zbad,
     output wire        hbad,
-    input  wire [5:0]  dbg_sel,
+    input  wire [6:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef
 );
@@ -33,7 +42,8 @@ module tb_mldsa_verify (
     wire [7:0]  sr, su, sid, sod;
     wire        sir, sov;
 
-    mldsa_verify u_ver (
+    mldsa_verify #(.K(K), .L(L), .TAU(TAU), .G1LOG(G1LOG), .MODE(MODE),
+                   .OMG(OMG), .BETA(BETA), .CTB(CTB)) u_ver (
         .clk(clk), .rst_n(rst_n), .start(start),
         .pk_wr_en(pk_wr_en), .pk_wr_addr(pk_wr_addr), .pk_wr_data(pk_wr_data),
         .sig_wr_en(sig_wr_en), .sig_wr_addr(sig_wr_addr), .sig_wr_data(sig_wr_data),

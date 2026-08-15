@@ -16,14 +16,26 @@ from cocotb.triggers import RisingEdge, Timer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "model"))
 from mldsa_oracle import (  # noqa: E402
-    _load_records, hint_unpack, pk_decode, polyz_unpack)
-from mldsa_model import chknorm  # noqa: E402
+    _load_records, hint_unpack, pk_decode, polyz_unpack, SIG_PARAMS)
+from mldsa_model import chknorm, PARAMS  # noqa: E402
 
 SIGVER_KAT = Path(__file__).resolve().parents[3] / "vectors" / "mldsa_sigver.kat"
 
-GAMMA1, BETA, OMEGA, K, ELL = 1 << 17, 78, 80, 4, 4
-ZBYTES = 256 // 4 * 9        # 576
-SIG_H0 = 32 + ELL * ZBYTES   # 2336
+# 参数集由 Makefile 的 MLDSA_ALG 环境变量选（与 -P 传给 RTL 的参数必须一致）
+import os  # noqa: E402
+ALG = os.environ.get("MLDSA_ALG", "ML-DSA-44")
+_P, _S = PARAMS[ALG], SIG_PARAMS[ALG]
+K, ELL = _P["k"], _P["l"]
+GAMMA1, BETA, OMEGA, TAU = _S["gamma1"], _S["beta"], _S["omega"], _S["tau"]
+CTB = _S["ctilde"]
+ZBITS = 18 if GAMMA1 == (1 << 17) else 20
+ZBYTES = 256 * ZBITS // 8          # 576 / 640
+SIG_H0 = CTB + ELL * ZBYTES        # hint 段起点
+
+
+# dbg_sel[6:3] 选组、[2:0] 选多项式
+def dbg(group, poly=0):
+    return (group << 3) | poly
 
 
 async def reset(dut):
@@ -99,8 +111,8 @@ def d44_records():
     recs = _load_records(SIGVER_KAT)
     if not recs:
         raise AssertionError("找不到 vectors/mldsa_sigver.kat")
-    out = [r for r in recs if r["alg"] == "ML-DSA-44"]
-    assert out, "KAT 里没有 ML-DSA-44 sigver 记录"
+    out = [r for r in recs if r["alg"] == ALG]
+    assert out, f"KAT 里没有 {ALG} sigver 记录"
     return out
 
 
@@ -108,15 +120,15 @@ def oracle_decode(rec):
     """oracle 侧的 sigDecode/pkDecode 结果 + 两个结构标志"""
     sig = bytes.fromhex(rec["sig"])
     pk = bytes.fromhex(rec["pk"])
-    ct = sig[:32]
-    off = 32
+    ct = sig[:CTB]
+    off = CTB
     z = []
     for _ in range(ELL):
         z.append(polyz_unpack(sig[off:off + ZBYTES], GAMMA1))
         off += ZBYTES
     h = hint_unpack(sig[off:off + OMEGA + K], K, OMEGA)
     zbad = any(chknorm(x, GAMMA1 - BETA) for p in z for x in p)
-    _, t1 = pk_decode(pk, "ML-DSA-44")
+    _, t1 = pk_decode(pk, ALG)
     return dict(ctilde=ct, z=z, t1=t1, h=h, zbad=zbad, hbad=(h is None))
 
 
@@ -153,7 +165,7 @@ async def test_sigdecode(dut):
         await run_to_done(dut)
         o = oracle_decode(rec)
 
-        got_ct = to_bytes(dut.ctilde.value, 32)
+        got_ct = to_bytes(dut.ctilde.value, CTB)
         assert got_ct == o["ctilde"], f"tcId={rec.get('tcid')}：c̃ 不一致"
 
         assert bool(int(dut.zbad.value)) == o["zbad"], (
@@ -167,13 +179,13 @@ async def test_sigdecode(dut):
         # NTT 双射 ⇒ ẑ==ntt(z) 同时说明 18 位解包对、NTT 对（t₁ 同理）。
         from mldsa_model import ntt as _ntt
         for j in range(ELL):
-            got = await read_poly(dut, (0 << 2) | j)
+            got = await read_poly(dut, dbg(0, j))
             want = _ntt(list(o["z"][j]))
             assert got == want, (
                 f"tcId={rec.get('tcid')}：ẑ[{j}] 不一致，首个不同在第 "
                 f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
         for i in range(K):
-            got = await read_poly(dut, (1 << 2) | i)
+            got = await read_poly(dut, dbg(1, i))
             want = _ntt([x << 13 for x in o["t1"][i]])
             assert got == want, (
                 f"tcId={rec.get('tcid')}：t̂₁[{i}] 不一致，首个不同在第 "
@@ -182,7 +194,7 @@ async def test_sigdecode(dut):
         # hint 位：只有结构合法时 oracle 才给出 h（非法时返回 None，位内容无意义）
         if o["h"] is not None:
             for i in range(K):
-                got = await read_poly(dut, (2 << 2) | i)
+                got = await read_poly(dut, dbg(2, i))
                 assert got == o["h"][i], (
                     f"tcId={rec.get('tcid')}：hint[{i}] 不一致，首个不同在第 "
                     f"{next(n for n in range(256) if got[n] != o['h'][i][n])} 位")
@@ -223,9 +235,9 @@ async def test_tr_mu_c(dut):
         f"μ 不一致，首个不同在字节 "
         f"{next(i for i in range(64) if got_mu[i] != mu_w[i])}")
 
-    c_w = sample_in_ball(sig[:32], 39)
+    c_w = sample_in_ball(sig[:CTB], TAU)
     chat_w = _ntt(list(c_w))
-    got_chat = await read_poly(dut, 3 << 2)
+    got_chat = await read_poly(dut, dbg(3))
     assert got_chat == chat_w, (
         f"ĉ 不一致，首个不同在第 "
         f"{next(i for i in range(256) if got_chat[i] != chat_w[i])} 个系数")
@@ -259,7 +271,7 @@ async def test_verify_acvp(dut):
         else:
             n_fail += 1
 
-    dut._log.info(f"④ ML-DSA-44 对上 ACVP sigver：应通过 {n_pass} 条全 true、"
+    dut._log.info(f"④ {ALG} 对上 ACVP sigver：应通过 {n_pass} 条全 true、"
                   f"应拒绝 {n_fail} 条全 false")
 
 
@@ -305,11 +317,15 @@ async def test_reject_selfmade(dut):
     dut._log.info(f"  阳性对照 tcId={rec.get('tcid')}：valid=true ✓")
 
     # ① ‖z‖∞ 越界：z[0][0] 的 18 位字段 = γ₁ + 131000 ⇒ z = −131000
-    v = (1 << 17) + 131000
+    v = GAMMA1 + (GAMMA1 - BETA + 6)   # |z| = γ₁−β+6 ≥ γ₁−β，必被拒
     s = bytearray(sig0)
-    s[32] = v & 0xFF
-    s[33] = (v >> 8) & 0xFF
-    s[34] = (s[34] & 0xFC) | ((v >> 16) & 0x03)
+    # z[0][0] 占 z 区（从 sig[CTB] 起）最低的 ZBITS 位，低位在前；
+    # 前两字节整个属于它，第三字节只占低 (ZBITS-16) 位，其余位要原样保留。
+    _hi = ZBITS - 16                     # 2（γ₁=2¹⁷）或 4（γ₁=2¹⁹）
+    _hm = (1 << _hi) - 1
+    s[CTB + 0] = v & 0xFF
+    s[CTB + 1] = (v >> 8) & 0xFF
+    s[CTB + 2] = (s[CTB + 2] & ~_hm & 0xFF) | ((v >> 16) & _hm)
     await reset(dut)
     await _preload_raw(dut, pk, bytes(s), msg, ctx)
     await run_to_done(dut, limit=6_000_000)
