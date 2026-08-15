@@ -5,7 +5,7 @@
 # 的是**最大的 87**，所以必须能把参数打进去。这里用 synth_design -generic。
 #
 #   vivado -mode batch -source hardware/syn/ooc_mldsa.tcl \
-#          -tclargs <part> <keygen|sign|verify> <44|65|87>
+#          -tclargs <part> <keygen|sign|verify|engine> <44|65|87>
 #
 # 例：
 #   vivado -mode batch -source ooc_mldsa.tcl \
@@ -19,15 +19,15 @@ set part  [lindex $argv 0]
 set op    [lindex $argv 1]
 set pset  [lindex $argv 2]
 if {$part eq "" || $op eq "" || $pset eq ""} {
-    puts "用法: vivado -mode batch -source ooc_mldsa.tcl -tclargs <part> <keygen|sign|verify> <44|65|87>"
+    puts "用法: vivado -mode batch -source ooc_mldsa.tcl -tclargs <part> <keygen|sign|verify|engine> <44|65|87>"
     exit 1
 }
 
 # FIPS 204 Table 1。keygen 只有 K/L/ETA；verify 没有 ETA（见各模块端口）。
 switch $pset {
-    44 { set K 4; set L 4; set ETA 2; set TAU 39; set G1 17; set MODE 0; set OMG 80; set BETA 78;  set CTB 32 }
-    65 { set K 6; set L 5; set ETA 4; set TAU 49; set G1 19; set MODE 1; set OMG 55; set BETA 196; set CTB 48 }
-    87 { set K 8; set L 7; set ETA 2; set TAU 60; set G1 19; set MODE 1; set OMG 75; set BETA 120; set CTB 64 }
+    44 { set K 4; set L 4; set ETA 2; set TAU 39; set G1 17; set MODE 0; set OMG 80; set BETA 78;  set CTB 32; set PS 0 }
+    65 { set K 6; set L 5; set ETA 4; set TAU 49; set G1 19; set MODE 1; set OMG 55; set BETA 196; set CTB 48; set PS 1 }
+    87 { set K 8; set L 7; set ETA 2; set TAU 60; set G1 19; set MODE 1; set OMG 75; set BETA 120; set CTB 64; set PS 2 }
     default { puts "未知参数集 $pset"; exit 1 }
 }
 
@@ -51,6 +51,7 @@ switch $op {
     keygen { set gen [list K=$K L=$L ETA=$ETA] }
     sign   { set gen [list K=$K L=$L ETA=$ETA TAU=$TAU G1LOG=$G1 MODE=$MODE OMG=$OMG BETA=$BETA CTB=$CTB] }
     verify { set gen [list K=$K L=$L TAU=$TAU G1LOG=$G1 MODE=$MODE OMG=$OMG BETA=$BETA CTB=$CTB] }
+    engine { set gen [list K=$K L=$L ETA=$ETA TAU=$TAU G1LOG=$G1 MODE=$MODE OMG=$OMG BETA=$BETA CTB=$CTB PSET=$PS] }
     default { puts "未知操作 $op"; exit 1 }
 }
 
