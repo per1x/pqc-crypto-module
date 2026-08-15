@@ -32,14 +32,19 @@ import struct
 import sys
 
 MAGIC = 0x53434750
-MAXPAY = 8192
+# ⚠️ 必须与 wire.h 的 PQCS_MAXPAY 一致。对不上不会报错，而是让下面那条
+#    "len 超过 MAXPAY" 变成一条**送得进去的合法请求** —— 用例照常"通过"，
+#    实际上已经不再测它声称要测的东西。这是双份定义最典型的坏法。
+MAXPAY = 16384
 (OP_PING, OP_RANDOM, OP_KEYGEN, OP_ENCAPS,
- OP_DECAPS, OP_IMPORT, OP_SYM, OP_AUTH) = range(1, 9)
+ OP_DECAPS, OP_IMPORT, OP_SYM, OP_AUTH,
+ OP_MLDSA_KEYGEN, OP_MLDSA_SIGN, OP_MLDSA_VERIFY) = range(1, 12)
 
 SDR_OK = 0
 SDR_INARGERR = 0x01000004
 SDR_KEYNOTEXIST = 0x01000005
 SDR_HARDFAIL = 0x01000006
+SDR_VERIFYFAIL = 0x01000008
 
 TIMEOUT = 15.0          # 超过就算它卡住了
 
@@ -162,6 +167,21 @@ def main():
         ("IMPORT_KEY 33 字节",      lambda s: call(s, OP_IMPORT, 3, 0, b"\0" * 33)),
         ("未知操作码 op=99",        lambda s: call(s, 99)),
         ("未知操作码 op=0",         lambda s: call(s, 0)),
+        # ML-DSA：从机（mldsa_axi）尚未落地，所以这几条今天要么是参数被挡下、
+        # 要么是硬件失败 —— 两种都算"拒绝"。它们真正盯的是**参数校验不会被
+        # 跳过**：等从机上来之后，这批用例一个字都不用改就继续有效。
+        ("ML-DSA KEYGEN pset=3（只有 0/1/2）",
+         lambda s: call(s, OP_MLDSA_KEYGEN, 3)),
+        ("ML-DSA KEYGEN pset=0xFFFFFFFF",
+         lambda s: call(s, OP_MLDSA_KEYGEN, 0xFFFFFFFF)),
+        ("ML-DSA SIGN 句柄 999（不存在）",
+         lambda s: call(s, OP_MLDSA_SIGN, 999, 0, b"m")),
+        ("ML-DSA SIGN 非空 ctx（约定里没给 ctx 字节留位置）",
+         lambda s: call(s, OP_MLDSA_SIGN, 0, 8, b"m")),
+        ("ML-DSA VERIFY pset=9",
+         lambda s: call(s, OP_MLDSA_VERIFY, 9, 0, b"\0" * 100)),
+        ("ML-DSA VERIFY 载荷短于 pk+sig",
+         lambda s: call(s, OP_MLDSA_VERIFY, 0, 0, b"\0" * 100)),
     ]:
         case(host, port, token, nm, fn)
 

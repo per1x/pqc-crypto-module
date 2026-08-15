@@ -36,6 +36,12 @@ static char g_ks[160];
 	}                                                                   \
 } while (0)
 
+/* 本用例要多少个槽位：0/1/2 给原有用例，3 种子导入，4 ML-DSA-87。
+ * 这个数出现在两处 —— setenv 和 C_GetSlotList 的断言 —— 用宏绑在一起。
+ * 分开写的代价刚被踩到过：加一个槽位，红的是八竿子打不着的"两段式查询"。 */
+#define P11_SLOTS      5
+#define P11_SLOTS_STR "5"
+
 static CK_ATTRIBUTE mk_ulong(CK_ATTRIBUTE_TYPE t, CK_ULONG *v)
 {
 	CK_ATTRIBUTE a;
@@ -50,7 +56,7 @@ int main(void)
 	snprintf(g_ks, sizeof(g_ks), "/tmp/pqchsm_p11_%d.ks", (int)getpid());
 	unlink(g_ks);
 	setenv("PQCHSM_KEYSTORE", g_ks, 1);
-	setenv("PQCHSM_SLOTS", "4", 1);   /* 0/1/2 给原有用例，3 留给种子导入 */
+	setenv("PQCHSM_SLOTS", P11_SLOTS_STR, 1);
 
 	TCASE("dlopen 模块并取函数表");
 	void *h = dlopen(PQCHSM_P11_MODULE, RTLD_NOW);
@@ -124,15 +130,15 @@ int main(void)
 	CK_SLOT_ID slots[8];
 	CK_ULONG n = 0;
 	CKCHECK(F->C_GetSlotList(CK_TRUE, NULL, &n), CKR_OK);
-	CHECK_EQ_INT(n, 4);
+	CHECK_EQ_INT(n, P11_SLOTS);
 	{
 		CK_ULONG small = 1;
 		CKCHECK(F->C_GetSlotList(CK_TRUE, slots, &small), CKR_BUFFER_TOO_SMALL);
-		CHECK_EQ_INT(small, 4);
+		CHECK_EQ_INT(small, P11_SLOTS);
 	}
 	n = 8;
 	CKCHECK(F->C_GetSlotList(CK_TRUE, slots, &n), CKR_OK);
-	CHECK_EQ_INT(n, 4);
+	CHECK_EQ_INT(n, P11_SLOTS);
 	CHECK_EQ_INT(slots[0], 0);
 
 	TCASE("机制列表包含 ML-DSA 与 ML-KEM");
@@ -342,6 +348,69 @@ int main(void)
 		CKCHECK(F->C_Sign(sess, msg, sizeof(msg), sig, &siglen), CKR_OK);
 		CHECK_EQ_INT(pqc_verify(PQC_ALG_ML_DSA_65, pkbuf, msg, sizeof(msg), NULL, 0,
 		                        sig, siglen), PQC_OK);
+	}
+
+	/* ML-DSA-87 走一遍同样的链条。
+	 *
+	 * 上面那几条测的都是 65，44 只在"种子存储"那条里露了一面，**87 之前一次
+	 * 都没走过整链**。它偏偏是最该走的那个：pk 2592、sig 4627，是三档里唯一
+	 * 会把长度假设撑破的参数集 —— 服务层那条线上载荷上限（pk‖sig‖msg）就是被
+	 * 它逼着从 8192 提到 16384 的。一个只在 65 上绿的测试对这类边界一无所知。 */
+	TCASE("★ ML-DSA-87 整链：生成 → 私钥不可导出 → 签 → 验");
+	{
+		CK_SESSION_HANDLE s87 = 0;
+		CK_ULONG ps87 = CKP_ML_DSA_87;
+		CK_ATTRIBUTE t87[1] = { mk_ulong(CKA_PARAMETER_SET, &ps87) };
+		CK_MECHANISM g87 = { CKM_ML_DSA_KEY_PAIR_GEN, NULL, 0 };
+		CK_MECHANISM m87 = { CKM_ML_DSA, NULL, 0 };
+		CK_OBJECT_HANDLE p87 = 0, v87 = 0;
+		CK_BYTE msg87[] = "hello ML-DSA-87";
+		CK_BYTE sig87[8192];
+		CK_ULONG sl87 = 0;
+		uint8_t pk87[4096];
+
+		CKCHECK(F->C_OpenSession(4, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL, NULL,
+		                         &s87), CKR_OK);
+		CKCHECK(F->C_InitToken(4, (CK_UTF8CHAR_PTR)"12345678", 8, NULL), CKR_OK);
+		CKCHECK(F->C_Login(s87, CKU_SO, (CK_UTF8CHAR_PTR)"12345678", 8), CKR_OK);
+		CKCHECK(F->C_InitPIN(s87, (CK_UTF8CHAR_PTR)"1234abcd", 8), CKR_OK);
+		CKCHECK(F->C_Logout(s87), CKR_OK);
+		CKCHECK(F->C_Login(s87, CKU_USER, (CK_UTF8CHAR_PTR)"1234abcd", 8), CKR_OK);
+
+		CKCHECK(F->C_GenerateKeyPair(s87, &g87, t87, 1, NULL, 0, &p87, &v87), CKR_OK);
+
+		/* 私钥不可导出 —— 换个参数集这条也必须成立 */
+		{
+			CK_ATTRIBUTE v = { CKA_VALUE, NULL, 0 };
+
+			CKCHECK(F->C_GetAttributeValue(s87, v87, &v, 1), CKR_ATTRIBUTE_SENSITIVE);
+			CHECK_EQ_INT(v.ulValueLen, CK_UNAVAILABLE_INFORMATION);
+		}
+		/* 公钥读得到，长度必须是 FIPS 204 的 2592 */
+		{
+			CK_ATTRIBUTE v = { CKA_VALUE, pk87, sizeof(pk87) };
+
+			CKCHECK(F->C_GetAttributeValue(s87, p87, &v, 1), CKR_OK);
+			CHECK_EQ_INT(v.ulValueLen, 2592);
+		}
+
+		CKCHECK(F->C_SignInit(s87, &m87, v87), CKR_OK);
+		sl87 = sizeof(sig87);
+		CKCHECK(F->C_Sign(s87, msg87, sizeof(msg87), sig87, &sl87), CKR_OK);
+		CHECK_EQ_INT(sl87, 4627);          /* FIPS 204 ML-DSA-87 签名 */
+
+		CKCHECK(F->C_VerifyInit(s87, &m87, p87), CKR_OK);
+		CKCHECK(F->C_Verify(s87, msg87, sizeof(msg87), sig87, sl87), CKR_OK);
+		/* 独立于本模块再验一遍 */
+		CHECK_EQ_INT(pqc_verify(PQC_ALG_ML_DSA_87, pk87, msg87, sizeof(msg87),
+		                        NULL, 0, sig87, sl87), PQC_OK);
+		/* 改一个 bit 必须验不过 —— 没有这一条，上面那些"通过"可能只是恒真 */
+		sig87[0] ^= 0x01;
+		CKCHECK(F->C_VerifyInit(s87, &m87, p87), CKR_OK);
+		CKCHECK(F->C_Verify(s87, msg87, sizeof(msg87), sig87, sl87),
+		        CKR_SIGNATURE_INVALID);
+
+		CKCHECK(F->C_CloseSession(s87), CKR_OK);
 	}
 
 	TCASE("ML-KEM 密钥对也能生成，且用途位正确");

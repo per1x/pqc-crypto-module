@@ -37,9 +37,11 @@ enum {
 	OP_SYM_BLOCK     = 7,   /* a0=alg, a1=槽|(解密<<8), 载荷=16 字节 → 16 字节 */
 	OP_AUTH          = 8,   /* 载荷=口令 → 空。**只有 TCP 连接需要** */
 
-	/* ---- ML-DSA（mldsa_axi，寄存器面见 docs/REGISTERS.md）----------------
+	/* ---- ML-DSA（mldsa_axi @ 0x8006_0000）--------------------------------
 	 * ⚠️ 从机本身尚未落地。这三条按已定的寄存器约定写好，先在 stub / 软件路径
-	 *    上验行为，硬件到位后才谈得上"在硬件上跑过"。 */
+	 *    上验行为，硬件到位后才谈得上"在硬件上跑过"。
+	 *    寄存器映射写在 pqchsm_fpgad.c 的 MD_* 那段（今天那里是唯一的口径；
+	 *    等从机进了位流，再把它挪进 docs/REGISTERS.md 与 RTL 对齐）。 */
 	OP_MLDSA_KEYGEN  = 9,   /* a0=pset → [4 字节句柄][pk]（sk 进片内金库，不出总线） */
 	OP_MLDSA_SIGN    = 10,  /* a0=句柄, a1=ctx_len, 载荷=msg → sig */
 	OP_MLDSA_VERIFY  = 11,  /* a0=pset, a1=ctx_len, 载荷=pk‖sig‖msg → 空 */
