@@ -10,6 +10,13 @@
 >   原生端口，**三个核内部一个字没动**，各自保留自己的 NTT 与算术。
 > * **第二期（提取共享 NTT / 乘法链）按实测没有必要**：engine-87 只占
 >   LUT 17.9% / BRAM 30.1% / DSP 15.8%，且已在 100MHz 下 MET。
+> * **整片实测已出（见 §5.1）**：ML-DSA-87 塞得下，WNS +2.537 / WHS +0.009
+>   双双 MET，bitstream 已生成。但 **CLB 到了 95.98%** —— 装下了，没有余地了。
+> * **这份 bitstream 里的 ML-DSA 是 87**，由顶层参数 `MLDSA_PSET` 显式决定
+>   （`zu3eg_hsm_top` → `mldsa_axi` → `mldsa_engine` 一路传到底）。
+>   在此之前三层都不传参数，engine 取默认值 —— 也就是说**板上那份其实一直是
+>   ML-DSA-44**，而所有面积估算都是按 87 算的。这种"默认值决定产品形态"
+>   不写在任何地方，只能从三层默认参数里推出来，现在改成显式的。
 > * **仍未做：运行时选参数集没打通到核那一层。** 叶子模块（打包/解包、
 >   decompose/hint、SampleInBall、ExpandMask）已全部运行时化，
 >   但三个核自己的 K/ℓ/η/τ/ω/β/c̃ 仍是编译期参数，所以 engine 也仍是
@@ -196,6 +203,35 @@ KeyGen 只吃 ξ(32)，与消息无关，不受此限。
 | Sign | sig(SIG) | SIG |
 | Verify | 无（结果看 `verify_ok`） | 0 |
 
+### ⚠️ 4.1 段边界差一拍（已知缺陷，当前由从机侧绕开）
+
+engine 的出口是
+
+```verilog
+assign out_data = (op_r == OP_KEYGEN)
+                    ? ((out_addr < PKLEN) ? kg_pk_data : kg_sk_data)
+                    : sg_sig_data;
+```
+
+`kg_pk_data` / `kg_sk_data` 来自核里的 `ram_dp`，是**同步读**（本拍的数据对应
+**上一拍**摆的 `out_addr`）；而选择器判的是**本拍**的 `out_addr`。两者差一拍。
+
+于是只要消费方在采数据的同一拍把 `out_addr` 推到下一个（同步读的常规做法，
+为了让背靠背读不掉拍），跨过 `PKLEN` 的那一拍选择器就会提前翻面，交出
+`kg_sk_data` 在地址 `(PKLEN-1) − PKLEN` 上的值（13 位回绕成 8191）。
+**表现：pk 的最后一个字节读回 `0x00`，别的字节全对。**
+
+engine 自己的用例碰不到它 —— `test_mldsa_engine.py` 的 `read_out` 是
+"摆地址 → 等一个上升沿 → 采样"，采样时选择器与数据是同一个地址。
+它是在 `mldsa_axi` 接上真 engine、把整段 pk 读回来对 ACVP 时才现形的
+（`test_mldsa_axi.test_keygen_matches_acvp`，第 1311 个字节）。
+
+**当前处置**：修在从机侧 —— `mldsa_axi` 的读路径不再提前一拍
+（AXI 读握手最快隔两拍，同步读一拍就够，不损失吞吐）。
+engine 本体**还没修**，因为它在另一条线的改动范围里。
+正解是把选择器的判据改成上一拍的 `out_addr`（寄存一份 `out_addr_d` 或一个
+`sel_sk` 位），改完可以把从机侧那段绕法还原。
+
 ## 5. 时序现状（OOC 实测，Vivado 2020.1 / xazu3eg-sfvc784-1-i / 100MHz 约束）
 
 全部是 **post-route** 的 WNS（post-synth 偏乐观，不作数）。Fmax 由 `1/(10ns − WNS)` 反推。
@@ -213,6 +249,54 @@ engine 那一行的"最初"是把三个核装进适配层、但还没切 ⑨ 写
 
 engine-87 面积：LUT 12634(17.9%)、FF 10713(7.6%)、BRAM 65 tile(30.1%)、DSP 57(15.8%)。
 **"不共享算术也塞得下"由实测证实 —— 第二期（提取共享 NTT / 乘法链）没有必要做。**
+
+### 5.1 整片实测（post-route，**这才是"塞不塞得下"的答案**）
+
+上面全部是 **OOC**（只有这一个模块，没有顶层、没有 PS、没有别的从机）。
+OOC 说明不了整片装不装得下 —— 装不下的方式是**布局拥塞**，而拥塞只有在
+整个设计一起布的时候才存在。所以下面这组数是完整实现流程量的：
+
+`hardware/syn/impl_bitstream.tcl`，Vivado 2020.1，`xazu3eg-sfvc784-1-i`，
+送检形态（`SECURE_ONLY_FUNCTIONAL=1`），`PQC_MLDSA_PSET=2`（ML-DSA-87），
+`clk_sys` 周期 13.5 ns（≈74 MHz，PL0 经 `BUFGCE_DIV` 二分频）。
+
+| | 加 ML-DSA 之前 | **ML-DSA-87 之后** | 器件总量 |
+|---|---|---|---|
+| CLB LUTs | 35812 (50.75%) | **52887 (74.95%)** | 70560 |
+| CLB Registers | — | 38803 (27.50%) | 141120 |
+| **CLB** | 6783 (**76.90%**) | **8465 (95.98%)** | 8820 |
+| BRAM tile | 31.5 (14.58%) | **112.5 (52.08%)** | 216 |
+| DSP | 140 (38.89%) | **197 (54.72%)** | 360 |
+| WNS | +3.361 ns | **+2.537 ns**（MET，0 failing） | |
+| WHS | +0.010 ns | **+0.009 ns**（MET，0 failing） | |
+| 片上功耗 | — | 2.989 W（动态 2.642） | |
+
+**结论：塞得下，时序也收敛，但 CLB 只剩 4%。**
+
+三条要点，别只看"MET"两个字：
+
+1. **CLB 95.98% 才是真正的边界，不是 LUT 的 74.95%。** LUT 还剩四分之一，
+   但它们分布在只剩 355 个空 CLB 里 —— 再加逻辑首先撞的是 CLB，不是 LUT。
+   布线器的初始拥塞报告也印证了这一点（global 8×8 / 2.41% tiles，
+   short 16×16 / 8~12% tiles，都集中在 `INT_X16..X23` 那一条）。
+   **这份设计已经没有"再塞一个模块"的余地了。**
+2. **保持时间没有被 ML-DSA 拉坏。** WHS 从 +0.010 变成 +0.009，几乎没动 ——
+   因为最差的那条保持路径**不在 ML-DSA 里**：它是
+   `u_symvault/u_sym/u_sm3/w_reg[6][4] → w_reg[5][4]`，1 级 LUT4、
+   数据 0.176 ns、时钟偏斜 +0.021 ns。加多少 ML-DSA 都不会影响它。
+   报告里的 +0.009 已经扣过 0.100 ns 的保持不确定度，**真实物理余量 +0.109 ns**
+   （`set_clock_uncertainty -hold 0.100`，理由见 impl_bitstream.tcl）。
+3. **建立时间的瓶颈换人了 —— 现在在 ML-DSA 里。** 最差路径是
+   `u_mldsa/u_eng/u_vf/u_ntt/u_mem1` → `u_mldsa/u_eng/u_vf/u_p6/acc_reg[2]`，
+   28 级逻辑（10 个 CARRY8 + 2 组 DSP 链）、数据 10.627 ns / 周期 13.5 ns。
+   余量还有 2.537 ns，但**再想提频就要先动 verify 的这条累加链**。
+
+BRAM 112.5 比早先"96 tile"的估算高，差的正是 `mldsa_axi` 自己的
+**64 KB 片内 sk 金库**（16 片 BRAM36）—— 那份估算只加了 engine 的 65 tile，
+漏了从机侧的金库。
+
+产物 `hardware/syn/impl/zu3eg_hsm.bit` / `.bin` 已生成（DRC 全过）。
+⚠️ **本轮只做到"造得出来"为止，没有上板。**
 
 面积（ML-DSA-87 Sign）：LUT 5831→5474，FF 3707→4324，BRAM 26.5→28 tile，**DSP 38→20**。
 DSP 少了近一半：原来 CT/GS/缩放/逐点/MAC 各自例化一份组合 `mldsa_mont_reduce`，
