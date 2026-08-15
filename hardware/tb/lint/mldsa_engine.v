@@ -26,6 +26,10 @@
 module mldsa_engine (
     input  wire        clk,
     input  wire        rst_n,
+    // 擦除口：mldsa_axi 把 ZEROIZE/tamper 转给引擎，引擎擦完把 wiping 落下。
+    // 替身不含真存储，所以只按固定拍数把 wiping 拉一下，让上层的等待逻辑有东西可等。
+    input  wire        zeroize,
+    output wire        wiping,
 
     input  wire        start,          // 脉冲
     input  wire [1:0]  op,             // 0=KeyGen 1=Sign 2=Verify
@@ -57,6 +61,7 @@ module mldsa_engine (
 );
     // 全部输出恒零：这个文件不做任何事，只让 lint 有个模块可查。
     assign busy = 1'b0;   assign done = 1'b0;   assign verify_ok = 1'b0;
+    assign wiping = 1'b0;   // 空壳没有存储可擦
     assign out_data = 8'd0; assign out_len = 16'd0;
     assign sha_start = 1'b0; assign sha_rate = 8'd0; assign sha_suffix = 8'd0;
     assign sha_in_valid = 1'b0; assign sha_in_data = 8'd0;

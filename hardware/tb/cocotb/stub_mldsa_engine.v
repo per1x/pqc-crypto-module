@@ -46,6 +46,10 @@
 module mldsa_engine (
     input  wire        clk,
     input  wire        rst_n,
+    // 擦除口：mldsa_axi 把 ZEROIZE/tamper 转给引擎，引擎擦完把 wiping 落下。
+    // 替身不含真存储，所以只按固定拍数把 wiping 拉一下，让上层的等待逻辑有东西可等。
+    input  wire        zeroize,
+    output wire        wiping,
 
     input  wire        start,
     input  wire [1:0]  op,             // 0=KeyGen 1=Sign 2=Verify
@@ -128,6 +132,20 @@ module mldsa_engine (
     assign busy      = (state != S_IDLE) && (state != S_DONE);
     assign done      = done_r;
     assign verify_ok = vok_r;
+
+    // ---- 擦除：替身没有真存储，但必须把 wiping 拉够一段时间 ----
+    // 上层（mldsa_axi）会等 wiping_any 落下才放行启动与读出。若替身把 wiping
+    // 恒接 0，那条等待路径在仿真里就**从来没被走过** —— 等真 engine 换上来、
+    // 擦除真的要花几万拍时，才第一次暴露上层的等待逻辑对不对。
+    // 所以这里给一个短但非零的擦除窗（16 拍），让那条路在替身阶段就被覆盖。
+    localparam integer WIPE_CYCLES = 16;
+    reg [4:0] wipe_cnt;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)      wipe_cnt <= 5'd0;
+        else if (zeroize) wipe_cnt <= WIPE_CYCLES[4:0];
+        else if (|wipe_cnt) wipe_cnt <= wipe_cnt - 5'd1;
+    end
+    assign wiping = |wipe_cnt;
     assign out_len   = out_len_r;
 
     assign sha_rate      = 8'd136;      // SHAKE256

@@ -115,11 +115,18 @@
 // （65536 拍），期间 WIPING=1、拒绝写、拒绝启动。理由与 mlkem_axi 那段
 // 一模一样：只清指针与有效位是"把目录页撕了而正文还在"。
 //
-// ⚠️ **engine 自己的输入/输出存储不在这台擦除机的覆盖范围内。** 它的接口里
-//    没有 zeroize 口，本层能做的只有把它按在复位上（rst_n && !zeroize_all）,
-//    而 BRAM 不会因为复位而清零。也就是说：**擦除之后 engine 存储里可能仍有
-//    上一次的 sk 字节。** 这是一条已知缺口，写在这里免得日后误以为已经覆盖 ——
-//    补法是给 engine 加一个 zeroize 口（那是 engine 那条线的改动）。
+// engine 自己的存储由**它自己那台擦除机**负责：本层把 zeroize 转给它，它擦完
+// 把 wiping 落下。两台擦除机要**一起等完**（wiping_any），只等本层那台会在
+// engine 还没擦干净时就放行启动与读出。
+//
+// ⚠️ 这里以前是一条已知缺口：engine 当时没有 zeroize 口，本层只能把它按在
+//    复位上（`rst_n && !zeroize_all`）—— 而**复位擦不掉 BRAM**，那种写法只是
+//    看起来像擦了，擦除之后 engine 存储里仍有上一次的 sk 字节。现在 engine
+//    有了真擦除口，rst_n 也就改回纯复位：有了真的擦法就不该再拿复位充数。
+//
+// 同一条理由也用在海绵上：`sha3_core` **本来就带 zeroize 口**，却一直接的
+//    1'b0、靠复位擦。它的状态里过过 sk 的派生量（ρ′/K/μ 那一路），所以现在
+//    接真 zeroize。
 `default_nettype none
 
 module mldsa_axi #(
@@ -247,6 +254,10 @@ module mldsa_axi #(
     reg [15:0] wipe_addr;
     reg        zall_d;
     wire       zeroize_all = zero_pulse || tamper || fw_tampered;
+    // engine 自己的擦除进度（它内部也有 sk 派生量）。**两台擦除机要一起等完**：
+    // 只等本层那台，会在 engine 还没擦干净时就放行启动/读出。
+    wire       eng_wiping;
+    wire       wiping_any = wiping || eng_wiping;
 
     // ================= 由 PSET 算出来的长度 =================
     // FIPS 204 表 2。这些是常数，直接查表 —— 用移位加法凑出来只会更难核对。
@@ -309,8 +320,12 @@ module mldsa_axi #(
     wire        sha_in_ready, sha_out_valid;
     wire [7:0]  sha_out_data;
 
+    // ⚠️ rst_n 是**纯复位**，不再 `&& !zeroize_all`：有了真的 zeroize 口之后
+    //    就不该再拿复位当擦除用 —— 复位本来也擦不掉 BRAM，那种写法只是看起来
+    //    像擦了。擦除靠 zeroize，engine 擦完把 wiping 落下。
     mldsa_engine u_eng (
-        .clk(clk), .rst_n(rst_n && !zeroize_all),
+        .clk(clk), .rst_n(rst_n),
+        .zeroize(zeroize_all), .wiping(eng_wiping),
         .start(eng_start), .op(op), .pset(pset),
         .busy(eng_busy), .done(eng_done), .verify_ok(eng_vok),
         .in_we(in_we), .in_addr(in_addr), .in_data(in_data),
@@ -322,10 +337,12 @@ module mldsa_axi #(
         .sha_out_valid(sha_out_valid), .sha_out_data(sha_out_data),
         .sha_out_ready(sha_out_ready));
 
+    // 海绵也接真 zeroize：它的状态里过过 sk 派生量（ρ′/K/μ 那一路），
+    // 原来接 1'b0 而靠复位擦是不够的 —— 这个核自己就带擦除口，用它。
     sha3_core u_sha (
-        .clk(clk), .rst_n(rst_n && !zeroize_all),
+        .clk(clk), .rst_n(rst_n),
         .rate_bytes(sha_rate), .suffix(sha_suffix),
-        .start(sha_start), .zeroize(1'b0),
+        .start(sha_start), .zeroize(zeroize_all),
         .in_valid(sha_in_valid), .in_ready(sha_in_ready),
         .in_data(sha_in_data), .in_flush(sha_in_flush),
         .out_valid(sha_out_valid), .out_ready(sha_out_ready),
@@ -382,7 +399,7 @@ module mldsa_axi #(
     // 前半段，而软件看到的是一路 OKAY。
     wire in_full = ({2'd0, in_ptr} >= IN_CAP);
     wire wr_indata = wr_now && wr_strb[0] && (wr_addr[5:2] == A_INDATA)
-                     && (state == S_IDLE) && !wiping && !in_full;
+                     && (state == S_IDLE) && !wiping_any && !in_full;
     // IN_PTR 只接受写 0。**不给"任意设置写指针"这个能力**是有意的：
     // 那等于给了一条绕过喂够校验的路（把指针推到需要的长度，实际字节是残留），
     // 而这正是上面那条校验要挡的东西。非零的写回 SLVERR，不是静默忽略。
@@ -409,9 +426,9 @@ module mldsa_axi #(
     // 读 OUT_DATA 的唯一闸门：out_ptr < OUT_LEN。存 sk 那一趟 OUT_LEN 只到
     // pk 的长度，于是 sk 那一段的地址根本不会被摆到 engine 的 out_addr 上。
     wire rd_outdata = f_arvalid && f_arready && (f_araddr[5:2] == A_OUTDATA)
-                      && !wiping && (out_ptr < out_len_r);
+                      && !wiping_any && (out_ptr < out_len_r);
 
-    wire [31:0] r_status = {25'd0, wiping, fw_tampered,
+    wire [31:0] r_status = {25'd0, wiping_any, fw_tampered,
                             len_err, param_err, verify_ok_r,
                             (state == S_IDLE) && run_done, (state != S_IDLE)};
 
@@ -511,7 +528,7 @@ module mldsa_axi #(
                                  && (state == S_IDLE) && in_full)
                              || wr_inptr_bad
                              || wr_busy_reject) ? RESP_SLVERR : RESP_OKAY;
-                if (wr_strb[0] && !wiping) begin
+                if (wr_strb[0] && !wiping_any) begin
                     case (wr_addr[5:2])
                     A_CTRL: begin
                         if (wr_data[1]) begin
@@ -538,7 +555,7 @@ module mldsa_axi #(
                         // 一次"写全 1 到 CTRL"就会同时踩到这两位 —— 用例里
                         // 那条"没有任何写法能清掉闩锁"的反证正是这么写的。
                         if (wr_data[0] && !wr_data[2] && (state == S_IDLE)
-                            && !zeroize_all && !wiping) begin
+                            && !zeroize_all && !wiping_any) begin
                             // ⚠️ 无论这次 START 是否被接受，**上一次的结果都要
                             // 当场作废**。这一条是 ML-KEM 在板上抓到的：仿真里
                             // 每条用例都从复位开始，OUT_LEN 本来就是 0，所以
