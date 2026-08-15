@@ -119,8 +119,18 @@ if {$mldsa_name eq ""} {
     puts "错误：PQC_MLDSA_PSET = $mldsa_pset，只认 0/1/2"
     exit 1
 }
+# ⚠️ **退到 65/44 的产物必须改名。** 与 dev / char 那两档同一条理由：
+#    这几份只差一个参数，长得一模一样，名字一样就必然有人拿错 —— 而拿错的
+#    后果是"照着 87 的文档去驱动一份 65 的位流"，pset 对不上会被拒绝启动，
+#    而排查方向会指向软件。默认（87）保持 zu3eg_hsm.bit 不动：板上脚本、
+#    boot/persist/boot_j1_pl.bif 都按这个名字走，改了会一起坏。
+if {$mldsa_pset != 2} {
+    append bitname "_mldsa$mldsa_name"
+    set bitname [string map {ML-DSA- ""} $bitname]
+}
 puts "=========================================================="
 puts "  ML-DSA 参数集：$mldsa_name （MLDSA_PSET=$mldsa_pset）"
+puts "  产物：$bitname.bit"
 puts "=========================================================="
 set gen_args [list -generic MLDSA_PSET=$mldsa_pset]
 if {$characterize} {
