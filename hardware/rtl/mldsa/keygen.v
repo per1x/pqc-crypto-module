@@ -62,6 +62,7 @@ module mldsa_keygen (
         S_IDLE  = 4'd0, S_H_ABS = 4'd1, S_H_GAP = 4'd2,
         S_H_FLU = 4'd3, S_H_SQ  = 4'd4,
         S_S_GEN = 4'd5, S_S_WAIT = 4'd6, S_S_MOVE = 4'd7,
+        S_NTT_LD = 4'd9, S_NTT_GO = 4'd10, S_NTT_ST = 4'd11, S_NTT_WB = 4'd12,
         S_FIN   = 4'd8;
 
     reg [3:0] st;
@@ -119,6 +120,18 @@ module mldsa_keygen (
     // 调试读口挂 b 口（done 后才用，与写不重叠）
     assign dbg_coef = dbg_sel[3] ? s2_dout : s1_dout;
 
+    // ---- NTT 核（第 ③ 段：对 ℓ 条 s₁ 做正变换，就地覆盖成 ŝ₁）----
+    reg         nt_start, nt_we;
+    reg  [7:0]  nt_waddr, nt_raddr;
+    reg signed [31:0] nt_wdata;
+    wire        nt_done;
+    wire signed [31:0] nt_rdata;
+    mldsa_ntt_core u_ntt (
+        .clk(clk), .rst_n(rst_n),
+        .start(nt_start), .inverse(1'b0), .done(nt_done),
+        .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
+        .rd_addr(nt_raddr), .rd_data(nt_rdata));
+
     // η 打包器留到 sk 组装段再接：第 ② 段只做「采样 + 存储」，
     // 而 η 打包（对 polyeta_pack）已在 test_mldsa_pack 里独立验过，
     // 这里空转它只会多一堆未接的输出。
@@ -136,6 +149,7 @@ module mldsa_keygen (
     end
 
     reg       ph;             // 同步读的两拍相位
+    reg       nt_lowseen;     // NTT：start 之后 done 先落一次再等它起
     reg [2:0] vj;             // 第几条多项式
     reg       s2phase;        // 在做 s₂ 而不是 s₁
 
@@ -143,7 +157,9 @@ module mldsa_keygen (
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; cnt <= 9'd0;
             owner <= OWN_FSM; vj <= 3'd0; ph <= 1'b0; s2phase <= 1'b0;
+            nt_lowseen <= 1'b0;
             et_start <= 1'b0; et_nonce <= 16'd0;
+            nt_start <= 1'b0;
             fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
             fsm_sr <= RATE256; fsm_su <= SUF; fsm_sid <= 8'd0;
             rho <= 256'd0; rho_prime <= 512'd0; key_out <= 256'd0;
@@ -152,6 +168,7 @@ module mldsa_keygen (
             fsm_siv <= 1'b0;
             fsm_sif <= 1'b0;
             et_start <= 1'b0;
+            nt_start <= 1'b0;
             done    <= 1'b0;
 
             case (st)
@@ -222,14 +239,49 @@ module mldsa_keygen (
                         if (!s2phase && vj == 3'd3) begin
                             s2phase <= 1'b1; vj <= 3'd0; st <= S_S_GEN;
                         end else if (s2phase && vj == 3'd3) begin
-                            vj <= 3'd0; owner <= OWN_FSM;
-                            st <= S_FIN;       // 第 ② 段到此为止
+                            vj <= 3'd0; ph <= 1'b0; owner <= OWN_FSM;
+                            st <= S_NTT_LD;    // 采完，对 s₁ 做 NTT
                         end else begin
                             vj <= vj + 3'd1; st <= S_S_GEN;
                         end
                     end else begin
                         cnt <= cnt + 9'd1; ph <= 1'b0;
                     end
+                end
+            end
+
+            // ---------- ③ ŝ₁ = NTT(s₁)，就地覆盖 s₁ 存储 ----------
+            // 装载：两拍一个系数（摆 s₁ 读地址 / 把读出的写进 NTT）。
+            S_NTT_LD: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 9'd255) begin cnt <= 9'd0; ph <= 1'b0; st <= S_NTT_GO; end
+                    else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
+                end
+            end
+            S_NTT_GO: begin nt_start <= 1'b1; nt_lowseen <= 1'b0; st <= S_NTT_ST; end
+            // ⚠️ NTT 核的 done 是**电平、保持到下一次 start**（见 ntt_core 文件头）。
+            // start 是非阻塞、要过两拍核才吃到，那之前 done 上挂着的还是**上一条**
+            // 的 1 —— 直接看 done 会当场误判完成，于是第二条 NTT 整个被跳过、
+            // 写回全 0。所以先等 done 落一次（说明核真的开始算了），再等它起。
+            // 第一条恰好因为复位后 done=0 而蒙对，非要多条连算才暴露 ——
+            // 与 sha3 那个坑同源。
+            S_NTT_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 9'd0; ph <= 1'b0; st <= S_NTT_WB; end
+            end
+
+            // 写回：读 NTT 结果，覆盖回 s₁[vj]。
+            S_NTT_WB: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 9'd255) begin
+                        cnt <= 9'd0; ph <= 1'b0;
+                        if (vj == 3'd3) begin vj <= 3'd0; st <= S_FIN; end
+                        else begin vj <= vj + 3'd1; st <= S_NTT_LD; end
+                    end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
                 end
             end
 
@@ -246,6 +298,17 @@ module mldsa_keygen (
         s1_raddr = {dbg_sel[1:0], dbg_idx};   // 默认给调试口
         s2_raddr = {dbg_sel[1:0], dbg_idx};
         et_rd_addr = cnt[7:0];
+        nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt[7:0];
+
+        // 装载：s₁[vj] → NTT 写口
+        if (st == S_NTT_LD) begin
+            s1_raddr = {vj[1:0], cnt[7:0]};
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt[7:0]; nt_wdata = s1_dout; end
+        end
+        // 写回：NTT 读口 → s₁[vj]
+        if (st == S_NTT_WB && ph) begin
+            s1_we = 1'b1; s1_waddr = {vj[1:0], cnt[7:0]}; s1_din = nt_rdata;
+        end
         if (st == S_S_MOVE && ph) begin
             if (!s2phase) begin
                 s1_we = 1'b1; s1_waddr = {vj[1:0], cnt[7:0]}; s1_din = et_rd_data;

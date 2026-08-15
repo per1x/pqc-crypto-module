@@ -17,7 +17,7 @@
 | `mldsa_polyt1_pack` / `polyt0_pack` / `polyeta_pack` | 完成 | 逐字节对 `mldsa_oracle.py` |
 | `mldsa_poly_uniform`（RejNTTPoly, SHAKE128） | 完成 | 逐系数对黄金模型 |
 | `mldsa_poly_eta`（RejBoundedPoly, SHAKE256） | 完成 | 逐系数对黄金模型 |
-| **KeyGen 顶层 FSM** | **进行中**：① H、② ExpandS 已逐段验（`test_mldsa_keygen`） | 目标：ACVP `ML-DSA-keyGen-FIPS204` |
+| **KeyGen 顶层 FSM** | **进行中**：① H、② ExpandS、③ NTT(s₁) 已逐段验（`test_mldsa_keygen`） | 目标：ACVP `ML-DSA-keyGen-FIPS204` |
 
 黄金模型 `hardware/model/mldsa_oracle.py` 的 `mldsa_keygen()` 已对过 ACVP，
 是 FSM 的唯一判据，也是逐段调试时的中间量来源。
@@ -104,6 +104,25 @@ end
 
 tr 要吸收整个 pk（44 是 1312 字节），9 位的通用计数器装不下，会在 512 处回绕。
 SHAKE 不会因此报错，只会给出一个合法但错误的摘要。
+
+### 7. NTT / sha3 的 done 是**电平**，多条连算要先等它落一次
+
+ntt_core 和 sha3_core 的 done「置位后保持到下一次 start 才清」。而 start 是
+非阻塞赋值、要过一两拍核才吃到 —— 那之前 done 上挂着的还是**上一条**的 1。
+直接 `if (done)` 会当场误判完成，把这一条整个跳过。
+
+第一条恰好因为复位后 done=0 而蒙对，**非要多条连算才暴露**。所以等待要写成
+「先看到 done 落一次（说明核真开始算了），再等它起」：
+
+```verilog
+S_GO: begin nt_start <= 1; low_seen <= 0; st <= S_WAIT; end
+S_WAIT: begin
+    if (!nt_done) low_seen <= 1;
+    if (low_seen && nt_done) st <= S_NEXT;
+end
+```
+
+④ 的 MAC 之后有 invNTT，用的是同一个 NTT 核，同一个坑。
 
 ### 6. 擦除/轮询上限随存储容量变
 

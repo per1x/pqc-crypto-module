@@ -119,18 +119,54 @@ async def test_expand_s(dut):
 
     rhop = int(dut.rho_prime.value).to_bytes(64, "little")
 
-    # s₁：nonce = j（sel = 0b0000..0b0011）
-    for j in range(4):
-        got = await read_poly(dut, j)
-        want = rej_eta_poly(rhop, j, 2)
-        assert got == want, (
-            f"s₁[{j}] 不一致，首个不同在第 "
-            f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
-    # s₂：nonce = 4+j（sel = 0b1000..0b1011）
+    # s₂：nonce = 4+j。**只验 s₂** —— s₁ 在第 ③ 段被 NTT 就地覆盖成 ŝ₁ 了，
+    # done 时读到的已经不是原始 s₁。s₁ 的采样正确性由 NTT 用例间接验：
+    # ŝ₁ == NTT(s₁) 成立，就同时说明 s₁ 采样对、NTT 对。
     for j in range(4):
         got = await read_poly(dut, 0b1000 | j)
         want = rej_eta_poly(rhop, 4 + j, 2)
         assert got == want, f"s₂[{j}] 不一致"
 
-    dut._log.info("ExpandS：s₁[0..3]、s₂[0..3] 全部对上 rej_eta_poly；"
+    dut._log.info("ExpandS：s₂[0..3] 对上 rej_eta_poly（s₁ 由 NTT 用例验）；"
                   "顺带证明 ρ' 对、海绵换手无碍")
+
+
+@cocotb.test()
+async def test_ntt_s1(dut):
+    """③ ŝ₁ = NTT(s₁)：done 后读 s₁ 存储（已被覆盖成 ŝ₁），对 ntt(s₁)
+
+    输入 s₁ 是 ExpandS 采出来的（rej_eta_poly），所以这条用例验的是一整条链：
+    ρ' 对 → s₁ 采样对 → NTT 对。任一环错都会在这里露出来。
+    """
+    import sys as _s
+    from pathlib import Path as _P
+    _s.path.insert(0, str(_P(__file__).resolve().parents[2] / "model"))
+    from mldsa_oracle import rej_eta_poly as _re
+    from mldsa_model import ntt as _ntt
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    xi = bytes(range(1, 33))
+    dut.xi.value = int.from_bytes(xi, "little")
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    for _ in range(600_000):
+        await RisingEdge(dut.clk)
+        if int(dut.done.value):
+            break
+    else:
+        raise AssertionError("NTT 段一直没完成")
+    await Timer(1, unit="ns")
+
+    rhop = int(dut.rho_prime.value).to_bytes(64, "little")
+    for j in range(4):
+        got = await read_poly(dut, j)              # s₁[j] 已是 ŝ₁[j]
+        want = _ntt(_re(rhop, j, 2))
+        assert got == want, (
+            f"ŝ₁[{j}] 不一致，首个不同在第 "
+            f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
+
+    dut._log.info("NTT(s₁)：ŝ₁[0..3] 对上 ntt(rej_eta_poly)，"
+                  "整条链 ρ'→s₁→NTT 都对")
