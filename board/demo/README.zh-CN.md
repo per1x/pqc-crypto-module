@@ -73,20 +73,41 @@ sh /media/sd-mmcblk1p2/hsm/run_demo.sh
 
 ### 从另一台机器（同一内网）
 
-先拿口令（只需一次）：
+**第一步：在那台机器上构建客户端。** 客户端不做任何密码运算，所以
+**不需要 liboqs、不需要 OpenSSL**，一条命令、只用系统的 `cc`：
+
+```
+sh board/demo/build_client.sh
+```
+
+它会产出两个东西：`sdf_demo`（SDF 接口）和 `p11_hw_demo`（标准 PKCS#11 接口）。
+
+**第二步：拿口令**（只需一次）：
 
 ```
 ssh root@192.168.50.175 cat /media/sd-mmcblk1p2/hsm/hsm_token
 ```
 
-然后：
+**第三步：连**。
+
+SDF 接口：
 
 ```
 ./sdf_demo 192.168.50.175 <口令>
 ```
 
+标准 PKCS#11 接口（这一条最能说明问题——一个不认识这块板的标准应用，
+拿标准 `C_*` 调用过来，密钥就在 FPGA 里生成、私钥永不离开硬件）：
+
+```
+PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=192.168.50.175 PQCHSM_SDFE_TOKEN=<口令> \
+    ./p11_hw_demo <PKCS#11 模块.so>
+```
+
 `sdf_demo` 是普通的用户程序，链接 `libsdfe`，**不含任何硬件细节**。
 本机版和远程版是同一个程序、同一段代码，只有"打开设备"那一行不同。
+`p11_hw_demo` 更彻底：它只认 OASIS 的 `pkcs11.h`，连 `libsdfe` 都不直接调 ——
+后端是不是 FPGA，由环境变量决定，代码一个字不用改。
 
 ---
 
@@ -98,6 +119,10 @@ ssh root@192.168.50.175 cat /media/sd-mmcblk1p2/hsm/hsm_token
 | ② | 私钥不出硬件 | 对称密钥进 `key_vault`，**RTL 上没有通往总线的读路径**；ML-KEM 的 dk 进片内金库，KeyGen 只交出公钥 + 槽号，且有一次性闩锁封死出口 |
 | ③ | 扫地址读不出密钥 | 绕过接口直接读：四个密码核的版本号**全部读回 0**（真值 `0x00010000`） |
 | ④ | 怎么打都崩不了板 | 往被拒地址狂写 36000 笔，板子照常运行 |
+| ⑤ | **标准 PKCS#11 接口** → FPGA | `p11_hw_demo`：`C_GenerateKeyPair` 私钥留片内、读 `CKA_VALUE` 被拒（`CKR_ATTRIBUTE_SENSITIVE`）、`C_Encapsulate`/`C_Decapsulate` 两端一致 |
+
+第 ⑤ 条是给"这东西能不能接进现有系统"这个问题的答案：不用任何私有 SDK，
+一个只认 OASIS `pkcs11.h` 的应用就能用它，而私钥从生成到使用一步都不出 FPGA。
 
 ### 关于 ③：为什么"读回 0"是个强证据
 
