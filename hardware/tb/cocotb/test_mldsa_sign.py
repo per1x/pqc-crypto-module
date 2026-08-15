@@ -205,32 +205,90 @@ async def test_ntt_prep(dut):
     dut._log.info("③ ŝ₁/ŝ₂/t̂₀ 全部对上 ntt(sk_decode)，整条 sk→解包→NTT 链都对")
 
 
-@cocotb.test()
-async def test_expand_mask(dut):
-    """④ y = ExpandMask(ρ'', κ=0)：done 后读 y[0..3]，对 oracle 的 expand_mask（κ=0 轮）
+def derive_rhopp(rec):
+    """从一条 KAT 复现 ρ''（ExpandMask 的种子）"""
+    sk = bytes.fromhex(rec["sk"])
+    msg = bytes.fromhex(rec["msg"])
+    ctx = bytes.fromhex(rec.get("context", "") or "")
+    rnd = bytes.fromhex(rec["rnd"])
+    _, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
+    mu_w = h_shake256(tr_w + _mprime(ctx, msg), 64)
+    return h_shake256(key_w + rnd + mu_w, 64)
 
-    y 是拒绝循环第一轮（κ=0）采出的 mask 多项式。这条同时验到了整条前置链：
-    sk→K/tr、μ、ρ''（ExpandMask 的种子就是 ρ''）都对，采样与 18 位解包才会对上。
+
+@cocotb.test()
+async def test_ymask_ntt(dut):
+    """④+⑤a ŷ = NTT(ExpandMask(ρ'', κ=0))：done 后读 y 存储（已被 NTT 覆盖）
+
+    y 在 ⑤ 被就地 NTT 成 ŷ，done 时读到的是 ŷ。NTT 双射，所以 ŷ 对上
+    ntt(expand_mask) 同时说明 ExpandMask 的 18 位解包 / γ₁−v 对、NTT 对，
+    并间接验到整条 sk→μ→ρ'' 前置链（ρ'' 是 ExpandMask 的种子）。
     """
     from mldsa_oracle import expand_mask
+    from mldsa_model import ntt as _ntt
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
     rec = first_d44()
-    sk, msg, ctx, rnd = await preload_all(dut, rec)
+    await preload_all(dut, rec)
     await run_to_done(dut)
 
-    _, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
-    mu_w = h_shake256(tr_w + _mprime(ctx, msg), 64)
-    rhopp_w = h_shake256(key_w + rnd + mu_w, 64)
-    y_w = expand_mask(rhopp_w, 0, 1 << 17, 4)     # κ=0, γ₁=2¹⁷, ℓ=4
-
+    y_w = expand_mask(derive_rhopp(rec), 0, 1 << 17, 4)   # κ=0, γ₁=2¹⁷, ℓ=4
     for j in range(4):
-        got = await read_poly(dut, 0b10000 | j)   # dbg_sel[4]=1 → y[j]
-        assert got == y_w[j], (
-            f"y[{j}] 不一致，首个不同在第 "
-            f"{next(i for i in range(256) if got[i] != y_w[j][i])} 个系数")
+        got = await read_poly(dut, 0b10000 | j)           # dbg_sel[4:2]=100 → y[j]（=ŷ[j]）
+        want = _ntt(list(y_w[j]))
+        assert got == want, (
+            f"ŷ[{j}] 不一致，首个不同在第 "
+            f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
 
-    dut._log.info("④ y[0..3] = ExpandMask(ρ'', κ=0) 全对上 oracle（18 位解包、γ₁−v 验到）")
+    dut._log.info("④+⑤a ŷ[0..3] = NTT(ExpandMask(ρ'',0)) 全对上 oracle")
+
+
+@cocotb.test()
+async def test_w_decompose(dut):
+    """⑤ w = invNTT(Â∘ŷ)、(w0,w1)=Decompose(caddq(w))：done 后读 w0/w1（κ=0 轮）
+
+    这条把整条主循环前半段串起来验：Â 现采（ExpandA）、逐点 mont 乘累加、reduce32、
+    invNTT、caddq、decompose 高低位拆分，全部对上 oracle κ=0 轮的 w0/w1。
+    """
+    from mldsa_oracle import expand_mask, rej_uniform_poly
+    from mldsa_model import (ntt as _ntt, invntt_tomont as _intt,
+                             montgomery_reduce as _mont, reduce32 as _r32,
+                             caddq as _cad, decompose as _dec)
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    rec = first_d44()
+    rho_w = bytes.fromhex(rec["sk"])[:32]     # sk 前 32 字节就是 ρ
+    await preload_all(dut, rec)
+    await run_to_done(dut)
+
+    gamma2 = 95232
+    y_w = expand_mask(derive_rhopp(rec), 0, 1 << 17, 4)
+    yhat = [_ntt(list(p)) for p in y_w]
+
+    for i in range(4):
+        acc = [0] * 256
+        for j in range(4):
+            a = rej_uniform_poly(rho_w, (i << 8) + j)
+            for n in range(256):
+                acc[n] += _mont(a[n] * yhat[j][n])
+        acc = _intt([_r32(x) for x in acc])
+        w = [_cad(x) for x in acc]
+        pair = [_dec(x, gamma2) for x in w]
+        w0_want = [p[0] for p in pair]
+        w1_want = [p[1] for p in pair]
+
+        got_w0 = await read_poly(dut, 0b10100 | i)    # [4:2]=101 → w0[i]
+        assert got_w0 == w0_want, (
+            f"w0[{i}] 不一致，首个不同在第 "
+            f"{next(n for n in range(256) if got_w0[n] != w0_want[n])} 个系数")
+        got_w1 = await read_poly(dut, 0b11000 | i)    # [4:2]=110 → w1[i]
+        assert got_w1 == w1_want, (
+            f"w1[{i}] 不一致，首个不同在第 "
+            f"{next(n for n in range(256) if got_w1[n] != w1_want[n])} 个系数")
+
+    dut._log.info("⑤ w0/w1[0..3] 对上 oracle κ=0 轮（ExpandA+MAC+invNTT+caddq+decompose 全链）")
 

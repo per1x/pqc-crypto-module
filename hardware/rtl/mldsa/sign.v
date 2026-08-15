@@ -99,6 +99,14 @@ module mldsa_sign (
         S_EM_GO  = 5'd13,    // 起 ExpandMask 采样器
         S_EM_WT  = 5'd14,    // 等 em_done
         S_EM_MV  = 5'd15,    // 采样结果 → y[poly]
+        // ⑤ w=invNTT(Â∘ŷ)，(w0,w1)=Decompose(caddq(w))
+        S_A_GO   = 5'd16,    // 起 ExpandA 采 Â[vi][vj]
+        S_A_WT   = 5'd17,    // 等 un_done
+        S_MAC    = 5'd18,    // acc[vi] += mont(Â∘ŷ[vj])
+        S_RED    = 5'd19,    // reduce32(acc[vi]) → invNTT 写口
+        S_INV_GO = 5'd20,    // nt_start（inverse）
+        S_INV_ST = 5'd21,    // 等 done 落一次再起
+        S_DEC    = 5'd22,    // caddq(invNTT) → decompose → w0/w1
         S_FIN    = 5'd31;
 
     reg [4:0] st;
@@ -155,7 +163,7 @@ module mldsa_sign (
     // ================= 海绵归属（FSM ↔ ExpandMask 采样器）=================
     // 只在换手方空闲时切（KeyGen 坑表第 1 条）。后续段（SampleInBall / ExpandA）
     // 再往 owner 里加成员。
-    localparam [1:0] OWN_FSM = 2'd0, OWN_EM = 2'd1;
+    localparam [1:0] OWN_FSM = 2'd0, OWN_EM = 2'd1, OWN_UNI = 2'd2;
     reg [1:0] owner;
 
     // FSM 自己驱动海绵时用的那组线
@@ -187,10 +195,65 @@ module mldsa_sign (
         .clk(clk), .a_we(y_we), .a_addr(y_waddr), .a_din(y_din), .a_dout(),
         .b_we(1'b0), .b_addr(y_raddr), .b_din(32'd0), .b_dout(y_dout));
 
-    // 调试读口挂 b 口（done 后用，与写不重叠）
-    //   dbg_sel[4]=1 → y[dbg_sel[1:0]]（当前 κ 轮）；否则按 [3:2] 选 s₁/s₂/t₀
-    assign dbg_coef = dbg_sel[4] ? y_dout
-                    : dbg_sel[3] ? (dbg_sel[2] ? t0_dout : s2_dout) : s1_dout;
+    // ---- ⑤ MAC 累加缓冲 acc（k×256×32），w0（k×256×32），w1（k×256×6）----
+    reg         ac_we; reg [9:0] ac_waddr; reg signed [31:0] ac_din; reg [9:0] ac_raddr;
+    wire signed [31:0] ac_dout;
+    ram_dp #(.DW(32), .AW(10)) u_acc (
+        .clk(clk), .a_we(ac_we), .a_addr(ac_waddr), .a_din(ac_din), .a_dout(),
+        .b_we(1'b0), .b_addr(ac_raddr), .b_din(32'd0), .b_dout(ac_dout));
+    reg         w0_we; reg [9:0] w0_waddr; reg signed [31:0] w0_din; reg [9:0] w0_raddr;
+    wire signed [31:0] w0_dout;
+    ram_dp #(.DW(32), .AW(10)) u_w0 (
+        .clk(clk), .a_we(w0_we), .a_addr(w0_waddr), .a_din(w0_din), .a_dout(),
+        .b_we(1'b0), .b_addr(w0_raddr), .b_din(32'd0), .b_dout(w0_dout));
+    reg         w1_we; reg [9:0] w1_waddr; reg [5:0] w1_din; reg [9:0] w1_raddr;
+    wire [5:0]  w1_dout;
+    ram_dp #(.DW(6), .AW(10)) u_w1 (
+        .clk(clk), .a_we(w1_we), .a_addr(w1_waddr), .a_din(w1_din), .a_dout(),
+        .b_we(1'b0), .b_addr(w1_raddr), .b_din(6'd0), .b_dout(w1_dout));
+
+    // ---- ExpandA 均匀采样器（⑤：Â 现采现用，seed=ρ，nonce=256·i+j）----
+    reg         un_start;
+    reg  [15:0] un_nonce;
+    wire        un_done;
+    reg  [7:0]  un_rd_addr;
+    wire [22:0] un_rd_data;
+    wire        un_ss, un_siv, un_sif, un_sor;
+    wire [7:0]  un_sr, un_su, un_sid;
+    mldsa_poly_uniform u_uni (
+        .clk(clk), .rst_n(rst_n),
+        .start(un_start), .seed(rho), .nonce(un_nonce), .done(un_done),
+        .sha_start(un_ss), .sha_rate(un_sr), .sha_suffix(un_su),
+        .sha_in_valid(un_siv), .sha_in_data(un_sid), .sha_in_flush(un_sif),
+        .sha_in_ready(sha_in_ready && (owner == OWN_UNI)),
+        .sha_out_valid(sha_out_valid && (owner == OWN_UNI)),
+        .sha_out_ready(un_sor), .sha_out_data(sha_out_data),
+        .rd_addr(un_rd_addr), .rd_data(un_rd_data), .count());
+
+    // 逐系数 mont 乘：Â(23 无符号) × ŷ(32 有符号)
+    wire signed [63:0] mac_prod = $signed({41'd0, un_rd_data}) * y_dout;
+    wire signed [31:0] mac_mont;
+    mldsa_mont_reduce u_mont (.a(mac_prod), .t_out(mac_mont));
+    // reduce32：MAC 累加值灌进 invNTT 前先规约
+    wire signed [31:0] red_out;
+    mldsa_reduce32 u_red (.a(ac_dout), .r(red_out));
+    // caddq → decompose（MODE=0，γ₂=(q−1)/88）
+    wire signed [31:0] cad_out;
+    mldsa_caddq u_cad (.a(nt_rdata), .r(cad_out));
+    wire signed [31:0] dec_a0;
+    wire        [5:0]  dec_a1;
+    mldsa_decompose #(.MODE(0)) u_dec (.a(cad_out), .a0(dec_a0), .a1(dec_a1));
+
+    // 调试读口挂 b 口（done 后用，与写不重叠）。dbg_sel[4:2] 选组，[1:0] 选第几条。
+    //   000 s₁  010 s₂  011 t₀  100 y  101 w0  110 w1
+    assign dbg_coef =
+          (dbg_sel[4:2] == 3'b000) ? s1_dout
+        : (dbg_sel[4:2] == 3'b010) ? s2_dout
+        : (dbg_sel[4:2] == 3'b011) ? t0_dout
+        : (dbg_sel[4:2] == 3'b100) ? y_dout
+        : (dbg_sel[4:2] == 3'b101) ? w0_dout
+        : (dbg_sel[4:2] == 3'b110) ? {{26{1'b0}}, w1_dout}
+        : 32'd0;
 
     assign sig_data = 8'd0;   // 后续段填
 
@@ -234,10 +297,14 @@ module mldsa_sign (
 
     // ④ 拒绝循环用
     reg [15:0] kappa;      // ExpandMask 的 nonce 基（每轮 +ℓ）
+    // ⑤ MAC / invNTT / decompose 用
+    reg [2:0]  vi;         // 第几个 i（0..k-1）
+    reg [2:0]  vj;         // 第几个 j（0..ℓ-1）
 
-    // NTT 装载时选中的 store 数据（nstore：0=s₁,1=s₂,2=t₀）
+    // NTT 装载时选中的 store 数据（nstore：0=s₁,1=s₂,2=t₀,3=y）
     wire signed [31:0] store_dout =
-        (nstore == 2'd0) ? s1_dout : (nstore == 2'd1) ? s2_dout : t0_dout;
+        (nstore == 2'd0) ? s1_dout : (nstore == 2'd1) ? s2_dout
+      : (nstore == 2'd2) ? t0_dout : y_dout;
 
     // ---- μ 支的吸收源：tr(64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ msg ----
     wire [5:0]  tr_idx      = ai[5:0];
@@ -276,7 +343,8 @@ module mldsa_sign (
             nstore <= 2'd0; nt_lowseen <= 1'b0;
             nt_start <= 1'b0; nt_inv <= 1'b0;
             owner <= OWN_FSM; em_start <= 1'b0; em_nonce <= 16'd0;
-            kappa <= 16'd0;
+            kappa <= 16'd0; vi <= 3'd0; vj <= 3'd0;
+            un_start <= 1'b0; un_nonce <= 16'd0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
             fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
@@ -288,6 +356,7 @@ module mldsa_sign (
             fsm_sif <= 1'b0;
             nt_start <= 1'b0;
             em_start <= 1'b0;
+            un_start <= 1'b0;
 
             case (st)
             S_IDLE: if (start) begin
@@ -453,6 +522,10 @@ module mldsa_sign (
                             if (nstore == 2'd2) begin
                                 kappa <= 16'd0;    // 进拒绝循环，κ 从 0 起
                                 st <= S_EM_GO;
+                            end else if (nstore == 2'd3) begin
+                                // ŷ = NTT(y) 做完 → ⑤ MAC
+                                vi <= 3'd0; vj <= 3'd0; owner <= OWN_UNI;
+                                st <= S_A_GO;
                             end else begin
                                 nstore <= nstore + 2'd1; st <= S_NT_LD;
                             end
@@ -483,11 +556,68 @@ module mldsa_sign (
                         cnt <= 8'd0; ph <= 1'b0;
                         if (poly == 3'd3) begin
                             poly <= 3'd0;
-                            kappa <= kappa + 16'd4;   // κ += ℓ
+                            kappa <= kappa + 16'd4;   // κ += ℓ（采完 y 立即加，同 oracle）
                             owner <= OWN_FSM;
-                            st <= S_FIN;              // 本里程碑到此（⑤ 起接下去）
+                            nstore <= 2'd3;           // ŷ = NTT(y) 就地覆盖
+                            st <= S_NT_LD;
                         end else begin
                             poly <= poly + 3'd1; st <= S_EM_GO;
+                        end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑤ 对每个 i：acc[i]=Σ_j mont(Â[i][j]∘ŷ[j])；
+            //            w=caddq(invNTT(reduce32(acc)))；(w0,w1)=Decompose(w) ----------
+            // Â 现采现用（un_nonce=256·i+j），不存。逐系数 MAC，j==0 直接放、之后累加。
+            S_A_GO: begin
+                un_nonce <= {5'd0, vi, 5'd0, vj};   // 256·i + j
+                un_start <= 1'b1;
+                st <= S_A_WT;
+            end
+            S_A_WT: if (un_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_MAC; end
+            S_MAC: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vj == 3'd3) begin
+                            vj <= 3'd0;
+                            owner <= OWN_FSM;   // MAC 完这一 i，进 invNTT（FSM 用 NTT 核）
+                            st <= S_RED;
+                        end else begin
+                            vj <= vj + 3'd1; owner <= OWN_UNI; st <= S_A_GO;
+                        end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            // 装载：reduce32(acc[vi]) → NTT 写口（inverse）
+            S_RED: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_INV_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_INV_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_INV_ST; end
+            S_INV_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_DEC; end
+            end
+            // 写回：caddq(invNTT[cnt]) → decompose → w0[vi]/w1[vi]
+            S_DEC: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vi == 3'd3) begin
+                            vi <= 3'd0;
+                            st <= S_FIN;        // 本里程碑到此（⑥ 起接 c̃/c）
+                        end else begin
+                            vi <= vi + 3'd1;
+                            vj <= 3'd0; owner <= OWN_UNI;
+                            st <= S_A_GO;       // 下一个 i 的 MAC
                         end
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
@@ -506,6 +636,11 @@ module mldsa_sign (
             sha_start = em_ss; sha_rate = em_sr; sha_suffix = em_su;
             sha_in_valid = em_siv; sha_in_data = em_sid; sha_in_flush = em_sif;
             sha_out_ready = em_sor;
+        end
+        OWN_UNI: begin
+            sha_start = un_ss; sha_rate = un_sr; sha_suffix = un_su;
+            sha_in_valid = un_siv; sha_in_data = un_sid; sha_in_flush = un_sif;
+            sha_out_ready = un_sor;
         end
         default: begin
             sha_start = fsm_ss; sha_rate = fsm_sr; sha_suffix = fsm_su;
@@ -539,6 +674,13 @@ module mldsa_sign (
         y_we = 1'b0; y_waddr = 10'd0; y_din = 32'd0;
         y_raddr = {dbg_sel[1:0], dbg_idx};    // 默认给调试口
         em_rd_addr = cnt;
+        ac_we = 1'b0; ac_waddr = 10'd0; ac_din = 32'd0;
+        ac_raddr = {dbg_sel[1:0], dbg_idx};
+        w0_we = 1'b0; w0_waddr = 10'd0; w0_din = 32'd0;
+        w0_raddr = {dbg_sel[1:0], dbg_idx};
+        w1_we = 1'b0; w1_waddr = 10'd0; w1_din = 6'd0;
+        w1_raddr = {dbg_sel[1:0], dbg_idx};
+        un_rd_addr = cnt;
 
         // S_UNP_I：进循环前清两个累加器
         if (st == S_UNP_I) begin eu_clr = 1'b1; tu_clr = 1'b1; end
@@ -549,23 +691,50 @@ module mldsa_sign (
             if (ph) begin y_we = 1'b1; y_waddr = {poly[1:0], cnt}; y_din = em_rd_data; end
         end
 
-        // ③ NTT 装载：选中 store[poly] → NTT 写口
+        // ⑤ MAC：Â[cnt]·ŷ[vj][cnt] 累加到 acc[vi][cnt]（j==0 直接放）
+        if (st == S_MAC) begin
+            un_rd_addr = cnt;
+            y_raddr    = {vj[1:0], cnt};
+            ac_raddr   = {vi[1:0], cnt};
+            if (ph) begin
+                ac_we    = 1'b1;
+                ac_waddr = {vi[1:0], cnt};
+                ac_din   = (vj == 3'd0) ? mac_mont : (ac_dout + mac_mont);
+            end
+        end
+        // ⑤ 装载：reduce32(acc[vi]) → invNTT 写口
+        if (st == S_RED) begin
+            ac_raddr = {vi[1:0], cnt};
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = red_out; end
+        end
+        // ⑤ 写回：caddq(invNTT[cnt]) → decompose → w0[vi]/w1[vi]
+        if (st == S_DEC) begin
+            nt_raddr = cnt;
+            if (ph) begin
+                w0_we = 1'b1; w0_waddr = {vi[1:0], cnt}; w0_din = dec_a0;
+                w1_we = 1'b1; w1_waddr = {vi[1:0], cnt}; w1_din = dec_a1;
+            end
+        end
+
+        // ③/⑤a NTT 装载：选中 store[poly] → NTT 写口（nstore：0=s₁,1=s₂,2=t₀,3=y）
         if (st == S_NT_LD) begin
             case (nstore)
                 2'd0: s1_raddr = {poly[1:0], cnt};
                 2'd1: s2_raddr = {poly[1:0], cnt};
-                default: t0_raddr = {poly[1:0], cnt};
+                2'd2: t0_raddr = {poly[1:0], cnt};
+                default: y_raddr = {poly[1:0], cnt};
             endcase
             if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = store_dout; end
         end
-        // ③ NTT 写回：NTT 读口 → 选中 store[poly]
+        // ③/⑤a NTT 写回：NTT 读口 → 选中 store[poly]
         if (st == S_NT_WB) begin
             nt_raddr = cnt;
             if (ph) begin
                 case (nstore)
                     2'd0: begin s1_we = 1'b1; s1_waddr = {poly[1:0], cnt}; s1_din = nt_rdata; end
                     2'd1: begin s2_we = 1'b1; s2_waddr = {poly[1:0], cnt}; s2_din = nt_rdata; end
-                    default: begin t0_we = 1'b1; t0_waddr = {poly[1:0], cnt}; t0_din = nt_rdata; end
+                    2'd2: begin t0_we = 1'b1; t0_waddr = {poly[1:0], cnt}; t0_din = nt_rdata; end
+                    default: begin y_we = 1'b1; y_waddr = {poly[1:0], cnt}; y_din = nt_rdata; end
                 endcase
             end
         end
