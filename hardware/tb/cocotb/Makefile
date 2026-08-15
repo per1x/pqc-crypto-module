@@ -99,6 +99,25 @@ ifneq ($(PARAM_ETA),)
 COMPILE_ARGS += -P$(TOPLEVEL).ETA=$(PARAM_ETA)
 export PARAM_ETA
 endif
+# Sign/Verify 还要 τ、γ₁ 指数、γ₂ 模式、ω、β、c̃ 字节数
+ifneq ($(PARAM_TAU),)
+COMPILE_ARGS += -P$(TOPLEVEL).TAU=$(PARAM_TAU)
+endif
+ifneq ($(PARAM_G1LOG),)
+COMPILE_ARGS += -P$(TOPLEVEL).G1LOG=$(PARAM_G1LOG)
+endif
+ifneq ($(PARAM_MODE),)
+COMPILE_ARGS += -P$(TOPLEVEL).MODE=$(PARAM_MODE)
+endif
+ifneq ($(PARAM_OMG),)
+COMPILE_ARGS += -P$(TOPLEVEL).OMG=$(PARAM_OMG)
+endif
+ifneq ($(PARAM_BETA),)
+COMPILE_ARGS += -P$(TOPLEVEL).BETA=$(PARAM_BETA)
+endif
+ifneq ($(PARAM_CTB),)
+COMPILE_ARGS += -P$(TOPLEVEL).CTB=$(PARAM_CTB)
+endif
 export MLDSA_ALG
 
 # mlkem_keygen 的存储观察口只在仿真里接出来（DEBUG_BANK=1）。

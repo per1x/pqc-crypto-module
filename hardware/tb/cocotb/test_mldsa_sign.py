@@ -18,7 +18,22 @@ from cocotb.triggers import RisingEdge, Timer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "model"))
 from mldsa_oracle import (  # noqa: E402
-    _load_records, _mprime, h_shake256, sk_decode)
+    _load_records, _mprime, h_shake256, sk_decode, SIG_PARAMS)
+from mldsa_model import PARAMS  # noqa: E402
+
+# 参数集由 Makefile 的 MLDSA_ALG 环境变量选（与 -P 传给 RTL 的参数必须一致）
+import os  # noqa: E402
+ALG = os.environ.get("MLDSA_ALG", "ML-DSA-44")
+_P, _S = PARAMS[ALG], SIG_PARAMS[ALG]
+KK, LL, ETA, GAMMA2 = _P["k"], _P["l"], _P["eta"], _P["gamma2"]
+TAU, GAMMA1, OMEGA, BETA = _S["tau"], _S["gamma1"], _S["omega"], _S["beta"]
+CTB = _S["ctilde"]
+SKLEN = 128 + (LL + KK) * (96 if ETA == 2 else 128) + KK * 416
+
+
+# dbg_sel[6:3] 选组、[2:0] 选多项式（k 最大 8）
+def dbg(group, poly=0):
+    return (group << 3) | poly
 
 SIGGEN_KAT = Path(__file__).resolve().parents[3] / "vectors" / "mldsa_siggen.kat"
 
@@ -92,7 +107,7 @@ def first_d44(deterministic=True):
     recs = _load_records(SIGGEN_KAT)
     if not recs:
         raise AssertionError("找不到 vectors/mldsa_siggen.kat")
-    cand = [r for r in recs if r["alg"] == "ML-DSA-44"
+    cand = [r for r in recs if r["alg"] == ALG
             and (not deterministic or r.get("deterministic", "") == "1")]
     for r in cand:
         if not oracle_round0(r)["reject"]:      # κ=0 轮未被拒 ⇒ 接受轮就是 κ=0
@@ -116,13 +131,13 @@ async def test_sk_decode(dut):
 
     rec = first_d44()
     sk = bytes.fromhex(rec["sk"])
-    assert len(sk) == 2560
+    assert len(sk) == SKLEN
     # 用完整 msg/ctx/rnd（first_d44 保证 κ=0 就接受 ⇒ done 落在 κ=0 轮），
     # 这样 done 快且中间量存储 = κ=0。ρ/K/tr 与 msg 无关，值不受影响。
     await preload_all(dut, rec)
     await run_to_done(dut)
 
-    rho_w, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
+    rho_w, key_w, tr_w, _, _, _ = sk_decode(sk, ALG)
     assert to_bytes(dut.rho.value, 32) == rho_w, "ρ 不一致"
     assert to_bytes(dut.key_out.value, 32) == key_w, "K 不一致"
     assert to_bytes(dut.tr_out.value, 64) == tr_w, "tr 不一致"
@@ -136,7 +151,7 @@ async def preload_all(dut, rec):
     msg = bytes.fromhex(rec["msg"])
     ctx = bytes.fromhex(rec.get("context", "") or "")
     rnd = bytes.fromhex(rec["rnd"])
-    assert len(sk) == 2560 and len(rnd) == 32
+    assert len(sk) == SKLEN and len(rnd) == 32
     await load_buf(dut, dut.sk_wr_en, dut.sk_wr_addr, dut.sk_wr_data, sk)
     if msg:
         await load_buf(dut, dut.msg_wr_en, dut.msg_wr_addr, dut.msg_wr_data, msg)
@@ -171,7 +186,7 @@ async def test_derive_mu_rhopp(dut):
     sk, msg, ctx, rnd = await preload_all(dut, rec)
     await run_to_done(dut)
 
-    _, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
+    _, key_w, tr_w, _, _, _ = sk_decode(sk, ALG)
     mu_w = h_shake256(tr_w + _mprime(ctx, msg), 64)
     rhopp_w = h_shake256(key_w + rnd + mu_w, 64)
 
@@ -200,19 +215,19 @@ async def test_ntt_prep(dut):
     await preload_all(dut, rec)      # 完整 msg ⇒ κ=0 接受 ⇒ done 落在 κ=0 轮
     await run_to_done(dut)
 
-    _, _, _, s1_w, s2_w, t0_w = sk_decode(sk, "ML-DSA-44")
+    _, _, _, s1_w, s2_w, t0_w = sk_decode(sk, ALG)
 
-    for j in range(4):
-        got = await read_poly(dut, 0b00000 | j)         # ŝ₁[j]
+    for j in range(LL):
+        got = await read_poly(dut, dbg(0, j))         # ŝ₁[j]
         want = _ntt(list(s1_w[j]))
         assert got == want, (
             f"ŝ₁[{j}] 不一致，首个不同在第 "
             f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
-    for j in range(4):
-        got = await read_poly(dut, 0b01000 | j)         # ŝ₂[j]
+    for j in range(KK):
+        got = await read_poly(dut, dbg(2, j))         # ŝ₂[j]（k 条）
         assert got == _ntt(list(s2_w[j])), f"ŝ₂[{j}] 不一致"
-    for j in range(4):
-        got = await read_poly(dut, 0b01100 | j)         # t̂₀[j]
+    for j in range(KK):
+        got = await read_poly(dut, dbg(3, j))         # t̂₀[j]（k 条）
         want = _ntt(list(t0_w[j]))
         assert got == want, (
             f"t̂₀[{j}] 不一致，首个不同在第 "
@@ -226,14 +241,14 @@ def derive_mu(rec):
     sk = bytes.fromhex(rec["sk"])
     msg = bytes.fromhex(rec["msg"])
     ctx = bytes.fromhex(rec.get("context", "") or "")
-    _, _, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
+    _, _, tr_w, _, _, _ = sk_decode(sk, ALG)
     return h_shake256(tr_w + _mprime(ctx, msg), 64)
 
 
 def derive_rhopp(rec):
     """从一条 KAT 复现 ρ''（ExpandMask 的种子）"""
     sk = bytes.fromhex(rec["sk"])
-    key_w = sk_decode(sk, "ML-DSA-44")[1]
+    key_w = sk_decode(sk, ALG)[1]
     rnd = bytes.fromhex(rec["rnd"])
     return h_shake256(key_w + rnd + derive_mu(rec), 64)
 
@@ -255,13 +270,13 @@ async def test_ymask_ntt(dut):
     await preload_all(dut, rec)
     await run_to_done(dut)
 
-    y_w = expand_mask(derive_rhopp(rec), 0, 1 << 17, 4)   # κ=0, γ₁=2¹⁷, ℓ=4
-    for j in range(4):
-        got_y = await read_poly(dut, 0b10000 | j)         # 组 100 → y[j]（原值）
+    y_w = expand_mask(derive_rhopp(rec), 0, GAMMA1, LL)   # κ=0 轮
+    for j in range(LL):
+        got_y = await read_poly(dut, dbg(4, j))         # 组 100 → y[j]（原值）
         assert got_y == y_w[j], (
             f"y[{j}] 不一致，首个不同在第 "
             f"{next(i for i in range(256) if got_y[i] != y_w[j][i])} 个系数")
-        got_yh = await read_poly(dut, 0b00100 | j)        # 组 001 → ŷ[j]
+        got_yh = await read_poly(dut, dbg(1, j))        # 组 001 → ŷ[j]
         want_yh = _ntt(list(y_w[j]))
         assert got_yh == want_yh, f"ŷ[{j}] 不一致"
 
@@ -288,13 +303,13 @@ async def test_w_decompose(dut):
     await preload_all(dut, rec)
     await run_to_done(dut)
 
-    gamma2 = 95232
-    y_w = expand_mask(derive_rhopp(rec), 0, 1 << 17, 4)
+    gamma2 = GAMMA2
+    y_w = expand_mask(derive_rhopp(rec), 0, GAMMA1, LL)
     yhat = [_ntt(list(p)) for p in y_w]
 
-    for i in range(4):
+    for i in range(KK):
         acc = [0] * 256
-        for j in range(4):
+        for j in range(LL):
             a = rej_uniform_poly(rho_w, (i << 8) + j)
             for n in range(256):
                 acc[n] += _mont(a[n] * yhat[j][n])
@@ -305,7 +320,7 @@ async def test_w_decompose(dut):
 
         # w0 在 ⑧ 被就地覆盖成 r₀，done 时读到的不是 w0；w0 的正确性由 test_r0_hint
         # 的 r₀=reduce32(w0−cs₂) 间接验（r₀ 对 ⇒ w0 对）。这里只验不被覆盖的 w1。
-        got_w1 = await read_poly(dut, 0b11000 | i)    # [5:2]=0110 → w1[i]
+        got_w1 = await read_poly(dut, dbg(6, i))    # [5:2]=0110 → w1[i]
         assert got_w1 == w1_want, (
             f"w1[{i}] 不一致，首个不同在第 "
             f"{next(n for n in range(256) if got_w1[n] != w1_want[n])} 个系数")
@@ -320,18 +335,18 @@ def oracle_w1_kappa0(rec):
                              montgomery_reduce as _mont, reduce32 as _r32,
                              caddq as _cad, decompose as _dec)
     rho_w = bytes.fromhex(rec["sk"])[:32]
-    y_w = expand_mask(derive_rhopp(rec), 0, 1 << 17, 4)
+    y_w = expand_mask(derive_rhopp(rec), 0, GAMMA1, LL)
     yhat = [_ntt(list(p)) for p in y_w]
     w1 = []
-    for i in range(4):
+    for i in range(KK):
         acc = [0] * 256
-        for j in range(4):
+        for j in range(LL):
             a = rej_uniform_poly(rho_w, (i << 8) + j)
             for n in range(256):
                 acc[n] += _mont(a[n] * yhat[j][n])
         acc = _intt([_r32(x) for x in acc])
         w = [_cad(x) for x in acc]
-        w1.append([_dec(x, 95232)[1] for x in w])
+        w1.append([_dec(x, GAMMA2)[1] for x in w])
     return w1
 
 
@@ -354,17 +369,17 @@ async def test_ctilde_and_c(dut):
 
     mu_w = derive_mu(rec)
     w1 = oracle_w1_kappa0(rec)
-    ctilde_w = h_shake256(mu_w + b"".join(polyw1_pack(w1[i], 95232) for i in range(4)), 32)
-    c_w = sample_in_ball(ctilde_w, 39)
+    ctilde_w = h_shake256(mu_w + b"".join(polyw1_pack(w1[i], GAMMA2) for i in range(KK)), CTB)
+    c_w = sample_in_ball(ctilde_w, TAU)
 
-    got_ct = to_bytes(dut.ctilde.value, 32)
+    got_ct = to_bytes(dut.ctilde.value, CTB)
     assert got_ct == ctilde_w, (
         f"c̃ 不一致，首个不同在字节 "
-        f"{next(i for i in range(32) if got_ct[i] != ctilde_w[i])}")
+        f"{next(i for i in range(CTB) if got_ct[i] != ctilde_w[i])}")
 
     # c 在 ⑦ 被就地 NTT 成 ĉ，done 时读到的是 ĉ；NTT 双射 ⇒ ĉ==ntt(c) 说明
     # SampleInBall 的 c 对、c-NTT 对（c 的原值也由 ⑦ z 用例间接验）。
-    got_chat = await read_poly(dut, 7 << 2)   # 组 7 → c（=ĉ）
+    got_chat = await read_poly(dut, dbg(7))   # 组 7 → c（=ĉ）
     chat_w = _ntt(list(c_w))
     assert got_chat == chat_w, (
         f"ĉ 不一致，首个不同在第 "
@@ -375,7 +390,7 @@ async def test_ctilde_and_c(dut):
 
 async def read_flag(dut, group):
     """读一个标志/标量（dbg 组 group，idx=0）"""
-    dut.dbg_sel.value = group << 2
+    dut.dbg_sel.value = group << 3
     dut.dbg_idx.value = 0
     await RisingEdge(dut.clk)
     await Timer(1, unit="ns")
@@ -390,43 +405,43 @@ def oracle_round0(rec):
                              caddq as _cad, decompose as _dec, chknorm as _chk,
                              make_hint as _mkh)
     sk = bytes.fromhex(rec["sk"])
-    rho_w, key_w, tr_w, s1, s2, t0 = sk_decode(sk, "ML-DSA-44")
-    gamma1, gamma2, beta, tau, omega = 1 << 17, 95232, 78, 39, 80
+    rho_w, key_w, tr_w, s1, s2, t0 = sk_decode(sk, ALG)
+    gamma1, gamma2, beta, tau, omega = GAMMA1, GAMMA2, BETA, TAU, OMEGA
     s1h = [_ntt(list(p)) for p in s1]
     s2h = [_ntt(list(p)) for p in s2]
     t0h = [_ntt(list(p)) for p in t0]
     mu_w = derive_mu(rec)
     rhopp = derive_rhopp(rec)
-    y = expand_mask(rhopp, 0, gamma1, 4)
+    y = expand_mask(rhopp, 0, gamma1, LL)
     yhat = [_ntt(list(p)) for p in y]
     w0, w1 = [], []
-    for i in range(4):
+    for i in range(KK):
         acc = [0] * 256
-        for j in range(4):
+        for j in range(LL):
             a = rej_uniform_poly(rho_w, (i << 8) + j)
             for n in range(256):
                 acc[n] += _mont(a[n] * yhat[j][n])
         acc = _intt([_r32(x) for x in acc])
         pr = [_dec(_cad(x), gamma2) for x in acc]
         w0.append([p[0] for p in pr]); w1.append([p[1] for p in pr])
-    ctil = h_shake256(mu_w + b"".join(polyw1_pack(w1[i], gamma2) for i in range(4)), 32)
+    ctil = h_shake256(mu_w + b"".join(polyw1_pack(w1[i], gamma2) for i in range(KK)), CTB)
     c = sample_in_ball(ctil, tau)
     chat = _ntt(list(c))
     # z
     z = []
-    for j in range(4):
+    for j in range(LL):
         cs1 = _intt([_mont(chat[n] * s1h[j][n]) for n in range(256)])
         z.append([_r32(y[j][n] + cs1[n]) for n in range(256)])
     z_bad = any(_chk(x, gamma1 - beta) for p in z for x in p)
     # r0
     r0 = []
-    for i in range(4):
+    for i in range(KK):
         cs2 = _intt([_mont(chat[n] * s2h[i][n]) for n in range(256)])
         r0.append([_r32(w0[i][n] - cs2[n]) for n in range(256)])
     r0_bad = any(_chk(x, gamma2 - beta) for p in r0 for x in p)
     # hint
     hint, weight, ct0_bad = [], 0, False
-    for i in range(4):
+    for i in range(KK):
         ct0 = [_r32(x) for x in _intt([_mont(chat[n] * t0h[i][n]) for n in range(256)])]
         if any(_chk(x, gamma2) for x in ct0):
             ct0_bad = True
@@ -449,8 +464,8 @@ async def test_z_norm(dut):
     await run_to_done(dut)
 
     o = oracle_round0(rec)
-    for j in range(4):
-        got = await read_poly(dut, (8 << 2) | j)      # 组 8 → z[j]
+    for j in range(LL):
+        got = await read_poly(dut, dbg(8, j))      # 组 8 → z[j]
         assert got == o["z"][j], (
             f"z[{j}] 不一致，首个不同在第 "
             f"{next(n for n in range(256) if got[n] != o['z'][j][n])} 个系数")
@@ -474,14 +489,14 @@ async def test_r0_hint(dut):
 
     o = oracle_round0(rec)
 
-    for i in range(4):
-        got = await read_poly(dut, (5 << 2) | i)      # 组 5 → r₀（就地覆盖 w0）
+    for i in range(KK):
+        got = await read_poly(dut, dbg(5, i))      # 组 5 → r₀（就地覆盖 w0）
         assert got == o["r0"][i], (
             f"r₀[{i}] 不一致，首个不同在第 "
             f"{next(n for n in range(256) if got[n] != o['r0'][i][n])} 个系数")
 
-    for i in range(4):
-        got = await read_poly(dut, (9 << 2) | i)      # 组 9 → hint[i]
+    for i in range(KK):
+        got = await read_poly(dut, dbg(9, i))      # 组 9 → hint[i]
         want = o["hint"][i]
         assert got == want, (
             f"hint[{i}] 不一致，首个不同在第 "
@@ -527,7 +542,7 @@ async def _run_acvp(dut, recs, label):
             f"{next(i for i in range(len(sig_w)) if sig[i] != sig_w[i])}"
             f"（len 得 {len(sig)} / 期望 {len(sig_w)}）")
         n_ok += 1
-    dut._log.info(f"⑩ ML-DSA-44 {label} siggen 全对上 ACVP：{n_ok} 条签名逐字节一致")
+    dut._log.info(f"⑩ {ALG} {label} siggen 全对上 ACVP：{n_ok} 条签名逐字节一致")
 
 
 @cocotb.test()
@@ -539,8 +554,8 @@ async def test_sign_acvp_det(dut):
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     recs = [r for r in _load_records(SIGGEN_KAT)
-            if r["alg"] == "ML-DSA-44" and r.get("deterministic", "") == "1"]
-    assert recs, "找不到确定性 ML-DSA-44 向量"
+            if r["alg"] == ALG and r.get("deterministic", "") == "1"]
+    assert recs, f"找不到确定性 {ALG} 向量"
     await _run_acvp(dut, recs, "确定性")
 
 
@@ -552,7 +567,7 @@ async def test_sign_acvp_rnd(dut):
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     recs = [r for r in _load_records(SIGGEN_KAT)
-            if r["alg"] == "ML-DSA-44" and r.get("deterministic", "") != "1"]
-    assert recs, "找不到非确定性 ML-DSA-44 向量"
+            if r["alg"] == ALG and r.get("deterministic", "") != "1"]
+    assert recs, f"找不到非确定性 {ALG} 向量"
     await _run_acvp(dut, recs, "非确定性")
 

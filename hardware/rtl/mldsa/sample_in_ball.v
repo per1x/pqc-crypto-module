@@ -16,13 +16,14 @@
 `default_nettype none
 
 module mldsa_sample_in_ball #(
-    parameter integer TAU = 39            // ML-DSA-44/65/87：39 / 49 / 60
+    parameter integer TAU = 39,           // ML-DSA-44/65/87：39 / 49 / 60
+    parameter integer CTB = 32            // c̃ 字节数：32 / 48 / 64（λ/4）
 ) (
     input  wire        clk,
     input  wire        rst_n,
 
     input  wire        start,
-    input  wire [255:0] seed,             // c̃，32 字节；seed[7:0] 是第 0 字节
+    input  wire [CTB*8-1:0] seed,         // c̃，CTB 字节；seed[7:0] 是第 0 字节
     output reg         done,
 
     output reg         sha_start,
@@ -48,7 +49,7 @@ module mldsa_sample_in_ball #(
     localparam [2:0] S_IDLE = 3'd0, S_ABS = 3'd1, S_GAP = 3'd2, S_FLUSH = 3'd3,
                      S_SIGN = 3'd4, S_BYTE = 3'd5, S_PLACE = 3'd6, S_DONE = 3'd7;
     reg [2:0] st;
-    reg [5:0] hdr_i;         // 0..31
+    reg [6:0] hdr_i;         // 0..CTB-1（CTB 最大 64）
     reg [3:0] scnt;          // signs 的 8 字节计数 0..7
     reg [63:0] signs;
     reg [7:0]  ii;           // 当前落点 i（START_I..255）
@@ -58,9 +59,11 @@ module mldsa_sample_in_ball #(
     integer kk;
 
     // 头部：c̃ 的 32 字节
-    wire [5:0] hdr_nxt_i = hdr_i + 6'd1;
+    wire [6:0] hdr_nxt_i = hdr_i + 7'd1;
+    // ⚠️ 末字节要钳位：hdr_nxt_i 在最后一拍会走到 CTB，直接切片会越界读到 X
+    wire [6:0] hdr_nxt_c = (hdr_nxt_i >= CTB[6:0]) ? (CTB[6:0] - 7'd1) : hdr_nxt_i;
     wire [7:0] hdr_byte     = seed[hdr_i*8 +: 8];
-    wire [7:0] hdr_byte_nxt = seed[hdr_nxt_i*8 +: 8];
+    wire [7:0] hdr_byte_nxt = seed[hdr_nxt_c*8 +: 8];
 
     // 只在需要字节的挤压态抽 SHAKE：读 signs、或在 S_BYTE 里取落点。
     assign sha_out_ready = (st == S_SIGN) || (st == S_BYTE);
@@ -72,7 +75,7 @@ module mldsa_sample_in_ball #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            st <= S_IDLE; done <= 1'b0; hdr_i <= 6'd0; scnt <= 4'd0;
+            st <= S_IDLE; done <= 1'b0; hdr_i <= 7'd0; scnt <= 4'd0;
             signs <= 64'd0; ii <= START_I; bb <= 8'd0;
             sha_start <= 1'b0; sha_in_valid <= 1'b0; sha_in_flush <= 1'b0;
             sha_in_data <= 8'd0;
@@ -84,7 +87,7 @@ module mldsa_sample_in_ball #(
 
             case (st)
             S_IDLE: if (start) begin
-                hdr_i <= 6'd0; scnt <= 4'd0; ii <= START_I;
+                hdr_i <= 7'd0; scnt <= 4'd0; ii <= START_I;
                 for (kk = 0; kk < 256; kk = kk + 1) cc[kk] <= 2'sd0;
                 sha_start <= 1'b1;
                 st <= S_ABS;
@@ -93,7 +96,7 @@ module mldsa_sample_in_ball #(
             S_ABS: begin
                 sha_in_valid <= 1'b1;
                 if (sha_in_valid && sha_in_ready) begin
-                    if (hdr_i == 6'd31) begin
+                    if (hdr_i == CTB[6:0] - 7'd1) begin
                         sha_in_valid <= 1'b0;
                         st <= S_GAP;
                     end else begin

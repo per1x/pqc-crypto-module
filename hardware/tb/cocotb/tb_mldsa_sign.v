@@ -1,10 +1,20 @@
 // 把 mldsa_sign 接上一个 sha3_core，供 cocotb 当顶层用（增量验证）
 `default_nettype none
-module tb_mldsa_sign (
+module tb_mldsa_sign #(
+    parameter integer K    = 4,
+    parameter integer L    = 4,
+    parameter integer ETA  = 2,
+    parameter integer TAU  = 39,
+    parameter integer G1LOG = 17,
+    parameter integer MODE = 0,
+    parameter integer OMG  = 80,
+    parameter integer BETA = 78,
+    parameter integer CTB  = 32
+) (
     input  wire clk, input wire rst_n,
     input  wire        start,
     input  wire        sk_wr_en,
-    input  wire [11:0] sk_wr_addr,
+    input  wire [12:0] sk_wr_addr,
     input  wire [7:0]  sk_wr_data,
     input  wire        msg_wr_en,
     input  wire [12:0] msg_wr_addr,
@@ -21,18 +31,19 @@ module tb_mldsa_sign (
     output wire [511:0] tr_out,
     output wire [511:0] mu,
     output wire [511:0] rhopp,
-    output wire [255:0] ctilde,
-    input  wire [5:0]  dbg_sel,
+    output wire [CTB*8-1:0] ctilde,
+    input  wire [6:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
-    input  wire [11:0] sig_addr,
+    input  wire [12:0] sig_addr,
     output wire [7:0]  sig_data
 );
     wire        ss, siv, sif, sor;
     wire [7:0]  sr, su, sid, sod;
     wire        sir, sov;
 
-    mldsa_sign u_sign (
+    mldsa_sign #(.K(K), .L(L), .ETA(ETA), .TAU(TAU), .G1LOG(G1LOG),
+                 .MODE(MODE), .OMG(OMG), .BETA(BETA), .CTB(CTB)) u_sign (
         .clk(clk), .rst_n(rst_n), .start(start),
         .sk_wr_en(sk_wr_en), .sk_wr_addr(sk_wr_addr), .sk_wr_data(sk_wr_data),
         .msg_wr_en(msg_wr_en), .msg_wr_addr(msg_wr_addr), .msg_wr_data(msg_wr_data),
