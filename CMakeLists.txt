@@ -114,6 +114,7 @@ add_library(pqchsm
   src/hal/hwrng_sdfe.c
   src/hal/pqc_sdfe.c
   service/libsdfe.c
+  service/sdfe_pkenc.c
   src/proto/proto.c
   src/audit/audit.c
   src/audit/anchor.c
