@@ -73,17 +73,36 @@ key was never loaded.
 
 ## RTL verification
 
-200 cocotb tests across 26 top levels, run under Icarus Verilog:
+249 cocotb tests across 26 top levels, run under Icarus Verilog (`tools/rtl_sim.sh`):
 
 | Group | Tests |
 |---|---|
 | ML-KEM operators and datapath | `mont_reduce`, `butterfly`, `basemul`, `ntt_core`, `compress`/`decompress` (5 widths), `sample`, `bitpack`, whole KeyGen/Encaps/Decaps |
-| ML-DSA operators | `tb_mldsa_units` (6), `mldsa_ntt_core` (5) |
+| ML-DSA operators | `tb_mldsa_units` (8), `mldsa_ntt_core` (5), `tb_mldsa_keygen` (8) |
 | Keccak | `keccak_f1600` (5), `sha3_core` (9) |
-| Bus | `axi4lite_xbar` (6), `axi4lite_firewall` (6), `pqc_accel_axi` (16), `key_vault` (4), `key_vault_axi` (6), `mlkem_axi` (9) |
+| Bus | `axi4lite_xbar` (8, plus 8 more at the board's NS=7), `axi4lite_firewall` (6), `pqc_accel_axi` (16), `key_vault` (4), `key_vault_axi` (6), `mlkem_axi` (13), `mldsa_axi` (22) |
 | Symmetric and SM | `aes_core` (5), `sm4_core` (6), `sm3_core` (6), `sym_vault_top` (5) |
 | Fan | `fan_ctrl` (7), `sysmon_drp` (3) |
 | TRNG | `trng_health` (8), `trng_source` (3), `trng_cond` (4), `trng_top` (4 + 2 no-drop + 1 drop), `trng_axi` (6), alarm path (4), raw tap (3) |
+
+⚠️ **The 22 `mldsa_axi` tests are an end-to-end check of the whole chain, not
+just a bus-layer one.** They drive the real `mldsa_engine` (the behavioural stub
+is gone) and are judged against the **official ACVP vectors** (KeyGen's pk/sk and
+Sign's σ byte for byte; Verify's pass *and* fail verdicts) plus
+`hardware/model/mldsa_oracle.py`, which covers the cases ACVP cannot express —
+chiefly **signing from a key slot**: an sk can only reach the vault through a real
+KeyGen, and none of the 90 ACVP siggen secret keys appears in the keygen vectors.
+The same σ is therefore pinned by two independent paths: the software-supplied-sk
+path against official ACVP, the from-slot path against the oracle, and the two
+must be byte-identical.
+
+That run covers **ML-DSA-44 only** (the default when no parameters are passed).
+The full matrix over all three parameter sets is the **twelve cells** of
+`tools/mldsa_grid.sh` (KeyGen / Sign / Verify / **AXI** × 44 / 65 / 87, 132 tests):
+Verilator for the ~15-minute development loop, Icarus as the pre-merge gate.
+⚠️ Verilator is a two-state simulator and **does not propagate X**, which is
+exactly the first entry in this project's defect table ("empty sensitivity list →
+X on the output") — so never run Verilator alone.
 
 Lint runs each module as its own top level, not only the integrated top:
 otherwise modules that nothing instantiates — combinational operators, samplers
@@ -263,7 +282,9 @@ Sanitiser and platform runs: ASan + UBSan clean; ThreadSanitizer 0 races
 Nothing in this section needs the board.
 
 ```bash
-./tools/rtl_sim.sh                     # 200 cocotb tests
+./tools/rtl_sim.sh                     # 249 cocotb tests
+sh tools/mldsa_grid.sh                 # ML-DSA twelve-cell matrix (Verilator, ~15 min)
+sh tools/mldsa_grid.sh icarus          # same matrix under Icarus — the pre-merge gate
 ./tools/rtl_lint.sh                    # Verilator -Wall + Icarus
 ./tools/rtl_synth_check.sh             # Yosys synthesisability
 python3 tools/sp800_90b.py --selftest  # reproduce the specification's worked examples
