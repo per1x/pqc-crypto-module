@@ -84,6 +84,12 @@ module mldsa_sign (
         S_HDR    = 5'd1,     // ρ/K/tr ← sk[0..127]
         S_UNP_I  = 5'd2,     // 清 unpacker、置初值
         S_UNP    = 5'd3,     // 位解包主循环
+        // ② μ = H(tr‖M')，ρ'' = H(K‖rnd‖μ)：共用一套吸收/挤压状态
+        S_D_GO   = 5'd4,     // 起海绵：start 脉冲、ai=0
+        S_D_ABS  = 5'd5,     // 吸收（μ 支：tr‖0‖|ctx|‖ctx‖msg；ρ'' 支：K‖rnd‖μ）
+        S_D_GAP  = 5'd6,     // 让 in_valid 落下，flush 才被采样
+        S_D_FLU  = 5'd7,     // in_flush
+        S_D_SQ   = 5'd8,     // 挤 64 字节 → μ 或 ρ''
         S_FIN    = 5'd31;
 
     reg [4:0] st;
@@ -160,10 +166,44 @@ module mldsa_sign (
     reg [11:0] skp;        // sk 读指针（进解包器的字节）
     reg        feed;       // S_UNP 内两拍：0=抽/摆地址，1=喂字节
 
+    // ② 派生哈希用
+    reg [13:0] ai;         // 吸收字节指针（μ 支最长 66+ctx+msg，≤ ~8500，14 位）
+    reg        dsel;       // 0 = 正在算 μ，1 = 正在算 ρ''
+
+    // ---- μ 支的吸收源：tr(64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ msg ----
+    wire [5:0]  tr_idx      = ai[5:0];
+    wire [13:0] thr_ctxend  = 14'd66 + {6'd0, ctx_len};              // ctx 占 [66, thr_ctxend)
+    wire [13:0] thr_total_mu= thr_ctxend + msg_len;                  // 66+|ctx|+|msg|
+    wire [13:0] ctx_off     = ai - 14'd66;
+    wire [13:0] msg_off     = ai - thr_ctxend;
+    reg  [7:0]  mu_byte;
+    always @(*) begin
+        if (ai < 14'd64)            mu_byte = tr_out[tr_idx*8 +: 8];
+        else if (ai == 14'd64)      mu_byte = 8'd0;
+        else if (ai == 14'd65)      mu_byte = ctx_len;
+        else if (ai <  thr_ctxend)  mu_byte = ctx_rdata;
+        else                        mu_byte = msg_rdata;
+    end
+
+    // ---- ρ'' 支的吸收源：K(32) ‖ rnd(32) ‖ μ(64) = 128 字节 ----
+    wire [6:0]  rp_i = ai[6:0];
+    reg  [7:0]  rp_byte;
+    always @(*) begin
+        if (ai < 14'd32)       rp_byte = key_out[rp_i[4:0]*8 +: 8];
+        else if (ai < 14'd64)  rp_byte = rnd[(rp_i[4:0])*8 +: 8];    // ai−32 的低 5 位
+        else                   rp_byte = mu[(rp_i[5:0])*8 +: 8];     // ai−64 的低 6 位
+    end
+
+    // 当前吸收的字节 / 总长 / 结束判据
+    wire [7:0]  abs_byte  = dsel ? rp_byte : mu_byte;
+    wire [13:0] abs_total = dsel ? 14'd128 : thr_total_mu;
+    wire        abs_last  = (ai == abs_total - 14'd1);
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; cnt <= 8'd0; ph <= 1'b0;
             poly <= 3'd0; t0phase <= 1'b0; skp <= 12'd0; feed <= 1'b0;
+            ai <= 14'd0; dsel <= 1'b0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
             sha_start <= 1'b0; sha_rate <= 8'd136; sha_suffix <= 8'h1F;
@@ -171,6 +211,8 @@ module mldsa_sign (
             sha_out_ready <= 1'b0;
         end else begin
             done <= 1'b0;
+            sha_start <= 1'b0;
+            sha_in_flush <= 1'b0;
 
             case (st)
             S_IDLE: if (start) begin
@@ -237,7 +279,8 @@ module mldsa_sign (
                         if (cnt == 8'd255) begin
                             cnt <= 8'd0;
                             if (poly == 3'd3) begin
-                                st <= S_FIN;
+                                dsel <= 1'b0;      // 先算 μ
+                                st <= S_D_GO;
                             end else begin
                                 poly <= poly + 3'd1;
                             end
@@ -251,6 +294,56 @@ module mldsa_sign (
                             if (tu_ir) skp <= skp + 12'd1;
                             feed <= 1'b0;
                         end
+                    end
+                end
+            end
+
+            // ---------- ② μ = H(tr‖M')，ρ'' = H(K‖rnd‖μ) ----------
+            // dsel=0 算 μ，dsel=1 算 ρ''，共用这一套吸收/挤压状态。
+            S_D_GO: begin
+                sha_rate <= 8'd136; sha_suffix <= 8'h1F;   // SHAKE256
+                sha_start <= 1'b1;
+                ai <= 14'd0; ph <= 1'b0; cnt <= 8'd0;
+                st <= S_D_ABS;
+            end
+
+            // 2 拍一个字节：ph=0 摆 ctx/msg 读地址（μ 支才用），ph=1 数据到位、驱 valid。
+            // 与 KeyGen 的 S_TR_ABS 同构：从缓冲取字节喂海绵，SHAKE 反压时保持不前进。
+            S_D_ABS: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    sha_in_valid <= 1'b1;
+                    sha_in_data  <= abs_byte;
+                    if (sha_in_valid && sha_in_ready) begin
+                        sha_in_valid <= 1'b0;
+                        if (abs_last) begin
+                            st <= S_D_GAP;
+                        end else begin
+                            ai <= ai + 14'd1; ph <= 1'b0;
+                        end
+                    end
+                end
+            end
+            S_D_GAP: st <= S_D_FLU;
+            S_D_FLU: begin sha_in_flush <= 1'b1; cnt <= 8'd0; st <= S_D_SQ; end
+
+            // 挤 64 字节，低地址先出、从高位塞右移，进 μ 或 ρ''。
+            S_D_SQ: begin
+                sha_out_ready <= 1'b1;
+                if (sha_out_valid) begin
+                    if (!dsel) mu    <= {sha_out_data, mu[511:8]};
+                    else       rhopp <= {sha_out_data, rhopp[511:8]};
+                    if (cnt == 8'd63) begin
+                        sha_out_ready <= 1'b0;
+                        if (!dsel) begin
+                            dsel <= 1'b1;      // μ 好了，接着算 ρ''
+                            st <= S_D_GO;
+                        end else begin
+                            st <= S_FIN;
+                        end
+                    end else begin
+                        cnt <= cnt + 8'd1;
                     end
                 end
             end
@@ -273,7 +366,9 @@ module mldsa_sign (
         t0_raddr = {dbg_sel[1:0], dbg_idx};
         // S_HDR 读 sk[0..127]（地址=cnt）；S_UNP 读打包区（地址=skp）
         sk_raddr = (st == S_HDR) ? {4'd0, cnt} : skp;
-        msg_raddr = 13'd0; ctx_raddr = 8'd0;
+        // ② μ 支吸收 ctx/msg 时，按 ai 摆读地址（ai 跨两拍稳定，组合驱动即可）
+        msg_raddr = msg_off[12:0];
+        ctx_raddr = ctx_off[7:0];
 
         eu_clr = 1'b0; eu_iv = 1'b0; eu_or = 1'b0;
         tu_clr = 1'b0; tu_iv = 1'b0; tu_or = 1'b0;

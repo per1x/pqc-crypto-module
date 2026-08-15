@@ -17,7 +17,8 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "model"))
-from mldsa_oracle import _load_records, sk_decode   # noqa: E402
+from mldsa_oracle import (  # noqa: E402
+    _load_records, _mprime, h_shake256, sk_decode)
 
 SIGGEN_KAT = Path(__file__).resolve().parents[3] / "vectors" / "mldsa_siggen.kat"
 
@@ -132,3 +133,57 @@ async def test_sk_decode(dut):
             f"{next(i for i in range(256) if got[i] != t0_w[j][i])} 个系数")
 
     dut._log.info("① skDecode：ρ/K/tr + s₁/s₂/t₀ 全部对上 oracle 的 sk_decode")
+
+
+async def preload_all(dut, rec):
+    """把一条 KAT 的 sk/msg/ctx/rnd/lengths 全部载入 DUT"""
+    sk = bytes.fromhex(rec["sk"])
+    msg = bytes.fromhex(rec["msg"])
+    ctx = bytes.fromhex(rec.get("context", "") or "")
+    rnd = bytes.fromhex(rec["rnd"])
+    assert len(sk) == 2560 and len(rnd) == 32
+    await load_buf(dut, dut.sk_wr_en, dut.sk_wr_addr, dut.sk_wr_data, sk)
+    if msg:
+        await load_buf(dut, dut.msg_wr_en, dut.msg_wr_addr, dut.msg_wr_data, msg)
+    if ctx:
+        await load_buf(dut, dut.ctx_wr_en, dut.ctx_wr_addr, dut.ctx_wr_data, ctx)
+    dut.msg_len.value = len(msg)
+    dut.ctx_len.value = len(ctx)
+    dut.rnd.value = int.from_bytes(rnd, "little")
+    return sk, msg, ctx, rnd
+
+
+async def run_to_done(dut, limit=1_000_000):
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    for _ in range(limit):
+        await RisingEdge(dut.clk)
+        if int(dut.done.value):
+            break
+    else:
+        raise AssertionError("一直没完成")
+    await Timer(1, unit="ns")
+
+
+@cocotb.test()
+async def test_derive_mu_rhopp(dut):
+    """② μ = H(tr‖M')、ρ'' = H(K‖rnd‖μ) 对上 oracle（含非空 ctx / 多字节 msg）"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    rec = first_d44()      # 确定性向量：rnd 全零、msg 6597 B、ctx 96 B
+    sk, msg, ctx, rnd = await preload_all(dut, rec)
+    await run_to_done(dut)
+
+    _, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
+    mu_w = h_shake256(tr_w + _mprime(ctx, msg), 64)
+    rhopp_w = h_shake256(key_w + rnd + mu_w, 64)
+
+    assert to_bytes(dut.mu.value, 64) == mu_w, (
+        f"μ 不一致，首个不同在字节 "
+        f"{next(i for i in range(64) if to_bytes(dut.mu.value, 64)[i] != mu_w[i])}")
+    assert to_bytes(dut.rhopp.value, 64) == rhopp_w, "ρ'' 不一致"
+
+    dut._log.info("② μ、ρ'' 逐字节对上 oracle（M' 封装、非空 ctx、6597B msg 都验到）")
+
