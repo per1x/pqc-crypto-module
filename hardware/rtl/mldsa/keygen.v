@@ -63,6 +63,7 @@ module mldsa_keygen (
         S_H_FLU = 4'd3, S_H_SQ  = 4'd4,
         S_S_GEN = 4'd5, S_S_WAIT = 4'd6, S_S_MOVE = 4'd7,
         S_NTT_LD = 4'd9, S_NTT_GO = 4'd10, S_NTT_ST = 4'd11, S_NTT_WB = 4'd12,
+        S_A_GEN = 4'd13, S_A_WAIT = 4'd14, S_MAC = 4'd15,
         S_FIN   = 4'd8;
 
     reg [3:0] st;
@@ -78,8 +79,8 @@ module mldsa_keygen (
 
     // ================= 海绵归属（FSM ↔ η 采样器）=================
     // 只在换手方空闲时切（见设计文档）。均匀采样器留到第 ④ 段再接。
-    localparam OWN_FSM = 1'b0, OWN_ETA = 1'b1;
-    reg owner;
+    localparam [1:0] OWN_FSM = 2'd0, OWN_ETA = 2'd1, OWN_UNI = 2'd2;
+    reg [1:0] owner;
 
     // ---- η 采样器（ExpandS）----
     reg         et_start;
@@ -117,8 +118,6 @@ module mldsa_keygen (
         .clk(clk), .a_we(s2_we), .a_addr(s2_waddr), .a_din(s2_din), .a_dout(),
         .b_we(1'b0), .b_addr(s2_raddr), .b_din(32'd0), .b_dout(s2_dout));
 
-    // 调试读口挂 b 口（done 后才用，与写不重叠）
-    assign dbg_coef = dbg_sel[3] ? s2_dout : s1_dout;
 
     // ---- NTT 核（第 ③ 段：对 ℓ 条 s₁ 做正变换，就地覆盖成 ŝ₁）----
     reg         nt_start, nt_we;
@@ -132,25 +131,72 @@ module mldsa_keygen (
         .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
         .rd_addr(nt_raddr), .rd_data(nt_rdata));
 
+    // ---- 均匀采样器（ExpandA，第 ④ 段：Â 现采现用，不存）----
+    reg         un_start;
+    reg  [15:0] un_nonce;
+    wire        un_done;
+    reg  [7:0]  un_rd_addr;
+    wire [22:0] un_rd_data;
+    wire        un_ss, un_siv, un_sif, un_sor;
+    wire [7:0]  un_sr, un_su, un_sid;
+    mldsa_poly_uniform u_uni (
+        .clk(clk), .rst_n(rst_n),
+        .start(un_start), .seed(rho), .nonce(un_nonce), .done(un_done),
+        .sha_start(un_ss), .sha_rate(un_sr), .sha_suffix(un_su),
+        .sha_in_valid(un_siv), .sha_in_data(un_sid), .sha_in_flush(un_sif),
+        .sha_in_ready(sha_in_ready && (owner == OWN_UNI)),
+        .sha_out_valid(sha_out_valid && (owner == OWN_UNI)),
+        .sha_out_ready(un_sor), .sha_out_data(sha_out_data),
+        .rd_addr(un_rd_addr), .rd_data(un_rd_data), .count());
+
+    // ---- 累加缓冲：k 条，每条 256×32（第 ④ 段临时全存；⑤⑥ 接上后改逐 i 流水）----
+    reg         ac_we;  reg [9:0] ac_waddr; reg signed [31:0] ac_din;
+    reg  [9:0]  ac_raddr; wire signed [31:0] ac_dout;
+    ram_dp #(.DW(32), .AW(10)) u_acc (
+        .clk(clk), .a_we(ac_we), .a_addr(ac_waddr), .a_din(ac_din), .a_dout(),
+        .b_we(1'b0), .b_addr(ac_raddr), .b_din(32'd0), .b_dout(ac_dout));
+
+    // 调试读口挂 b 口（done 后才用，与写不重叠）
+    //   sel[3]=0        → s₁（后面被 NTT 覆盖成 ŝ₁）
+    //   sel[3:2]=2'b10  → s₂
+    //   sel[3:2]=2'b11  → acc（MAC 累加缓冲）
+    assign dbg_coef = (dbg_sel[3:2] == 2'b11) ? ac_dout
+                    : (dbg_sel[3] ? s2_dout : s1_dout);
+
+    // 逐系数 mont 乘：Â(23 无符号) × ŝ₁(32 有符号)
+    wire signed [63:0] mac_prod =
+        $signed({41'd0, un_rd_data}) * s1_dout;
+    wire signed [31:0] mac_mont;
+    mldsa_mont_reduce u_mont (.a(mac_prod), .t_out(mac_mont));
+
     // η 打包器留到 sk 组装段再接：第 ② 段只做「采样 + 存储」，
     // 而 η 打包（对 polyeta_pack）已在 test_mldsa_pack 里独立验过，
     // 这里空转它只会多一堆未接的输出。
-    // 海绵接口二选一
+    // 海绵接口三选一（FSM / η 采样器 / 均匀采样器）
     always @(*) begin
-        if (owner == OWN_ETA) begin
+        case (owner)
+        OWN_ETA: begin
             sha_start = et_ss; sha_rate = et_sr; sha_suffix = et_su;
             sha_in_valid = et_siv; sha_in_data = et_sid; sha_in_flush = et_sif;
             sha_out_ready = et_sor;
-        end else begin
+        end
+        OWN_UNI: begin
+            sha_start = un_ss; sha_rate = un_sr; sha_suffix = un_su;
+            sha_in_valid = un_siv; sha_in_data = un_sid; sha_in_flush = un_sif;
+            sha_out_ready = un_sor;
+        end
+        default: begin
             sha_start = fsm_ss; sha_rate = fsm_sr; sha_suffix = fsm_su;
             sha_in_valid = fsm_siv; sha_in_data = fsm_sid; sha_in_flush = fsm_sif;
             sha_out_ready = fsm_sor;
         end
+        endcase
     end
 
     reg       ph;             // 同步读的两拍相位
     reg       nt_lowseen;     // NTT：start 之后 done 先落一次再等它起
-    reg [2:0] vj;             // 第几条多项式
+    reg [2:0] vj;             // 第几条多项式（j）
+    reg [2:0] vi;             // 第几个 i（MAC 段）
     reg       s2phase;        // 在做 s₂ 而不是 s₁
 
     always @(posedge clk or negedge rst_n) begin
@@ -158,6 +204,7 @@ module mldsa_keygen (
             st <= S_IDLE; done <= 1'b0; cnt <= 9'd0;
             owner <= OWN_FSM; vj <= 3'd0; ph <= 1'b0; s2phase <= 1'b0;
             nt_lowseen <= 1'b0;
+            vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0;
             et_start <= 1'b0; et_nonce <= 16'd0;
             nt_start <= 1'b0;
             fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
@@ -169,6 +216,7 @@ module mldsa_keygen (
             fsm_sif <= 1'b0;
             et_start <= 1'b0;
             nt_start <= 1'b0;
+            un_start <= 1'b0;
             done    <= 1'b0;
 
             case (st)
@@ -279,8 +327,43 @@ module mldsa_keygen (
                 end else begin
                     if (cnt == 9'd255) begin
                         cnt <= 9'd0; ph <= 1'b0;
-                        if (vj == 3'd3) begin vj <= 3'd0; st <= S_FIN; end
-                        else begin vj <= vj + 3'd1; st <= S_NTT_LD; end
+                        if (vj == 3'd3) begin
+                            vj <= 3'd0; vi <= 3'd0; ph <= 1'b0;
+                            owner <= OWN_UNI;
+                            st <= S_A_GEN;         // ŝ₁ 全部就绪，开始 MAC
+                        end else begin vj <= vj + 3'd1; st <= S_NTT_LD; end
+                    end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ④ 对每个 i：acc[i] = Σ_j mont(Â[i][j] ∘ ŝ₁[j]) ----------
+            // Â 现采现用（un_nonce = 256·i + j），不存。
+            S_A_GEN: begin
+                un_nonce <= {5'd0, vi, 5'd0, vj};   // 256·i + j
+                un_start <= 1'b1;
+                st <= S_A_WAIT;
+            end
+            S_A_WAIT: if (un_done) begin cnt <= 9'd0; ph <= 1'b0; st <= S_MAC; end
+
+            // 逐系数：ph=0 摆 Â/ŝ₁/acc 读地址，ph=1 算 mont 写 acc。
+            // j==0 直接放，之后累加（省掉清零）。
+            S_MAC: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 9'd255) begin
+                        cnt <= 9'd0; ph <= 1'b0;
+                        if (vj == 3'd3) begin
+                            vj <= 3'd0;
+                            if (vi == 3'd3) begin
+                                vi <= 3'd0; owner <= OWN_FSM;
+                                st <= S_FIN;       // 第 ④ 段到此为止
+                            end else begin
+                                vi <= vi + 3'd1; st <= S_A_GEN;
+                            end
+                        end else begin
+                            vj <= vj + 3'd1; st <= S_A_GEN;
+                        end
                     end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
                 end
             end
@@ -299,6 +382,21 @@ module mldsa_keygen (
         s2_raddr = {dbg_sel[1:0], dbg_idx};
         et_rd_addr = cnt[7:0];
         nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt[7:0];
+        ac_we = 1'b0; ac_waddr = 10'd0; ac_din = 32'd0;
+        ac_raddr = {dbg_sel[1:0], dbg_idx};   // 默认给调试口读 acc
+        un_rd_addr = cnt[7:0];
+
+        // MAC：Â[cnt]·ŝ₁[vj][cnt]，累加到 acc[vi][cnt]
+        if (st == S_MAC) begin
+            un_rd_addr = cnt[7:0];
+            s1_raddr   = {vj[1:0], cnt[7:0]};
+            ac_raddr   = {vi[1:0], cnt[7:0]};
+            if (ph) begin
+                ac_we    = 1'b1;
+                ac_waddr = {vi[1:0], cnt[7:0]};
+                ac_din   = (vj == 3'd0) ? mac_mont : (ac_dout + mac_mont);
+            end
+        end
 
         // 装载：s₁[vj] → NTT 写口
         if (st == S_NTT_LD) begin

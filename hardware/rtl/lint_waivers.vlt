@@ -229,7 +229,3 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v" -match "*'dk_
 // 低 W 位：t₁ 用 10、t₀ 用 13、s 用 3 或 4。端口不随 W 收窄是有意的 ——
 // 三个封装模块共用同一个 bitpack，收窄就得为每种位宽各写一份端口表。
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/pack.v" -match "*'in_val'*"
-
-// ML-DSA keygen 的调试读口 dbg_sel：[3] 选 s₁/s₂、[1:0] 选第几条（4 条，够）。
-// [2] 结构上恒为 0 —— 端口给 4 位是为了以后 65/87 参数集 k 到 8 时不改接口。
-lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/keygen.v" -match "*'dbg_sel'*"
