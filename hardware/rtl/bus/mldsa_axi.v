@@ -131,22 +131,11 @@
 
 module mldsa_axi #(
     parameter [31:0]  VERSION     = 32'h0001_0000,
-    parameter integer SECURE_ONLY = 1,
-    // ---- ML-DSA 参数集（编译期）----
-    // 三个核这一版仍是编译期参数化的，engine 也是，所以本层要把整套参数原样
-    // 透传下去。**以前这里一个参数都不传**，于是 engine 取默认值 —— 板上那份
-    // bitstream 里的 ML-DSA 其实是 44，而"塞不塞得下"问的是最大的 87。
-    // 默认值仍是 44（与 engine 的默认一致），由顶层显式选。
-    parameter integer K     = 4,
-    parameter integer L     = 4,
-    parameter integer ETA   = 2,
-    parameter integer TAU   = 39,
-    parameter integer G1LOG = 17,
-    parameter integer MODE  = 0,
-    parameter integer OMG   = 80,
-    parameter integer BETA  = 78,
-    parameter integer CTB   = 32,
-    parameter integer PSET  = 0     // 0=44 1=65 2=87
+    parameter integer SECURE_ONLY = 1
+    // ML-DSA 的参数集**不再是编译期的**：engine 运行时支持 44/65/87，
+    // 由 MODE 寄存器的 PSET 字段逐次运算选择。以前这里有一整排
+    // K/L/ETA/TAU/... 透传给 engine，现在 engine 一个参数都没有了，
+    // 留着它们只会让人以为综合时还要选参数集。
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -293,14 +282,22 @@ module mldsa_axi #(
     // 输入。软件看到的是 BUSY 一直不落，与"算得慢"分不开。
     wire op_ok = (op == OP_KEYGEN) || (op == OP_SIGN) || (op == OP_VERIFY);
 
-    // ⚠️ **pset 必须与本次综合的参数集一致，而且要在本层判。**
+    // ⚠️ **pset 只有 0/1/2 有意义，而且要在本层判。**
     // engine 自己也查这一条，但它的拒绝路径是"置 param_err、立刻 done、
     // 不启动任何核"，而**它不更新 op_r** —— 于是本层在 S_FIN 里抄下来的
     // eng_out_len 是**上一次运算**那个 op 的长度。软件看到的是 DONE=1 加一个
     // 像模像样的 OUT_LEN，读出来却是上一次的输出字节。比不报错更糟：它看起来
     // 成功了（与"被拒的 START 要作废上一次结果"是同一个坑的两个入口）。
     // 所以本层在 START 处就判掉、根本不启动 engine，engine 那份留作第二道。
-    wire pset_ok = (pset == PSET[1:0]);
+    //
+    // 【这一行改过，改的理由值得记】
+    // 它原来是 `pset == PSET[1:0]` —— 拿运行时 pset 去比**本次综合的**参数集。
+    // 在 engine 还是编译期单参数集的那一版里这是对的。但 engine 后来做成了
+    // **运行时支持 44/65/87**，这一行就变成了一道把另外两套全部拒掉的闸门：
+    // bitstream 声称支持三套、实际只有一套能用，而失败方式是"START 被拒"，
+    // 看起来像功能根本没做。两条并行的改动各自都对，合到一起才错 —— 这种
+    // 接缝错误不会被任何一侧的用例发现，只有合并后端到端跑才现形。
+    wire pset_ok = (pset != 2'd3);
 
     // 消息上限：见 MSGMAX 的声明处。超了**不启动**，而不是让核里的地址
     // 安静回绕 —— 回绕算出来的是一个长度、格式全对但内容错的签名。
@@ -357,9 +354,7 @@ module mldsa_axi #(
     // ⚠️ rst_n 是**纯复位**，不再 `&& !zeroize_all`：有了真的 zeroize 口之后
     //    就不该再拿复位当擦除用 —— 复位本来也擦不掉 BRAM，那种写法只是看起来
     //    像擦了。擦除靠 zeroize，engine 擦完把 wiping 落下。
-    mldsa_engine #(.K(K), .L(L), .ETA(ETA), .TAU(TAU), .G1LOG(G1LOG),
-                   .MODE(MODE), .OMG(OMG), .BETA(BETA), .CTB(CTB),
-                   .PSET(PSET)) u_eng (
+    mldsa_engine u_eng (
         .clk(clk), .rst_n(rst_n),
         .zeroize(zeroize_all), .wiping(eng_wiping),
         .start(eng_start), .op(op), .pset(pset),
