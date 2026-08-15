@@ -85,6 +85,22 @@ COMPILE_ARGS += -P$(TOPLEVEL).D=$(PARAM_D)
 export PARAM_D
 endif
 
+# ML-DSA 参数集切换：make PARAM_K=6 PARAM_L=5 PARAM_ETA=4 …（65），
+# 不给就是顶层默认的 ML-DSA-44。测试台从同名环境变量读参数集名字。
+ifneq ($(PARAM_K),)
+COMPILE_ARGS += -P$(TOPLEVEL).K=$(PARAM_K)
+export PARAM_K
+endif
+ifneq ($(PARAM_L),)
+COMPILE_ARGS += -P$(TOPLEVEL).L=$(PARAM_L)
+export PARAM_L
+endif
+ifneq ($(PARAM_ETA),)
+COMPILE_ARGS += -P$(TOPLEVEL).ETA=$(PARAM_ETA)
+export PARAM_ETA
+endif
+export MLDSA_ALG
+
 # mlkem_keygen 的存储观察口只在仿真里接出来（DEBUG_BANK=1）。
 # 综合时它必须是 0 —— 那个口直连私钥系数。
 ifeq ($(TOPLEVEL),mlkem_keygen)

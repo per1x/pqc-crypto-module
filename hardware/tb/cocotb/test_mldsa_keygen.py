@@ -18,6 +18,32 @@ from cocotb.triggers import RisingEdge, Timer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "model"))
 from mldsa_oracle import rej_eta_poly   # noqa: E402
+from mldsa_model import PARAMS          # noqa: E402
+
+# 参数集由 Makefile 的 MLDSA_ALG 环境变量选（与 -P 传给 RTL 的 K/L/ETA 必须一致）
+import os                               # noqa: E402
+ALG = os.environ.get("MLDSA_ALG", "ML-DSA-44")
+_P = PARAMS[ALG]
+KK, LL, ETA = _P["k"], _P["l"], _P["eta"]
+PEB = 96 if ETA == 2 else 128           # 每条 s 的打包字节数
+SK_S1 = 128
+SK_S2 = SK_S1 + LL * PEB
+SK_T0 = SK_S2 + KK * PEB
+PKLEN = 32 + KK * 320
+SKLEN = SK_T0 + KK * 416
+
+
+# dbg_sel[5:3] 选组（0=s₁ 1=s₂ 2=acc），[2:0] 选第几条多项式
+def dbg_s1(j):
+    return j
+
+
+def dbg_s2(j):
+    return (1 << 3) | j
+
+
+def dbg_acc(i):
+    return (2 << 3) | i
 
 
 async def reset(dut):
@@ -62,7 +88,7 @@ async def test_h_expand(dut):
             raise AssertionError(f"seed={seed_base:#x}: H 一直没完成")
         await Timer(1, unit="ns")
 
-        h = hashlib.shake_256(xi + bytes([4, 4])).digest(128)
+        h = hashlib.shake_256(xi + bytes([KK, LL])).digest(128)
         rho_w = h[:32]
         rhop_w = h[32:96]
         key_w = h[96:128]
@@ -122,9 +148,9 @@ async def test_expand_s(dut):
     # s₂：nonce = 4+j。**只验 s₂** —— s₁ 在第 ③ 段被 NTT 就地覆盖成 ŝ₁ 了，
     # done 时读到的已经不是原始 s₁。s₁ 的采样正确性由 NTT 用例间接验：
     # ŝ₁ == NTT(s₁) 成立，就同时说明 s₁ 采样对、NTT 对。
-    for j in range(4):
-        got = await read_poly(dut, 0b1000 | j)
-        want = rej_eta_poly(rhop, 4 + j, 2)
+    for j in range(KK):
+        got = await read_poly(dut, dbg_s2(j))
+        want = rej_eta_poly(rhop, LL + j, ETA)
         assert got == want, f"s₂[{j}] 不一致"
 
     dut._log.info("ExpandS：s₂[0..3] 对上 rej_eta_poly（s₁ 由 NTT 用例验）；"
@@ -161,9 +187,9 @@ async def test_ntt_s1(dut):
     await Timer(1, unit="ns")
 
     rhop = int(dut.rho_prime.value).to_bytes(64, "little")
-    for j in range(4):
-        got = await read_poly(dut, j)              # s₁[j] 已是 ŝ₁[j]
-        want = _ntt(_re(rhop, j, 2))
+    for j in range(LL):
+        got = await read_poly(dut, dbg_s1(j))      # s₁[j] 已是 ŝ₁[j]
+        want = _ntt(_re(rhop, j, ETA))
         assert got == want, (
             f"ŝ₁[{j}] 不一致，首个不同在第 "
             f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
@@ -208,13 +234,13 @@ async def test_acc_after_invntt(dut):
 
     rho = int(dut.rho.value).to_bytes(32, "little")
     rhop = int(dut.rho_prime.value).to_bytes(64, "little")
-    shat = [_ntt(_re(rhop, j, 2)) for j in range(4)]
-    s2 = [_re(rhop, 4 + i, 2) for i in range(4)]
+    shat = [_ntt(_re(rhop, j, ETA)) for j in range(LL)]
+    s2 = [_re(rhop, LL + i, ETA) for i in range(KK)]
 
-    for i in range(4):
-        got = await read_poly(dut, 0b1100 | i)     # acc[i]
+    for i in range(KK):
+        got = await read_poly(dut, dbg_acc(i))     # acc[i]
         acc = [0] * 256
-        for j in range(4):
+        for j in range(LL):
             a = _ru(rho, (i << 8) + j)
             for n in range(256):
                 acc[n] += _mont(a[n] * shat[j][n])
@@ -277,15 +303,15 @@ async def test_sk_rho_key_s(dut):
     assert await read_sk(dut, 32, 32) == key, "sk 的 K 段不对"
 
     # s₁pack：4 条 × 96 字节，从 SK_S1=128 起
-    s1pack = b"".join(_pep(_re(rhop, j, 2), 2) for j in range(4))
-    got_s1 = await read_sk(dut, 128, len(s1pack))
+    s1pack = b"".join(_pep(_re(rhop, j, ETA), ETA) for j in range(LL))
+    got_s1 = await read_sk(dut, SK_S1, len(s1pack))
     assert got_s1 == s1pack, (
         f"s₁pack 不对，首个不同在字节 "
         f"{next(i for i in range(len(s1pack)) if got_s1[i] != s1pack[i])}")
 
     # s₂pack：紧接 s₁pack
-    s2pack = b"".join(_pep(_re(rhop, 4 + j, 2), 2) for j in range(4))
-    got_s2 = await read_sk(dut, 128 + len(s1pack), len(s2pack))
+    s2pack = b"".join(_pep(_re(rhop, LL + j, ETA), ETA) for j in range(KK))
+    got_s2 = await read_sk(dut, SK_S1 + len(s1pack), len(s2pack))
     assert got_s2 == s2pack, "s₂pack 不对"
 
     dut._log.info("sk 组装：ρ‖K‖s₁pack‖s₂pack 逐字节对上黄金（t₀/tr 段留到 ⑥b/⑦）")
@@ -337,13 +363,13 @@ async def test_pk_and_t0(dut):
 
     rho = int(dut.rho.value).to_bytes(32, "little")
     rhop = int(dut.rho_prime.value).to_bytes(64, "little")
-    shat = [_ntt(_re(rhop, j, 2)) for j in range(4)]
-    s2 = [_re(rhop, 4 + i, 2) for i in range(4)]
+    shat = [_ntt(_re(rhop, j, ETA)) for j in range(LL)]
+    s2 = [_re(rhop, LL + i, ETA) for i in range(KK)]
 
     t1_all, t0_all = bytearray(), bytearray()
-    for i in range(4):
+    for i in range(KK):
         acc = [0] * 256
-        for j in range(4):
+        for j in range(LL):
             a = _ru(rho, (i << 8) + j)
             for n in range(256):
                 acc[n] += _mont(a[n] * shat[j][n])
@@ -362,8 +388,7 @@ async def test_pk_and_t0(dut):
         f"t₁pack 不对，首个不同在字节 "
         f"{next(i for i in range(len(t1_all)) if got_t1[i] != t1_all[i])}")
 
-    # sk 的 t₀pack：SK_T0 = 128 + 8*96 = 896
-    got_t0 = await read_sk(dut, 896, len(t0_all))
+    got_t0 = await read_sk(dut, SK_T0, len(t0_all))
     assert got_t0 == bytes(t0_all), (
         f"t₀pack 不对，首个不同在字节 "
         f"{next(i for i in range(len(t0_all)) if got_t0[i] != t0_all[i])}")
@@ -401,7 +426,7 @@ async def test_keygen_full(dut):
         raise AssertionError("KeyGen 一直没完成")
     await Timer(1, unit="ns")
 
-    pk_w, sk_w = _kg(xi, "ML-DSA-44")
+    pk_w, sk_w = _kg(xi, ALG)
     pk = await read_pk(dut, 0, len(pk_w))
     sk = await read_sk(dut, 0, len(sk_w))
     assert pk == pk_w, (
@@ -411,7 +436,7 @@ async def test_keygen_full(dut):
         f"sk 不一致，首个不同在字节 "
         f"{next(i for i in range(len(sk_w)) if sk[i] != sk_w[i])}")
 
-    dut._log.info(f"ML-DSA-44 KeyGen 完整通过：pk {len(pk)} 字节、"
+    dut._log.info(f"{ALG} KeyGen 完整通过：pk {len(pk)} 字节、"
                   f"sk {len(sk)} 字节全部对上黄金")
 
 
@@ -430,9 +455,9 @@ async def test_keygen_acvp(dut):
     recs = _lk(limit_per_alg=1)
     if not recs:
         raise AssertionError("找不到 mldsa_keygen.kat")
-    rec = next((r for r in recs if r.get("alg") == "ML-DSA-44"), None)
+    rec = next((r for r in recs if r.get("alg") == ALG), None)
     if rec is None:
-        raise AssertionError("KAT 里没有 ML-DSA-44")
+        raise AssertionError(f"KAT 里没有 {ALG}")
     seed = bytes.fromhex(rec["seed"])
     pk_w = bytes.fromhex(rec["pk"])
     sk_w = bytes.fromhex(rec["sk"])
@@ -463,4 +488,4 @@ async def test_keygen_acvp(dut):
         f"sk 与 ACVP 不一致，首个不同在字节 "
         f"{next(i for i in range(len(sk_w)) if sk[i] != sk_w[i])}")
 
-    dut._log.info("ML-DSA-44 KeyGen 对上 ACVP 官方向量：pk/sk 逐字节一致")
+    dut._log.info(f"{ALG} KeyGen 对上 ACVP 官方向量：pk/sk 逐字节一致（pk {len(pk_w)}B / sk {len(sk_w)}B）")

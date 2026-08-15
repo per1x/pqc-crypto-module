@@ -1,6 +1,15 @@
 // 把 mldsa_keygen 接上一个 sha3_core，供 cocotb 当顶层用（增量验证）
+//
+// 参数 K/L/ETA 透传给核，用 Icarus 的 -P 覆盖即可切参数集：
+//   ML-DSA-44：K=4 L=4 ETA=2（默认）
+//   ML-DSA-65：K=6 L=5 ETA=4
+//   ML-DSA-87：K=8 L=7 ETA=2
 `default_nettype none
-module tb_mldsa_keygen (
+module tb_mldsa_keygen #(
+    parameter integer K   = 4,
+    parameter integer L   = 4,
+    parameter integer ETA = 2
+) (
     input  wire clk, input  wire rst_n,
     input  wire        start,
     input  wire [255:0] xi,
@@ -8,19 +17,19 @@ module tb_mldsa_keygen (
     output wire [255:0] rho,
     output wire [511:0] rho_prime,
     output wire [255:0] key_out,
-    input  wire [3:0]  dbg_sel,
+    input  wire [5:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
-    input  wire [11:0] pk_addr,
+    input  wire [12:0] pk_addr,
     output wire [7:0]  pk_data,
-    input  wire [11:0] sk_addr,
+    input  wire [12:0] sk_addr,
     output wire [7:0]  sk_data
 );
     wire        ss, siv, sif, sor;
     wire [7:0]  sr, su, sid, sod;
     wire        sir, sov;
 
-    mldsa_keygen u_kg (
+    mldsa_keygen #(.K(K), .L(L), .ETA(ETA)) u_kg (
         .clk(clk), .rst_n(rst_n), .start(start), .xi(xi), .done(done),
         .sha_start(ss), .sha_rate(sr), .sha_suffix(su),
         .sha_in_valid(siv), .sha_in_data(sid), .sha_in_flush(sif),
@@ -40,3 +49,4 @@ module tb_mldsa_keygen (
         .ext_start(1'b0), .ext_done(), .ext_wr_en(1'b0),
         .ext_wr_addr(5'd0), .ext_wr_data(64'd0), .ext_rd_addr(5'd0), .ext_rd_data());
 endmodule
+`default_nettype wire
