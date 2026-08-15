@@ -82,7 +82,7 @@ VERILOG_SOURCES = \
 # 地址译码按板级顶层的槽数再跑一遍：板上现在是 7 个槽（加了 ML-DSA）。
 # 不给就是模块默认的 NS=5。测试台从同名环境变量读槽数。
 ifneq ($(XBAR_NS),)
-COMPILE_ARGS += -Paxi4lite_xbar.NS=$(XBAR_NS)
+COMPILE_ARGS += $(PDEF)NS=$(XBAR_NS)
 export XBAR_NS
 endif
 
@@ -94,45 +94,69 @@ ifeq ($(TOPLEVEL),mldsa_axi)
 VERILOG_SOURCES += $(PWD)/stub_mldsa_engine.v
 endif
 
+# ============================================================================
+# 【两个仿真器的参数覆盖语法不同 —— 这里抹平】
+# ============================================================================
+# Icarus:    -P<顶层>.<参数>=<值>
+# Verilator: -G<参数>=<值>            （不带顶层名，带了会 "Invalid option"）
+#
+# 为什么要支持 Verilator：**它比 Icarus 快约 7.5 倍**（实测 keygen-44：
+# Icarus 42~47s / Verilator 11.6s；仿真速率 143k vs 1079k ns/s）。ML-DSA 的
+# Sign 要跑满拒绝采样循环，Icarus 下 Sign-87 单格就要 36 分钟、九格全量约
+# 1.8 小时，而那是每次合并的关卡。换 Verilator 后九格约 15 分钟。
+#
+# ⚠️ **但不要用 Verilator 当最终关卡。** 它是二值仿真、**不传播 X**，而本项目
+#    踩过的第一个坑就是"空敏感列表 → 输出 X"（见 mldsa-keygen-design 的坑表
+#    第 1 条）——那类 bug Icarus 会暴露，Verilator 会安静地显示 0。
+#    正确分工：**开发内环用 Verilator 求快，合并/发布前用 Icarus 求准。**
+ifeq ($(SIM),verilator)
+PDEF := -G
+# Verilator 默认把位宽告警当致命错误；仓库里 mldsa 三个模块有既存的
+# WIDTHEXPAND（早于本次改动，见各自文件头），先降级以免挡住跑测试。
+EXTRA_ARGS += --timing -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC
+else
+PDEF := -P$(TOPLEVEL).
+endif
+
 # 参数化模块（例如 mlkem_compress 的 D）用 PARAM_D 传进来，
-# 由 Icarus 的 -P 覆盖顶层参数，RTL 里不留仅供测试的分支。
+# 覆盖顶层参数，RTL 里不留仅供测试的分支。
 ifneq ($(PARAM_D),)
-COMPILE_ARGS += -P$(TOPLEVEL).D=$(PARAM_D)
+COMPILE_ARGS += $(PDEF)D=$(PARAM_D)
 export PARAM_D
 endif
 
 # ML-DSA 参数集切换：make PARAM_K=6 PARAM_L=5 PARAM_ETA=4 …（65），
 # 不给就是顶层默认的 ML-DSA-44。测试台从同名环境变量读参数集名字。
 ifneq ($(PARAM_K),)
-COMPILE_ARGS += -P$(TOPLEVEL).K=$(PARAM_K)
+COMPILE_ARGS += $(PDEF)K=$(PARAM_K)
 export PARAM_K
 endif
 ifneq ($(PARAM_L),)
-COMPILE_ARGS += -P$(TOPLEVEL).L=$(PARAM_L)
+COMPILE_ARGS += $(PDEF)L=$(PARAM_L)
 export PARAM_L
 endif
 ifneq ($(PARAM_ETA),)
-COMPILE_ARGS += -P$(TOPLEVEL).ETA=$(PARAM_ETA)
+COMPILE_ARGS += $(PDEF)ETA=$(PARAM_ETA)
 export PARAM_ETA
 endif
 # Sign/Verify 还要 τ、γ₁ 指数、γ₂ 模式、ω、β、c̃ 字节数
 ifneq ($(PARAM_TAU),)
-COMPILE_ARGS += -P$(TOPLEVEL).TAU=$(PARAM_TAU)
+COMPILE_ARGS += $(PDEF)TAU=$(PARAM_TAU)
 endif
 ifneq ($(PARAM_G1LOG),)
-COMPILE_ARGS += -P$(TOPLEVEL).G1LOG=$(PARAM_G1LOG)
+COMPILE_ARGS += $(PDEF)G1LOG=$(PARAM_G1LOG)
 endif
 ifneq ($(PARAM_MODE),)
-COMPILE_ARGS += -P$(TOPLEVEL).MODE=$(PARAM_MODE)
+COMPILE_ARGS += $(PDEF)MODE=$(PARAM_MODE)
 endif
 ifneq ($(PARAM_OMG),)
-COMPILE_ARGS += -P$(TOPLEVEL).OMG=$(PARAM_OMG)
+COMPILE_ARGS += $(PDEF)OMG=$(PARAM_OMG)
 endif
 ifneq ($(PARAM_BETA),)
-COMPILE_ARGS += -P$(TOPLEVEL).BETA=$(PARAM_BETA)
+COMPILE_ARGS += $(PDEF)BETA=$(PARAM_BETA)
 endif
 ifneq ($(PARAM_CTB),)
-COMPILE_ARGS += -P$(TOPLEVEL).CTB=$(PARAM_CTB)
+COMPILE_ARGS += $(PDEF)CTB=$(PARAM_CTB)
 endif
 # ⚠️ 这个 export 必须带卫兵，和上面每个 PARAM_* 一样。
 # 无卫兵的 `export MLDSA_ALG` 在变量没设时会导出一个**空串**，把测试里
@@ -146,25 +170,25 @@ endif
 # mlkem_keygen 的存储观察口只在仿真里接出来（DEBUG_BANK=1）。
 # 综合时它必须是 0 —— 那个口直连私钥系数。
 ifeq ($(TOPLEVEL),mlkem_keygen)
-COMPILE_ARGS += -Pmlkem_keygen.DEBUG_BANK=1
+COMPILE_ARGS += $(PDEF)DEBUG_BANK=1
 endif
 ifeq ($(TOPLEVEL),mlkem_encaps)
-COMPILE_ARGS += -Pmlkem_encaps.DEBUG_BANK=1
+COMPILE_ARGS += $(PDEF)DEBUG_BANK=1
 endif
 ifeq ($(TOPLEVEL),mlkem_decaps)
-COMPILE_ARGS += -Pmlkem_decaps.DEBUG_BANK=1
+COMPILE_ARGS += $(PDEF)DEBUG_BANK=1
 endif
 # 风扇的"温度陈旧就强制满速"在真硬件上要等约 0.9 秒才触发，
 # 仿真里等不起 —— 把门限压到 200 拍，测的仍是同一条逻辑。
 ifeq ($(TOPLEVEL),fan_ctrl)
-COMPILE_ARGS += -Pfan_ctrl.STALE_LIMIT=200
+COMPILE_ARGS += $(PDEF)STALE_LIMIT=200
 # 卡死检测默认要 30000 次采样（约 30 秒），仿真里等不起，压到 20 次。
-COMPILE_ARGS += -Pfan_ctrl.STUCK_LIMIT=20
+COMPILE_ARGS += $(PDEF)STUCK_LIMIT=20
 endif
 
 ifeq ($(TOPLEVEL),sysmon_drp)
 # 采样间隔默认 75000 拍（1 ms），仿真里压到 200 拍；超时压到 64。
-COMPILE_ARGS += -Psysmon_drp.PERIOD=200 -Psysmon_drp.TIMEOUT=64
+COMPILE_ARGS += $(PDEF)PERIOD=200 $(PDEF)TIMEOUT=64
 endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
