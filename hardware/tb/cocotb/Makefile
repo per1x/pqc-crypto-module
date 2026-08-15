@@ -43,6 +43,7 @@ VERILOG_SOURCES = \
   $(RTL_MLDSA)/butterfly.v \
   $(RTL_MLDSA)/ntt_core.v \
   $(RTL_MLDSA)/pack.v \
+  $(RTL_MLDSA)/sampler.v \
   $(RTL_MLDSA)/rounding.v \
   $(RTL_MLDSA)/sample.v \
   $(RTL_FAN)/fan_ctrl.v \
@@ -65,6 +66,7 @@ VERILOG_SOURCES = \
   $(RTL_BOARD)/axi4lite_xbar.v \
   $(PWD)/tb_mlkem_units.v \
   $(PWD)/tb_mldsa_units.v \
+  $(PWD)/tb_mldsa_sampler.v \
   $(PWD)/tb_trng_health.v
 
 # 参数化模块（例如 mlkem_compress 的 D）用 PARAM_D 传进来，

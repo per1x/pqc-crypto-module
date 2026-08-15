@@ -89,6 +89,8 @@ run test_mldsa_ntt   mldsa_ntt_core
 run_one test_mldsa_pack mldsa_polyt1_pack   test_polyt1_pack   "polyt1 (10 位)"
 run_one test_mldsa_pack mldsa_polyt0_pack   test_polyt0_pack   "polyt0 (13 位)"
 run_one test_mldsa_pack mldsa_polyeta_pack  test_polyeta_pack  "polyeta (η=2)"
+run_one test_mldsa_sampler tb_mldsa_sampler test_poly_uniform "RejNTTPoly (SHAKE128)"
+run_one test_mldsa_sampler tb_mldsa_sampler test_poly_eta     "RejBoundedPoly (η=2)"
 
 echo
 echo "  Keccak"
