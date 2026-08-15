@@ -134,7 +134,14 @@ endif
 ifneq ($(PARAM_CTB),)
 COMPILE_ARGS += -P$(TOPLEVEL).CTB=$(PARAM_CTB)
 endif
+# ⚠️ 这个 export 必须带卫兵，和上面每个 PARAM_* 一样。
+# 无卫兵的 `export MLDSA_ALG` 在变量没设时会导出一个**空串**，把测试里
+# os.environ.get("MLDSA_ALG", "ML-DSA-44") 的默认值顶掉 —— 于是不带任何参数
+# 直接 `make MODULE=test_mldsa_keygen` 会去找一个名字为空的参数集而失败。
+# 表现是"基线上就红"，很容易被当成别人改坏的。
+ifneq ($(MLDSA_ALG),)
 export MLDSA_ALG
+endif
 
 # mlkem_keygen 的存储观察口只在仿真里接出来（DEBUG_BANK=1）。
 # 综合时它必须是 0 —— 那个口直连私钥系数。
