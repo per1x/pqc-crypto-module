@@ -90,49 +90,28 @@ def first_d44(deterministic=True):
 
 @cocotb.test()
 async def test_sk_decode(dut):
-    """① skDecode：ρ/K/tr + s₁/s₂/t₀ 逐一对上 oracle 的 sk_decode（用 ACVP sk）"""
+    """① skDecode：ρ/K/tr 逐字节对上 oracle 的 sk_decode（用 ACVP sk）
+
+    s₁/s₂/t₀ 的系数在第 ③ 段被 NTT 就地覆盖成 ŝ₁/ŝ₂/t̂₀，done 时读到的已不是原始值 ——
+    与 KeyGen 一样，它们的采样/解包正确性由 ③ 的 NTT 用例间接验（NTT 双射：
+    ŝ == ntt(sk_decode 的 s) 成立就同时说明 skDecode 对、NTT 对）。这里只独立验
+    不被覆盖的 ρ/K/tr。
+    """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
     rec = first_d44()
     sk = bytes.fromhex(rec["sk"])
     assert len(sk) == 2560
-
     await load_buf(dut, dut.sk_wr_en, dut.sk_wr_addr, dut.sk_wr_data, sk)
+    await run_to_done(dut)
 
-    dut.start.value = 1
-    await RisingEdge(dut.clk)
-    dut.start.value = 0
-
-    for _ in range(200_000):
-        await RisingEdge(dut.clk)
-        if int(dut.done.value):
-            break
-    else:
-        raise AssertionError("skDecode 一直没完成")
-    await Timer(1, unit="ns")
-
-    rho_w, key_w, tr_w, s1_w, s2_w, t0_w = sk_decode(sk, "ML-DSA-44")
-
+    rho_w, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
     assert to_bytes(dut.rho.value, 32) == rho_w, "ρ 不一致"
     assert to_bytes(dut.key_out.value, 32) == key_w, "K 不一致"
     assert to_bytes(dut.tr_out.value, 64) == tr_w, "tr 不一致"
 
-    for j in range(4):
-        got = await read_poly(dut, 0b00000 | j)      # s₁[j]
-        assert got == s1_w[j], (
-            f"s₁[{j}] 不一致，首个不同在第 "
-            f"{next(i for i in range(256) if got[i] != s1_w[j][i])} 个系数")
-    for j in range(4):
-        got = await read_poly(dut, 0b01000 | j)      # s₂[j]  (dbg_sel[3:2]=10)
-        assert got == s2_w[j], f"s₂[{j}] 不一致"
-    for j in range(4):
-        got = await read_poly(dut, 0b01100 | j)      # t₀[j]  (dbg_sel[3:2]=11)
-        assert got == t0_w[j], (
-            f"t₀[{j}] 不一致，首个不同在第 "
-            f"{next(i for i in range(256) if got[i] != t0_w[j][i])} 个系数")
-
-    dut._log.info("① skDecode：ρ/K/tr + s₁/s₂/t₀ 全部对上 oracle 的 sk_decode")
+    dut._log.info("① skDecode：ρ/K/tr 逐字节对上 oracle（s₁/s₂/t₀ 由 ③ NTT 链间接验）")
 
 
 async def preload_all(dut, rec):
@@ -186,4 +165,42 @@ async def test_derive_mu_rhopp(dut):
     assert to_bytes(dut.rhopp.value, 64) == rhopp_w, "ρ'' 不一致"
 
     dut._log.info("② μ、ρ'' 逐字节对上 oracle（M' 封装、非空 ctx、6597B msg 都验到）")
+
+
+@cocotb.test()
+async def test_ntt_prep(dut):
+    """③ ŝ₁/ŝ₂/t̂₀ = NTT(s₁/s₂/t₀)：done 后读三个存储，对 ntt(sk_decode 出来的原始值)
+
+    验的是整条链：sk 解包 → NTT。NTT 双射，所以 ŝ 对上 ntt(oracle_s) 同时说明
+    skDecode 与 NTT 都对（① 的系数独立检查被这条覆盖，同 KeyGen 的做法）。
+    """
+    from mldsa_model import ntt as _ntt
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    rec = first_d44()
+    sk = bytes.fromhex(rec["sk"])
+    await load_buf(dut, dut.sk_wr_en, dut.sk_wr_addr, dut.sk_wr_data, sk)
+    await run_to_done(dut)
+
+    _, _, _, s1_w, s2_w, t0_w = sk_decode(sk, "ML-DSA-44")
+
+    for j in range(4):
+        got = await read_poly(dut, 0b00000 | j)         # ŝ₁[j]
+        want = _ntt(list(s1_w[j]))
+        assert got == want, (
+            f"ŝ₁[{j}] 不一致，首个不同在第 "
+            f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
+    for j in range(4):
+        got = await read_poly(dut, 0b01000 | j)         # ŝ₂[j]
+        assert got == _ntt(list(s2_w[j])), f"ŝ₂[{j}] 不一致"
+    for j in range(4):
+        got = await read_poly(dut, 0b01100 | j)         # t̂₀[j]
+        want = _ntt(list(t0_w[j]))
+        assert got == want, (
+            f"t̂₀[{j}] 不一致，首个不同在第 "
+            f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
+
+    dut._log.info("③ ŝ₁/ŝ₂/t̂₀ 全部对上 ntt(sk_decode)，整条 sk→解包→NTT 链都对")
 

@@ -90,6 +90,11 @@ module mldsa_sign (
         S_D_GAP  = 5'd6,     // 让 in_valid 落下，flush 才被采样
         S_D_FLU  = 5'd7,     // in_flush
         S_D_SQ   = 5'd8,     // 挤 64 字节 → μ 或 ρ''
+        // ③ 对 s₁/s₂/t₀ 就地 NTT
+        S_NT_LD  = 5'd9,     // store[poly] → NTT 写口
+        S_NT_GO  = 5'd10,    // nt_start
+        S_NT_ST  = 5'd11,    // 等 done 落一次再起
+        S_NT_WB  = 5'd12,    // NTT 读口 → store[poly]
         S_FIN    = 5'd31;
 
     reg [4:0] st;
@@ -131,6 +136,18 @@ module mldsa_sign (
         .clk(clk), .a_we(t0_we), .a_addr(t0_waddr), .a_din(t0_din), .a_dout(),
         .b_we(1'b0), .b_addr(t0_raddr), .b_din(32'd0), .b_dout(t0_dout));
 
+    // ---- NTT 核（③：对 s₁/s₂/t₀ 就地正变换成 ŝ₁/ŝ₂/t̂₀）----
+    reg         nt_start, nt_inv, nt_we;
+    reg  [7:0]  nt_waddr, nt_raddr;
+    reg signed [31:0] nt_wdata;
+    wire        nt_done;
+    wire signed [31:0] nt_rdata;
+    mldsa_ntt_core u_ntt (
+        .clk(clk), .rst_n(rst_n),
+        .start(nt_start), .inverse(nt_inv), .done(nt_done),
+        .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
+        .rd_addr(nt_raddr), .rd_data(nt_rdata));
+
     // 调试读口挂 b 口（done 后用，与写不重叠）
     assign dbg_coef = dbg_sel[3] ? (dbg_sel[2] ? t0_dout : s2_dout) : s1_dout;
 
@@ -170,6 +187,14 @@ module mldsa_sign (
     reg [13:0] ai;         // 吸收字节指针（μ 支最长 66+ctx+msg，≤ ~8500，14 位）
     reg        dsel;       // 0 = 正在算 μ，1 = 正在算 ρ''
 
+    // ③ NTT prep 用
+    reg [1:0]  nstore;     // 0=s₁, 1=s₂, 2=t₀
+    reg        nt_lowseen; // 「done 是电平」：start 后先见它落一次再等它起
+
+    // NTT 装载时选中的 store 数据（nstore：0=s₁,1=s₂,2=t₀）
+    wire signed [31:0] store_dout =
+        (nstore == 2'd0) ? s1_dout : (nstore == 2'd1) ? s2_dout : t0_dout;
+
     // ---- μ 支的吸收源：tr(64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ msg ----
     wire [5:0]  tr_idx      = ai[5:0];
     wire [13:0] thr_ctxend  = 14'd66 + {6'd0, ctx_len};              // ctx 占 [66, thr_ctxend)
@@ -204,6 +229,8 @@ module mldsa_sign (
             st <= S_IDLE; done <= 1'b0; cnt <= 8'd0; ph <= 1'b0;
             poly <= 3'd0; t0phase <= 1'b0; skp <= 12'd0; feed <= 1'b0;
             ai <= 14'd0; dsel <= 1'b0;
+            nstore <= 2'd0; nt_lowseen <= 1'b0;
+            nt_start <= 1'b0; nt_inv <= 1'b0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
             sha_start <= 1'b0; sha_rate <= 8'd136; sha_suffix <= 8'h1F;
@@ -213,6 +240,7 @@ module mldsa_sign (
             done <= 1'b0;
             sha_start <= 1'b0;
             sha_in_flush <= 1'b0;
+            nt_start <= 1'b0;
 
             case (st)
             S_IDLE: if (start) begin
@@ -340,11 +368,49 @@ module mldsa_sign (
                             dsel <= 1'b1;      // μ 好了，接着算 ρ''
                             st <= S_D_GO;
                         end else begin
-                            st <= S_FIN;
+                            // ρ'' 好了，进 ③ NTT prep
+                            nstore <= 2'd0; poly <= 3'd0; cnt <= 8'd0; ph <= 1'b0;
+                            st <= S_NT_LD;
                         end
                     end else begin
                         cnt <= cnt + 8'd1;
                     end
+                end
+            end
+
+            // ---------- ③ ŝ₁/ŝ₂/t̂₀ = NTT(s₁/s₂/t₀)，就地覆盖 ----------
+            // 遍历 nstore∈{s₁,s₂,t₀} × poly∈0..3，共 12 条。装载 / 写回都是两拍一个系数。
+            S_NT_LD: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_NT_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_NT_GO: begin nt_start <= 1'b1; nt_inv <= 1'b0; nt_lowseen <= 1'b0; st <= S_NT_ST; end
+            // 「done 是电平」坑（KeyGen 坑表第 7 条）：先等 done 落一次，再等它起。
+            S_NT_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_NT_WB; end
+            end
+            S_NT_WB: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (poly == 3'd3) begin
+                            poly <= 3'd0;
+                            if (nstore == 2'd2) begin
+                                st <= S_FIN;       // ③ 全做完（后续段接拒绝循环）
+                            end else begin
+                                nstore <= nstore + 2'd1; st <= S_NT_LD;
+                            end
+                        end else begin
+                            poly <= poly + 3'd1; st <= S_NT_LD;
+                        end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
             end
 
@@ -373,8 +439,31 @@ module mldsa_sign (
         eu_clr = 1'b0; eu_iv = 1'b0; eu_or = 1'b0;
         tu_clr = 1'b0; tu_iv = 1'b0; tu_or = 1'b0;
 
+        nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt;
+
         // S_UNP_I：进循环前清两个累加器
         if (st == S_UNP_I) begin eu_clr = 1'b1; tu_clr = 1'b1; end
+
+        // ③ NTT 装载：选中 store[poly] → NTT 写口
+        if (st == S_NT_LD) begin
+            case (nstore)
+                2'd0: s1_raddr = {poly[1:0], cnt};
+                2'd1: s2_raddr = {poly[1:0], cnt};
+                default: t0_raddr = {poly[1:0], cnt};
+            endcase
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = store_dout; end
+        end
+        // ③ NTT 写回：NTT 读口 → 选中 store[poly]
+        if (st == S_NT_WB) begin
+            nt_raddr = cnt;
+            if (ph) begin
+                case (nstore)
+                    2'd0: begin s1_we = 1'b1; s1_waddr = {poly[1:0], cnt}; s1_din = nt_rdata; end
+                    2'd1: begin s2_we = 1'b1; s2_waddr = {poly[1:0], cnt}; s2_din = nt_rdata; end
+                    default: begin t0_we = 1'b1; t0_waddr = {poly[1:0], cnt}; t0_din = nt_rdata; end
+                endcase
+            end
+        end
 
         if (st == S_UNP && !t0phase) begin
             if (eu_ov) begin
