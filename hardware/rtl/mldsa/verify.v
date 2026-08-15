@@ -293,6 +293,14 @@ module mldsa_verify (
     mldsa_caddq u_cad (.a(nt_rdata), .r(cad_out));
     wire [5:0] uh_a1;
     mldsa_use_hint u_uh (.mode(cfg_g2mode), .a(cad_out), .hint(h_dout), .a1_out(uh_a1));
+    // ④ 的写回链原来是一整条组合路径：
+    //   invNTT 结果(BRAM) → caddq → UseHint(含 decompose 的乘法与比较)
+    //   → w₁ → bitpack 的累加器
+    // 逻辑层级 33，是 verify（以及整个 engine）的关键路径。
+    // 与 Sign ⑨ 那条同形，解法也一样：从中间切一刀，w₁ 先进寄存器再喂打包器。
+    // 代价是 ④ 每个系数从 2 拍变 3 拍，只影响这一段。
+    reg  [5:0] w1_r;
+    reg  [1:0] uph;      // ④ 专用三拍相位
 
     // ---- w1Encode：6 位/系数打包进 w1pk ----
     reg         p6_clr, p6_iv;
@@ -300,7 +308,7 @@ module mldsa_verify (
     wire [7:0]  p6_ob;
     mldsa_bitpack u_p6 (
         .clk(clk), .rst_n(rst_n), .clr(p6_clr), .w(cfg_w1bits),
-        .in_val({14'd0, uh_a1}), .in_valid(p6_iv), .in_ready(p6_ir),
+        .in_val({14'd0, w1_r}), .in_valid(p6_iv), .in_ready(p6_ir),
         .out_byte(p6_ob), .out_valid(p6_ov));
 
     // ================= 位解包器 =================
@@ -410,7 +418,7 @@ module mldsa_verify (
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; valid <= 1'b0;
             cnt <= 8'd0; ph <= 1'b0; poly <= 4'd0; rdp <= 13'd0; feed <= 1'b0;
-            pset_r <= 2'd0; busy_r <= 1'b0;
+            pset_r <= 2'd0; busy_r <= 1'b0; uph <= 2'd0; w1_r <= 6'd0;
             mm_last <= 1'b0;
             hclr <= 11'd0; hidx <= 8'd0; hfirst <= 8'd0; hprev <= 8'd0;
             ctilde <= 512'd0; ctilde_p <= 512'd0; tr_out <= 512'd0; mu <= 512'd0;
@@ -744,10 +752,15 @@ module mldsa_verify (
             // w' = caddq(invNTT)；w'₁ = UseHint(h[vi][cnt], w')；6 位打包进 w1pk
             // 打包器只在最开头 clr 一次（每条 192 字节字节对齐，连续打包与逐条等价；
             // 换条 clr 会抹掉比最后一个系数晚出的待吐字节 —— Sign 实测坑第 3 条）。
+            // 三拍：0 摆地址 / 1 锁存 w₁ / 2 喂打包器（要等 p6_ir）
             S_UH: begin
-                if (!ph) begin
-                    ph <= 1'b1;
+                if (uph == 2'd0) begin
+                    uph <= 2'd1;
+                end else if (uph == 2'd1) begin
+                    w1_r <= uh_a1;
+                    uph  <= 2'd2;
                 end else if (p6_ir) begin
+                    uph <= 2'd0;
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
                         if (vi == KM1) begin
@@ -854,8 +867,8 @@ module mldsa_verify (
         if (st == S_UH) begin
             nt_raddr = cnt;
             h_raddr  = {vi[2:0], cnt};
-            if (!ph && cnt == 8'd0 && vi == 3'd0) p6_clr = 1'b1;   // 仅最开头清一次
-            if (ph) p6_iv = 1'b1;
+            if (uph == 2'd0 && cnt == 8'd0 && vi == 3'd0) p6_clr = 1'b1;  // 仅最开头清一次
+            if (uph == 2'd2) p6_iv = 1'b1;   // 第 3 拍才喂：w₁ 上一拍才进寄存器
         end
         // 打包器吐字节 → w1pk
         if (p6_ov) begin wp_we = 1'b1; wp_waddr = wp_ptr; wp_din = p6_ob; end
