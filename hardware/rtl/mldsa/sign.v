@@ -847,11 +847,66 @@ module mldsa_sign (
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
                         if (vj == 3'd3) begin
-                            vj <= 3'd0;
-                            st <= S_FIN;      // 本里程碑到此（⑧ 起接 r₀）
+                            vj <= 3'd0; vi <= 3'd0;
+                            st <= S_R_MUL;    // 进 ⑧ r₀
                         end else begin
                             vj <= vj + 3'd1; st <= S_Z_MUL;
                         end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑧ r₀[i]=reduce32(w0[i]−invNTT(ĉ∘ŝ₂[i]))；‖r₀‖∞ 检查 ----------
+            // r₀ 就地覆盖 w0 存储（w0 之后只在 ⑨ 用作 r₀）。
+            S_R_MUL: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_R_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_R_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_R_ST; end
+            S_R_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_R_WB; end
+            end
+            S_R_WB: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (norm_bad) reject <= 1'b1;
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vi == 3'd3) begin vi <= 3'd0; st <= S_H_MUL; end
+                        else begin vi <= vi + 3'd1; st <= S_R_MUL; end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑨ ct₀=reduce32(invNTT(ĉ∘t̂₀[i]))；‖ct₀‖∞ 检查；
+            //            hint=MakeHint(reduce32(r₀+ct₀), w₁[i])；权重累加 ----------
+            S_H_MUL: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_H_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_H_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_H_ST; end
+            S_H_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_H_WB; end
+            end
+            S_H_WB: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (norm_bad) reject <= 1'b1;               // ‖ct₀‖∞ ≥ γ₂
+                    if (hint_bit) weight <= weight + 9'd1;      // 累加 hint 权重
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vi == 3'd3) begin
+                            vi <= 3'd0;
+                            st <= S_FIN;      // 本里程碑到此（⑩ 起接拒绝判定 + sigEncode）
+                        end else begin vi <= vi + 3'd1; st <= S_H_MUL; end
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
             end
@@ -1005,6 +1060,33 @@ module mldsa_sign (
             nt_raddr = cnt;
             y_raddr  = {vj[1:0], cnt};
             if (ph) begin z_we = 1'b1; z_waddr = {vj[1:0], cnt}; z_din = comb_red; end
+        end
+
+        // ⑧ r₀：pointwise ĉ∘ŝ₂[vi] → invNTT 写口
+        if (st == S_R_MUL) begin
+            c_raddr  = cnt;
+            s2_raddr = {vi[1:0], cnt};
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = pw_mont; end
+        end
+        // ⑧ r₀ 写回：r0[vi]=reduce32(w0[vi]−cs₂)，就地覆盖 w0（read-first：读旧 w0）
+        if (st == S_R_WB) begin
+            nt_raddr = cnt;
+            w0_raddr = {vi[1:0], cnt};
+            if (ph) begin w0_we = 1'b1; w0_waddr = {vi[1:0], cnt}; w0_din = comb_red; end
+        end
+
+        // ⑨ hint：pointwise ĉ∘t̂₀[vi] → invNTT 写口
+        if (st == S_H_MUL) begin
+            c_raddr  = cnt;
+            t0_raddr = {vi[1:0], cnt};
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = pw_mont; end
+        end
+        // ⑨ hint 写回：ct0=reduce32(invNTT)；a0=reduce32(r0[vi]+ct0)；hint=MakeHint(a0,w1[vi])
+        if (st == S_H_WB) begin
+            nt_raddr = cnt;
+            w0_raddr = {vi[1:0], cnt};   // r0（⑧ 覆盖进 w0）
+            w1_raddr = {vi[1:0], cnt};
+            if (ph) begin hn_we = 1'b1; hn_waddr = {vi[1:0], cnt}; hn_din = hint_bit; end
         end
 
         // ③/⑤a NTT 装载：选中 store[poly] → NTT 写口（nstore：0=s₁,1=s₂,2=t₀,3=y）

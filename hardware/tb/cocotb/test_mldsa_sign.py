@@ -285,19 +285,16 @@ async def test_w_decompose(dut):
         acc = _intt([_r32(x) for x in acc])
         w = [_cad(x) for x in acc]
         pair = [_dec(x, gamma2) for x in w]
-        w0_want = [p[0] for p in pair]
         w1_want = [p[1] for p in pair]
 
-        got_w0 = await read_poly(dut, 0b10100 | i)    # [4:2]=101 → w0[i]
-        assert got_w0 == w0_want, (
-            f"w0[{i}] 不一致，首个不同在第 "
-            f"{next(n for n in range(256) if got_w0[n] != w0_want[n])} 个系数")
-        got_w1 = await read_poly(dut, 0b11000 | i)    # [4:2]=110 → w1[i]
+        # w0 在 ⑧ 被就地覆盖成 r₀，done 时读到的不是 w0；w0 的正确性由 test_r0_hint
+        # 的 r₀=reduce32(w0−cs₂) 间接验（r₀ 对 ⇒ w0 对）。这里只验不被覆盖的 w1。
+        got_w1 = await read_poly(dut, 0b11000 | i)    # [5:2]=0110 → w1[i]
         assert got_w1 == w1_want, (
             f"w1[{i}] 不一致，首个不同在第 "
             f"{next(n for n in range(256) if got_w1[n] != w1_want[n])} 个系数")
 
-    dut._log.info("⑤ w0/w1[0..3] 对上 oracle κ=0 轮（ExpandA+MAC+invNTT+caddq+decompose 全链）")
+    dut._log.info("⑤ w1[0..3] 对上 oracle κ=0 轮（ExpandA+MAC+invNTT+caddq+decompose；w0 由 ⑧ r₀ 间接验）")
 
 
 def oracle_w1_kappa0(rec):
@@ -447,4 +444,41 @@ async def test_z_norm(dut):
     assert bool(rej) == o["z_bad"], f"z-norm 拒绝标志不一致：RTL={rej} oracle={o['z_bad']}"
 
     dut._log.info(f"⑦ z[0..3] 对上 oracle κ=0 轮；‖z‖∞ 拒绝标志={bool(rej)}（=oracle）")
+
+
+@cocotb.test()
+async def test_r0_hint(dut):
+    """⑧ r₀=w0−c·s₂ 及 ‖r₀‖∞ 检查、⑨ ct₀/MakeHint/权重（κ=0 轮），对上 oracle"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    rec = first_d44()
+    await preload_all(dut, rec)
+    await run_to_done(dut)
+
+    o = oracle_round0(rec)
+
+    for i in range(4):
+        got = await read_poly(dut, (5 << 2) | i)      # 组 5 → r₀（就地覆盖 w0）
+        assert got == o["r0"][i], (
+            f"r₀[{i}] 不一致，首个不同在第 "
+            f"{next(n for n in range(256) if got[n] != o['r0'][i][n])} 个系数")
+
+    for i in range(4):
+        got = await read_poly(dut, (9 << 2) | i)      # 组 9 → hint[i]
+        want = o["hint"][i]
+        assert got == want, (
+            f"hint[{i}] 不一致，首个不同在第 "
+            f"{next(n for n in range(256) if got[n] != want[n])} 位")
+
+    w = await read_flag(dut, 11)
+    assert w == o["weight"], f"hint 权重不一致：RTL={w} oracle={o['weight']}"
+
+    # done 时 reject = z_bad | r0_bad | ct0_bad（权重>ω 的判定留到 ⑩）
+    rej = await read_flag(dut, 10)
+    exp = o["z_bad"] or o["r0_bad"] or o["ct0_bad"]
+    assert bool(rej) == exp, f"拒绝标志不一致：RTL={rej} oracle(z|r0|ct0)={exp}"
+
+    dut._log.info(f"⑧⑨ r₀[0..3]/hint[0..3]/权重={o['weight']} 全对上 oracle κ=0 轮；"
+                  f"reject={bool(rej)}")
 
