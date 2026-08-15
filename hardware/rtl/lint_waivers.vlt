@@ -67,6 +67,8 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/axi4lite_regs.v" -match "*
 // 逐个从设备、逐个信号列，新增一个从设备不会被这几条顺带遮住。
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v"     -match "*'f_araddr'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v"     -match "*'wr_addr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mldsa_axi.v"     -match "*'f_araddr'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mldsa_axi.v"     -match "*'wr_addr'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/key_vault_axi.v" -match "*'f_araddr'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/key_vault_axi.v" -match "*'wr_addr'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/sym_axi.v"       -match "*'f_araddr'*"

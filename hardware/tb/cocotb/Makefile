@@ -67,6 +67,7 @@ VERILOG_SOURCES = \
   $(RTL_BUS)/key_vault_axi.v \
   $(RTL_BUS)/pqc_accel_axi.v \
   $(RTL_BUS)/mlkem_axi.v \
+  $(RTL_BUS)/mldsa_axi.v \
   $(RTL_BUS)/sym_axi.v \
   $(RTL_BUS)/sym_vault_top.v \
   $(RTL_BOARD)/axi4lite_xbar.v \
@@ -77,6 +78,14 @@ VERILOG_SOURCES = \
   $(PWD)/tb_mldsa_sign.v \
   $(PWD)/tb_mldsa_verify.v \
   $(PWD)/tb_trng_health.v
+
+# ML-DSA 的共享引擎（mldsa_engine）还在另一条线上做。mldsa_axi 这条用例先用
+# 一个行为级替身顶着 —— 它按固定延迟出假数据，验的是 AXI 那一层，不是算法。
+# 只在这条用例里编进去：真 engine 落地之后这里换成 $(RTL_MLDSA)/mldsa_engine.v，
+# 用例一条都不用改（用例只经寄存器说话）。
+ifeq ($(TOPLEVEL),mldsa_axi)
+VERILOG_SOURCES += $(PWD)/stub_mldsa_engine.v
+endif
 
 # 参数化模块（例如 mlkem_compress 的 D）用 PARAM_D 传进来，
 # 由 Icarus 的 -P 覆盖顶层参数，RTL 里不留仅供测试的分支。

@@ -33,6 +33,13 @@ RTL_FILES=$(find "$ROOT/hardware/rtl" "$ROOT/hardware/platform/fan_ctrl" -name '
 # 文件一起看的，一个缺失模块就能让整仓 lint 全红，等于没有 lint。
 # 桩只进 lint，不进 impl_bitstream.tcl，理由见文件头。
 STUBS="$ROOT/hardware/tb/lint/vendor_stubs.v"
+# ML-DSA 的共享引擎还在另一条线上做。它没落地之前，mldsa_axi 例化的
+# mldsa_engine 是个缺失模块 —— 而缺一个模块就会让**整仓 lint 全红**
+# （理由同上：Verilator 把命令行上所有文件一起看）。所以没落地时补一个
+# 只有端口表的空壳。真 engine 一落进 hardware/rtl/mldsa/，这个 if 自动失效，
+# 不需要谁记得回来删。
+[ -f "$ROOT/hardware/rtl/mldsa/mldsa_engine.v" ] \
+  || STUBS="$STUBS $ROOT/hardware/tb/lint/mldsa_engine.v"
 WAIVERS="$ROOT/hardware/rtl/lint_waivers.vlt"
 
 command -v verilator >/dev/null 2>&1 || { echo "SKIP: 没装 verilator（brew install verilator）"; exit 0; }
