@@ -92,6 +92,12 @@ void slot_wipe_key_material(slot_t *s)
 	pqc_secure_zero(s->seed, sizeof(s->seed));
 	s->seed_len = 0;
 	s->has_seed = 0;
+	/* 硬件槽的句柄也要跟着作废。**这里只作废本进程的引用** ——
+	 * PL 金库里那份 dk 由硬件的 zeroize 或下一次 PL 重配清掉，
+	 * 不是这个函数能做到的事。留着一个指向已销毁对象的句柄更危险：
+	 * 槽位复用之后它会指向别人的私钥。 */
+	s->hw_handle = 0;
+	s->hw_resident = 0;
 }
 
 void slot_wipe_pins(slot_t *s)
@@ -635,6 +641,53 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 	if (st != HSM_OK) {
 		return st;
 	}
+	/* ---- 私钥留在硬件里的那条路 ----------------------------------------
+	 * 条件有三个，缺一不可：
+	 *   · 后端两个句柄操作都在（pqc_backend_has_hw_keys）；
+	 *   · 是"生成"而不是"由种子装载"—— 种子装载要求私钥可复现，
+	 *     而硬件生成的 d/z 取自 PL 自己的 TRNG，复现不了；
+	 *   · 没要求种子存储策略 —— 那条策略的前提就是存着种子。
+	 * 任何一条不满足就照旧走软件路径，**不猜、不降级到"假装在硬件里"**。 */
+	if (!seed && !(policy & SLOT_POLICY_SEED_STORAGE) && pqc_backend_has_hw_keys()) {
+		uint8_t *hpk = pqc_secure_alloc(info->pk_len);
+		uint32_t hh = 0;
+
+		if (!hpk) {
+			return HSM_ERR_NOMEM;
+		}
+		if (pqc_keypair_hw(alg, hpk, &hh) == PQC_OK) {
+			slot_wipe_key_material(s);
+			s->pk = hpk;
+			s->pk_len = info->pk_len;
+			s->sk = NULL;
+			s->sk_len = 0;
+			s->has_seed = 0;
+			s->hw_handle = hh;
+			s->hw_resident = 1;
+
+			s->meta.alg          = alg;
+			s->meta.usage        = usage;
+			s->meta.policy       = policy;
+			s->meta.use_count    = 0;
+			s->meta.last_used_at = 0;
+			{
+				hsm_status_t rs = slot_reseal(s);
+
+				if (rs != HSM_OK) {
+					return rs;
+				}
+			}
+			if (out) {
+				*out = make_handle(s);
+			}
+			return HSM_OK;
+		}
+		/* 硬件路径失败：**不静默退回软件**。上层要的是"私钥在硬件里"，
+		 * 悄悄给一把软件密钥是把承诺变成谎话。 */
+		pqc_secure_free(hpk, info->pk_len);
+		return HSM_ERR_CRYPTO;
+	}
+
 	uint8_t *pk = pqc_secure_alloc(info->pk_len);
 	uint8_t *sk = pqc_secure_alloc(info->sk_len);
 	if (!pk || !sk) {
@@ -817,6 +870,16 @@ static hsm_status_t borrow_secret(slot_t *s, const uint8_t **sk_out,
 {
 	*tmp = NULL;
 	*tmp_len = 0;
+	/* 私钥在硬件里：软件侧根本没有可借的东西，这不是错误状态。
+	 * 回 NULL 让调用方走句柄路径 —— begin_use 其余的活（句柄校验、
+	 * 用途检查、状态机）与私钥在哪无关，仍然要做，所以这里不能提前返回失败。
+	 *
+	 * 少了这一条的症状是"生成成功、公钥拿得到、一解封装就 BAD_STATE"，
+	 * 看起来像密钥坏了，其实是借私钥这一步不认识"没有私钥"这种正常情况。 */
+	if (s->hw_resident) {
+		*sk_out = NULL;
+		return HSM_OK;
+	}
 	if (s->sk) {
 		*sk_out = s->sk;
 		return HSM_OK;
@@ -953,6 +1016,15 @@ hsm_status_t hsm_object_decaps(hsm_token_t *tok, hsm_session_t sess, hsm_handle_
 		hsm_status_t op;
 		if (!ct || !ss || !ss_len || ct_len != info->ct_len || cap < info->ss_len) {
 			op = HSM_ERR_BAD_ARG;
+		} else if (s->hw_resident) {
+			/* 私钥在 PL 的片内金库里：只把句柄和密文交下去。
+			 * 上面 begin_use 借到的 sk 在这条路上恒为 NULL —— 借的动作仍然要做，
+			 * 因为它同时管着句柄校验、用途检查和状态机，那几件事与私钥在哪无关。 */
+			op = (pqc_decaps_hw(s->meta.alg, s->hw_handle, ct, ss) == PQC_OK)
+			     ? HSM_OK : HSM_ERR_CRYPTO;
+			if (op == HSM_OK) {
+				*ss_len = info->ss_len;
+			}
 		} else {
 			op = (pqc_decaps(s->meta.alg, sk, ct, ss) == PQC_OK) ? HSM_OK : HSM_ERR_CRYPTO;
 			if (op == HSM_OK) {

@@ -40,6 +40,17 @@ typedef struct {
 	uint8_t user_salt[PIN_SALT_LEN], user_verifier[VERIFIER_LEN];
 	int     has_so_pin, has_user_pin;
 
+	/* ---- 私钥留在硬件里的槽 ----------------------------------------------
+	 * hw_resident 为真时 sk 恒为 NULL，也没有种子：私钥在 PL 的片内金库里，
+	 * 本进程只有一个句柄（现在就是金库槽号，但这里不该依赖那件事）。
+	 *
+	 * **故意不放进 slot_meta_t**：那会改元数据的 wire 格式和 KMAC 标签。
+	 * 而且不落盘正是对的 —— 金库是 BRAM，PL 一重配就清空，
+	 * 硬件槽的寿命本来就绑在这一次 PL 配置上。落盘时它按 kind=0
+	 * （没有密钥材料）写出去，重新载入就是个空槽，与事实一致。 */
+	uint32_t hw_handle;
+	int      hw_resident;
+
 	uint8_t *pk;   size_t pk_len;
 	uint8_t *sk;   size_t sk_len;     /* SEED_STORAGE 策略下恒为 NULL */
 	uint8_t  seed[64]; size_t seed_len; int has_seed;
