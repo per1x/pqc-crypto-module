@@ -29,12 +29,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from mldsa_model import (  # noqa: E402
-    D, GAMMA2_32, GAMMA2_88, N, PARAMS, Q, caddq, decompose, invntt_tomont,
-    make_hint, montgomery_reduce, ntt, power2round, reduce32,
+    D, GAMMA2_32, GAMMA2_88, N, PARAMS, Q, caddq, chknorm, decompose,
+    invntt_tomont, make_hint, montgomery_reduce, ntt, power2round, reduce32,
     rej_eta_coeff, rej_uniform_coeff, use_hint,
 )
 
 KAT = Path(__file__).resolve().parents[2] / "vectors" / "mldsa_keygen.kat"
+SIGGEN_KAT = Path(__file__).resolve().parents[2] / "vectors" / "mldsa_siggen.kat"
+SIGVER_KAT = Path(__file__).resolve().parents[2] / "vectors" / "mldsa_sigver.kat"
 
 
 # ---------------------------------------------------------------- 预言机 A
@@ -313,6 +315,493 @@ def oracle_c() -> bool:
     return ok
 
 
+# ------------------------------------------------ 预言机 D / E：Sign / Verify
+#
+# 参数常量：tau/gamma1/omega/beta/lambda 在 mldsa_model 的 PARAMS 里没有，
+# 按 FIPS 204 Table 1 补齐（beta = tau·eta；c_tilde 长度 = lambda/4 字节）。
+SIG_PARAMS = {
+    #                tau  gamma1   omega  beta  lambda  ctilde
+    "ML-DSA-44": {"tau": 39, "gamma1": 1 << 17, "omega": 80, "beta": 78,
+                  "lambda": 128, "ctilde": 32},
+    "ML-DSA-65": {"tau": 49, "gamma1": 1 << 19, "omega": 55, "beta": 196,
+                  "lambda": 192, "ctilde": 48},
+    "ML-DSA-87": {"tau": 60, "gamma1": 1 << 19, "omega": 75, "beta": 120,
+                  "lambda": 256, "ctilde": 64},
+}
+
+POLYETA_BYTES = {2: 96, 4: 128}   # s1/s2 每条多项式的打包字节数
+POLYT0_BYTES = 416
+POLYT1_BYTES = 320
+
+
+# ---- 解包（verify / skDecode 用）--------------------------------------------
+
+def polyt1_unpack(buf: bytes) -> list[int]:
+    """t₁ 每系数 10 位的逆过程"""
+    r = [0] * N
+    for i in range(N // 4):
+        o = 5 * i
+        r[4 * i + 0] = (buf[o + 0] | (buf[o + 1] << 8)) & 0x3FF
+        r[4 * i + 1] = ((buf[o + 1] >> 2) | (buf[o + 2] << 6)) & 0x3FF
+        r[4 * i + 2] = ((buf[o + 2] >> 4) | (buf[o + 3] << 4)) & 0x3FF
+        r[4 * i + 3] = ((buf[o + 3] >> 6) | (buf[o + 4] << 2)) & 0x3FF
+    return r
+
+
+def polyt0_unpack(buf: bytes) -> list[int]:
+    """t₀ 每系数 13 位的逆过程；还原 2^(D−1) − a"""
+    r = [0] * N
+    for i in range(N // 8):
+        o = 13 * i
+        r[8 * i + 0] = (buf[o + 0] | (buf[o + 1] << 8)) & 0x1FFF
+        r[8 * i + 1] = ((buf[o + 1] >> 5) | (buf[o + 2] << 3)
+                        | (buf[o + 3] << 11)) & 0x1FFF
+        r[8 * i + 2] = ((buf[o + 3] >> 2) | (buf[o + 4] << 6)) & 0x1FFF
+        r[8 * i + 3] = ((buf[o + 4] >> 7) | (buf[o + 5] << 1)
+                        | (buf[o + 6] << 9)) & 0x1FFF
+        r[8 * i + 4] = ((buf[o + 6] >> 4) | (buf[o + 7] << 4)
+                        | (buf[o + 8] << 12)) & 0x1FFF
+        r[8 * i + 5] = ((buf[o + 8] >> 1) | (buf[o + 9] << 7)) & 0x1FFF
+        r[8 * i + 6] = ((buf[o + 9] >> 6) | (buf[o + 10] << 2)
+                        | (buf[o + 11] << 10)) & 0x1FFF
+        r[8 * i + 7] = ((buf[o + 11] >> 3) | (buf[o + 12] << 5)) & 0x1FFF
+    return [(1 << (D - 1)) - x for x in r]
+
+
+def polyeta_unpack(buf: bytes, eta: int) -> list[int]:
+    """s₁/s₂ 的解包，与 polyeta_pack 互逆"""
+    r = [0] * N
+    if eta == 2:
+        for i in range(N // 8):
+            o = 3 * i
+            r[8 * i + 0] = (buf[o + 0]) & 7
+            r[8 * i + 1] = (buf[o + 0] >> 3) & 7
+            r[8 * i + 2] = ((buf[o + 0] >> 6) | (buf[o + 1] << 2)) & 7
+            r[8 * i + 3] = (buf[o + 1] >> 1) & 7
+            r[8 * i + 4] = (buf[o + 1] >> 4) & 7
+            r[8 * i + 5] = ((buf[o + 1] >> 7) | (buf[o + 2] << 1)) & 7
+            r[8 * i + 6] = (buf[o + 2] >> 2) & 7
+            r[8 * i + 7] = (buf[o + 2] >> 5) & 7
+        return [eta - x for x in r]
+    for i in range(N // 2):
+        r[2 * i + 0] = buf[i] & 0x0F
+        r[2 * i + 1] = buf[i] >> 4
+    return [eta - x for x in r]
+
+
+def polyz_unpack(buf: bytes, gamma1: int) -> list[int]:
+    """ExpandMask / z 的位解包：γ₁=2¹⁷ 走 18 位，γ₁=2¹⁹ 走 20 位"""
+    r = [0] * N
+    if gamma1 == (1 << 17):
+        for i in range(N // 4):
+            o = 9 * i
+            r[4 * i + 0] = (buf[o + 0] | (buf[o + 1] << 8)
+                            | (buf[o + 2] << 16)) & 0x3FFFF
+            r[4 * i + 1] = ((buf[o + 2] >> 2) | (buf[o + 3] << 6)
+                            | (buf[o + 4] << 14)) & 0x3FFFF
+            r[4 * i + 2] = ((buf[o + 4] >> 4) | (buf[o + 5] << 4)
+                            | (buf[o + 6] << 12)) & 0x3FFFF
+            r[4 * i + 3] = ((buf[o + 6] >> 6) | (buf[o + 7] << 2)
+                            | (buf[o + 8] << 10)) & 0x3FFFF
+    else:
+        for i in range(N // 2):
+            o = 5 * i
+            r[2 * i + 0] = (buf[o + 0] | (buf[o + 1] << 8)
+                            | (buf[o + 2] << 16)) & 0xFFFFF
+            r[2 * i + 1] = ((buf[o + 2] >> 4) | (buf[o + 3] << 4)
+                            | (buf[o + 4] << 12)) & 0xFFFFF
+    return [gamma1 - x for x in r]
+
+
+def hint_unpack(buf: bytes, k: int, omega: int) -> list[list[int]] | None:
+    """HintBitPack 的逆：ω+k 字节 → k 条 0/1 提示多项式；结构不合法返回 None"""
+    h = [[0] * N for _ in range(k)]
+    index = 0
+    for i in range(k):
+        end = buf[omega + i]
+        if end < index or end > omega:
+            return None
+        first = index
+        while index < end:
+            if index > first and buf[index - 1] >= buf[index]:
+                return None   # 同一多项式内下标必须严格递增
+            h[i][buf[index]] = 1
+            index += 1
+    for j in range(index, omega):
+        if buf[j] != 0:
+            return None       # 填充区必须全零
+    return h
+
+
+# ---- 打包（sign / sigEncode 用）--------------------------------------------
+
+def polyz_pack(p: list[int], gamma1: int) -> bytes:
+    """z 的打包：每系数存 γ₁ − z，18 位 (γ₁=2¹⁷) 或 20 位 (γ₁=2¹⁹)"""
+    if gamma1 == (1 << 17):
+        out = bytearray(N // 4 * 9)
+        for i in range(N // 4):
+            t0 = gamma1 - p[4 * i + 0]
+            t1 = gamma1 - p[4 * i + 1]
+            t2 = gamma1 - p[4 * i + 2]
+            t3 = gamma1 - p[4 * i + 3]
+            o = 9 * i
+            out[o + 0] = t0 & 0xFF
+            out[o + 1] = (t0 >> 8) & 0xFF
+            out[o + 2] = ((t0 >> 16) | (t1 << 2)) & 0xFF
+            out[o + 3] = (t1 >> 6) & 0xFF
+            out[o + 4] = ((t1 >> 14) | (t2 << 4)) & 0xFF
+            out[o + 5] = (t2 >> 4) & 0xFF
+            out[o + 6] = ((t2 >> 12) | (t3 << 6)) & 0xFF
+            out[o + 7] = (t3 >> 2) & 0xFF
+            out[o + 8] = (t3 >> 10) & 0xFF
+        return bytes(out)
+    out = bytearray(N // 2 * 5)
+    for i in range(N // 2):
+        t0 = gamma1 - p[2 * i + 0]
+        t1 = gamma1 - p[2 * i + 1]
+        o = 5 * i
+        out[o + 0] = t0 & 0xFF
+        out[o + 1] = (t0 >> 8) & 0xFF
+        out[o + 2] = ((t0 >> 16) | (t1 << 4)) & 0xFF
+        out[o + 3] = (t1 >> 4) & 0xFF
+        out[o + 4] = (t1 >> 12) & 0xFF
+    return bytes(out)
+
+
+def polyw1_pack(p: list[int], gamma2: int) -> bytes:
+    """w₁ 的打包：γ₂=(q−1)/88 → 6 位/系数，γ₂=(q−1)/32 → 4 位/系数"""
+    if gamma2 == GAMMA2_88:
+        out = bytearray(N // 4 * 3)
+        for i in range(N // 4):
+            o = 3 * i
+            out[o + 0] = (p[4 * i + 0] | (p[4 * i + 1] << 6)) & 0xFF
+            out[o + 1] = ((p[4 * i + 1] >> 2) | (p[4 * i + 2] << 4)) & 0xFF
+            out[o + 2] = ((p[4 * i + 2] >> 4) | (p[4 * i + 3] << 2)) & 0xFF
+        return bytes(out)
+    out = bytearray(N // 2)
+    for i in range(N // 2):
+        out[i] = (p[2 * i + 0] | (p[2 * i + 1] << 4)) & 0xFF
+    return bytes(out)
+
+
+def hint_pack(h: list[list[int]], omega: int) -> bytes:
+    """HintBitPack：每条多项式里 1 的下标顺次写入，末尾 k 字节存累计计数"""
+    k = len(h)
+    out = bytearray(omega + k)
+    index = 0
+    for i in range(k):
+        for j in range(N):
+            if h[i][j] != 0:
+                out[index] = j
+                index += 1
+        out[omega + i] = index
+    return bytes(out)
+
+
+# ---- 采样 -------------------------------------------------------------------
+
+def sample_in_ball(seed: bytes, tau: int) -> list[int]:
+    """SampleInBall：SHAKE256(seed) 流里取 τ 个 ±1，其余为 0"""
+    c = [0] * N
+    xof = hashlib.shake_256(seed)
+    buf = xof.digest(136)
+    signs = int.from_bytes(buf[:8], "little")
+    pos = 8
+    for i in range(N - tau, N):
+        while True:
+            if pos >= len(buf):
+                buf = xof.digest(len(buf) + 136)   # SHAKE 是流，digest 取前缀
+            b = buf[pos]
+            pos += 1
+            if b <= i:
+                break
+        c[i] = c[b]
+        c[b] = 1 - 2 * (signs & 1)
+        signs >>= 1
+    return c
+
+
+def expand_mask(rho_pp: bytes, kappa: int, gamma1: int, ell: int) -> list[list[int]]:
+    """ExpandMask：l 条系数落在 (−γ₁, γ₁] 的 mask 多项式 y"""
+    c_bits = 1 + (gamma1 - 1).bit_length()      # 18 (γ₁=2¹⁷) 或 20 (γ₁=2¹⁹)
+    out = []
+    for r in range(ell):
+        nonce = kappa + r
+        buf = hashlib.shake_256(
+            rho_pp + bytes([nonce & 0xFF, nonce >> 8])).digest(32 * c_bits)
+        out.append(polyz_unpack(buf, gamma1))
+    return out
+
+
+# ---- NTT 域的辅助 -----------------------------------------------------------
+
+def _pointwise(a: list[int], b: list[int]) -> list[int]:
+    return [montgomery_reduce(a[i] * b[i]) for i in range(N)]
+
+
+def _mprime(context: bytes, msg: bytes) -> bytes:
+    """external 接口的 M' 封装（FIPS 204 Algorithm 2/3 的 pure 分支）"""
+    return bytes([0, len(context)]) + context + msg
+
+
+# ---- 密钥拆包 ---------------------------------------------------------------
+
+def sk_decode(sk: bytes, name: str):
+    """skDecode：rho ‖ K ‖ tr ‖ s1 ‖ s2 ‖ t0"""
+    par = PARAMS[name]
+    k, ell, eta = par["k"], par["l"], par["eta"]
+    eb = POLYETA_BYTES[eta]
+    off = 0
+    rho = sk[off:off + 32]; off += 32
+    key = sk[off:off + 32]; off += 32
+    tr = sk[off:off + 64]; off += 64
+    s1 = []
+    for _ in range(ell):
+        s1.append(polyeta_unpack(sk[off:off + eb], eta)); off += eb
+    s2 = []
+    for _ in range(k):
+        s2.append(polyeta_unpack(sk[off:off + eb], eta)); off += eb
+    t0 = []
+    for _ in range(k):
+        t0.append(polyt0_unpack(sk[off:off + POLYT0_BYTES])); off += POLYT0_BYTES
+    return rho, key, tr, s1, s2, t0
+
+
+def pk_decode(pk: bytes, name: str):
+    """pkDecode：rho ‖ t1"""
+    k = PARAMS[name]["k"]
+    rho = pk[:32]
+    off = 32
+    t1 = []
+    for _ in range(k):
+        t1.append(polyt1_unpack(pk[off:off + POLYT1_BYTES])); off += POLYT1_BYTES
+    return rho, t1
+
+
+# ---- Sign / Verify ----------------------------------------------------------
+
+def mldsa_sign(sk: bytes, msg: bytes, context: bytes, rnd: bytes,
+               name: str) -> bytes:
+    """FIPS 204 ML-DSA.Sign（external + pure）：M' 封装后走 Sign_internal"""
+    par = PARAMS[name]
+    sp = SIG_PARAMS[name]
+    k, ell, eta, gamma2 = par["k"], par["l"], par["eta"], par["gamma2"]
+    tau, gamma1, omega, beta = sp["tau"], sp["gamma1"], sp["omega"], sp["beta"]
+    ctilde_len = sp["ctilde"]
+
+    rho, key, tr, s1, s2, t0 = sk_decode(sk, name)
+
+    a_hat = [[rej_uniform_poly(rho, (i << 8) + j) for j in range(ell)]
+             for i in range(k)]
+    s1_hat = [ntt(list(p)) for p in s1]
+    s2_hat = [ntt(list(p)) for p in s2]
+    t0_hat = [ntt(list(p)) for p in t0]
+
+    m_prime = _mprime(context, msg)
+    mu = h_shake256(tr + m_prime, 64)
+    rho_pp = h_shake256(key + rnd + mu, 64)
+
+    kappa = 0
+    while True:
+        y = expand_mask(rho_pp, kappa, gamma1, ell)
+        kappa += ell
+        y_hat = [ntt(list(p)) for p in y]
+
+        # w = A·y，逐系数 caddq 后分解出 (w0, w1)
+        w0, w1 = [], []
+        for i in range(k):
+            acc = _pointwise(a_hat[i][0], y_hat[0])
+            for j in range(1, ell):
+                pw = _pointwise(a_hat[i][j], y_hat[j])
+                acc = [acc[n] + pw[n] for n in range(N)]
+            acc = invntt_tomont([reduce32(x) for x in acc])
+            acc = [caddq(x) for x in acc]
+            pair = [decompose(x, gamma2) for x in acc]
+            w0.append([p[0] for p in pair])
+            w1.append([p[1] for p in pair])
+
+        c_tilde = h_shake256(
+            mu + b"".join(polyw1_pack(w1[i], gamma2) for i in range(k)),
+            ctilde_len)
+        c = sample_in_ball(c_tilde, tau)
+        c_hat = ntt(list(c))
+
+        # z = y + c·s1
+        z = []
+        for j in range(ell):
+            cs1 = invntt_tomont(_pointwise(c_hat, s1_hat[j]))
+            z.append([reduce32(y[j][n] + cs1[n]) for n in range(N)])
+        if any(chknorm(x, gamma1 - beta) for p in z for x in p):
+            continue
+
+        # r0 = LowBits(w − c·s2)
+        r0 = []
+        bad = False
+        for i in range(k):
+            cs2 = invntt_tomont(_pointwise(c_hat, s2_hat[i]))
+            r0.append([reduce32(w0[i][n] - cs2[n]) for n in range(N)])
+        if any(chknorm(x, gamma2 - beta) for p in r0 for x in p):
+            continue
+
+        # 提示：c·t0，范数 <γ₂ 且权重 ≤ω
+        h = []
+        ct0_ok = True
+        weight = 0
+        for i in range(k):
+            ct0 = invntt_tomont(_pointwise(c_hat, t0_hat[i]))
+            ct0 = [reduce32(x) for x in ct0]
+            if any(chknorm(x, gamma2) for x in ct0):
+                ct0_ok = False
+                break
+            a0 = [reduce32(r0[i][n] + ct0[n]) for n in range(N)]
+            hi = [make_hint(a0[n], w1[i][n], gamma2) for n in range(N)]
+            weight += sum(hi)
+            h.append(hi)
+        if not ct0_ok or weight > omega:
+            continue
+
+        sig = (c_tilde
+               + b"".join(polyz_pack(z[j], gamma1) for j in range(ell))
+               + hint_pack(h, omega))
+        return sig
+
+
+def mldsa_verify(pk: bytes, msg: bytes, context: bytes, sig: bytes,
+                 name: str) -> bool:
+    """FIPS 204 ML-DSA.Verify（external + pure）"""
+    par = PARAMS[name]
+    sp = SIG_PARAMS[name]
+    k, ell, gamma2 = par["k"], par["l"], par["gamma2"]
+    tau, gamma1, omega, beta = sp["tau"], sp["gamma1"], sp["omega"], sp["beta"]
+    ctilde_len = sp["ctilde"]
+
+    zbytes = (N // 4 * 9) if gamma1 == (1 << 17) else (N // 2 * 5)
+    exp_len = ctilde_len + ell * zbytes + omega + k
+    if len(sig) != exp_len:
+        return False
+
+    off = 0
+    c_tilde = sig[off:off + ctilde_len]; off += ctilde_len
+    z = []
+    for _ in range(ell):
+        z.append(polyz_unpack(sig[off:off + zbytes], gamma1)); off += zbytes
+    h = hint_unpack(sig[off:off + omega + k], k, omega)
+    if h is None:
+        return False
+
+    if any(chknorm(x, gamma1 - beta) for p in z for x in p):
+        return False
+
+    rho, t1 = pk_decode(pk, name)
+    a_hat = [[rej_uniform_poly(rho, (i << 8) + j) for j in range(ell)]
+             for i in range(k)]
+
+    tr = h_shake256(pk, 64)
+    m_prime = _mprime(context, msg)
+    mu = h_shake256(tr + m_prime, 64)
+
+    c = sample_in_ball(c_tilde, tau)
+    c_hat = ntt(list(c))
+    z_hat = [ntt(list(p)) for p in z]
+    t1_hat = [ntt([coeff << D for coeff in t1[i]]) for i in range(k)]
+
+    w1p = []
+    for i in range(k):
+        acc = _pointwise(a_hat[i][0], z_hat[0])
+        for j in range(1, ell):
+            acc = [acc[n] + _pointwise(a_hat[i][j], z_hat[j])[n]
+                   for n in range(N)]
+        ct1 = _pointwise(c_hat, t1_hat[i])
+        acc = [reduce32(acc[n] - ct1[n]) for n in range(N)]
+        acc = [caddq(x) for x in invntt_tomont(acc)]
+        w1p.append([use_hint(acc[n], h[i][n], gamma2) for n in range(N)])
+
+    c_tilde_p = h_shake256(
+        mu + b"".join(polyw1_pack(w1p[i], gamma2) for i in range(k)),
+        ctilde_len)
+    return c_tilde_p == c_tilde
+
+
+# ---- KAT 装载与两个新预言机 -------------------------------------------------
+
+def _load_records(path: Path):
+    if not path.exists():
+        return None
+    recs = []
+    cur: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("#"):
+            continue
+        if not line:
+            if cur:
+                recs.append(cur)
+                cur = {}
+            continue
+        key, _, val = line.partition(" = ")
+        cur[key.strip()] = val.strip()
+    if cur:
+        recs.append(cur)
+    return [r for r in recs if r.get("alg") in PARAMS]
+
+
+def _hx(s: str) -> bytes:
+    return bytes.fromhex(s) if s else b""
+
+
+def oracle_d() -> bool:
+    """siggen：逐字节重现 ACVP 期望签名"""
+    recs = _load_records(SIGGEN_KAT)
+    if recs is None:
+        print("  ⚠ 预言机 D 跳过：找不到 vectors/mldsa_siggen.kat")
+        return True
+    ok = True
+    per: dict[str, int] = {}
+    for r in recs:
+        alg = r["alg"]
+        sig = mldsa_sign(_hx(r["sk"]), _hx(r["msg"]), _hx(r.get("context", "")),
+                         _hx(r["rnd"]), alg)
+        want = _hx(r["sig"])
+        if sig != want:
+            n = next((i for i in range(min(len(sig), len(want)))
+                      if sig[i] != want[i]), min(len(sig), len(want)))
+            print(f"  ✗ {alg} tcId={r.get('tcid')}：sig 不匹配，"
+                  f"首个不同字节 @ {n}（len 得 {len(sig)} / 期望 {len(want)}）")
+            ok = False
+        else:
+            per[alg] = per.get(alg, 0) + 1
+    if ok:
+        detail = "、".join(f"{a} {per.get(a, 0)} 条" for a in PARAMS)
+        print(f"  ✓ 预言机 D：mldsa_sign 逐字节重现 ACVP siggen（{detail}）")
+    return ok
+
+
+def oracle_e() -> bool:
+    """sigver：verify 的 bool 与 ACVP result 字段一致，覆盖 pass/fail 两类"""
+    recs = _load_records(SIGVER_KAT)
+    if recs is None:
+        print("  ⚠ 预言机 E 跳过：找不到 vectors/mldsa_sigver.kat")
+        return True
+    ok = True
+    n_pass = n_fail = 0
+    for r in recs:
+        alg = r["alg"]
+        expect = r.get("result", "").lower() == "pass"
+        got = mldsa_verify(_hx(r["pk"]), _hx(r["msg"]),
+                           _hx(r.get("context", "")), _hx(r["sig"]), alg)
+        if got != expect:
+            print(f"  ✗ {alg} tcId={r.get('tcid')}：verify={got} 期望={expect}")
+            ok = False
+        elif expect:
+            n_pass += 1
+        else:
+            n_fail += 1
+    if ok:
+        print(f"  ✓ 预言机 E：mldsa_verify 与 ACVP sigver 一致 —— "
+              f"应通过 {n_pass} 条全 True，应拒绝 {n_fail} 条全 False")
+    return ok
+
+
 # ---------------------------------------------------------------- 反证
 
 def falsify() -> bool:
@@ -363,7 +852,7 @@ def falsify() -> bool:
 def main() -> int:
     print("ML-DSA 算子独立预言机")
     print()
-    results = [oracle_a(), oracle_b(), oracle_c()]
+    results = [oracle_a(), oracle_b(), oracle_c(), oracle_d(), oracle_e()]
     print()
     print("反证（把算子改坏，预言机必须报错）")
     results.append(falsify())
