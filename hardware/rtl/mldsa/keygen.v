@@ -45,12 +45,14 @@ module mldsa_keygen (
     output reg [511:0] rho_prime,
     output reg [255:0] key_out,
 
-    // ---- 调试读口：done 之后读 s₁/s₂ 的系数，供逐段验证 ----
-    // sel[3] 选 s₁(0)/s₂(1)，sel[1:0] 选第几条（ℓ=k=4，用不到 sel[2]），
-    // idx 选系数。
+    // ---- 调试读口：done 之后读 s₁/s₂/acc 的系数，供逐段验证 ----
     input  wire [3:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
-    output wire signed [31:0] dbg_coef
+    output wire signed [31:0] dbg_coef,
+
+    // ---- sk 输出缓冲：done 之后按字节读 ----
+    input  wire [11:0] sk_addr,
+    output wire [7:0]  sk_data
 );
     // k、ℓ 用 8 位常量而不是 integer：尾字节要直接取它们的低 8 位
     // （FIPS 204 的 H 输入是 ξ‖IntegerToBytes(k,1)‖IntegerToBytes(ℓ,1)）。
@@ -174,6 +176,30 @@ module mldsa_keygen (
     wire signed [31:0] red_out;
     mldsa_reduce32 u_red (.a(ac_dout), .r(red_out));
 
+    // ================= sk 输出缓冲 =================
+    // 布局：ρ(32)‖K(32)‖tr(64)‖s₁pack(384)‖s₂pack(384)‖t₀pack(1664) = 2560
+    localparam integer SK_S1 = 128, SK_S2 = SK_S1 + L*96, SK_T0 = SK_S2 + K*96;
+    reg         sk_we;  reg [11:0] sk_waddr; reg [7:0] sk_din;
+    ram_dp #(.DW(8), .AW(12)) u_sk (
+        .clk(clk), .a_we(sk_we), .a_addr(sk_waddr), .a_din(sk_din), .a_dout(),
+        .b_we(1'b0), .b_addr(sk_addr), .b_din(8'd0), .b_dout(sk_data));
+
+    // ---- η 打包器（s₁/s₂ → sk，在 ② ExpandS 阶段趁 s₁ 还是原始值时打包）----
+    // ⚠️ 必须在 ③ NTT 之前打包 s₁：NTT 会就地覆盖 s₁ 成 ŝ₁，之后原始值就没了。
+    // 这正是设计文档「② 存 + 打包」的原意。
+    reg         pe_clr, pe_iv;
+    reg  signed [12:0] pe_coef;
+    wire        pe_ir, pe_ov;
+    wire [7:0]  pe_ob;
+    mldsa_polyeta_pack #(.ETA(ETA)) u_pe (
+        .clk(clk), .rst_n(rst_n), .clr(pe_clr),
+        .coef(pe_coef), .in_valid(pe_iv), .in_ready(pe_ir),
+        .out_byte(pe_ob), .out_valid(pe_ov));
+
+    // η 打包的落盘指针：s₁ 从 SK_S1 起，s₂ 接着往下（连续，因为 sk 里
+    // s₁pack 与 s₂pack 就是相邻的）。
+    reg [11:0] pe_ptr;
+
     // η 打包器留到 sk 组装段再接：第 ② 段只做「采样 + 存储」，
     // 而 η 打包（对 polyeta_pack）已在 test_mldsa_pack 里独立验过，
     // 这里空转它只会多一堆未接的输出。
@@ -210,6 +236,7 @@ module mldsa_keygen (
             owner <= OWN_FSM; vj <= 3'd0; ph <= 1'b0; s2phase <= 1'b0;
             nt_lowseen <= 1'b0;
             vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0; nt_inv <= 1'b0;
+            pe_ptr <= SK_S1[11:0];
             et_start <= 1'b0; et_nonce <= 16'd0;
             nt_start <= 1'b0;
             fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
@@ -226,7 +253,7 @@ module mldsa_keygen (
 
             case (st)
             S_IDLE: if (start) begin
-                cnt <= 9'd0; owner <= OWN_FSM;
+                cnt <= 9'd0; owner <= OWN_FSM; pe_ptr <= SK_S1[11:0];
                 fsm_sr <= RATE256; fsm_su <= SUF;
                 fsm_ss <= 1'b1;
                 fsm_sid <= xi[7:0];
@@ -282,11 +309,11 @@ module mldsa_keygen (
 
             // 采样器读口同步，两拍一个系数：ph=0 摆地址，ph=1 用数据。
             // 用数据这一拍：写进 s1/s2 存储 + 喂 η 打包器（有反压）。
-            // 无打包器反压了（打包留到 sk 组装段），所以两拍一个系数直接推进。
+            // 采样值同时进 s 存储和 η 打包器（有反压），两拍一个系数。
             S_S_MOVE: begin
                 if (!ph) begin
                     ph <= 1'b1;
-                end else begin
+                end else if (pe_ir) begin
                     if (cnt == 9'd255) begin
                         cnt <= 9'd0; ph <= 1'b0;
                         if (!s2phase && vj == 3'd3) begin
@@ -403,6 +430,9 @@ module mldsa_keygen (
             S_FIN: begin done <= 1'b1; st <= S_IDLE; end
             default: st <= S_IDLE;
             endcase
+
+            // η 打包器每吐一个字节，落盘指针前进一格
+            if (pe_ov) pe_ptr <= pe_ptr + 12'd1;
         end
     end
 
@@ -415,6 +445,8 @@ module mldsa_keygen (
         et_rd_addr = cnt[7:0];
         nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt[7:0];
         ac_we = 1'b0; ac_waddr = 10'd0; ac_din = 32'd0;
+        sk_we = 1'b0; sk_waddr = 12'd0; sk_din = 8'd0;
+        pe_clr = 1'b0; pe_iv = 1'b0; pe_coef = 13'd0;
         ac_raddr = {dbg_sel[1:0], dbg_idx};   // 默认给调试口读 acc
         un_rd_addr = cnt[7:0];
 
@@ -431,6 +463,26 @@ module mldsa_keygen (
                 ac_we = 1'b1; ac_waddr = {vi[1:0], cnt[7:0]};
                 ac_din = nt_rdata + s2_dout;
             end
+        end
+
+        // H 挤压：ρ → sk[0..31]，K → sk[32..63]（ρ' 不进 sk）
+        if (st == S_H_SQ && sha_out_valid) begin
+            if (cnt < 9'd32) begin
+                sk_we = 1'b1; sk_waddr = {5'd0, cnt[6:0]}; sk_din = sha_out_data;
+            end else if (cnt >= 9'd96) begin
+                sk_we = 1'b1; sk_waddr = {5'd0, cnt[6:0]} - 12'd64; sk_din = sha_out_data;
+            end
+        end
+
+        // ② ExpandS：采样值喂 η 打包器（每条开始前 clr）
+        if (st == S_S_WAIT) pe_clr = 1'b1;
+        if (st == S_S_MOVE && ph) begin
+            pe_iv   = 1'b1;
+            pe_coef = et_rd_data[12:0];
+        end
+        // η 打包器吐字节 → sk
+        if (pe_ov) begin
+            sk_we = 1'b1; sk_waddr = pe_ptr; sk_din = pe_ob;
         end
 
         // MAC：Â[cnt]·ŝ₁[vj][cnt]，累加到 acc[vi][cnt]

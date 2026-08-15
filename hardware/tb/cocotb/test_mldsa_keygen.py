@@ -226,3 +226,66 @@ async def test_acc_after_invntt(dut):
             f"{next(n for n in range(256) if got[n] != want[n])} 个系数")
 
     dut._log.info("④+⑤：acc[0..3] 对上 invNTT(reduce32(Σ mont(Â∘ŝ₁)))+s₂，整条链都对")
+
+
+async def read_sk(dut, start, n):
+    """done 之后经 sk 口读 n 个字节"""
+    out = bytearray()
+    for a in range(start, start + n):
+        dut.sk_addr.value = a
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        out.append(int(dut.sk_data.value) & 0xFF)
+    return bytes(out)
+
+
+@cocotb.test()
+async def test_sk_rho_key_s(dut):
+    """⑥a sk 组装：ρ‖K‖…‖s₁pack‖s₂pack 逐字节对黄金
+
+    验的是 H 的 ρ/K 落进 sk、以及 ② ExpandS 阶段趁 s₁ 还是原始值时把
+    s₁/s₂ 的 η 打包也落进 sk（NTT 覆盖之前）。tr 段与 t₀ 段留到 ⑥b/⑦。
+    """
+    import sys as _s
+    from pathlib import Path as _P
+    _s.path.insert(0, str(_P(__file__).resolve().parents[2] / "model"))
+    from mldsa_oracle import rej_eta_poly as _re, polyeta_pack as _pep
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+    dut.sk_addr.value = 0
+
+    xi = bytes([(i * 3 + 5) & 0xFF for i in range(32)])
+    dut.xi.value = int.from_bytes(xi, "little")
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    for _ in range(3_000_000):
+        await RisingEdge(dut.clk)
+        if int(dut.done.value):
+            break
+    else:
+        raise AssertionError("sk 组装一直没完成")
+    await Timer(1, unit="ns")
+
+    rho = int(dut.rho.value).to_bytes(32, "little")
+    key = int(dut.key_out.value).to_bytes(32, "little")
+    rhop = int(dut.rho_prime.value).to_bytes(64, "little")
+
+    # ρ‖K
+    assert await read_sk(dut, 0, 32) == rho, "sk 的 ρ 段不对"
+    assert await read_sk(dut, 32, 32) == key, "sk 的 K 段不对"
+
+    # s₁pack：4 条 × 96 字节，从 SK_S1=128 起
+    s1pack = b"".join(_pep(_re(rhop, j, 2), 2) for j in range(4))
+    got_s1 = await read_sk(dut, 128, len(s1pack))
+    assert got_s1 == s1pack, (
+        f"s₁pack 不对，首个不同在字节 "
+        f"{next(i for i in range(len(s1pack)) if got_s1[i] != s1pack[i])}")
+
+    # s₂pack：紧接 s₁pack
+    s2pack = b"".join(_pep(_re(rhop, 4 + j, 2), 2) for j in range(4))
+    got_s2 = await read_sk(dut, 128 + len(s1pack), len(s2pack))
+    assert got_s2 == s2pack, "s₂pack 不对"
+
+    dut._log.info("sk 组装：ρ‖K‖s₁pack‖s₂pack 逐字节对上黄金（t₀/tr 段留到 ⑥b/⑦）")
