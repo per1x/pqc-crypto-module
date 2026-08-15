@@ -91,6 +91,17 @@ int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
 int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
                  const uint8_t *in, uint8_t *out);
 
+/* public-key encryption of arbitrary data (KEM-DEM): ML-KEM.Encaps (hardware,
+ * dk on-chip) wraps a shared secret; AES-256-GCM (software) is the authenticated
+ * DEM. blob = ct ‖ iv ‖ tag ‖ ciphertext. See service/sdfe_pkenc.h. */
+int SDFE_PKEncrypt(SDFE_HANDLE hSession, uint32_t pset,
+                   const uint8_t *ek, uint32_t ek_len,
+                   const uint8_t *data, uint32_t data_len,
+                   uint8_t *out, uint32_t *out_len);
+int SDFE_PKDecrypt(SDFE_HANDLE hSession, uint32_t key_handle,
+                   const uint8_t *blob, uint32_t blob_len,
+                   uint8_t *data, uint32_t *data_len);   /* auth fail → no plaintext */
+
 const char *SDFE_StrError(int rv);
 ```
 
@@ -139,7 +150,9 @@ standard does land, the change is confined to that layer.
 
 ## PKCS#11 v3.2
 
-`src/p11/p11_module.c` implements 44 `C_` functions. Build it with
+`src/p11/p11_module.c` implements 40 `C_` functions (36 in the 2.40
+`CK_FUNCTION_LIST`, plus `C_GetInterfaceList` / `C_GetInterface` /
+`C_EncapsulateKey` / `C_DecapsulateKey` in the 3.2 table). Build it with
 `cmake --build build --target pqchsm-p11`.
 
 ```c
@@ -150,6 +163,7 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 | Mechanism | Backed by | Status |
 |---|---|---|
 | `CKM_ML_KEM` (0x17) | `mlkem_axi`, all three parameter sets | **Hardware** |
+| `CKM_AES_GCM` | AEAD DEM over the KEM shared secret (`C_Encrypt`/`C_Decrypt`) | Software GCM; KEM half in hardware |
 | `CKM_AES_ECB` / `CKM_AES_CBC` | `sym_axi` AES-128/256 | **Hardware** |
 | `CKM_SHA3_256` | `sha3_core` (currently reached only through ML-KEM) | Needs a dedicated path |
 | `CKM_ML_DSA` (0x1D) | ML-DSA operators, not chained into cores | ❌ Software only |
