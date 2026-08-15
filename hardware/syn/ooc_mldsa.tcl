@@ -47,18 +47,13 @@ read_verilog -sv [glob $root/rtl/trng/*.v]
 read_xdc $root/syn/constraints/ooc_seq.xdc
 
 set top "mldsa_$op"
-switch $op {
-    keygen { set gen [list K=$K L=$L ETA=$ETA] }
-    sign   { set gen [list K=$K L=$L ETA=$ETA TAU=$TAU G1LOG=$G1 MODE=$MODE OMG=$OMG BETA=$BETA CTB=$CTB] }
-    verify { set gen [list K=$K L=$L TAU=$TAU G1LOG=$G1 MODE=$MODE OMG=$OMG BETA=$BETA CTB=$CTB] }
-    engine { set gen [list K=$K L=$L ETA=$ETA TAU=$TAU G1LOG=$G1 MODE=$MODE OMG=$OMG BETA=$BETA CTB=$CTB PSET=$PS] }
-    default { puts "未知操作 $op"; exit 1 }
-}
 
+# ⚠️ 三个核与 engine 现在都是**运行时选参数集**的（pset 是端口，不是参数），
+#    所以不再需要 -generic —— 一次综合就覆盖 44/65/87 三套。
+#    参数集表仍保留在上面：它现在只用来给报告命名，并在下面打印出来核对。
 set gargs {}
-foreach g $gen { lappend gargs -generic $g }
 
-puts "=== OOC: $top @ ML-DSA-$pset  ($gen) ==="
+puts "=== OOC: $top（运行时选参数集，本次综合覆盖 44/65/87；报告按 $pset 命名）==="
 eval synth_design -top $top -part $part -mode out_of_context \
      -flatten_hierarchy rebuilt $gargs
 

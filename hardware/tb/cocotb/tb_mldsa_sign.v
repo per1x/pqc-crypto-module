@@ -31,7 +31,7 @@ module tb_mldsa_sign #(
     output wire [511:0] tr_out,
     output wire [511:0] mu,
     output wire [511:0] rhopp,
-    output wire [CTB*8-1:0] ctilde,
+    output wire [511:0] ctilde,        // 定宽 512 位，低 ctb 字节有效
     input  wire [6:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
@@ -42,9 +42,12 @@ module tb_mldsa_sign #(
     wire [7:0]  sr, su, sid, sod;
     wire        sir, sov;
 
-    mldsa_sign #(.K(K), .L(L), .ETA(ETA), .TAU(TAU), .G1LOG(G1LOG),
-                 .MODE(MODE), .OMG(OMG), .BETA(BETA), .CTB(CTB)) u_sign (
-        .clk(clk), .rst_n(rst_n), .start(start),
+    // 核已改成运行时选参数集。既有九格脚本用 -P K/L/... 选，
+    // 这里由 K 反推 pset（K 在三个参数集里互不相同），让那批脚本不用改。
+    localparam [1:0] PSET_FROM_K = (K == 4) ? 2'd0 : (K == 6) ? 2'd1 : 2'd2;
+
+    mldsa_sign u_sign (
+        .clk(clk), .rst_n(rst_n), .pset(PSET_FROM_K), .start(start),
         .sk_wr_en(sk_wr_en), .sk_wr_addr(sk_wr_addr), .sk_wr_data(sk_wr_data),
         .msg_wr_en(msg_wr_en), .msg_wr_addr(msg_wr_addr), .msg_wr_data(msg_wr_data),
         .ctx_wr_en(ctx_wr_en), .ctx_wr_addr(ctx_wr_addr), .ctx_wr_data(ctx_wr_data),

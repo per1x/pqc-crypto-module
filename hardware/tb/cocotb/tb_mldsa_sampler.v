@@ -58,7 +58,7 @@ module tb_mldsa_sampler (
     wire        es_start, es_iv, es_if, es_ir, es_ov, es_or;
     wire [7:0]  es_rate, es_suf, es_id, es_od;
 
-    mldsa_poly_eta #(.ETA(2)) u_eta (
+    mldsa_poly_eta u_eta (.eta(3'd2),
         .clk(clk), .rst_n(rst_n),
         .start(e_start), .seed(e_seed), .nonce(e_nonce), .done(e_done),
         .sha_start(es_start), .sha_rate(es_rate), .sha_suffix(es_suf),

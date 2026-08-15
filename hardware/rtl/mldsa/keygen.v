@@ -30,14 +30,14 @@
 // η 只影响 polyeta 打包宽度（η=2→3 位/系数=96 字节，η=4→4 位=128 字节），
 // 这一层已经在 pack.v 的 mldsa_polyeta_pack 里按 ETA 参数化好了。
 // 存储与地址位宽按最大的 87 开（k=8 要 3 位多项式下标），小参数集用不满而已。
-module mldsa_keygen #(
-    parameter integer K   = 4,
-    parameter integer L   = 4,
-    parameter integer ETA = 2
-) (
+// ⚠️ 参数集是**运行时选**的：K/ℓ/η 不再是编译期参数，而是 start 那一拍
+//    按 pset 锁存进配置寄存器。存储一律按最大的 87 开（s₁/s₂/acc 都是 AW=11
+//    ＝ 8 条 × 256，sk/pk 缓冲 AW=13），所以三个参数集共用同一份存储。
+module mldsa_keygen (
     input  wire        clk,
     input  wire        rst_n,
 
+    input  wire [1:0]  pset,         // 0=44 1=65 2=87，start 那一拍锁存
     input  wire        start,        // 脉冲
     input  wire [255:0] xi,          // 32 字节种子；xi[7:0] 是第 0 字节
     output reg         done,
@@ -72,11 +72,32 @@ module mldsa_keygen #(
 );
     // k、ℓ 的 8 位形式：H 的尾两字节要直接取它们的低 8 位
     // （FIPS 204 的 H 输入是 ξ‖IntegerToBytes(k,1)‖IntegerToBytes(ℓ,1)）。
-    localparam [7:0] KB = K[7:0], LB = L[7:0];
+    // ---- 运行时参数集配置（start 锁存 pset，之后整个运算用 cfg_*）----
+    // ⚠️ 译码用的是 pset_eff 而不是 pset_r：start 那一拍 pset_r 还是**上一次**的值，
+    //    而同一拍里就要用 cfg_sk_t0 去初始化落盘指针。空闲时让配置跟着输入走、
+    //    一离开 S_IDLE 就冻结在锁存值上，两边都对。
+    reg [1:0] pset_r;
+    reg       busy_r;                 // 1 = 已经离开 S_IDLE（配置冻结）
+    wire [1:0] pset_eff = busy_r ? pset_r : pset;
+    wire [3:0]  cfg_k, cfg_l, cfg_km1, cfg_lm1, cfg_lkm1;
+    wire [2:0]  cfg_eta;
+    wire [7:0]  cfg_peb;
+    wire [12:0] cfg_sk_t0;
+    wire [13:0] cfg_pklen;
+    mldsa_params u_par (
+        .pset(pset_eff),
+        .k(cfg_k), .l(cfg_l), .eta(cfg_eta), .tau(), .omega(), .ctb(), .g2mode(),
+        .km1(cfg_km1), .lm1(cfg_lm1), .lkm1(cfg_lkm1),
+        .ebits(), .peb(cfg_peb), .zbits(), .zb(), .w1bits(), .w1b(),
+        .gamma1(), .gamma2(), .eta_s(),
+        .zbound(), .r0bound(), .ct0bound(),
+        .sk_s2(), .sk_t0(cfg_sk_t0), .sklen(), .pklen(cfg_pklen),
+        .siglen(), .sig_h0());
+
+    wire [7:0] KB = {4'd0, cfg_k}, LB = {4'd0, cfg_l};
     localparam [7:0] RATE256 = 8'd136, SUF = 8'h1F;   // SHAKE256
     // η=2 → 每条 s 打包 96 字节（3 位/系数）；η=4 → 128 字节（4 位/系数）
-    localparam integer PEB = (ETA == 2) ? 96 : 128;
-    localparam [2:0] LM1 = L[2:0] - 3'd1, KM1 = K[2:0] - 3'd1;
+    wire [2:0] LM1 = cfg_lm1[2:0], KM1 = cfg_km1[2:0];
 
     localparam [4:0]
         S_IDLE  = 5'd0, S_H_ABS = 5'd1, S_H_GAP = 5'd2,
@@ -114,7 +135,7 @@ module mldsa_keygen #(
     wire        et_ss, et_siv, et_sif, et_sor;
     wire [7:0]  et_sr, et_su, et_sid;
 
-    mldsa_poly_eta #(.ETA(ETA)) u_eta (
+    mldsa_poly_eta u_eta (.eta(cfg_eta),
         .clk(clk), .rst_n(rst_n),
         .start(et_start), .seed(rho_prime), .nonce(et_nonce), .done(et_done),
         .sha_start(et_ss), .sha_rate(et_sr), .sha_suffix(et_su),
@@ -234,8 +255,7 @@ module mldsa_keygen #(
 
     // ================= sk 输出缓冲 =================
     // 布局：ρ(32)‖K(32)‖tr(64)‖s₁pack(384)‖s₂pack(384)‖t₀pack(1664) = 2560
-    localparam integer SK_S1 = 128, SK_S2 = SK_S1 + L*PEB, SK_T0 = SK_S2 + K*PEB;
-    localparam integer PKLEN = 32 + K*320;   // 1312
+    localparam [12:0] SK_S1 = 13'd128;      // s₁pack 恒从 128 起，与参数集无关
     reg         sk_we;  reg [12:0] sk_waddr; reg [7:0] sk_din;
     ram_dp #(.DW(8), .AW(13)) u_sk (
         .clk(clk), .a_we(sk_we), .a_addr(sk_waddr), .a_din(sk_din), .a_dout(),
@@ -249,7 +269,7 @@ module mldsa_keygen #(
     wire        pe_ir, pe_ov;
     wire [7:0]  pe_ob;
     mldsa_polyeta_pack u_pe (
-        .clk(clk), .rst_n(rst_n), .clr(pe_clr), .eta(ETA[2:0]),
+        .clk(clk), .rst_n(rst_n), .clr(pe_clr), .eta(cfg_eta),
         .coef(pe_coef), .in_valid(pe_iv), .in_ready(pe_ir),
         .out_byte(pe_ob), .out_valid(pe_ov));
 
@@ -323,11 +343,12 @@ module mldsa_keygen #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; cnt <= 9'd0; mm_last <= 1'b0;
+            pset_r <= 2'd0; busy_r <= 1'b0;
             owner <= OWN_FSM; vj <= 3'd0; ph <= 1'b0; s2phase <= 1'b0;
             nt_lowseen <= 1'b0;
             vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0; nt_inv <= 1'b0;
-            pe_ptr <= SK_S1[12:0];
-            p1_ptr <= 13'd32; p0_ptr <= SK_T0[12:0]; obyte <= 13'd0;
+            pe_ptr <= SK_S1;
+            p1_ptr <= 13'd32; p0_ptr <= cfg_sk_t0; obyte <= 13'd0;
             et_start <= 1'b0; et_nonce <= 16'd0;
             nt_start <= 1'b0;
             fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
@@ -344,8 +365,9 @@ module mldsa_keygen #(
 
             case (st)
             S_IDLE: if (start) begin
-                cnt <= 9'd0; owner <= OWN_FSM; pe_ptr <= SK_S1[12:0];
-                p1_ptr <= 13'd32; p0_ptr <= SK_T0[12:0];
+                pset_r <= pset; busy_r <= 1'b1;
+                cnt <= 9'd0; owner <= OWN_FSM; pe_ptr <= SK_S1;
+                p1_ptr <= 13'd32; p0_ptr <= cfg_sk_t0;
                 fsm_sr <= RATE256; fsm_su <= SUF;
                 fsm_ss <= 1'b1;
                 fsm_sid <= xi[7:0];
@@ -391,7 +413,7 @@ module mldsa_keygen #(
             // nonce：s₁ 用 j，s₂ 用 ℓ+j（ℓ=4）
             S_S_GEN: begin
                 // s₁ 用 nonce=j，s₂ 用 nonce=**ℓ**+j（不是常数 4 —— 65 的 ℓ=5、87 的 ℓ=7）
-                et_nonce <= s2phase ? (L[15:0] + {13'd0, vj}) : {13'd0, vj};
+                et_nonce <= s2phase ? ({12'd0, cfg_l} + {13'd0, vj}) : {13'd0, vj};
                 et_start <= 1'b1;
                 st <= S_S_WAIT;
             end
@@ -550,7 +572,7 @@ module mldsa_keygen #(
                     fsm_sid <= pk_adout;     // 同步读，已就绪
                     if (fsm_siv && sha_in_ready) begin
                         fsm_siv <= 1'b0;
-                        if (obyte == PKLEN[12:0] - 13'd1) st <= S_TR_GAP;
+                        if (obyte == cfg_pklen[12:0] - 13'd1) st <= S_TR_GAP;
                         else begin obyte <= obyte + 13'd1; ph <= 1'b0; end
                     end
                 end
@@ -565,7 +587,12 @@ module mldsa_keygen #(
                 end
             end
 
-            S_FIN: begin done <= 1'b1; st <= S_IDLE; end
+            // 回到 S_IDLE 的同时解冻配置：下一次 start 才好按新的 pset 译码。
+            // ⚠️ 漏了这一句的后果很隐蔽：第二次运行会用**上一次**的参数集去算
+            //    sk 段偏移，44→65 时 t₀ 段落在 896 而不是 1536 —— 前 896 字节全对，
+            //    从那里开始错。九格抓不到（每格只跑一个参数集），只有运行时切换
+            //    的用例才会现形。
+            S_FIN: begin done <= 1'b1; busy_r <= 1'b0; st <= S_IDLE; end
             default: st <= S_IDLE;
             endcase
 

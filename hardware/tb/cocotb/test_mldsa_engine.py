@@ -69,9 +69,17 @@ async def load_bytes(dut, data: bytes, base: int = 0):
     await RisingEdge(dut.clk)
 
 
-async def run_op(dut, op: int, msg_len: int = 0, ctx_len: int = 0, limit=40_000_000):
+async def run_op(dut, op: int, msg_len: int = 0, ctx_len: int = 0, limit=40_000_000,
+                 pset=None):   # 注：venv 是 Python 3.9，不能写 int | None
+    """发一次运算并等 done。
+
+    ⚠️ pset=None 时**不碰 dut.pset** —— 运行时切换那条用例是自己在外面设的，
+    这里若无条件写回 PSET_OF[ALG] 就会把它覆盖掉（踩过一次：44 过、65 报
+    out_len 不对，看着像 RTL 没跟着切，其实是测试自己写回去了）。
+    """
     dut.op.value = op
-    dut.pset.value = PSET_OF[ALG]
+    if pset is not None:
+        dut.pset.value = pset
     dut.msg_len.value = msg_len
     dut.ctx_len.value = ctx_len
     dut.start.value = 1
@@ -121,7 +129,7 @@ async def test_engine_keygen_acvp(dut):
     pk_len, sk_len, _ = LEN_OF[ALG]
 
     await load_bytes(dut, seed, 0)
-    cyc = await run_op(dut, OP_KEYGEN)
+    cyc = await run_op(dut, OP_KEYGEN, pset=PSET_OF[ALG])
 
     assert int(dut.out_len.value) == pk_len + sk_len, \
         f"out_len={int(dut.out_len.value)}，应当是 {pk_len + sk_len}"
@@ -143,7 +151,7 @@ async def test_engine_done_is_level_and_busy(dut):
 
     seed, _, _ = kat_keygen()
     await load_bytes(dut, seed, 0)
-    await run_op(dut, OP_KEYGEN)
+    await run_op(dut, OP_KEYGEN, pset=PSET_OF[ALG])
 
     assert int(dut.busy.value) == 0, "done 之后 busy 必须落下"
     for _ in range(50):
@@ -153,39 +161,104 @@ async def test_engine_done_is_level_and_busy(dut):
 
 
 @cocotb.test()
-async def test_engine_rejects_bad_pset(dut):
-    """pset 与本次综合的参数集不符时**拒绝启动**，不按错参数集算下去
+async def test_engine_rejects_oversize_len(dut):
+    """msg 超过核里 u_msg 的 8192、或 ctx 超过 255 时**拒绝启动**
 
-    这条是反证：没有它的话，软件写错 pset 会安静地拿到一份用错参数集算出来的
-    密钥/签名 —— 而那份东西看起来完全正常（长度对、格式对），只是错的。
+    这条是反证：没有它的话，超长会让高位地址安静回绕 —— 出来的签名长度对、
+    格式对，但是错的，而且 KAT 抓不到（KAT 的消息都很短）。
+    拒绝路径也必须给 done，否则软件会一直等。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
     seed, pk_w, _ = kat_keygen()
+    pk_len, _, _ = LEN_OF[ALG]
     await load_bytes(dut, seed, 0)
 
-    bad = (PSET_OF[ALG] + 1) % 3
-    dut.op.value = OP_KEYGEN
-    dut.pset.value = bad
-    dut.msg_len.value = 0
-    dut.ctx_len.value = 0
-    dut.start.value = 1
-    await RisingEdge(dut.clk)
-    dut.start.value = 0
-    # 拒绝路径是立刻完成，不启动任何核
-    for _ in range(200):
+    for bad_msg, bad_ctx, why in ((8193, 0, "msg 超过 8192"), (0, 256, "ctx 超过 255")):
+        dut.op.value = OP_SIGN
+        dut.pset.value = PSET_OF[ALG]
+        dut.msg_len.value = bad_msg
+        dut.ctx_len.value = bad_ctx
+        dut.start.value = 1
         await RisingEdge(dut.clk)
-    await Timer(1, unit="ns")
-    assert int(dut.done.value) == 1, "拒绝路径也要给出 done，否则软件会一直等"
-    assert int(dut.busy.value) == 0, "被拒绝时不该有核在跑"
+        dut.start.value = 0
+        for _ in range(200):
+            await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        assert int(dut.done.value) == 1, f"{why}：拒绝路径也要给出 done"
+        assert int(dut.busy.value) == 0, f"{why}：被拒绝时不该有核在跑"
 
-    # 再用正确的 pset 跑一遍，结果必须仍然正确（拒绝不能留下坏状态）
-    dut.pset.value = PSET_OF[ALG]
-    await run_op(dut, OP_KEYGEN)
-    pk_len, _, _ = LEN_OF[ALG]
+    # 被拒绝之后再正常跑一次，结果必须仍然正确（拒绝不能留下坏状态）
+    await run_op(dut, OP_KEYGEN, pset=PSET_OF[ALG])
     assert await read_out(dut, pk_len, 0) == pk_w, "被拒绝一次之后再跑，结果就不对了"
-    dut._log.info(f"engine：pset 不符被拒绝（{bad} ≠ {PSET_OF[ALG]}），且不留坏状态")
+    dut._log.info("engine：超长 msg/ctx 被拒绝且不留坏状态")
+
+
+@cocotb.test()
+async def test_engine_runtime_pset_switch(dut):
+    """**同一次仿真里先 44 再 65 再 87，各自对上 ACVP**
+
+    这是"运行时选参数集"的判据。分三次编译各跑一个是证明不了的 ——
+    那只说明每个参数集单独对，不说明同一份 bitstream 能在运行时切。
+    这条用例**一次复位、一份 RTL**，中途只改 pset 端口，
+    三个参数集各跑一遍 KeyGen / Sign / Verify，全部对 ACVP 官方向量。
+
+    ⚠️ 顺序是 44 → 65 → 87，每次都换段偏移、换打包位宽、换 γ₁/γ₂、换循环边界。
+       若哪一处还留着上一次的配置（例如段偏移没跟着 pset 变），
+       出来的字节就不可能与 ACVP 一致。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    for alg in ("ML-DSA-44", "ML-DSA-65", "ML-DSA-87"):
+        ps = PSET_OF[alg]
+        pk_len, sk_len, sig_len = LEN_OF[alg]
+        dut.pset.value = ps
+
+        # ---- KeyGen ----
+        recs = load_kat(limit_per_alg=1)
+        rec = next((r for r in recs if r.get("alg") == alg), None)
+        assert rec is not None, f"KAT 里没有 {alg}"
+        seed = bytes.fromhex(rec["seed"])
+        await load_bytes(dut, seed, 0)
+        await run_op(dut, OP_KEYGEN)      # pset 由循环外面设，这里不许覆盖
+        assert int(dut.out_len.value) == pk_len + sk_len, f"{alg} out_len 不对"
+        assert await read_out(dut, pk_len, 0) == bytes.fromhex(rec["pk"]), f"{alg} pk 不对"
+        got_sk = await read_out(dut, sk_len, pk_len)
+        want_sk = bytes.fromhex(rec["sk"])
+        if got_sk != want_sk:
+            d = next(i for i in range(sk_len) if got_sk[i] != want_sk[i])
+            raise AssertionError(
+                f"{alg} sk 第一处不同在 offset {d}（pk_len={pk_len}）："
+                f"got={got_sk[d]:02x} want={want_sk[d]:02x}；"
+                f"got[0:8]={got_sk[:8].hex()} want[0:8]={want_sk[:8].hex()}")
+
+        # ---- Sign ----
+        sg = _kat(SIGGEN_KAT, alg, lambda r: r.get("deterministic") == "1")[0]
+        msg = bytes.fromhex(sg["msg"]); ctx = bytes.fromhex(sg.get("context", ""))
+        await load_bytes(dut, bytes.fromhex(sg["sk"]) + bytes.fromhex(sg["rnd"])
+                         + ctx + msg, 0)
+        await run_op(dut, OP_SIGN, msg_len=len(msg), ctx_len=len(ctx))
+        assert int(dut.out_len.value) == sig_len, f"{alg} sig out_len 不对"
+        assert await read_out(dut, sig_len, 0) == bytes.fromhex(sg["sig"]), \
+            f"{alg} σ 与 ACVP siggen 不一致"
+
+        # ---- Verify：pass 与 fail 两种判定 ----
+        for want in ("pass", "fail"):
+            vr = _kat(SIGVER_KAT, alg, lambda r, w=want: r.get("result") == w)[0]
+            vmsg = bytes.fromhex(vr["msg"]); vctx = bytes.fromhex(vr.get("context", ""))
+            await load_bytes(dut, bytes.fromhex(vr["pk"]) + bytes.fromhex(vr["sig"])
+                             + vctx + vmsg, 0)
+            await run_op(dut, OP_VERIFY, msg_len=len(vmsg), ctx_len=len(vctx))
+            ok = int(dut.verify_ok.value)
+            assert ok == (1 if want == "pass" else 0), \
+                f"{alg} sigver 判定错了：期望 {want}"
+
+        dut._log.info(f"  {alg}：KeyGen pk/sk + Sign σ + Verify(pass/fail) 全对上 ACVP")
+
+    dut._log.info("engine：同一次仿真里 44 → 65 → 87 三个参数集全部对上 ACVP "
+                  "—— 运行时选参数集成立")
 
 
 @cocotb.test()
@@ -203,7 +276,7 @@ async def test_engine_zeroize_wipes_input_buffer(dut):
     pk_len, _, _ = LEN_OF[ALG]
 
     await load_bytes(dut, seed, 0)
-    await run_op(dut, OP_KEYGEN)
+    await run_op(dut, OP_KEYGEN, pset=PSET_OF[ALG])
     assert await read_out(dut, pk_len, 0) == pk_w
 
     # 擦除：拉一拍 zeroize，等 wiping 落下
@@ -221,14 +294,14 @@ async def test_engine_zeroize_wipes_input_buffer(dut):
     dut._log.info(f"engine：擦除用了 {n} 拍（逐地址写 0，32768 个地址）")
 
     # 不再灌种子，直接跑：ξ 现在应当是全 0，pk 必然不是老那份
-    await run_op(dut, OP_KEYGEN)
+    await run_op(dut, OP_KEYGEN, pset=PSET_OF[ALG])
     pk_after = await read_out(dut, pk_len, 0)
     assert pk_after != pk_w, \
         "擦除后用同一段地址跑出了同一个 pk —— 说明输入缓冲根本没被擦"
 
     # 而且确实是"全 0 种子"的那份结果：再灌一次全 0 跑，应当与擦除后一致
     await load_bytes(dut, bytes(32), 0)
-    await run_op(dut, OP_KEYGEN)
+    await run_op(dut, OP_KEYGEN, pset=PSET_OF[ALG])
     assert await read_out(dut, pk_len, 0) == pk_after, \
         "擦除后的结果与显式灌全 0 的结果不一致 —— 缓冲没被擦干净"
     dut._log.info("engine：zeroize 逐地址擦除得到外部可观测的反证")
@@ -267,7 +340,7 @@ async def test_engine_sign_acvp(dut):
 
     # 按约定排布灌进去：sk ‖ rnd ‖ ctx ‖ msg
     await load_bytes(dut, sk + rnd + ctx + msg, 0)
-    cyc = await run_op(dut, OP_SIGN, msg_len=len(msg), ctx_len=len(ctx))
+    cyc = await run_op(dut, OP_SIGN, msg_len=len(msg), ctx_len=len(ctx), pset=PSET_OF[ALG])
 
     assert int(dut.out_len.value) == sig_len, \
         f"out_len={int(dut.out_len.value)}，应当是 {sig_len}"
@@ -298,7 +371,7 @@ async def test_engine_verify_acvp(dut):
         assert len(pk) == pk_len and len(sig) == sig_len
 
         await load_bytes(dut, pk + sig + ctx + msg, 0)
-        await run_op(dut, OP_VERIFY, msg_len=len(msg), ctx_len=len(ctx))
+        await run_op(dut, OP_VERIFY, msg_len=len(msg), ctx_len=len(ctx), pset=PSET_OF[ALG])
         ok = int(dut.verify_ok.value)
         assert ok == (1 if want == "pass" else 0), \
             f"{ALG} sigver 判定错了：期望 {want}，verify_ok={ok}"

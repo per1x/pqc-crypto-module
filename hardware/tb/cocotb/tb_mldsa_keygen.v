@@ -29,8 +29,16 @@ module tb_mldsa_keygen #(
     wire [7:0]  sr, su, sid, sod;
     wire        sir, sov;
 
-    mldsa_keygen #(.K(K), .L(L), .ETA(ETA)) u_kg (
-        .clk(clk), .rst_n(rst_n), .start(start), .xi(xi), .done(done),
+    // 核已经改成**运行时选参数集**，不再有 K/L/ETA 参数。
+    // 但既有的九格脚本（tools/mldsa_grid.sh）是用 -P K/L/ETA 选参数集的，
+    // 所以这里由 K 反推 pset，让那批脚本一个字都不用改：
+    //   K=4→44  K=6→65  K=8→87（K 在三个参数集里互不相同，反推是唯一的）
+    // 运行时切换的用例走 tb_mldsa_engine（它的 pset 是真端口，可以中途改）。
+    localparam [1:0] PSET_FROM_K = (K == 4) ? 2'd0 : (K == 6) ? 2'd1 : 2'd2;
+
+    mldsa_keygen u_kg (
+        .clk(clk), .rst_n(rst_n), .pset(PSET_FROM_K),
+        .start(start), .xi(xi), .done(done),
         .sha_start(ss), .sha_rate(sr), .sha_suffix(su),
         .sha_in_valid(siv), .sha_in_data(sid), .sha_in_flush(sif),
         .sha_in_ready(sir), .sha_out_valid(sov), .sha_out_ready(sor),

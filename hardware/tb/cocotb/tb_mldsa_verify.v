@@ -28,8 +28,8 @@ module tb_mldsa_verify #(
     input  wire [7:0]  ctx_len,
     output wire        done,
     output wire        valid,
-    output wire [CTB*8-1:0] ctilde,
-    output wire [CTB*8-1:0] ctilde_p,
+    output wire [511:0] ctilde,        // 定宽 512 位，低 ctb 字节有效
+    output wire [511:0] ctilde_p,
     output wire [511:0] tr_out,
     output wire [511:0] mu,
     output wire        zbad,
@@ -42,9 +42,11 @@ module tb_mldsa_verify #(
     wire [7:0]  sr, su, sid, sod;
     wire        sir, sov;
 
-    mldsa_verify #(.K(K), .L(L), .TAU(TAU), .G1LOG(G1LOG), .MODE(MODE),
-                   .OMG(OMG), .BETA(BETA), .CTB(CTB)) u_ver (
-        .clk(clk), .rst_n(rst_n), .start(start),
+    // 核已改成运行时选参数集；由 K 反推 pset，让既有九格脚本不用改。
+    localparam [1:0] PSET_FROM_K = (K == 4) ? 2'd0 : (K == 6) ? 2'd1 : 2'd2;
+
+    mldsa_verify u_ver (
+        .clk(clk), .rst_n(rst_n), .pset(PSET_FROM_K), .start(start),
         .pk_wr_en(pk_wr_en), .pk_wr_addr(pk_wr_addr), .pk_wr_data(pk_wr_data),
         .sig_wr_en(sig_wr_en), .sig_wr_addr(sig_wr_addr), .sig_wr_data(sig_wr_data),
         .msg_wr_en(msg_wr_en), .msg_wr_addr(msg_wr_addr), .msg_wr_data(msg_wr_data),

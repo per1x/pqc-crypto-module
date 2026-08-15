@@ -111,9 +111,11 @@ module tb_mldsa_units (
 
     mldsa_rej_uniform u_ru (
         .bytes_in(ru_bytes), .cand(ru_cand), .cand_ok(ru_ok));
-    mldsa_rej_eta #(.ETA(2)) u_re2 (
+    // η 已是运行时口：两份例化只是把 eta 各接死成 2/4，
+    // 好让同一条用例仍能一次比完两种 η（这本身也证明了同一份 RTL 两种都对）
+    mldsa_rej_eta u_re2 (.eta(3'd2),
         .nibble(re_nib), .coeff(re2_coeff), .coeff_ok(re2_ok));
-    mldsa_rej_eta #(.ETA(4)) u_re4 (
+    mldsa_rej_eta u_re4 (.eta(3'd4),
         .nibble(re_nib), .coeff(re4_coeff), .coeff_ok(re4_ok));
 
     mldsa_rej_uniform_buf u_rb (

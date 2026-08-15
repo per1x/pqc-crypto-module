@@ -25,26 +25,30 @@ module mldsa_rej_uniform (
     assign cand_ok = (cand < Q);
 endmodule
 
-module mldsa_rej_eta #(
-    parameter integer ETA = 2
-) (
+// ⚠️ η 是**运行时输入**（运行时选 44/65/87 的一部分）：
+//    44/87 用 η=2，65 用 η=4，两支的接受门限与折算式都不同。
+//    两支并行算完再选 —— 都是几个比较器和一次 4 位乘法，不值得为省这点面积
+//    去把两套式子揉成一条。
+module mldsa_rej_eta (
+    input  wire        [2:0]  eta,      // 2 或 4
     input  wire        [3:0]  nibble,
     output wire signed [31:0] coeff,
     output wire               coeff_ok
 );
-    generate
-        if (ETA == 2) begin : g_eta2
-            // 205·t >> 10 等价于 floor(t/5)，t < 15
-            wire [11:0] scaled = nibble * 8'd205;
-            wire [3:0]  fifth  = {2'd0, scaled[11:10]};
-            wire [3:0]  rem    = nibble - (fifth * 4'd5);
-            assign coeff_ok = (nibble < 4'd15);
-            assign coeff    = 32'sd2 - $signed({28'd0, rem});
-        end else begin : g_eta4
-            assign coeff_ok = (nibble < 4'd9);
-            assign coeff    = 32'sd4 - $signed({28'd0, nibble});
-        end
-    endgenerate
+    // η=2 支：205·t >> 10 等价于 floor(t/5)，t < 15
+    wire [11:0] scaled = nibble * 8'd205;
+    wire [3:0]  fifth  = {2'd0, scaled[11:10]};
+    wire [3:0]  rem    = nibble - (fifth * 4'd5);
+    wire        ok2    = (nibble < 4'd15);
+    wire signed [31:0] c2 = 32'sd2 - $signed({28'd0, rem});
+
+    // η=4 支
+    wire        ok4    = (nibble < 4'd9);
+    wire signed [31:0] c4 = 32'sd4 - $signed({28'd0, nibble});
+
+    wire is2 = (eta == 3'd2);
+    assign coeff_ok = is2 ? ok2 : ok4;
+    assign coeff    = is2 ? c2  : c4;
 endmodule
 
 // 均匀采样的收集器：每周期吃一组 3 字节，攒够 256 个系数就置 done。

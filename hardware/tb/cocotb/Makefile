@@ -38,6 +38,7 @@ VERILOG_SOURCES = \
   $(RTL_MLKEM)/encaps.v \
   $(RTL_MLKEM)/decaps.v \
   $(RTL_MLKEM)/pack.v \
+  $(RTL_MLDSA)/params.v \
   $(RTL_MLDSA)/mont_reduce.v \
   $(RTL_MLDSA)/reduce.v \
   $(RTL_MLDSA)/butterfly.v \

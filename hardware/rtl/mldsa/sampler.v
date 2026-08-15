@@ -219,12 +219,11 @@ endmodule
 // 而且第二个候选可能因为已经攒够 256 个而必须丢掉 —— 这一条要写对，
 // 否则最后一个系数会串到下一条多项式去。
 // ---------------------------------------------------------------------------
-module mldsa_poly_eta #(
-    parameter integer ETA = 2
-) (
+module mldsa_poly_eta (
     input  wire        clk,
     input  wire        rst_n,
 
+    input  wire [2:0]  eta,            // 2 或 4，运行时给
     input  wire        start,
     input  wire [511:0] seed,          // ρ'，64 字节
     input  wire [15:0] nonce,
@@ -272,7 +271,7 @@ module mldsa_poly_eta #(
     reg  [3:0] nib;
     wire signed [31:0] coeff;
     wire               coeff_ok;
-    mldsa_rej_eta #(.ETA(ETA)) u_rej (
+    mldsa_rej_eta u_rej (.eta(eta),
         .nibble(nib), .coeff(coeff), .coeff_ok(coeff_ok));
 
     reg [8:0] n;

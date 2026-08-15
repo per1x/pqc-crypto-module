@@ -63,22 +63,9 @@
 //    日后误以为已经覆盖。**
 `default_nettype none
 
-module mldsa_engine #(
-    // ⚠️ 这一版三个核仍是**编译期参数化**的，所以 engine 也是。
-    //    pset 端口存在且会被校验：与本次综合的参数集不符时拒绝启动并置 param_err，
-    //    **绝不按错误的参数集算下去**（那会安静产生错误的密钥/签名）。
-    //    运行时选参数集要等三个核的 K/L/η/τ/ω/β/c̃ 也改成运行时配置，见设计文档第 6 节。
-    parameter integer K     = 4,
-    parameter integer L     = 4,
-    parameter integer ETA   = 2,
-    parameter integer TAU   = 39,
-    parameter integer G1LOG = 17,
-    parameter integer MODE  = 0,
-    parameter integer OMG   = 80,
-    parameter integer BETA  = 78,
-    parameter integer CTB   = 32,
-    parameter integer PSET  = 0     // 0=44 1=65 2=87，用来校验 pset 端口
-) (
+// ⚠️ **运行时选参数集**：pset 在 start 那一拍锁存，engine 与三个核都按它译码
+//    （mldsa_params）。一个 bitstream 支持 44/65/87 三套，不再需要按参数集重综合。
+module mldsa_engine (
     input  wire        clk,
     input  wire        rst_n,
 
@@ -116,19 +103,7 @@ module mldsa_engine #(
     localparam [1:0] OP_KEYGEN = 2'd0, OP_SIGN = 2'd1, OP_VERIFY = 2'd2;
 
     // ---- 长度（FIPS 204 表 2），由参数算出来，不写死 ----
-    localparam integer PEB    = (ETA == 2) ? 96 : 128;      // η 打包每条字节数
-    localparam integer PKLEN  = 32 + K*320;
-    localparam integer SKLEN  = 128 + (L+K)*PEB + K*416;
-    localparam integer ZB     = (G1LOG == 17) ? 576 : 640;  // z 每条字节数
-    localparam integer SIGLEN = CTB + L*ZB + OMG + K;
-    localparam integer MSGMAX = 8192;                       // 核里 u_msg 的容量
-
-    localparam [14:0] SK_BASE  = 15'd0;
-    localparam [14:0] RND_BASE = SK_BASE + SKLEN[14:0];
-    localparam [14:0] CTX_BASE_S = RND_BASE + 15'd32;
-    localparam [14:0] PK_BASE  = 15'd0;
-    localparam [14:0] SIG_BASE = PK_BASE + PKLEN[14:0];
-    localparam [14:0] CTX_BASE_V = SIG_BASE + SIGLEN[14:0];
+    localparam integer MSGMAX = 8192;   // 核里 u_msg 的容量，见文件头那条
 
     // ================= 输入字节缓冲（32 KB）=================
     // 空闲时接 AXI 的写口；跑起来之后由喂数 FSM 读。
@@ -148,6 +123,31 @@ module mldsa_engine #(
                      S_WIPE = 4'd6;
     reg [3:0]  state;
     reg [1:0]  op_r;
+    reg [1:0]  pset_r;      // start 那一拍锁存，之后整个运算冻结在这个值上
+    // 空闲时配置跟着输入走，一忙起来就冻结（与三个核里同名信号同一个道理）
+    wire [1:0] pset_eff = (state == S_IDLE) ? pset : pset_r;
+
+    // ---- 运行时参数集译码 ----
+    // 空闲时跟着输入走、一离开 S_IDLE 就冻结在锁存值上：start 那一拍就要用
+    // 这些长度去算段边界，而 pset_r 那时还是上一次的值。
+    wire [12:0] cfg_sklen, cfg_siglen;
+    wire [13:0] cfg_pklen;
+    mldsa_params u_par (
+        .pset(pset_eff),
+        .k(), .l(), .eta(), .tau(), .omega(), .ctb(), .g2mode(),
+        .km1(), .lm1(), .lkm1(),
+        .ebits(), .peb(), .zbits(), .zb(), .w1bits(), .w1b(),
+        .gamma1(), .gamma2(), .eta_s(),
+        .zbound(), .r0bound(), .ct0bound(),
+        .sk_s2(), .sk_t0(), .sklen(cfg_sklen), .pklen(cfg_pklen),
+        .siglen(cfg_siglen), .sig_h0());
+
+    // 段边界（全部随 pset 走）
+    wire [14:0] RND_BASE   = {2'd0, cfg_sklen};
+    wire [14:0] CTX_BASE_S = RND_BASE + 15'd32;
+    wire [14:0] SIG_BASE   = {1'd0, cfg_pklen};
+    wire [14:0] CTX_BASE_V = SIG_BASE + {2'd0, cfg_siglen};
+
     reg [15:0] msg_r, ctx_r;
     reg [14:0] fidx;              // 喂数扫描指针
     reg        done_r, param_err;
@@ -164,8 +164,10 @@ module mldsa_engine #(
                             : ({2'd0, CTX_BASE_V} + var_len);
 
     // START 时的校验：参数集要对得上，消息不能超过核里 u_msg 的容量
-    wire start_ok = (pset == PSET[1:0]) && (msg_len <= MSGMAX[15:0])
-                    && (ctx_len <= 16'd255);
+    // pset 是运行时的，不再需要"与综合时的参数集比对"这条；
+    // 仍然校验长度：msg 超过核里 u_msg 的容量、或 ctx 超过 FIPS 204 的单字节上限，
+    // 都**拒绝启动**，不让高位地址安静回绕。
+    wire start_ok = (msg_len <= MSGMAX[15:0]) && (ctx_len <= 16'd255);
 
     assign wiping = (state == S_WIPE);
     assign busy   = (state != S_IDLE) && (state != S_DONE);
@@ -184,7 +186,7 @@ module mldsa_engine #(
 
     // 输出读口的地址翻译（组合，out_addr 直接落到核的读口上）
     wire [12:0] kg_pk_addr = out_addr[12:0];
-    wire [12:0] kg_sk_addr = out_addr[12:0] - PKLEN[12:0];
+    wire [12:0] kg_sk_addr = out_addr[12:0] - cfg_pklen[12:0];
     wire [12:0] sg_sig_addr = out_addr[12:0];
 
     // ---- 海绵三选一 ----
@@ -207,8 +209,8 @@ module mldsa_engine #(
     assign sha_in_flush = sel_kg ? kg_sif : sel_sg ? sg_sif : vf_sif;
     assign sha_out_ready= sel_kg ? kg_sor : sel_sg ? sg_sor : vf_sor;
 
-    mldsa_keygen #(.K(K), .L(L), .ETA(ETA)) u_kg (
-        .clk(clk), .rst_n(rst_n),
+    mldsa_keygen u_kg (
+        .clk(clk), .rst_n(rst_n), .pset(pset_r),
         .start(kg_start), .xi(xi_r), .done(kg_done),
         .sha_start(kg_ss), .sha_rate(kg_sr), .sha_suffix(kg_su),
         .sha_in_valid(kg_siv), .sha_in_data(kg_sid), .sha_in_flush(kg_sif),
@@ -220,9 +222,8 @@ module mldsa_engine #(
         .pk_addr(kg_pk_addr), .pk_data(kg_pk_data),
         .sk_addr(kg_sk_addr), .sk_data(kg_sk_data));
 
-    mldsa_sign #(.K(K), .L(L), .ETA(ETA), .TAU(TAU), .G1LOG(G1LOG),
-                 .MODE(MODE), .OMG(OMG), .BETA(BETA), .CTB(CTB)) u_sg (
-        .clk(clk), .rst_n(rst_n),
+    mldsa_sign u_sg (
+        .clk(clk), .rst_n(rst_n), .pset(pset_r),
         .start(sg_start),
         .sk_wr_en(sk_we),  .sk_wr_addr(seg_addr),  .sk_wr_data(seg_data),
         .msg_wr_en(msg_we_s), .msg_wr_addr(seg_addr), .msg_wr_data(seg_data),
@@ -238,9 +239,8 @@ module mldsa_engine #(
         .dbg_sel(7'd0), .dbg_idx(8'd0), .dbg_coef(),
         .sig_addr(sg_sig_addr), .sig_data(sg_sig_data));
 
-    mldsa_verify #(.K(K), .L(L), .TAU(TAU), .G1LOG(G1LOG),
-                   .MODE(MODE), .OMG(OMG), .BETA(BETA), .CTB(CTB)) u_vf (
-        .clk(clk), .rst_n(rst_n),
+    mldsa_verify u_vf (
+        .clk(clk), .rst_n(rst_n), .pset(pset_r),
         .start(vf_start),
         .pk_wr_en(pk_we),   .pk_wr_addr(seg_addr),  .pk_wr_data(seg_data),
         .sig_wr_en(sig_we), .sig_wr_addr(seg_addr), .sig_wr_data(seg_data),
@@ -258,10 +258,10 @@ module mldsa_engine #(
 
     // ---- 出口 ----
     assign out_data = (op_r == OP_KEYGEN)
-                        ? ((out_addr < PKLEN[14:0]) ? kg_pk_data : kg_sk_data)
+                        ? ((out_addr < {1'd0, cfg_pklen}) ? kg_pk_data : kg_sk_data)
                         : sg_sig_data;
-    assign out_len  = (op_r == OP_KEYGEN) ? (PKLEN[15:0] + SKLEN[15:0])
-                    : (op_r == OP_SIGN)   ? SIGLEN[15:0] : 16'd0;
+    assign out_len  = (op_r == OP_KEYGEN) ? ({2'd0, cfg_pklen} + {3'd0, cfg_sklen})
+                    : (op_r == OP_SIGN)   ? {3'd0, cfg_siglen} : 16'd0;
     assign verify_ok = vf_valid && !param_err;
 
     // ================= 缓冲写口与喂数的段译码 =================
@@ -312,7 +312,8 @@ module mldsa_engine #(
     // ================= 主状态机 =================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE; op_r <= 2'd0; msg_r <= 16'd0; ctx_r <= 16'd0;
+            state <= S_IDLE; op_r <= 2'd0; pset_r <= 2'd0;
+            msg_r <= 16'd0; ctx_r <= 16'd0;
             fidx <= 15'd0; done_r <= 1'b0; param_err <= 1'b0;
             xi_r <= 256'd0; rnd_r <= 256'd0;
             kg_start <= 1'b0; sg_start <= 1'b0; vf_start <= 1'b0;
@@ -331,7 +332,8 @@ module mldsa_engine #(
                         param_err <= 1'b1; done_r <= 1'b1;
                     end else begin
                         param_err <= 1'b0; done_r <= 1'b0;
-                        op_r  <= op; msg_r <= msg_len; ctx_r <= ctx_len;
+                        op_r  <= op; pset_r <= pset;
+                        msg_r <= msg_len; ctx_r <= ctx_len;
                         fidx  <= 15'd0;
                         state <= S_FEED_A;
                     end

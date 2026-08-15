@@ -8,18 +8,9 @@
 // 海绵接在外面（engine 不自带），与 mldsa_axi 的接法一致：
 // engine 的 sha_* 口直连 sha3_core，zeroize 也一并接真。
 `default_nettype none
-module tb_mldsa_engine #(
-    parameter integer K     = 4,
-    parameter integer L     = 4,
-    parameter integer ETA   = 2,
-    parameter integer TAU   = 39,
-    parameter integer G1LOG = 17,
-    parameter integer MODE  = 0,
-    parameter integer OMG   = 80,
-    parameter integer BETA  = 78,
-    parameter integer CTB   = 32,
-    parameter integer PSET  = 0
-) (
+// engine 已经是**运行时选参数集**的，所以这个测试台不再需要任何参数 ——
+// 参数集由用例通过 pset 端口在运行时给，甚至可以在同一次仿真里换。
+module tb_mldsa_engine (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        zeroize,
@@ -46,8 +37,7 @@ module tb_mldsa_engine #(
     wire [7:0]  sr, su, sid, sod;
     wire        sir, sov;
 
-    mldsa_engine #(.K(K), .L(L), .ETA(ETA), .TAU(TAU), .G1LOG(G1LOG),
-                   .MODE(MODE), .OMG(OMG), .BETA(BETA), .CTB(CTB), .PSET(PSET)) u_eng (
+    mldsa_engine u_eng (
         .clk(clk), .rst_n(rst_n),
         .zeroize(zeroize), .wiping(wiping),
         .start(start), .op(op), .pset(pset),
