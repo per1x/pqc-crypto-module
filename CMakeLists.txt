@@ -111,6 +111,7 @@ add_library(pqchsm
   src/hal/hwrng_stub.c
   src/hal/hwrng_mmap.c
   src/hal/hwrng_sdfe.c
+  src/hal/pqc_sdfe.c
   service/libsdfe.c
   src/proto/proto.c
   src/audit/audit.c

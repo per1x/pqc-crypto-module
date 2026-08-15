@@ -107,9 +107,46 @@ typedef struct pqc_backend {
 	                       const uint8_t *msg, size_t msg_len,
 	                       const uint8_t *ctx, size_t ctx_len,
 	                       const uint8_t *sig, size_t sig_len);
+
+	/* ---- 句柄型操作：私钥根本不经过软件 ----------------------------------
+	 *
+	 * 上面那几个都是**按字节传私钥**的（decaps 的第二个参数就是 sk）。
+	 * 对软件后端这没问题 —— 私钥本来就在进程内存里。但对 FPGA 后端，
+	 * 它是个硬冲突：PL 里的 ML-KEM 现在把 dk 留在片内金库，KeyGen 只交出
+	 * 公钥和一个槽号，而且有一道一次性闩锁封死 dk 的出口。照上面的签名
+	 * 实现，就必须把 dk 拉回软件内存 —— 等于把"私钥不出硬件"这条性质
+	 * 亲手抵消掉。
+	 *
+	 * 所以另开一组按句柄的操作。两条要点：
+	 *
+	 *   · **句柄由后端定义，上层只当它是个不透明的数。** 现在它就是 PL
+	 *     金库的槽号，但上层不该知道，否则换一种硬件就要改 slot 层。
+	 *
+	 *   · **不支持就填 NULL，别做一个"内部先取出字节再调字节版"的实现。**
+	 *     那种实现能让所有测试通过，而它恰好把这组接口存在的唯一理由
+	 *     取消了 —— 上层无从分辨自己拿到的是真的硬件保管还是一层包装。
+	 *     pqc_backend_has_hw_keys() 就是给上层用来问这件事的。
+	 */
+	pqc_status_t (*keypair_hw)(pqc_alg_t alg, uint8_t *pk, uint32_t *hw_handle);
+
+	pqc_status_t (*decaps_hw)(pqc_alg_t alg, uint32_t hw_handle,
+	                          const uint8_t *ct, uint8_t *ss);
 } pqc_backend_t;
 
 const pqc_backend_t *pqc_backend_liboqs(void);
+
+/* 经密码机服务（pqchsm_fpgad）打 FPGA 的后端。
+ * 本机走 UNIX socket；设了 PQCHSM_SDFE_HOST + PQCHSM_SDFE_TOKEN 就走 TCP。
+ * 连不上时返回 NULL —— 让调用方显式决定，不静默退回软件。 */
+const pqc_backend_t *pqc_backend_sdfe(void);
+
+/* 当前后端是否真的把私钥留在硬件里（两个句柄操作都在才算）。
+ * 上层据此决定生成密钥时走哪条路 —— 不要用后端名字去判。 */
+int pqc_backend_has_hw_keys(void);
+
+pqc_status_t pqc_keypair_hw(pqc_alg_t alg, uint8_t *pk, uint32_t *hw_handle);
+pqc_status_t pqc_decaps_hw(pqc_alg_t alg, uint32_t hw_handle,
+                           const uint8_t *ct, uint8_t *ss);
 
 /* 进程级当前后端；未设置时默认 liboqs。be == NULL 恢复默认。 */
 void                 pqc_set_backend(const pqc_backend_t *be);
