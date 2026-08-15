@@ -187,11 +187,46 @@ module mldsa_keygen #(
     assign dbg_coef = (dbg_sel[5:3] == 3'd2) ? ac_dout
                     : (dbg_sel[5:3] == 3'd1) ? s2_dout : s1_dout;
 
-    // 逐系数 mont 乘：Â(23 无符号) × ŝ₁(32 有符号)
-    wire signed [63:0] mac_prod =
-        $signed({41'd0, un_rd_data}) * s1_dout;
-    wire signed [31:0] mac_mont;
-    mldsa_mont_reduce u_mont (.a(mac_prod), .t_out(mac_mont));
+    // ======================================================================
+    // ④ 逐系数 mont 乘：Â(23 无符号) × ŝ₁(32 有符号)，**流水版**
+    // ======================================================================
+    //
+    // 原来这里是一条全组合的 mldsa_mont_reduce。把 NTT 蝶形流水化之后，
+    // 它就是 keygen 剩下的关键路径 —— ML-DSA-87 post-route 实测
+    // WNS = −1.479ns，路径 u_s1 → （三次 32×32 乘）→ u_acc，逻辑层级 29。
+    // 与 sign/verify 的那两条是同一个形状，所以用同一个 mldsa_mont_mul_pipe。
+    //
+    // 时序：第 T 拍发读地址 → 第 T+1 拍数据出来、拉 in_valid（写回地址与
+    // 旧累加值一起进 tag）→ 第 T+6 拍结果回来。每拍发一个，比原来两拍一个快一倍。
+    // 段与段之间必须排空：下一段(vj+1)要读的正是这一段刚写完的累加器。
+    reg  mm_last, mm_iv;
+    reg  [7:0] mm_addr_d;
+    wire mm_issue = !mm_last && (st == S_MAC);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mm_iv <= 1'b0; mm_addr_d <= 8'd0;
+        end else begin
+            mm_iv     <= mm_issue;
+            mm_addr_d <= cnt[7:0];
+        end
+    end
+
+    // tag = {写回地址 8 位, 旧累加值 32 位}。
+    // ⚠️ ac_dout 取当拍的值、地址取上一拍锁存的 —— 两者都对应第 T 拍发出的那个系数。
+    wire        mm_ov, mm_busy;
+    wire [39:0] mm_otag;
+    wire signed [31:0] mm_t;
+    mldsa_mont_mul_pipe #(.TAGW(40)) u_mm (
+        .clk(clk), .rst_n(rst_n),
+        .in_valid(mm_iv), .in_tag({mm_addr_d, ac_dout}),
+        .x($signed({9'd0, un_rd_data})), .y(s1_dout),
+        .out_valid(mm_ov), .out_tag(mm_otag), .t_out(mm_t),
+        .pipe_busy(mm_busy));
+
+    wire [7:0]  mm_owaddr = mm_otag[39:32];
+    wire signed [31:0] mm_oacc = $signed(mm_otag[31:0]);
+    wire        mm_empty  = ~mm_iv & ~mm_busy;
 
     // reduce32：MAC 累加值在灌进 invNTT 前先规约（第 ⑤ 段）
     wire signed [31:0] red_out;
@@ -287,7 +322,7 @@ module mldsa_keygen #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            st <= S_IDLE; done <= 1'b0; cnt <= 9'd0;
+            st <= S_IDLE; done <= 1'b0; cnt <= 9'd0; mm_last <= 1'b0;
             owner <= OWN_FSM; vj <= 3'd0; ph <= 1'b0; s2phase <= 1'b0;
             nt_lowseen <= 1'b0;
             vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0; nt_inv <= 1'b0;
@@ -435,26 +470,25 @@ module mldsa_keygen #(
             end
             S_A_WAIT: if (un_done) begin cnt <= 9'd0; ph <= 1'b0; st <= S_MAC; end
 
-            // 逐系数：ph=0 摆 Â/ŝ₁/acc 读地址，ph=1 算 mont 写 acc。
-            // j==0 直接放，之后累加（省掉清零）。
+            // 逐系数：每拍用 cnt 发一个读地址，结果 6 拍后由 tag 带着写回地址回来。
+            // 256 个发完后等流水排空，再换 (vi,vj)。j==0 直接放，之后累加（省掉清零）。
             S_MAC: begin
-                if (!ph) begin
-                    ph <= 1'b1;
-                end else begin
-                    if (cnt == 9'd255) begin
-                        cnt <= 9'd0; ph <= 1'b0;
-                        if (vj == LM1) begin
-                            vj <= 3'd0;
-                            if (vi == KM1) begin
-                                vi <= 3'd0; ph <= 1'b0; owner <= OWN_FSM;
-                                st <= S_RED;       // acc 全算完，进 invNTT 段
-                            end else begin
-                                vi <= vi + 3'd1; st <= S_A_GEN;
-                            end
+                if (!mm_last) begin
+                    if (cnt == 9'd255) mm_last <= 1'b1;
+                    else               cnt <= cnt + 9'd1;
+                end else if (mm_empty) begin
+                    cnt <= 9'd0; ph <= 1'b0; mm_last <= 1'b0;
+                    if (vj == LM1) begin
+                        vj <= 3'd0;
+                        if (vi == KM1) begin
+                            vi <= 3'd0; owner <= OWN_FSM;
+                            st <= S_RED;       // acc 全算完，进 invNTT 段
                         end else begin
-                            vj <= vj + 3'd1; st <= S_A_GEN;
+                            vi <= vi + 3'd1; st <= S_A_GEN;
                         end
-                    end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
+                    end else begin
+                        vj <= vj + 3'd1; st <= S_A_GEN;
+                    end
                 end
             end
 
@@ -618,14 +652,16 @@ module mldsa_keygen #(
         if (p0_ov) begin sk_we = 1'b1; sk_waddr = p0_ptr; sk_din = p0_ob; end
 
         // MAC：Â[cnt]·ŝ₁[vj][cnt]，累加到 acc[vi][cnt]
+        // 写回地址与"旧累加值"都来自 tag，不再用当拍的 cnt / ac_dout ——
+        // 结果比读地址晚 6 拍，用当拍的 cnt 会写到错误的系数上。
         if (st == S_MAC) begin
             un_rd_addr = cnt[7:0];
             s1_raddr   = {vj[2:0], cnt[7:0]};
             ac_raddr   = {vi[2:0], cnt[7:0]};
-            if (ph) begin
+            if (mm_ov) begin
                 ac_we    = 1'b1;
-                ac_waddr = {vi[2:0], cnt[7:0]};
-                ac_din   = (vj == 3'd0) ? mac_mont : (ac_dout + mac_mont);
+                ac_waddr = {vi[2:0], mm_owaddr};
+                ac_din   = (vj == 3'd0) ? mm_t : (mm_oacc + mm_t);
             end
         end
 

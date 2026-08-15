@@ -256,11 +256,19 @@ module mldsa_verify #(
         .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
         .rd_addr(nt_raddr), .rd_data(nt_rdata));
 
-    // ---- ④ 逐点乘：S_MAC 用 Â×ẑ，S_CT1 用 ĉ×t̂₁ ----
-    wire signed [63:0] pw_prod = (st == S_CT1) ? (c_dout * t1_dout)
-                                              : ($signed({41'd0, un_rd_data}) * z_dout);
-    wire signed [31:0] pw_mont;
-    mldsa_mont_reduce u_mont (.a(pw_prod), .t_out(pw_mont));
+    // ======================================================================
+    // ④ 逐点乘：S_MAC 用 Â×ẑ，S_CT1 用 ĉ×t̂₁ —— **流水版**
+    // ======================================================================
+    //
+    // 原来这里是一条全组合的 mldsa_mont_reduce。把 NTT 蝶形流水化之后它就是
+    // verify 剩下的关键路径 —— ML-DSA-87 post-route 实测 WNS = −3.487ns，
+    // 路径 u_z →（三次 32×32 乘）→ u_acc，逻辑层级 33。
+    // 与 keygen/sign 的那几条是同一个形状，用同一个 mldsa_mont_mul_pipe。
+    //
+    // 时序：第 T 拍发读地址 → 第 T+1 拍数据出来、拉 in_valid（写回地址与
+    // 旧累加值一起进 tag）→ 第 T+6 拍结果回来。每拍发一个，比原来两拍一个快一倍。
+    // 两段之间必须排空：S_CT1 要读 S_MAC 刚写完的累加器。
+    // （流水乘法链的例化在控制寄存器之后 —— 它要用 cnt）
     // reduce32 在 invNTT **之前**（照 oracle 的顺序，别挪到后面）
     wire signed [31:0] red_out;
     mldsa_reduce32 u_red (.a(ac_dout), .r(red_out));
@@ -324,6 +332,38 @@ module mldsa_verify #(
     reg        nt_lowseen;     // 「done 是电平」：先见它落一次再等它起
     reg [3:0]  vi, vj;         // ④ 的 i / j
 
+    // ---- ④ 逐点乘的流水链（接上面 259 行处那条注释）----
+    reg  mm_last, mm_iv;
+    reg  [7:0] mm_addr_d;
+    wire mm_issue = !mm_last && (st == S_MAC || st == S_CT1);
+    wire mm_is_ct1 = (st == S_CT1);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mm_iv <= 1'b0; mm_addr_d <= 8'd0;
+        end else begin
+            mm_iv     <= mm_issue;
+            mm_addr_d <= cnt;
+        end
+    end
+
+    // tag = {写回地址 8 位, 旧累加值 32 位}。
+    // ⚠️ ac_dout 取当拍的值、地址取上一拍锁存的 —— 两者都对应第 T 拍发出的那个系数。
+    wire        mm_ov, mm_busy;
+    wire [39:0] mm_otag;
+    wire signed [31:0] mm_t;
+    mldsa_mont_mul_pipe #(.TAGW(40)) u_mm (
+        .clk(clk), .rst_n(rst_n),
+        .in_valid(mm_iv), .in_tag({mm_addr_d, ac_dout}),
+        .x(mm_is_ct1 ? c_dout : $signed({9'd0, un_rd_data})),
+        .y(mm_is_ct1 ? t1_dout : z_dout),
+        .out_valid(mm_ov), .out_tag(mm_otag), .t_out(mm_t),
+        .pipe_busy(mm_busy));
+
+    wire [7:0]  mm_owaddr = mm_otag[39:32];
+    wire signed [31:0] mm_oacc = $signed(mm_otag[31:0]);
+    wire        mm_empty  = ~mm_iv & ~mm_busy;
+
     localparam [13:0] PKLEN = 14'd32 + K[13:0]*14'd320;
 
     // ---- tr 支的吸收源：整个 pk ----
@@ -354,6 +394,7 @@ module mldsa_verify #(
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; valid <= 1'b0;
             cnt <= 8'd0; ph <= 1'b0; poly <= 4'd0; rdp <= 13'd0; feed <= 1'b0;
+            mm_last <= 1'b0;
             hclr <= 11'd0; hidx <= 8'd0; hfirst <= 8'd0; hprev <= 8'd0;
             ctilde <= 256'd0; ctilde_p <= 256'd0; tr_out <= 512'd0; mu <= 512'd0;
             zbad <= 1'b0; hbad <= 1'b0;
@@ -645,25 +686,27 @@ module mldsa_verify #(
                 st <= S_A_WT;
             end
             S_A_WT: if (un_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_MAC; end
+            // 每拍发一个；256 个发完等流水排空，再换 vj（下一段要读这一段写的累加器）
             S_MAC: begin
-                if (!ph) begin ph <= 1'b1; end
-                else begin
-                    if (cnt == 8'd255) begin
-                        cnt <= 8'd0; ph <= 1'b0;
-                        if (vj == LM1) begin
-                            vj <= 4'd0; owner <= OWN_FSM; st <= S_CT1;
-                        end else begin
-                            vj <= vj + 4'd1; owner <= OWN_UNI; st <= S_A_GO;
-                        end
-                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                if (!mm_last) begin
+                    if (cnt == 8'd255) mm_last <= 1'b1;
+                    else               cnt <= cnt + 8'd1;
+                end else if (mm_empty) begin
+                    cnt <= 8'd0; ph <= 1'b0; mm_last <= 1'b0;
+                    if (vj == LM1) begin
+                        vj <= 4'd0; owner <= OWN_FSM; st <= S_CT1;
+                    end else begin
+                        vj <= vj + 4'd1; owner <= OWN_UNI; st <= S_A_GO;
+                    end
                 end
             end
             // acc −= mont(ĉ∘t̂₁[vi])
             S_CT1: begin
-                if (!ph) begin ph <= 1'b1; end
-                else begin
-                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_RED; end
-                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                if (!mm_last) begin
+                    if (cnt == 8'd255) mm_last <= 1'b1;
+                    else               cnt <= cnt + 8'd1;
+                end else if (mm_empty) begin
+                    cnt <= 8'd0; ph <= 1'b0; mm_last <= 1'b0; st <= S_RED;
                 end
             end
             // reduce32(acc) → invNTT 写口
@@ -760,13 +803,15 @@ module mldsa_verify #(
         if (st == S_D_ABS && hsel == 2'd0) pk_raddr = ai[12:0];
 
         // ④ MAC：Â[cnt]·ẑ[vj][cnt] 累加到 acc[cnt]（j==0 直接放，省清零）
+        // 写回地址与"旧累加值"都来自 tag，不再用当拍的 cnt / ac_dout ——
+        // 结果比读地址晚 6 拍，用当拍的 cnt 会写到错误的系数上。
         if (st == S_MAC) begin
             un_rd_addr = cnt;
             z_raddr    = {vj[2:0], cnt};
             ac_raddr   = cnt;
-            if (ph) begin
-                ac_we    = 1'b1; ac_waddr = cnt;
-                ac_din   = (vj == 3'd0) ? pw_mont : (ac_dout + pw_mont);
+            if (mm_ov) begin
+                ac_we    = 1'b1; ac_waddr = mm_owaddr;
+                ac_din   = (vj == 3'd0) ? mm_t : (mm_oacc + mm_t);
             end
         end
         // ④ acc −= mont(ĉ∘t̂₁[vi])
@@ -774,8 +819,8 @@ module mldsa_verify #(
             c_raddr  = cnt;
             t1_raddr = {vi[2:0], cnt};
             ac_raddr = cnt;
-            if (ph) begin
-                ac_we = 1'b1; ac_waddr = cnt; ac_din = ac_dout - pw_mont;
+            if (mm_ov) begin
+                ac_we = 1'b1; ac_waddr = mm_owaddr; ac_din = mm_oacc - mm_t;
             end
         end
         // ④ 装载：reduce32(acc) → invNTT 写口

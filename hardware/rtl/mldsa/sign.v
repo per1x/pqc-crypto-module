@@ -304,10 +304,6 @@ module mldsa_sign #(
         .sha_out_ready(un_sor), .sha_out_data(sha_out_data),
         .rd_addr(un_rd_addr), .rd_data(un_rd_data), .count());
 
-    // 逐系数 mont 乘：Â(23 无符号) × ŷ(32 有符号)
-    wire signed [63:0] mac_prod = $signed({41'd0, un_rd_data}) * yh_dout;
-    wire signed [31:0] mac_mont;
-    mldsa_mont_reduce u_mont (.a(mac_prod), .t_out(mac_mont));
     // reduce32：MAC 累加值灌进 invNTT 前先规约
     wire signed [31:0] red_out;
     mldsa_reduce32 u_red (.a(ac_dout), .r(red_out));
@@ -371,14 +367,6 @@ module mldsa_sign #(
     ram_dp #(.DW(1), .AW(11)) u_hn (
         .clk(clk), .a_we(hn_we), .a_addr(hn_waddr), .a_din(hn_din), .a_dout(),
         .b_we(1'b0), .b_addr(hn_raddr), .b_din(1'd0), .b_dout(hn_dout));
-
-    // ---- ⑦⑧⑨ 共用：逐点 ĉ∘ŝ（mont 乘），及 invNTT 后的合成 + norm 检查 ----
-    //   MUL 状态选第二乘子：S_R_MUL→ŝ₂，S_H_MUL→t̂₀，其余（S_Z_MUL）→ŝ₁
-    wire signed [31:0] pw_b = (st == S_R_MUL) ? s2_dout
-                            : (st == S_H_MUL) ? t0_dout : s1_dout;
-    wire signed [63:0] pw_prod = c_dout * pw_b;
-    wire signed [31:0] pw_mont;
-    mldsa_mont_reduce u_mont2 (.a(pw_prod), .t_out(pw_mont));
 
     // 合成（invNTT 结果在 nt_rdata）：z=y+cs₁，r0=w0−cs₂，ct0=cs（都过 reduce32）
     wire signed [31:0] comb_in = (st == S_R_WB) ? (w0_dout - nt_rdata)
@@ -503,6 +491,71 @@ module mldsa_sign #(
         (nstore == 2'd0) ? s1_dout : (nstore == 2'd1) ? s2_dout
       : (nstore == 2'd2) ? t0_dout : y_dout;
 
+    // ======================================================================
+    // ⑤⑦⑧⑨ 共用的**流水**乘法链：mont(x·y)
+    // ======================================================================
+    //
+    // 原来这里是两条**全组合**的 mldsa_mont_reduce（⑤ 的 Â∘ŷ 与 ⑦⑧⑨ 的 ĉ∘ŝ）。
+    // 它们是把蝶形流水化之后剩下的真正关键路径 —— ML-DSA-87 Sign 的 post-route
+    // 实测：蝶形流水化前 WNS = −3.332ns（关键路径在蝶形），流水化后 WNS = −3.356ns，
+    // 关键路径原地搬到 u_t0 → pw_prod → u_ntt 这条上。同一个形状：
+    // BRAM 读出 → 三次 32×32 乘（x·y、m=p·QINV、m·Q）→ BRAM 写入，逻辑层级 31。
+    //
+    // 两条链合并成**一条** mldsa_mont_mul_pipe：⑤ 与 ⑦⑧⑨ 在时间上互斥
+    // （S_MAC 与 S_*_MUL 是不同状态），分时复用即可，顺带省掉一整套乘法器。
+    //
+    // 时序结构（与 ntt_core 同一套写法）：
+    //   第 T 拍   FSM 用 cnt 发读地址
+    //   第 T+1 拍 BRAM 数据出来 → 拉 in_valid，把**写回地址**与**累加旁路**塞进 tag
+    //   第 T+6 拍 结果回来，写回地址从 tag 里取
+    // 每拍发一个（原来两拍一个），所以这几段反而比改造前**快一倍**。
+    // 段与段之间必须排空（mm_empty）：下一段要读的正是这一段刚写完的累加器。
+    //
+    //   MUL 状态选第二乘子：S_R_MUL→ŝ₂，S_H_MUL→t̂₀，其余（S_Z_MUL）→ŝ₁
+    wire signed [31:0] pw_b = (st == S_R_MUL) ? s2_dout
+                            : (st == S_H_MUL) ? t0_dout : s1_dout;
+
+    wire mm_is_mac = (st == S_MAC);
+    // ⑤ 的第一乘子是 Â（23 位无符号），补零成 32 位有符号；⑦⑧⑨ 是 ĉ
+    wire signed [31:0] mm_x = mm_is_mac ? $signed({9'd0, un_rd_data}) : c_dout;
+    wire signed [31:0] mm_y = mm_is_mac ? yh_dout : pw_b;
+
+    // 本段 256 个系数是否已全部发出（发完还要等流水排空才能换段）
+    reg        mm_last;
+    reg        mm_iv;
+    reg  [7:0] mm_addr_d;      // 上一拍发出的读地址，随数据一起进 tag
+    wire       mm_issue = !mm_last &&
+                          (st == S_MAC   || st == S_Z_MUL ||
+                           st == S_R_MUL || st == S_H_MUL);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mm_iv <= 1'b0; mm_addr_d <= 8'd0;
+        end else begin
+            mm_iv     <= mm_issue;
+            mm_addr_d <= cnt;
+        end
+    end
+
+    // tag = {写回地址 8 位, 累加旁路 32 位}。
+    // ⚠️ ac_dout 取的是**当拍**的值（第 T+1 拍才是 cnt 那个地址的内容），
+    // 而地址用的是**上一拍**锁存的 mm_addr_d —— 两者都对应第 T 拍发出的那个系数。
+    // 把它们交给 tag 之后，"旁路比结果早/晚一拍"这类错位在结构上不可能发生。
+    wire        mm_ov;
+    wire [39:0] mm_otag;
+    wire signed [31:0] mm_t;
+    wire        mm_busy;
+    mldsa_mont_mul_pipe #(.TAGW(40)) u_mm (
+        .clk(clk), .rst_n(rst_n),
+        .in_valid(mm_iv), .in_tag({mm_addr_d, ac_dout}),
+        .x(mm_x), .y(mm_y),
+        .out_valid(mm_ov), .out_tag(mm_otag), .t_out(mm_t),
+        .pipe_busy(mm_busy));
+
+    wire [7:0]  mm_owaddr = mm_otag[39:32];
+    wire signed [31:0] mm_oacc = $signed(mm_otag[31:0]);
+    wire        mm_empty  = ~mm_iv & ~mm_busy;
+
     // ---- μ 支的吸收源：tr(64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ msg ----
     wire [5:0]  tr_idx      = ai[5:0];
     wire [13:0] thr_ctxend  = 14'd66 + {6'd0, ctx_len};              // ctx 占 [66, thr_ctxend)
@@ -540,6 +593,7 @@ module mldsa_sign #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; cnt <= 8'd0; ph <= 1'b0;
+            mm_last <= 1'b0;
             poly <= 4'd0; t0phase <= 1'b0; skp <= 12'd0; feed <= 1'b0;
             ai <= 14'd0; hsel <= 2'd0;
             nstore <= 2'd0; nt_lowseen <= 1'b0;
@@ -798,20 +852,20 @@ module mldsa_sign #(
                 st <= S_A_WT;
             end
             S_A_WT: if (un_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_MAC; end
+            // 每拍发一个系数；发完 256 个再等流水排空（下一段要读这一段写的累加器）
             S_MAC: begin
-                if (!ph) begin
-                    ph <= 1'b1;
-                end else begin
-                    if (cnt == 8'd255) begin
-                        cnt <= 8'd0; ph <= 1'b0;
-                        if (vj == LM1) begin
-                            vj <= 4'd0;
-                            owner <= OWN_FSM;   // MAC 完这一 i，进 invNTT（FSM 用 NTT 核）
-                            st <= S_RED;
-                        end else begin
-                            vj <= vj + 4'd1; owner <= OWN_UNI; st <= S_A_GO;
-                        end
-                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                if (!mm_last) begin
+                    if (cnt == 8'd255) mm_last <= 1'b1;
+                    else               cnt <= cnt + 8'd1;
+                end else if (mm_empty) begin
+                    cnt <= 8'd0; mm_last <= 1'b0; ph <= 1'b0;
+                    if (vj == LM1) begin
+                        vj <= 4'd0;
+                        owner <= OWN_FSM;   // MAC 完这一 i，进 invNTT（FSM 用 NTT 核）
+                        st <= S_RED;
+                    end else begin
+                        vj <= vj + 4'd1; owner <= OWN_UNI; st <= S_A_GO;
+                    end
                 end
             end
             // 装载：reduce32(acc[vi]) → NTT 写口（inverse）
@@ -906,10 +960,11 @@ module mldsa_sign #(
 
             // 对每个 j：pointwise ĉ∘ŝ₁[vj] → invNTT 写口
             S_Z_MUL: begin
-                if (!ph) begin ph <= 1'b1; end
-                else begin
-                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_Z_GO; end
-                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                if (!mm_last) begin
+                    if (cnt == 8'd255) mm_last <= 1'b1;
+                    else               cnt <= cnt + 8'd1;
+                end else if (mm_empty) begin
+                    cnt <= 8'd0; mm_last <= 1'b0; ph <= 1'b0; st <= S_Z_GO;
                 end
             end
             S_Z_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_Z_ST; end
@@ -937,10 +992,11 @@ module mldsa_sign #(
             // ---------- ⑧ r₀[i]=reduce32(w0[i]−invNTT(ĉ∘ŝ₂[i]))；‖r₀‖∞ 检查 ----------
             // r₀ 就地覆盖 w0 存储（w0 之后只在 ⑨ 用作 r₀）。
             S_R_MUL: begin
-                if (!ph) begin ph <= 1'b1; end
-                else begin
-                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_R_GO; end
-                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                if (!mm_last) begin
+                    if (cnt == 8'd255) mm_last <= 1'b1;
+                    else               cnt <= cnt + 8'd1;
+                end else if (mm_empty) begin
+                    cnt <= 8'd0; mm_last <= 1'b0; ph <= 1'b0; st <= S_R_GO;
                 end
             end
             S_R_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_R_ST; end
@@ -963,10 +1019,11 @@ module mldsa_sign #(
             // ---------- ⑨ ct₀=reduce32(invNTT(ĉ∘t̂₀[i]))；‖ct₀‖∞ 检查；
             //            hint=MakeHint(reduce32(r₀+ct₀), w₁[i])；权重累加 ----------
             S_H_MUL: begin
-                if (!ph) begin ph <= 1'b1; end
-                else begin
-                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_H_GO; end
-                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                if (!mm_last) begin
+                    if (cnt == 8'd255) mm_last <= 1'b1;
+                    else               cnt <= cnt + 8'd1;
+                end else if (mm_empty) begin
+                    cnt <= 8'd0; mm_last <= 1'b0; ph <= 1'b0; st <= S_H_GO;
                 end
             end
             S_H_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_H_ST; end
@@ -1149,14 +1206,16 @@ module mldsa_sign #(
         end
 
         // ⑤ MAC：Â[cnt]·ŷ[vj][cnt] 累加到 acc[vi][cnt]（j==0 直接放）
+        // 写回地址与"旧累加值"都来自 tag，不再用当拍的 cnt / ac_dout ——
+        // 结果比读地址晚 6 拍，用当拍的 cnt 会写到错误的系数上。
         if (st == S_MAC) begin
             un_rd_addr = cnt;
             yh_raddr   = {vj[2:0], cnt};
             ac_raddr   = {vi[2:0], cnt};
-            if (ph) begin
+            if (mm_ov) begin
                 ac_we    = 1'b1;
-                ac_waddr = {vi[2:0], cnt};
-                ac_din   = (vj == 3'd0) ? mac_mont : (ac_dout + mac_mont);
+                ac_waddr = {vi[2:0], mm_owaddr};
+                ac_din   = (vj == 3'd0) ? mm_t : (mm_oacc + mm_t);
             end
         end
         // ⑤ 装载：reduce32(acc[vi]) → invNTT 写口
@@ -1205,7 +1264,7 @@ module mldsa_sign #(
         if (st == S_Z_MUL) begin
             c_raddr  = cnt;
             s1_raddr = {vj[2:0], cnt};
-            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = pw_mont; end
+            if (mm_ov) begin nt_we = 1'b1; nt_waddr = mm_owaddr; nt_wdata = mm_t; end
         end
         // ⑦ z 写回：z[vj]=reduce32(y[vj]+invNTT)
         if (st == S_Z_WB) begin
@@ -1218,7 +1277,7 @@ module mldsa_sign #(
         if (st == S_R_MUL) begin
             c_raddr  = cnt;
             s2_raddr = {vi[2:0], cnt};
-            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = pw_mont; end
+            if (mm_ov) begin nt_we = 1'b1; nt_waddr = mm_owaddr; nt_wdata = mm_t; end
         end
         // ⑧ r₀ 写回：r0[vi]=reduce32(w0[vi]−cs₂)，就地覆盖 w0（read-first：读旧 w0）
         if (st == S_R_WB) begin
@@ -1231,7 +1290,7 @@ module mldsa_sign #(
         if (st == S_H_MUL) begin
             c_raddr  = cnt;
             t0_raddr = {vi[2:0], cnt};
-            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = pw_mont; end
+            if (mm_ov) begin nt_we = 1'b1; nt_waddr = mm_owaddr; nt_wdata = mm_t; end
         end
         // ⑨ hint 写回：ct0=reduce32(invNTT)；a0=reduce32(r0[vi]+ct0)；hint=MakeHint(a0,w1[vi])
         if (st == S_H_WB) begin
