@@ -643,12 +643,19 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 	}
 	/* ---- 私钥留在硬件里的那条路 ----------------------------------------
 	 * 条件有三个，缺一不可：
-	 *   · 后端两个句柄操作都在（pqc_backend_has_hw_keys）；
+	 *   · 后端对**这一类算法**的句柄操作齐全
+	 *     （KEM 要 keypair_hw+decaps_hw，签名要 keypair_hw+sign_hw）；
 	 *   · 是"生成"而不是"由种子装载"—— 种子装载要求私钥可复现，
-	 *     而硬件生成的 d/z 取自 PL 自己的 TRNG，复现不了；
+	 *     而硬件生成的 d/z（ML-DSA 是 ξ）取自 PL 自己的 TRNG，复现不了；
 	 *   · 没要求种子存储策略 —— 那条策略的前提就是存着种子。
-	 * 任何一条不满足就照旧走软件路径，**不猜、不降级到"假装在硬件里"**。 */
-	if (!seed && !(policy & SLOT_POLICY_SEED_STORAGE) && pqc_backend_has_hw_keys()) {
+	 * 任何一条不满足就照旧走软件路径，**不猜、不降级到"假装在硬件里"**。
+	 *
+	 * ⚠️ 这里问的是 info->kind 而不是一个笼统的"后端有没有硬件密钥"。
+	 * 两类是两件独立的事：本项目就正处在"ML-KEM 的核在板上、ML-DSA 的从机
+	 * 还没落地"的阶段，用一个布尔去问，要么把已经成立的 ML-KEM 也拖下水，
+	 * 要么把还没成立的 ML-DSA 说成成立了。 */
+	if (!seed && !(policy & SLOT_POLICY_SEED_STORAGE) &&
+	    pqc_backend_has_hw_keys_kind((unsigned)info->kind)) {
 		uint8_t *hpk = pqc_secure_alloc(info->pk_len);
 		uint32_t hh = 0;
 
@@ -658,8 +665,8 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 		pqc_status_t hst = pqc_keypair_hw(alg, hpk, &hh);
 
 		if (hst == PQC_ERR_UNSUPPORTED) {
-			/* 算法不匹配，不是硬件故障。硬件里只有 ML-KEM；要 ML-DSA
-			 * 就走软件。判据是算法，不是这次调用成没成 ——
+			/* 算法不匹配，不是硬件故障 —— 这个后端做不了这个算法，
+			 * 那就走软件。判据是算法，不是这次调用成没成 ——
 			 * 与 pqc_sdfe.c 里那条界线同源：换算法可以，换保证不行。 */
 			pqc_secure_free(hpk, info->pk_len);
 		} else if (hst == PQC_OK) {
@@ -982,9 +989,24 @@ hsm_status_t hsm_object_sign(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t 
 			op = HSM_ERR_BAD_ARG;
 		} else {
 			size_t n = cap;
-			/* rnd = NULL → hedged 签名，由后端取 TRNG（FIPS 204 推荐模式） */
-			op = (pqc_sign(s->meta.alg, sk, msg, msg_len, ctx, ctx_len, NULL, sig, &n)
-			      == PQC_OK) ? HSM_OK : HSM_ERR_CRYPTO;
+			/* rnd = NULL → hedged 签名，由后端取 TRNG（FIPS 204 推荐模式）。
+			 * 硬件路径上 rnd 只能是 NULL：核的 rnd 由 PL 的 TRNG 供给，
+			 * 寄存器面没有喂它的入口（见 pqc.h 的 sign_hw 注释）。 */
+			if (s->hw_resident) {
+				/* 私钥在 PL 的片内金库里：只把句柄和消息交下去。
+				 * 与 hsm_object_decaps 那一支同构 —— 上面 begin_use
+				 * 借到的 sk 在这条路上恒为 NULL，而借的动作仍然要做，
+				 * 因为它同时管着句柄校验、用途检查和状态机，
+				 * 那几件事与私钥在哪无关。 */
+				op = (pqc_sign_hw(s->meta.alg, s->hw_handle,
+				                  msg, msg_len, ctx, ctx_len, NULL,
+				                  sig, &n) == PQC_OK)
+				     ? HSM_OK : HSM_ERR_CRYPTO;
+			} else {
+				op = (pqc_sign(s->meta.alg, sk, msg, msg_len, ctx, ctx_len,
+				               NULL, sig, &n) == PQC_OK)
+				     ? HSM_OK : HSM_ERR_CRYPTO;
+			}
 			if (op == HSM_OK) {
 				*sig_len = n;
 			}

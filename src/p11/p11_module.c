@@ -527,19 +527,25 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 	 *
 	 * 装上之后 C_GenerateKeyPair 生成的 ML-KEM 私钥**留在 PL 的片内金库**，
 	 * 本进程只拿到公钥和一个句柄；C_Decapsulate 把句柄交给硬件，
-	 * 私钥连指针都不存在。
+	 * 私钥连指针都不存在。ML-DSA 的 C_Sign 走的是同一套（keypair_hw + sign_hw），
+	 * 只是它的从机 mldsa_axi **尚未落地** —— 驱动就位，运算还没有地方跑。
 	 *
 	 * 与熵源那个开关分开，是因为它们的失败方式不同：熵源取不到就该停机，
-	 * 而算法后端不支持某个算法（比如 ML-DSA，硬件里还没有）时要能回落到
-	 * 软件 —— 后端的 vtable 里那几项填 NULL，pqc_* 包装会回
-	 * PQC_ERR_UNSUPPORTED，上层据此选择。**回落是显式的，不是静默的。**
+	 * 而算法后端不支持某个算法时要能回落到软件 —— 后端的 vtable 里那几项
+	 * 填 NULL，pqc_* 包装会回 PQC_ERR_UNSUPPORTED，上层据此选择。
+	 * **回落是显式的，不是静默的。**
+	 *
+	 * 这道闸门只问 KEM：它是本开关成立的最低条件（板上真正跑着的就是它），
+	 * 也是加签名之前这行代码一直在问的那件事。签名那一半由 slot 层按算法各自
+	 * 判（pqc_backend_has_hw_keys_kind(info->kind)）—— 在这里一并要求，
+	 * 等于让还没落地的 ML-DSA 把已经能用的 ML-KEM 一起挡在门外。
 	 */
 	{
 		const char *be = getenv("PQCHSM_BACKEND");
 
 		if (be && !strcmp(be, "sdfe")) {
 			pqc_set_backend(pqc_backend_sdfe());
-			if (!pqc_backend_has_hw_keys()) {
+			if (!pqc_backend_has_hw_keys_kind(PQC_KIND_KEM)) {
 				rv = CKR_DEVICE_ERROR;
 				goto out;
 			}
