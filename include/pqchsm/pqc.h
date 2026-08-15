@@ -125,12 +125,28 @@ typedef struct pqc_backend {
 	 *   · **不支持就填 NULL，别做一个"内部先取出字节再调字节版"的实现。**
 	 *     那种实现能让所有测试通过，而它恰好把这组接口存在的唯一理由
 	 *     取消了 —— 上层无从分辨自己拿到的是真的硬件保管还是一层包装。
-	 *     pqc_backend_has_hw_keys() 就是给上层用来问这件事的。
+	 *     pqc_backend_has_hw_keys_kind() 就是给上层用来问这件事的。
 	 */
 	pqc_status_t (*keypair_hw)(pqc_alg_t alg, uint8_t *pk, uint32_t *hw_handle);
 
 	pqc_status_t (*decaps_hw)(pqc_alg_t alg, uint32_t hw_handle,
 	                          const uint8_t *ct, uint8_t *ss);
+
+	/* 签名版的句柄操作。与 decaps_hw 同一条纪律：sk 只有一个槽号，
+	 * 软件侧连一个能放它的缓冲区都不该存在。
+	 *
+	 * rnd 的语义比字节版**窄**：硬件核的 rnd 由 PL 自己的 TRNG 供给
+	 * （FIPS 204 的 hedged 模式），寄存器面上没有喂 rnd 的入口。所以
+	 *   · rnd == NULL  → hedged，正常路径；
+	 *   · rnd != NULL  → 后端应当回 PQC_ERR_UNSUPPORTED，**不要默默忽略它**。
+	 * 忽略的后果是：调用方以为自己在跑确定性模式（KAT / 复现实验），
+	 * 拿到的却是一个合法但每次都不同的签名 —— 一个"验得过、对不上向量"
+	 * 的结果最难查，因为两边都不报错。 */
+	pqc_status_t (*sign_hw)(pqc_alg_t alg, uint32_t hw_handle,
+	                        const uint8_t *msg, size_t msg_len,
+	                        const uint8_t *ctx, size_t ctx_len,
+	                        const uint8_t *rnd,
+	                        uint8_t *sig, size_t *sig_len);
 } pqc_backend_t;
 
 const pqc_backend_t *pqc_backend_liboqs(void);
@@ -140,13 +156,45 @@ const pqc_backend_t *pqc_backend_liboqs(void);
  * 连不上时返回 NULL —— 让调用方显式决定，不静默退回软件。 */
 const pqc_backend_t *pqc_backend_sdfe(void);
 
-/* 当前后端是否真的把私钥留在硬件里（两个句柄操作都在才算）。
- * 上层据此决定生成密钥时走哪条路 —— 不要用后端名字去判。 */
+/* 当前后端是否真的把**某一类**算法的私钥留在硬件里。
+ * 上层据此决定生成密钥时走哪条路 —— 不要用后端名字去判。
+ *
+ * ============================================================================
+ * 【为什么这里必须按种类问，不能是一个布尔】
+ * ============================================================================
+ * 一个密钥只有在**生成它**和**用它**两步都有句柄路径时，才谈得上"私钥在硬件里"：
+ *   · KEM 要 keypair_hw + decaps_hw；
+ *   · 签名要 keypair_hw + sign_hw。
+ * 这是两个独立的事实。硬件完全可能只做了一半 —— 本项目就正好处在这个阶段：
+ * ML-KEM 的核在板上跑着，ML-DSA 的 AXI 从机还没落地。
+ *
+ * 把两者合成一个布尔会朝两个方向都出错：
+ *   · 合取（都在才算真）：ML-DSA 一天没落地，**ML-KEM 也跟着退回软件**，
+ *     一条已经成立的硬件保证被另一条尚未成立的连累掉；
+ *   · 析取（有一个就算真）：上层拿它去生成 ML-DSA 密钥，keypair_hw 走通了、
+ *     签名却没有句柄路径，于是只能把 sk 拉回软件 —— 那正是这组接口要防的事，
+ *     而且要到第一次签名时才暴露。
+ *
+ * kinds 是**位掩码**（PQC_KIND_* 的值就是为此定的 1/2），语义是**合取**：
+ * 问 PQC_KIND_KEM|PQC_KIND_SIG 等于问"这两类是不是都在硬件里"。
+ * 常规用法是拿单独一类去问，比如 pqc_alg_info(alg)->kind。 */
+int pqc_backend_has_hw_keys_kind(unsigned kinds);
+
+/* 旧名字，等价于 pqc_backend_has_hw_keys_kind(PQC_KIND_KEM)。
+ * 加签名之前本项目只有 KEM 一条硬件路径，所有调用点问的其实都是它；
+ * 保留是为了不动老调用方，**但新代码请直接写种类** —— 这个名字读起来像
+ * "后端有没有硬件密钥"，而那个问题现在已经没有唯一答案了。 */
 int pqc_backend_has_hw_keys(void);
 
 pqc_status_t pqc_keypair_hw(pqc_alg_t alg, uint8_t *pk, uint32_t *hw_handle);
 pqc_status_t pqc_decaps_hw(pqc_alg_t alg, uint32_t hw_handle,
                            const uint8_t *ct, uint8_t *ss);
+/* rnd 必须为 NULL（hedged）；非 NULL 时回 PQC_ERR_UNSUPPORTED，见 vtable 注释 */
+pqc_status_t pqc_sign_hw(pqc_alg_t alg, uint32_t hw_handle,
+                         const uint8_t *msg, size_t msg_len,
+                         const uint8_t *ctx, size_t ctx_len,
+                         const uint8_t *rnd,
+                         uint8_t *sig, size_t *sig_len);
 
 /* 进程级当前后端；未设置时默认 liboqs。be == NULL 恢复默认。 */
 void                 pqc_set_backend(const pqc_backend_t *be);
