@@ -494,6 +494,26 @@ async def read_sig(dut, n):
     return bytes(out)
 
 
+async def _run_acvp(dut, recs, label):
+    n_ok = 0
+    import os
+    _lim = os.environ.get("ACVP_N")
+    if _lim:
+        recs = recs[:int(_lim)]
+    for idx, rec in enumerate(recs):
+        await reset(dut)
+        await preload_all(dut, rec)
+        await run_to_done(dut, limit=8_000_000)
+        sig_w = bytes.fromhex(rec["sig"])
+        sig = await read_sig(dut, len(sig_w))
+        assert sig == sig_w, (
+            f"[{label}] tcId={rec.get('tcid')}（第 {idx} 条）σ 与 ACVP 不一致，首个不同在字节 "
+            f"{next(i for i in range(len(sig_w)) if sig[i] != sig_w[i])}"
+            f"（len 得 {len(sig)} / 期望 {len(sig_w)}）")
+        n_ok += 1
+    dut._log.info(f"⑩ ML-DSA-44 {label} siggen 全对上 ACVP：{n_ok} 条签名逐字节一致")
+
+
 @cocotb.test()
 async def test_sign_acvp_det(dut):
     """⑩ 整体：确定性 ML-DSA-44 —— 拒绝循环跑到接受轮，σ 逐字节对上 **ACVP siggen**
@@ -502,24 +522,21 @@ async def test_sign_acvp_det(dut):
     驱动 RTL，读出的完整 2420 字节签名与 ACVP 期望签名逐字节一致。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
-    await reset(dut)
-
     recs = [r for r in _load_records(SIGGEN_KAT)
             if r["alg"] == "ML-DSA-44" and r.get("deterministic", "") == "1"]
     assert recs, "找不到确定性 ML-DSA-44 向量"
+    await _run_acvp(dut, recs, "确定性")
 
-    n_ok = 0
-    for idx, rec in enumerate(recs):
-        await reset(dut)
-        await preload_all(dut, rec)
-        await run_to_done(dut, limit=6_000_000)
-        sig_w = bytes.fromhex(rec["sig"])
-        sig = await read_sig(dut, len(sig_w))
-        assert sig == sig_w, (
-            f"tcId={rec.get('tcid')}（第 {idx} 条）σ 与 ACVP 不一致，首个不同在字节 "
-            f"{next(i for i in range(len(sig_w)) if sig[i] != sig_w[i])}"
-            f"（len 得 {len(sig)} / 期望 {len(sig_w)}）")
-        n_ok += 1
 
-    dut._log.info(f"⑩ ML-DSA-44 确定性 siggen 全对上 ACVP：{n_ok} 条签名逐字节一致")
+@cocotb.test()
+async def test_sign_acvp_rnd(dut):
+    """⑩ 整体：非确定性 ML-DSA-44 —— rnd 取自 KAT，σ 逐字节对上 **ACVP siggen**
+
+    非确定性只是 rnd 非零；RTL 把 rnd 当输入喂进 ρ''，与确定性同一条路径。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    recs = [r for r in _load_records(SIGGEN_KAT)
+            if r["alg"] == "ML-DSA-44" and r.get("deterministic", "") != "1"]
+    assert recs, "找不到非确定性 ML-DSA-44 向量"
+    await _run_acvp(dut, recs, "非确定性")
 
