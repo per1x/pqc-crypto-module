@@ -366,7 +366,7 @@ module mldsa_sign (
 
     // ⑦⑧⑨⑩ 拒绝循环状态
     reg        reject;     // 本轮任一 norm / 权重越界 → 作废重来
-    reg [8:0]  weight;     // hint 总权重（≤ 256×4，9 位）
+    reg [10:0] weight;     // hint 总权重（最多 256×4=1024，要 11 位；9 位会在 >511 时回绕）
 
     // ---- ⑩ sig 输出缓冲：2420 字节；HintBitPack 的运行下标 hidx；打包落盘指针 ----
     reg         sig_we; reg [11:0] sig_waddr; reg [7:0] sig_din;
@@ -408,7 +408,7 @@ module mldsa_sign (
         : (dbg_sel[5:2] == 4'd8)  ? z_dout
         : (dbg_sel[5:2] == 4'd9)  ? {31'd0, hn_dout}
         : (dbg_sel[5:2] == 4'd10) ? {31'd0, reject}       // 本轮拒绝标志
-        : (dbg_sel[5:2] == 4'd11) ? {23'd0, weight}       // hint 总权重
+        : (dbg_sel[5:2] == 4'd11) ? {21'd0, weight}       // hint 总权重
         : 32'd0;
 
 
@@ -506,7 +506,7 @@ module mldsa_sign (
             kappa <= 16'd0; vi <= 3'd0; vj <= 3'd0;
             un_start <= 1'b0; un_nonce <= 16'd0;
             wp_ptr <= 10'd0; sb_start <= 1'b0; ctilde <= 256'd0;
-            reject <= 1'b0; weight <= 9'd0;
+            reject <= 1'b0; weight <= 11'd0;
             sigptr <= 12'd0; hidx <= 8'd0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
@@ -638,7 +638,13 @@ module mldsa_sign (
                     end
                 end
             end
-            S_D_GAP: st <= S_D_FLU;
+            // ⚠️ 吸收长度恰好是 rate（136）的整数倍时，最后一个字节把一个块填满、
+            // 触发一次置换 —— 这拍海绵在置换、in_ready 落下。若照旧只等一拍就拉 flush，
+            // flush 会落在「海绵不在 S_ABSORB」的拍次上被整个忽略（in_flush 只在
+            // in_valid 低且核在 S_ABSORB 时才被采样），于是永远吸不完、卡在挤压。
+            // 所以等 in_ready 重新拉高（核置换完、回到 S_ABSORB）再冲刷。
+            // 非整数倍时最后一字节不填满块，in_ready 一直是高，这里立刻通过，行为不变。
+            S_D_GAP: if (sha_in_ready) st <= S_D_FLU;
             S_D_FLU: begin fsm_sif <= 1'b1; cnt <= 8'd0; st <= S_D_SQ; end
 
             // 挤字节：μ/ρ'' 挤 64，c̃ 挤 32；低地址先出、从高位塞右移。
@@ -714,7 +720,7 @@ module mldsa_sign (
             // 然后 done；⑤ 起再往下接 ŷ/w/…，并把 done 往后挪。
             S_EM_GO: begin
                 owner <= OWN_EM;
-                if (poly == 3'd0) begin reject <= 1'b0; weight <= 9'd0; end  // 新一轮清标志
+                if (poly == 3'd0) begin reject <= 1'b0; weight <= 11'd0; end  // 新一轮清标志
                 em_nonce <= kappa + {13'd0, poly};
                 em_start <= 1'b1;
                 st <= S_EM_WT;
@@ -930,7 +936,7 @@ module mldsa_sign (
                 if (!ph) begin ph <= 1'b1; end
                 else begin
                     if (norm_bad) reject <= 1'b1;               // ‖ct₀‖∞ ≥ γ₂
-                    if (hint_bit) weight <= weight + 9'd1;      // 累加 hint 权重
+                    if (hint_bit) weight <= weight + 11'd1;      // 累加 hint 权重
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
                         if (vi == 3'd3) begin
@@ -944,7 +950,7 @@ module mldsa_sign (
             // ---------- ⑩ 拒绝判定 + sigEncode ----------
             // reject（z/r0/ct0 越界）或 权重>ω → 本轮作废，回 ④ 重采（κ 已在 ④ 递增）。
             S_REJ: begin
-                if (reject || (weight > 9'd80)) begin
+                if (reject || (weight > 11'd80)) begin
                     poly <= 3'd0;             // 新一轮从 r=0 开始
                     st <= S_EM_GO;
                 end else begin
