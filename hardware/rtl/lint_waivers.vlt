@@ -36,12 +36,6 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/mont_reduce.v" -match "*
 // Barrett 约减：乘积右移 26 位后只用低 16 位
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/butterfly.v" -match "*'shifted'*"
 
-// 运行时位宽的打包/解包：掩码 (1<<w)−1 **必须在 21 位里算**，
-// 因为 w 最大取到 20，在 20 位里 (1<<20) 会溢出成 0、掩码变成全 1 的反面。
-// 算完只取低 20 位用，第 20 位按构造恒为 0，本来就不该有读者。
-lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/pack.v"   -match "*'w_mask'*"
-lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/unpack.v" -match "*'w_mask'*"
-
 // SampleInBall 的起点 N−τ：**必须在 9 位里算**，否则 256 在 8 位里就是 0。
 // τ ∈ [39,60] ⇒ 结果 ∈ [196,217]，取低 8 位即可，第 8 位按构造恒为 0。
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/sample_in_ball.v" -match "*'start_i9'*"

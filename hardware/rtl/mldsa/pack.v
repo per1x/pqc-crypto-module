@@ -53,9 +53,23 @@ module mldsa_bitpack (
     reg [4:0]  nbits;                 // 累加器里现在有多少位有效（最大 7+20=27）
 
     // 只取低 w 位。原来这是静态位选 in_val[W-1:0]，运行时要显式造掩码。
-    // 掩码在 21 位里算：w=20 时 (1<<20) 在 20 位里会溢出成 0。
-    wire [20:0] w_mask = (21'd1 << w) - 21'd1;
-    wire [19:0] masked = in_val & w_mask[19:0];
+    // ⚠️ **不要写成 (1<<w)−1**：那是一个桶形移位器加 21 位借位链，
+    //    而它正落在 acc 的关键路径上（实测 engine WNS 因此从 +0.003 掉到 −1.135）。
+    //    w 只可能取 3/4/6/10/13/18/20 七个值，直接查表 —— 每个输出位都是 w 的
+    //    5 输入函数，一级 LUT 就够。
+    reg [19:0] w_mask;
+    always @(*) begin
+        case (w)
+            5'd3:  w_mask = 20'h00007;
+            5'd4:  w_mask = 20'h0000F;
+            5'd6:  w_mask = 20'h0003F;
+            5'd10: w_mask = 20'h003FF;
+            5'd13: w_mask = 20'h01FFF;
+            5'd18: w_mask = 20'h3FFFF;
+            default: w_mask = 20'hFFFFF;   // w=20
+        endcase
+    end
+    wire [19:0] masked = in_val & w_mask;
 
     // ⚠️ **必须反压。** 第一版写的是 in_ready 恒为 1、只在没有新系数的拍次
     //    才吐字节 —— 那是错的：W=10 时每拍进 10 位、最多出 8 位，

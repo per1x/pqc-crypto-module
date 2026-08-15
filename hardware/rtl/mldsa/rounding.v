@@ -45,7 +45,6 @@ module mldsa_decompose (
 );
     localparam signed [31:0] Q     = 32'sd8380417;
     localparam signed [31:0] QHALF = 32'sd4190208;   // (q−1)/2
-    wire signed [31:0] gamma2x2 = mode ? 32'sd523776 : 32'sd190464;
 
     wire [23:0] a1t_full = (a[23:0] + 24'd127) >> 7;
     wire [16:0] a1t      = a1t_full[16:0];
@@ -63,7 +62,14 @@ module mldsa_decompose (
 
     assign a1 = mode ? a1_32 : a1_88;
 
-    wire signed [31:0] sub = a - $signed({26'd0, a1}) * gamma2x2;
+    // ⚠️ **不要写成 a1 * gamma2x2**：γ₂ 改成运行时信号之后那就是一个真的
+    //    32×32 乘法器，而原来（γ₂ 是常量）综合器把它变成几次移位相加。
+    //    实测代价：verify 的 WNS 从 +0.993 掉到 −0.893，engine 一起掉。
+    //    a1 只有 6 位、γ₂ 只有两个取值 —— 两个**常量乘**算完再选，
+    //    综合器仍然能各自优化成移位相加。
+    wire signed [31:0] prod88 = $signed({26'd0, a1}) * 32'sd190464;
+    wire signed [31:0] prod32 = $signed({26'd0, a1}) * 32'sd523776;
+    wire signed [31:0] sub = a - (mode ? prod32 : prod88);
     // a₀ 超过 (q−1)/2 时减一个 q，折回对称区间
     assign a0 = (sub > QHALF) ? (sub - Q) : sub;
 endmodule

@@ -41,10 +41,21 @@ module mldsa_bitunpack (
     assign out_valid = (nbits >= w);
     assign in_ready  = (nbits <  w);
 
-    // 只取低 w 位。原来是静态位选 acc[W-1:0]，运行时要显式造掩码
-    // （掩码在 21 位里算：w=20 时 (1<<20) 在 20 位里会溢出成 0）。
-    wire [20:0] w_mask = (21'd1 << w) - 21'd1;
-    assign out_val = acc[19:0] & w_mask[19:0];
+    // 只取低 w 位。理由与 pack.v 那边一样：查表而不是 (1<<w)−1，
+    // 后者是桶形移位器加借位链，会落到关键路径上。
+    reg [19:0] w_mask;
+    always @(*) begin
+        case (w)
+            5'd3:  w_mask = 20'h00007;
+            5'd4:  w_mask = 20'h0000F;
+            5'd6:  w_mask = 20'h0003F;
+            5'd10: w_mask = 20'h003FF;
+            5'd13: w_mask = 20'h01FFF;
+            5'd18: w_mask = 20'h3FFFF;
+            default: w_mask = 20'hFFFFF;   // w=20
+        endcase
+    end
+    assign out_val = acc[19:0] & w_mask;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
