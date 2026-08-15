@@ -232,3 +232,110 @@ async def test_tr_mu_c(dut):
 
     dut._log.info(f"②③ tr/μ 逐字节对上 oracle（pk 1312B 吸收、msg {len(msg)}B、"
                   f"ctx {len(ctx)}B）；ĉ=NTT(SampleInBall(c̃)) 对上 oracle")
+
+
+@cocotb.test()
+async def test_verify_acvp(dut):
+    """④ 整体：ML-DSA-44 对上 **ACVP sigver** —— 应通过全 true、应拒绝全 false
+
+    这是 Verify-44 的最终判据。15 条向量里 3 条应通过、12 条应拒绝（3 条 hint 结构
+    非法、9 条 c̃ 不匹配），两类都必须判对 —— 「错误地返回 true」是最危险的失败模式。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    recs = d44_records()
+
+    n_pass = n_fail = 0
+    for rec in recs:
+        await reset(dut)
+        await preload(dut, rec)
+        await run_to_done(dut, limit=6_000_000)
+        expect = rec.get("result", "").lower() == "pass"
+        got = bool(int(dut.valid.value))
+        assert got == expect, (
+            f"tcId={rec.get('tcid')}：verify={got} 期望={expect}"
+            f"（zbad={int(dut.zbad.value)} hbad={int(dut.hbad.value)}）")
+        if expect:
+            n_pass += 1
+        else:
+            n_fail += 1
+
+    dut._log.info(f"④ ML-DSA-44 对上 ACVP sigver：应通过 {n_pass} 条全 true、"
+                  f"应拒绝 {n_fail} 条全 false")
+
+
+async def _preload_raw(dut, pk, sig, msg, ctx):
+    await load_buf(dut, dut.pk_wr_en, dut.pk_wr_addr, dut.pk_wr_data, pk)
+    await load_buf(dut, dut.sig_wr_en, dut.sig_wr_addr, dut.sig_wr_data, sig)
+    if msg:
+        await load_buf(dut, dut.msg_wr_en, dut.msg_wr_addr, dut.msg_wr_data, msg)
+    if ctx:
+        await load_buf(dut, dut.ctx_wr_en, dut.ctx_wr_addr, dut.ctx_wr_data, ctx)
+    dut.msg_len.value = len(msg)
+    dut.ctx_len.value = len(ctx)
+
+
+@cocotb.test()
+async def test_reject_selfmade(dut):
+    """自造反例：ACVP **没覆盖**的两条拒绝路径必须真的生效
+
+    ACVP 的 sigver 里没有「‖z‖∞ 越界」也没有「hint 累计计数非单调 / >ω」这两类
+    （见 docs/reference/mldsa-verify-design.zh-CN.md 的分类表），但 FIPS 204 要求。
+    不自造反例的话，这两条逻辑等于没验 —— 而它们错了会造成**假阳性**（放过坏签名）。
+
+    做法：拿一条 ACVP 应通过的向量当阳性对照，然后只改一处：
+      ① 把 z[0][0] 的 18 位字段改成 γ₁+131000 ⇒ z = −131000，|z| ≥ γ₁−β=130994；
+      ② 把 hint 累计计数改成非单调（count[1] < count[0]）；
+      ③ 把 hint 累计计数改成 > ω。
+    每条都必须 valid=false，且对应的标志（zbad / hbad）真的置起来 ——
+    只看 valid=false 不够，c̃ 不匹配也会让 valid=false，那样等于没验到这条路径。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    recs = d44_records()
+    rec = next(r for r in recs if r.get("result", "").lower() == "pass")
+    pk = bytes.fromhex(rec["pk"])
+    sig0 = bytes.fromhex(rec["sig"])
+    msg = bytes.fromhex(rec["msg"])
+    ctx = bytes.fromhex(rec.get("context", "") or "")
+
+    # 阳性对照：不改，必须通过
+    await reset(dut)
+    await _preload_raw(dut, pk, sig0, msg, ctx)
+    await run_to_done(dut, limit=6_000_000)
+    assert bool(int(dut.valid.value)), "阳性对照居然没通过，反例无意义"
+    dut._log.info(f"  阳性对照 tcId={rec.get('tcid')}：valid=true ✓")
+
+    # ① ‖z‖∞ 越界：z[0][0] 的 18 位字段 = γ₁ + 131000 ⇒ z = −131000
+    v = (1 << 17) + 131000
+    s = bytearray(sig0)
+    s[32] = v & 0xFF
+    s[33] = (v >> 8) & 0xFF
+    s[34] = (s[34] & 0xFC) | ((v >> 16) & 0x03)
+    await reset(dut)
+    await _preload_raw(dut, pk, bytes(s), msg, ctx)
+    await run_to_done(dut, limit=6_000_000)
+    assert not bool(int(dut.valid.value)), "①：z 越界的签名居然通过了"
+    assert bool(int(dut.zbad.value)), "①：z 越界但 zbad 没置起来（这条路径没验到）"
+    dut._log.info("  ① ‖z‖∞ 越界：valid=false 且 zbad=1 ✓")
+
+    # ② hint 累计计数非单调：count[1] < count[0]
+    s = bytearray(sig0)
+    s[SIG_H0 + OMEGA + 0] = 5
+    s[SIG_H0 + OMEGA + 1] = 3
+    await reset(dut)
+    await _preload_raw(dut, pk, bytes(s), msg, ctx)
+    await run_to_done(dut, limit=6_000_000)
+    assert not bool(int(dut.valid.value)), "②：计数非单调的签名居然通过了"
+    assert bool(int(dut.hbad.value)), "②：计数非单调但 hbad 没置起来"
+    dut._log.info("  ② hint 累计计数非单调：valid=false 且 hbad=1 ✓")
+
+    # ③ hint 累计计数 > ω
+    s = bytearray(sig0)
+    s[SIG_H0 + OMEGA + 0] = OMEGA + 1
+    await reset(dut)
+    await _preload_raw(dut, pk, bytes(s), msg, ctx)
+    await run_to_done(dut, limit=6_000_000)
+    assert not bool(int(dut.valid.value)), "③：计数 >ω 的签名居然通过了"
+    assert bool(int(dut.hbad.value)), "③：计数 >ω 但 hbad 没置起来"
+    dut._log.info("  ③ hint 累计计数 >ω：valid=false 且 hbad=1 ✓")
+
+    dut._log.info("自造反例：ACVP 未覆盖的 z-norm / hint 计数两条拒绝路径均已验到")

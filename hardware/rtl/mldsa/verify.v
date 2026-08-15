@@ -99,6 +99,16 @@ module mldsa_verify (
         S_NT_GO  = 6'd17,
         S_NT_ST  = 6'd18,
         S_NT_WB  = 6'd19,
+        // ④ 对每个 i：acc=Σ_j Â∘ẑ − ĉ∘t̂₁；w'=caddq(invNTT(reduce32(acc)))；
+        //    w'₁=UseHint(h,w')；6 位打包进 w1pk；最后 c̃'=H(μ‖w1pk) 比对
+        S_A_GO   = 6'd20,
+        S_A_WT   = 6'd21,
+        S_MAC    = 6'd22,
+        S_CT1    = 6'd23,
+        S_RED    = 6'd24,
+        S_INV_GO = 6'd25,
+        S_INV_ST = 6'd26,
+        S_UH     = 6'd27,
         S_FIN   = 6'd63;
 
     reg [5:0] st;
@@ -177,6 +187,38 @@ module mldsa_verify (
         .sha_out_ready(sb_sor), .sha_out_data(sha_out_data),
         .rd_addr(sb_rd_addr), .rd_data(sb_rd_data));
 
+    // ---- ExpandA 均匀采样器（④：Â 现采现用，seed=ρ、nonce=256·i+j）----
+    reg  [255:0] rho;
+    reg         un_start;
+    reg  [15:0] un_nonce;
+    wire        un_done;
+    reg  [7:0]  un_rd_addr;
+    wire [22:0] un_rd_data;
+    wire        un_ss, un_siv, un_sif, un_sor;
+    wire [7:0]  un_sr, un_su, un_sid;
+    mldsa_poly_uniform u_uni (
+        .clk(clk), .rst_n(rst_n),
+        .start(un_start), .seed(rho), .nonce(un_nonce), .done(un_done),
+        .sha_start(un_ss), .sha_rate(un_sr), .sha_suffix(un_su),
+        .sha_in_valid(un_siv), .sha_in_data(un_sid), .sha_in_flush(un_sif),
+        .sha_in_ready(sha_in_ready && (owner == OWN_UNI)),
+        .sha_out_valid(sha_out_valid && (owner == OWN_UNI)),
+        .sha_out_ready(un_sor), .sha_out_data(sha_out_data),
+        .rd_addr(un_rd_addr), .rd_data(un_rd_data), .count());
+
+    // ---- 累加缓冲（一次只处理一个 i）与 w1pk 缓冲 ----
+    reg         ac_we; reg [7:0] ac_waddr; reg signed [31:0] ac_din; reg [7:0] ac_raddr;
+    wire signed [31:0] ac_dout;
+    ram_dp #(.DW(32), .AW(8)) u_acc (
+        .clk(clk), .a_we(ac_we), .a_addr(ac_waddr), .a_din(ac_din), .a_dout(),
+        .b_we(1'b0), .b_addr(ac_raddr), .b_din(32'd0), .b_dout(ac_dout));
+    reg         wp_we; reg [9:0] wp_waddr; reg [7:0] wp_din; reg [9:0] wp_raddr;
+    wire [7:0]  wp_dout;
+    reg  [9:0]  wp_ptr;
+    ram_dp #(.DW(8), .AW(10)) u_wp (
+        .clk(clk), .a_we(wp_we), .a_addr(wp_waddr), .a_din(wp_din), .a_dout(),
+        .b_we(1'b0), .b_addr(wp_raddr), .b_din(8'd0), .b_dout(wp_dout));
+
     // ---- NTT 核（③：c/z/t₁ 三组正变换，就地覆盖）----
     reg         nt_start, nt_inv, nt_we;
     reg  [7:0]  nt_waddr, nt_raddr;
@@ -188,6 +230,29 @@ module mldsa_verify (
         .start(nt_start), .inverse(nt_inv), .done(nt_done),
         .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
         .rd_addr(nt_raddr), .rd_data(nt_rdata));
+
+    // ---- ④ 逐点乘：S_MAC 用 Â×ẑ，S_CT1 用 ĉ×t̂₁ ----
+    wire signed [63:0] pw_prod = (st == S_CT1) ? (c_dout * t1_dout)
+                                              : ($signed({41'd0, un_rd_data}) * z_dout);
+    wire signed [31:0] pw_mont;
+    mldsa_mont_reduce u_mont (.a(pw_prod), .t_out(pw_mont));
+    // reduce32 在 invNTT **之前**（照 oracle 的顺序，别挪到后面）
+    wire signed [31:0] red_out;
+    mldsa_reduce32 u_red (.a(ac_dout), .r(red_out));
+    // caddq 后才能喂 use_hint（decompose 假定输入已在 [0,q)）
+    wire signed [31:0] cad_out;
+    mldsa_caddq u_cad (.a(nt_rdata), .r(cad_out));
+    wire [5:0] uh_a1;
+    mldsa_use_hint #(.MODE(0)) u_uh (.a(cad_out), .hint(h_dout), .a1_out(uh_a1));
+
+    // ---- w1Encode：6 位/系数打包进 w1pk ----
+    reg         p6_clr, p6_iv;
+    wire        p6_ir, p6_ov;
+    wire [7:0]  p6_ob;
+    mldsa_bitpack #(.W(6)) u_p6 (
+        .clk(clk), .rst_n(rst_n), .clr(p6_clr),
+        .in_val({7'd0, uh_a1}), .in_valid(p6_iv), .in_ready(p6_ir),
+        .out_byte(p6_ob), .out_valid(p6_ov));
 
     // ================= 位解包器 =================
     // z：18 位 → γ₁−v；t₁：10 位 → 直接用
@@ -231,6 +296,7 @@ module mldsa_verify (
     reg [1:0]  hsel;           // 0 = tr(吸收 pk)，1 = μ，2 = c̃'
     reg [1:0]  nstore;         // NTT 对象：0=c, 1=z, 2=t₁
     reg        nt_lowseen;     // 「done 是电平」：先见它落一次再等它起
+    reg [2:0]  vi, vj;         // ④ 的 i / j
 
     localparam [13:0] PKLEN = 14'd1312;
 
@@ -249,8 +315,13 @@ module mldsa_verify (
         else                        mu_byte = msg_rdata;
     end
 
-    wire [7:0]  abs_byte  = (hsel == 2'd0) ? pk_rdata : mu_byte;
-    wire [13:0] abs_total = (hsel == 2'd0) ? PKLEN : thr_mu;
+    // ---- c̃' 支的吸收源：μ(64) ‖ w1pk(k·192=768) = 832 字节 ----
+    wire [7:0] ct_byte = (ai < 14'd64) ? mu[ai[5:0]*8 +: 8] : wp_dout;
+
+    wire [7:0]  abs_byte  = (hsel == 2'd0) ? pk_rdata
+                          : (hsel == 2'd1) ? mu_byte : ct_byte;
+    wire [13:0] abs_total = (hsel == 2'd0) ? PKLEN
+                          : (hsel == 2'd1) ? thr_mu : 14'd832;
     wire        abs_last  = (ai == abs_total - 14'd1);
 
     always @(posedge clk or negedge rst_n) begin
@@ -263,6 +334,8 @@ module mldsa_verify (
             ai <= 14'd0; hsel <= 2'd0; nstore <= 2'd0; nt_lowseen <= 1'b0;
             owner <= OWN_FSM; sb_start <= 1'b0;
             nt_start <= 1'b0; nt_inv <= 1'b0;
+            vi <= 3'd0; vj <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0;
+            rho <= 256'd0; wp_ptr <= 10'd0;
             fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
             fsm_siv <= 1'b0; fsm_sid <= 8'd0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
             for (ii = 0; ii < K; ii = ii + 1) hcnt[ii] <= 8'd0;
@@ -272,6 +345,9 @@ module mldsa_verify (
             fsm_sif <= 1'b0;
             nt_start <= 1'b0;
             sb_start <= 1'b0;
+            un_start <= 1'b0;
+            // w₁ 打包器每吐一字节，w1pk 落盘指针前进
+            if (p6_ov) wp_ptr <= wp_ptr + 10'd1;
 
             case (st)
             S_IDLE: if (start) begin
@@ -440,6 +516,9 @@ module mldsa_verify (
                     fsm_sid <= abs_byte;
                     if (fsm_siv && sha_in_ready) begin
                         fsm_siv <= 1'b0;
+                        // ρ = pk[0..31]：趁 tr 吸收 pk 时顺手截下来（ExpandA 的种子），
+                        // 不必再单开一段读 pk。低地址字节先出，从高位塞右移。
+                        if (hsel == 2'd0 && ai < 14'd32) rho <= {abs_byte, rho[255:8]};
                         if (abs_last) begin
                             st <= S_D_GAP;
                         end else begin
@@ -454,18 +533,22 @@ module mldsa_verify (
             // μ 的吸收长度是变长的（66+|ctx|+|msg|），一定会有向量踩中。
             S_D_GAP: if (sha_in_ready) st <= S_D_FLU;
             S_D_FLU: begin fsm_sif <= 1'b1; cnt <= 8'd0; st <= S_D_SQ; end
+            // 挤字节：tr/μ 挤 64，c̃' 挤 32
             S_D_SQ: begin
                 fsm_sor <= 1'b1;
                 if (sha_out_valid) begin
-                    if (hsel == 2'd0) tr_out <= {sha_out_data, tr_out[511:8]};
-                    else              mu     <= {sha_out_data, mu[511:8]};
-                    if (cnt == 8'd63) begin
+                    if (hsel == 2'd0)      tr_out   <= {sha_out_data, tr_out[511:8]};
+                    else if (hsel == 2'd1) mu       <= {sha_out_data, mu[511:8]};
+                    else                   ctilde_p <= {sha_out_data, ctilde_p[255:8]};
+                    if (cnt == ((hsel == 2'd2) ? 8'd31 : 8'd63)) begin
                         fsm_sor <= 1'b0;
                         if (hsel == 2'd0) begin
                             hsel <= 2'd1;          // tr 好了，接着算 μ
                             st <= S_D_GO;
-                        end else begin
+                        end else if (hsel == 2'd1) begin
                             st <= S_SIB_GO;        // μ 好了，进 ③
+                        end else begin
+                            st <= S_FIN;           // c̃' 好了，判定
                         end
                     end else begin
                         cnt <= cnt + 8'd1;
@@ -515,7 +598,10 @@ module mldsa_verify (
                             if (nstore == 2'd1) begin
                                 nstore <= 2'd2; st <= S_NT_LD;             // 接着 t₁
                             end else begin
-                                st <= S_FIN;   // 本里程碑到此（④ 起接 w'₁/c̃'）
+                                // 三组 NTT 都好了，进 ④
+                                vi <= 3'd0; vj <= 3'd0; wp_ptr <= 10'd0;
+                                owner <= OWN_UNI;
+                                st <= S_A_GO;
                             end
                         end else begin
                             poly <= poly + 3'd1; st <= S_NT_LD;
@@ -524,7 +610,74 @@ module mldsa_verify (
                 end
             end
 
-            S_FIN: begin done <= 1'b1; valid <= !zbad && !hbad; st <= S_IDLE; end
+            // ---------- ④ 对每个 i：acc = Σ_j Â[i][j]∘ẑ[j] − ĉ∘t̂₁[i] ----------
+            S_A_GO: begin
+                un_nonce <= {5'd0, vi, 5'd0, vj};   // 256·i + j
+                un_start <= 1'b1;
+                st <= S_A_WT;
+            end
+            S_A_WT: if (un_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_MAC; end
+            S_MAC: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vj == 3'd3) begin
+                            vj <= 3'd0; owner <= OWN_FSM; st <= S_CT1;
+                        end else begin
+                            vj <= vj + 3'd1; owner <= OWN_UNI; st <= S_A_GO;
+                        end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            // acc −= mont(ĉ∘t̂₁[vi])
+            S_CT1: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_RED; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            // reduce32(acc) → invNTT 写口
+            S_RED: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_INV_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_INV_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_INV_ST; end
+            S_INV_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_UH; end
+            end
+            // w' = caddq(invNTT)；w'₁ = UseHint(h[vi][cnt], w')；6 位打包进 w1pk
+            // 打包器只在最开头 clr 一次（每条 192 字节字节对齐，连续打包与逐条等价；
+            // 换条 clr 会抹掉比最后一个系数晚出的待吐字节 —— Sign 实测坑第 3 条）。
+            S_UH: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else if (p6_ir) begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vi == 3'd3) begin
+                            vi <= 3'd0;
+                            hsel <= 2'd2;          // 进 c̃' = H(μ‖w1pk)
+                            st <= S_D_GO;
+                        end else begin
+                            vi <= vi + 3'd1; vj <= 3'd0; owner <= OWN_UNI;
+                            st <= S_A_GO;
+                        end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // 判定：c̃' == c̃ 且结构检查都通过
+            S_FIN: begin
+                done  <= 1'b1;
+                valid <= (ctilde_p == ctilde) && !zbad && !hbad;
+                st <= S_IDLE;
+            end
             default: st <= S_IDLE;
             endcase
         end
@@ -537,6 +690,11 @@ module mldsa_verify (
             sha_start = sb_ss; sha_rate = sb_sr; sha_suffix = sb_su;
             sha_in_valid = sb_siv; sha_in_data = sb_sid; sha_in_flush = sb_sif;
             sha_out_ready = sb_sor;
+        end
+        OWN_UNI: begin
+            sha_start = un_ss; sha_rate = un_sr; sha_suffix = un_su;
+            sha_in_valid = un_siv; sha_in_data = un_sid; sha_in_flush = un_sif;
+            sha_out_ready = un_sor;
         end
         default: begin
             sha_start = fsm_ss; sha_rate = fsm_sr; sha_suffix = fsm_su;
@@ -564,8 +722,48 @@ module mldsa_verify (
         c_we = 1'b0; c_waddr = 8'd0; c_din = 32'd0; c_raddr = dbg_idx;
         sb_rd_addr = cnt;
         nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt;
+        ac_we = 1'b0; ac_waddr = 8'd0; ac_din = 32'd0; ac_raddr = dbg_idx;
+        un_rd_addr = cnt;
+        p6_clr = 1'b0; p6_iv = 1'b0;
+        wp_we = 1'b0; wp_waddr = 10'd0; wp_din = 8'd0;
+        // c̃' 吸收时读 w1pk（ai≥64 之后）
+        wp_raddr = (ai >= 14'd64) ? (ai[9:0] - 10'd64) : 10'd0;
 
         if (st == S_D_ABS && hsel == 2'd0) pk_raddr = ai[10:0];
+
+        // ④ MAC：Â[cnt]·ẑ[vj][cnt] 累加到 acc[cnt]（j==0 直接放，省清零）
+        if (st == S_MAC) begin
+            un_rd_addr = cnt;
+            z_raddr    = {vj[1:0], cnt};
+            ac_raddr   = cnt;
+            if (ph) begin
+                ac_we    = 1'b1; ac_waddr = cnt;
+                ac_din   = (vj == 3'd0) ? pw_mont : (ac_dout + pw_mont);
+            end
+        end
+        // ④ acc −= mont(ĉ∘t̂₁[vi])
+        if (st == S_CT1) begin
+            c_raddr  = cnt;
+            t1_raddr = {vi[1:0], cnt};
+            ac_raddr = cnt;
+            if (ph) begin
+                ac_we = 1'b1; ac_waddr = cnt; ac_din = ac_dout - pw_mont;
+            end
+        end
+        // ④ 装载：reduce32(acc) → invNTT 写口
+        if (st == S_RED) begin
+            ac_raddr = cnt;
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = red_out; end
+        end
+        // ④ UseHint + 6 位打包
+        if (st == S_UH) begin
+            nt_raddr = cnt;
+            h_raddr  = {vi[1:0], cnt};
+            if (!ph && cnt == 8'd0 && vi == 3'd0) p6_clr = 1'b1;   // 仅最开头清一次
+            if (ph) p6_iv = 1'b1;
+        end
+        // 打包器吐字节 → w1pk
+        if (p6_ov) begin wp_we = 1'b1; wp_waddr = wp_ptr; wp_din = p6_ob; end
 
         // ③a SampleInBall 结果 → c 存储
         if (st == S_SIB_MV) begin
