@@ -72,12 +72,14 @@
 #define SDR_KEYNOTEXIST 0x01000005u
 #define SDR_AUTHFAIL    0x01000007u
 #define SDR_HARDFAIL    0x01000006u
+#define SDR_VERIFYFAIL  0x01000008u
 
 #define PL_BASE   0x80000000UL
 #define S_TRNG    0x00000
 #define S_VAULT   0x10000
 #define S_SYM     0x20000
 #define S_MLKEM   0x30000
+#define S_MLDSA   0x60000   /* 0x8006_0000 —— mldsa_axi（尚未落地，按约定预留） */
 
 /* ---- 寄存器（与各核的 localparam A_* 一致）---- */
 #define TR_CTRL   (S_TRNG + 0x00)
@@ -130,6 +132,51 @@
 #define PL_KEY_SLOTS     16              /* 金库有 16 个槽（64 KB / 4096） */
 #define MKS_DONE  (1u << 1)
 #define MKS_PARER (1u << 5)
+
+/* ---- ML-DSA（mldsa_axi @ 0x8006_0000）--------------------------------------
+ *
+ * ⚠️ **这个从机还没有落地。** 下面整块是照已经定下来的寄存器约定写的驱动，
+ *    今天只能在 stub / 软件路径上验行为。硬件到位之前，任何"ML-DSA 在硬件上
+ *    跑过"的说法都不成立 —— 这里成立的只是"驱动与接口已就位"。
+ *
+ * 与 mlkem_axi 的三处不同，都会咬人，写在这里免得照着 MK_* 抄错：
+ *   ① 复位输入指针的办法不一样：ML-KEM 是 CTRL[2]（MKC_INRST），
+ *      ML-DSA 是**写 IN_PTR = 0**，CTRL[1] 是另一件事（CLEAR，清整个状态）；
+ *   ② 多了 OUT_PTR / MSG_LEN / CTX_LEN 三个 RW 寄存器；
+ *   ③ STATUS 的位序完全不同 —— ML-KEM 的 param_err 在 bit5，
+ *      ML-DSA 在 bit3，而 bit2 是 verify_ok。按 MK 的位掩码去读会读到别的位。
+ */
+#define MD_VER     (S_MLDSA + 0x00)
+#define MD_CTRL    (S_MLDSA + 0x04)
+#define MD_STATUS  (S_MLDSA + 0x08)
+#define MD_MODE    (S_MLDSA + 0x0C)
+#define MD_INDATA  (S_MLDSA + 0x10)
+#define MD_INPTR   (S_MLDSA + 0x14)
+#define MD_OUTDAT  (S_MLDSA + 0x18)
+#define MD_OUTPTR  (S_MLDSA + 0x1C)
+#define MD_OUTLEN  (S_MLDSA + 0x20)
+#define MD_MSGLEN  (S_MLDSA + 0x24)
+#define MD_CTXLEN  (S_MLDSA + 0x28)
+#define MD_KEYSTAT (S_MLDSA + 0x2C)   /* {sk_lock, slot_valid[7:0]} */
+
+#define MDC_START  0x01u              /* CTRL[0] */
+#define MDC_CLEAR  0x02u              /* CTRL[1] */
+#define MDC_SKLOCK 0x10u              /* CTRL[4]：一次性闩锁 */
+
+#define MDS_BUSY   (1u << 0)
+#define MDS_DONE   (1u << 1)
+#define MDS_VEROK  (1u << 2)
+#define MDS_PARER  (1u << 3)
+#define MDS_LENER  (1u << 4)
+
+/* MODE：[1:0]=OP [3:2]=PSET [4]=SK_TO_SLOT [5]=SK_FROM_SLOT [9:6]=SLOT */
+#define MDO_KEYGEN 0u
+#define MDO_SIGN   1u
+#define MDO_VERIFY 2u
+#define MDM_SK_TO_SLOT   0x10u
+#define MDM_SK_FROM_SLOT 0x20u
+#define MDM_SLOT(s)      (((s) & 15u) << 6)
+#define MLDSA_KEY_SLOTS  8            /* 签名私钥金库 8 个槽（比 ML-KEM 的 16 少） */
 
 static int sec_fd = -1;
 static int fg;
@@ -308,6 +355,122 @@ static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 	return 0;
 }
 
+/* ---- ML-DSA 长度（FIPS 204，与 RTL 一致）---- */
+static void mldsa_len(uint32_t pset, uint32_t *pk, uint32_t *sk, uint32_t *sig)
+{
+	static const uint32_t PK[3]  = { 1312, 1952, 2592 };
+	static const uint32_t SK[3]  = { 2560, 4032, 4896 };
+	static const uint32_t SIG[3] = { 2420, 3309, 4627 };
+
+	*pk  = PK[pset];
+	*sk  = SK[pset];
+	*sig = SIG[pset];
+}
+
+/* 等 done 等多久。
+ *
+ * ============================================================================
+ * 【为什么这里不能照抄 mlkem_run 的 3000000】
+ * ============================================================================
+ * ML-KEM 的每条运算都是定长无分支的：耗时只取决于参数集，抖动很小，
+ * 一个写死的自旋数够用。ML-DSA 的 Sign 不是 —— 它有**拒绝采样循环**：
+ * 每轮重采 y、算 w、试 z/r₀/ct₀ 的范数，任一项越界就整轮重来。
+ * 期望轮数是个位数，但分布有长尾，偶尔十几轮是**正常的、不是故障**。
+ *
+ * 拿 ML-KEM 的量级去卡它，症状是"平时好好的，偶尔报一次硬件失败"，
+ * 参数集越大越容易踩到。这种偶发会被当成硬件不稳定去查 —— 方向从一开始就错了。
+ *
+ * 另一头也不能无限等：daemon 是单线程的，一条卡住的请求把后面所有人一起挡住
+ * （与文件里 TCP 超时那段是同一个可用性论证）。所以给**墙钟期限**而不是自旋数：
+ * 自旋数换算成时间要依赖"一笔 ioctl+SMC 多快"，那个数随平台变，写死了等于
+ * 把超时长度交给运气。
+ *
+ * 下面这些系数是**上限**，不是耗时估计：它们唯一的作用是保证硬件不吭声时
+ * 我们会停下来。真实耗时等从机落地后实测，届时按量出来的数收紧。
+ */
+static long mldsa_timeout_ms(uint32_t op, uint32_t pset, uint32_t in_len)
+{
+	long base = (op == MDO_SIGN) ? 10000L : 2000L;
+	long mul  = (long)pset + 1;            /* 44/65/87 → 1/2/3 */
+
+	/* μ = H(tr‖M') 要把整条消息吸进 SHAKE：长消息是实打实的时间。 */
+	return base * mul + (long)in_len / 8;
+}
+
+static long now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* 通用：写 MODE/长度 → 灌输入 → 脉冲 START → 等 done → 取输出。
+ * 形状照 mlkem_run，差别都在寄存器约定上（见 MD_* 那段的三条）。
+ *
+ * 返回：0 成功；-1 IN_PTR 对不上；-2 硬件拒绝参数/长度；-3 超时；-4 输出放不下。
+ * verify_ok 只在 op == MDO_VERIFY 时有意义。 */
+static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
+		     const uint8_t *in, uint32_t in_len,
+		     uint32_t msg_len, uint32_t ctx_len,
+		     uint8_t *out, uint32_t out_cap, uint32_t *out_len,
+		     int *verify_ok)
+{
+	uint32_t i, n, st = 0;
+	long deadline;
+
+	if (verify_ok)
+		*verify_ok = 0;
+	wr(MD_MODE, op | (pset << 2) | mode_extra);
+	wr(MD_CTRL, MDC_CLEAR);
+	wr(MD_INPTR, 0);            /* ⚠️ 不是 CTRL 的某个位 —— 见 MD_* 那段第 ① 条 */
+	wr(MD_OUTPTR, 0);
+	wr(MD_MSGLEN, msg_len);
+	wr(MD_CTXLEN, ctx_len);
+	for (i = 0; i < in_len && !hw_fault; i++)
+		wr(MD_INDATA, in[i]);
+	if (hw_fault)
+		return -3;
+	if (rd(MD_INPTR) != in_len) {
+		logf_("IN_PTR 对不上：%u vs %u", rd(MD_INPTR), in_len);
+		return -1;
+	}
+	wr(MD_CTRL, MDC_START);
+
+	/* 每 4096 次才看一次表：取时间本身也是个系统调用，
+	 * 每轮都取会把等待循环变成"主要在读时钟"。 */
+	deadline = now_ms() + mldsa_timeout_ms(op, pset, in_len);
+	for (i = 0; !hw_fault; i++) {
+		st = rd(MD_STATUS);
+		if (st & (MDS_PARER | MDS_LENER)) {
+			logf_("硬件拒绝了这次请求（op=%u pset=%u STATUS=0x%08x，"
+			      "param_err=%d len_err=%d）", op, pset, st,
+			      !!(st & MDS_PARER), !!(st & MDS_LENER));
+			return -2;
+		}
+		if (st & MDS_DONE)
+			break;
+		if ((i & 0xFFF) == 0xFFF && now_ms() > deadline) {
+			logf_("等 ML-DSA done 超时（op=%u pset=%u，上限 %ld ms）",
+			      op, pset, mldsa_timeout_ms(op, pset, in_len));
+			return -3;
+		}
+	}
+	if (hw_fault || !(st & MDS_DONE))
+		return -3;
+	if (verify_ok)
+		*verify_ok = (st & MDS_VEROK) ? 1 : 0;
+	n = rd(MD_OUTLEN);
+	if (n > out_cap)
+		return -4;
+	for (i = 0; i < n && !hw_fault; i++)
+		out[i] = (uint8_t)rd(MD_OUTDAT);
+	if (hw_fault)
+		return -3;
+	*out_len = n;
+	return 0;
+}
+
 /* ---- 句柄表：dk 留在这里，不给应用 ---- */
 /* ============================================================================
  * 【句柄表：现在它里面没有私钥了】
@@ -323,9 +486,17 @@ static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 #define MAX_KEYS PL_KEY_SLOTS
 static struct { int used; uint32_t pset; } keys[MAX_KEYS];
 
+/* 签名私钥的句柄表。**与上面那张分开**，不是重复代码：
+ * 两个核各有自己的金库，槽号空间互不相干（ML-KEM 16 个、ML-DSA 8 个）。
+ * 合成一张表就得再引一个"这是哪个核"的字段，而那个字段一旦弄错，
+ * 后果是拿签名槽的号去 ML-KEM 的金库里取私钥 —— 恰恰是句柄不做间接映射
+ * 要避免的那类错。两张表、各自槽号即句柄，对不上的可能性为零。 */
+static struct { int used; uint32_t pset; } dsa_keys[MLDSA_KEY_SLOTS];
+
 static void keys_wipe(void)
 {
 	memset(keys, 0, sizeof keys);
+	memset(dsa_keys, 0, sizeof dsa_keys);
 }
 
 /* ---- 对称 ---- */
@@ -475,6 +646,113 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		*out_len = n;
 		logf_("DECAPS 句柄/槽 %u → K %u 字节（dk 全程在片内）", h, n);
 		return SDR_OK;
+	}
+
+	/* ========================================================================
+	 * 【ML-DSA：驱动已就位，从机尚未落地】
+	 * ========================================================================
+	 * 下面三条按已定的寄存器约定写全了，但 0x8006_0000 上现在**没有东西**。
+	 * 在真硬件出现之前，它们在板上会以"读 VERSION 得 0 / 等不到 done"的形式
+	 * 失败，那是正确行为 —— 不是回落到软件。本进程一行密码运算都不做。
+	 *
+	 * 关于 ctx（FIPS 204 的 M' = [0,|ctx|]‖ctx‖msg）：
+	 * 已定的寄存器约定里，输入字节流是 "sk‖msg"（Sign）和 "pk‖sig‖msg"
+	 * （Verify），**没有给 ctx 字节留位置**，只有一个 CTX_LEN 寄存器。
+	 * 那就只能有两种做法：
+	 *   ① 猜一个位置（比如塞在 msg 前面）并照它送；
+	 *   ② 明确拒绝非空 ctx，等从机落地后与 RTL 对齐再放开。
+	 * 选 ②。猜错的后果不是报错，是**签在了另一条 M' 上** —— 签名合法、
+	 * 验得过、却不是调用方以为的那条消息，而且软件侧无从发现。
+	 * PKCS#11 那条路径本来就恒传 ctx_len=0，所以这条限制今天不挡任何人。
+	 */
+	case OP_MLDSA_KEYGEN: {
+		uint32_t pklen, sklen, siglen, n, h;
+		uint8_t xi[32];
+
+		if (q->a0 > 2)
+			return SDR_INARGERR;
+		mldsa_len(q->a0, &pklen, &sklen, &siglen);
+		/* ξ 取自**硬件**熵源，与 ML-KEM 的 d/z 同一条纪律 */
+		if (trng_bytes(xi, 32))
+			return SDR_HARDFAIL;
+		for (h = 0; h < MLDSA_KEY_SLOTS && dsa_keys[h].used; h++)
+			;
+		if (h == MLDSA_KEY_SLOTS)
+			return SDR_UNKNOWERR;
+
+		/* SK_TO_SLOT：sk 进片内金库，不从 OUT_DATA 出来。
+		 * 于是 OUT_LEN 应当恰好是 pk 的长度 —— 这一条要断言，
+		 * 它是"私钥没出硬件"在软件侧唯一能自己核对的证据。 */
+		if (mldsa_run(MDO_KEYGEN, q->a0, MDM_SK_TO_SLOT | MDM_SLOT(h),
+			      xi, 32, 0, 0, out + 4, PQCS_MAXPAY - 4, &n, NULL)) {
+			memset(xi, 0, sizeof xi);
+			return SDR_HARDFAIL;
+		}
+		memset(xi, 0, sizeof xi);
+		if (n != pklen) {
+			logf_("ML-DSA KEYGEN 返回 %u 字节，应当恰好是 pk 的 %u ——"
+			      " sk 可能仍然出了总线，拒绝这次结果", n, pklen);
+			return SDR_HARDFAIL;
+		}
+		dsa_keys[h].used = 1;
+		dsa_keys[h].pset = q->a0;
+		memcpy(out, &h, 4);
+		*out_len = 4 + pklen;
+		logf_("ML-DSA KEYGEN pset=%u → 句柄/槽 %u，pk %u 字节"
+		      "（sk %u 字节留在片内金库，本进程没见过它）",
+		      q->a0, h, pklen, sklen);
+		return SDR_OK;
+	}
+
+	case OP_MLDSA_SIGN: {
+		uint32_t pklen, sklen, siglen, n, h = q->a0;
+
+		if (h >= MLDSA_KEY_SLOTS || !dsa_keys[h].used)
+			return SDR_KEYNOTEXIST;
+		if (q->a1 != 0)
+			return SDR_INARGERR;   /* 非空 ctx：见上面那段 */
+		mldsa_len(dsa_keys[h].pset, &pklen, &sklen, &siglen);
+		/* **只送消息**。sk 由 PL 从金库里取，一个字节都不经过总线，
+		 * 也不经过本进程 —— 这里连一个能放 sk 的缓冲区都不存在。 */
+		if (mldsa_run(MDO_SIGN, dsa_keys[h].pset,
+			      MDM_SK_FROM_SLOT | MDM_SLOT(h),
+			      pay, q->len, q->len, 0,
+			      out, PQCS_MAXPAY, &n, NULL))
+			return SDR_HARDFAIL;
+		if (n != siglen) {
+			logf_("ML-DSA SIGN 返回 %u 字节，应为 %u", n, siglen);
+			return SDR_HARDFAIL;
+		}
+		*out_len = n;
+		logf_("ML-DSA SIGN 句柄/槽 %u，msg %u 字节 → sig %u 字节"
+		      "（sk 全程在片内）", h, q->len, n);
+		return SDR_OK;
+	}
+
+	case OP_MLDSA_VERIFY: {
+		uint32_t pklen, sklen, siglen, n = 0, msg_len;
+		int ok = 0;
+
+		if (q->a0 > 2)
+			return SDR_INARGERR;
+		if (q->a1 != 0)
+			return SDR_INARGERR;   /* 非空 ctx：见上面那段 */
+		mldsa_len(q->a0, &pklen, &sklen, &siglen);
+		if (q->len < pklen + siglen)
+			return SDR_INARGERR;
+		msg_len = q->len - pklen - siglen;
+		/* 验签只用公钥，载荷 pk‖sig‖msg 与硬件要的字节流逐字节一致，
+		 * 直接把 pay 送下去，不多抄一遍。 */
+		if (mldsa_run(MDO_VERIFY, q->a0, 0, pay, q->len, msg_len, 0,
+			      out, PQCS_MAXPAY, &n, &ok))
+			return SDR_HARDFAIL;
+		*out_len = 0;
+		logf_("ML-DSA VERIFY pset=%u msg %u 字节 → %s",
+		      q->a0, msg_len, ok ? "通过" : "不通过");
+		/* 验不过是**结果**不是故障，但线上仍然要用一个非 SDR_OK 的码回它：
+		 * 只有这样，"忘了看返回值的载荷"才不会被当成验过了。
+		 * 老客户端不认识这个码，会走 != SDR_OK 的分支 —— fail-closed。 */
+		return ok ? SDR_OK : SDR_VERIFYFAIL;
 	}
 
 	case OP_IMPORT_KEY: {
@@ -635,6 +913,33 @@ int main(int argc, char **argv)
 			return 2;
 		}
 		logf_("私钥外泄闩锁已置上：KeyGen 不会再把 dk 送出总线");
+
+		/* ML-DSA 那把闩锁同理，但**只在从机确实存在时才置**。
+		 *
+		 * 0x8006_0000 现在多半是空的（mldsa_axi 尚未落地）。对着空地址写
+		 * 会在 EL3 上被拒，而这个启动分支把任何一笔失败都判成"拒绝启动" ——
+		 * 于是加这几行的直接后果会是**板子起不来**，跟 ML-DSA 有没有毫无关系。
+		 *
+		 * 所以先用 VERSION 探一下：读得到约定的常量才认为有从机。
+		 * 探测走 hw_rd 而不是 rd()，因为后者会把失败粘进 hw_fault，
+		 * 让"没有这个从机"这件正常的事污染掉后面的判断。 */
+		uint32_t dver = 0;
+
+		if (hw_rd(MD_VER, &dver) == 0 && dver == CORE_VERSION) {
+			uint32_t dks = 0;
+
+			wr(MD_CTRL, MDC_SKLOCK);
+			if (hw_rd(MD_KEYSTAT, &dks) || !(dks & (1u << 8))) {
+				logf_("置 ML-DSA 私钥闩锁失败（KEYSTAT=0x%08x）—— 拒绝启动",
+				      dks);
+				return 2;
+			}
+			logf_("ML-DSA 私钥外泄闩锁已置上");
+		} else {
+			logf_("0x%08lx 上没有 mldsa_axi（VERSION=0x%08x）——"
+			      " 跳过 ML-DSA 闩锁。**签名这条路今天不在硬件上**",
+			      PL_BASE + S_MLDSA, dver);
+		}
 	}
 
 	/* ---- 远程口令：读得到就开 TCP，读不到就**不开** ----

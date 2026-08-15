@@ -12,7 +12,20 @@
 #include <stdint.h>
 
 #define PQCS_MAGIC   0x53434750u   /* "PQCS" */
-#define PQCS_MAXPAY  8192u
+
+/* 单条载荷上限。
+ *
+ * 从 8192 提到 16384 是 ML-DSA 逼出来的，不是"顺手放宽"：Verify 一条请求要同时
+ * 送 pk‖sig‖msg，ML-DSA-87 光 pk(2592)+sig(4627) 就占掉 7219 字节，按老上限
+ * 只剩不到 1 KB 留给消息。而 sign.v 的 msg 缓冲本身就有 8192 字节
+ * （见 docs/reference/mldsa-sign-design.zh-CN.md §4），也就是说老上限会让
+ * **软件这一侧先于硬件成为瓶颈** —— 那种限制查起来最费劲，因为它不在硬件手册里。
+ *
+ * 16384 = 7219 + 255(ctx 上限) + 8192 还余 718，正好把硬件的能力完整暴露出来。
+ * 代价是 daemon 那两个 static 缓冲各多 8 KB，可以忽略。
+ * ⚠️ 这是**协议常量**：两侧必须同版本编译，否则新客户端的长请求会被老 daemon
+ *    按"len 超限"断开（fail-closed，不会算错，但表现为莫名其妙的掉线）。 */
+#define PQCS_MAXPAY  16384u
 
 enum {
 	OP_PING          = 1,   /* → 版本串 */
@@ -23,6 +36,13 @@ enum {
 	OP_IMPORT_KEY    = 6,   /* a0=槽, 载荷=key */
 	OP_SYM_BLOCK     = 7,   /* a0=alg, a1=槽|(解密<<8), 载荷=16 字节 → 16 字节 */
 	OP_AUTH          = 8,   /* 载荷=口令 → 空。**只有 TCP 连接需要** */
+
+	/* ---- ML-DSA（mldsa_axi，寄存器面见 docs/REGISTERS.md）----------------
+	 * ⚠️ 从机本身尚未落地。这三条按已定的寄存器约定写好，先在 stub / 软件路径
+	 *    上验行为，硬件到位后才谈得上"在硬件上跑过"。 */
+	OP_MLDSA_KEYGEN  = 9,   /* a0=pset → [4 字节句柄][pk]（sk 进片内金库，不出总线） */
+	OP_MLDSA_SIGN    = 10,  /* a0=句柄, a1=ctx_len, 载荷=msg → sig */
+	OP_MLDSA_VERIFY  = 11,  /* a0=pset, a1=ctx_len, 载荷=pk‖sig‖msg → 空 */
 };
 
 /* ============================================================================
