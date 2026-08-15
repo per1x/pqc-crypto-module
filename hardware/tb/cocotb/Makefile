@@ -49,6 +49,7 @@ VERILOG_SOURCES = \
   $(RTL_MLDSA)/sampler.v \
   $(RTL_MLDSA)/keygen.v \
   $(RTL_MLDSA)/sign.v \
+  $(RTL_MLDSA)/verify.v \
   $(RTL_MLDSA)/rounding.v \
   $(RTL_MLDSA)/sample.v \
   $(RTL_FAN)/fan_ctrl.v \
@@ -74,6 +75,7 @@ VERILOG_SOURCES = \
   $(PWD)/tb_mldsa_sampler.v \
   $(PWD)/tb_mldsa_keygen.v \
   $(PWD)/tb_mldsa_sign.v \
+  $(PWD)/tb_mldsa_verify.v \
   $(PWD)/tb_trng_health.v
 
 # 参数化模块（例如 mlkem_compress 的 D）用 PARAM_D 传进来，
