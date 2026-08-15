@@ -85,6 +85,20 @@ module mldsa_verify (
         S_HI    = 6'd5,      // 扫下标、置 h 位、查严格递增
         S_HP    = 6'd6,      // 查填充区全零
         S_T1    = 6'd7,      // t₁ 位解包（10 位）
+        // ② tr=H(pk)、μ=H(tr‖M')：共用一套吸收/挤压状态（hsel 选支）
+        S_D_GO  = 6'd8,
+        S_D_ABS = 6'd9,
+        S_D_GAP = 6'd10,
+        S_D_FLU = 6'd11,
+        S_D_SQ  = 6'd12,
+        // ③ c=SampleInBall(c̃)，以及 ĉ/ẑ/t̂₁ 三组 NTT
+        S_SIB_GO = 6'd13,
+        S_SIB_WT = 6'd14,
+        S_SIB_MV = 6'd15,
+        S_NT_LD  = 6'd16,
+        S_NT_GO  = 6'd17,
+        S_NT_ST  = 6'd18,
+        S_NT_WB  = 6'd19,
         S_FIN   = 6'd63;
 
     reg [5:0] st;
@@ -125,11 +139,55 @@ module mldsa_verify (
         .clk(clk), .a_we(h_we), .a_addr(h_waddr), .a_din(h_din), .a_dout(),
         .b_we(1'b0), .b_addr(h_raddr), .b_din(1'b0), .b_dout(h_dout));
 
+    // c 存储：256×32（③ 存 c，随后就地 NTT 成 ĉ）
+    reg         c_we;  reg [7:0] c_waddr;  reg signed [31:0] c_din;  reg [7:0] c_raddr;
+    wire signed [31:0] c_dout;
+    ram_dp #(.DW(32), .AW(8)) u_c (
+        .clk(clk), .a_we(c_we), .a_addr(c_waddr), .a_din(c_din), .a_dout(),
+        .b_we(1'b0), .b_addr(c_raddr), .b_din(32'd0), .b_dout(c_dout));
+
     assign dbg_coef =
           (dbg_sel[5:2] == 4'd0) ? z_dout
         : (dbg_sel[5:2] == 4'd1) ? t1_dout
         : (dbg_sel[5:2] == 4'd2) ? {31'd0, h_dout}
+        : (dbg_sel[5:2] == 4'd3) ? c_dout
         : 32'd0;
+
+    // ================= 海绵归属（FSM ↔ SampleInBall ↔ ExpandA）=================
+    // 只在换手方空闲时切（KeyGen 坑表第 1 条）。
+    localparam [1:0] OWN_FSM = 2'd0, OWN_SIB = 2'd1, OWN_UNI = 2'd2;
+    reg [1:0] owner;
+    reg       fsm_ss, fsm_siv, fsm_sif, fsm_sor;
+    reg [7:0] fsm_sr, fsm_su, fsm_sid;
+
+    // ---- SampleInBall（复用 Sign 建好的模块）----
+    reg         sb_start;
+    wire        sb_done;
+    reg  [7:0]  sb_rd_addr;
+    wire signed [31:0] sb_rd_data;
+    wire        sb_ss, sb_siv, sb_sif, sb_sor;
+    wire [7:0]  sb_sr, sb_su, sb_sid;
+    mldsa_sample_in_ball #(.TAU(39)) u_sib (
+        .clk(clk), .rst_n(rst_n),
+        .start(sb_start), .seed(ctilde), .done(sb_done),
+        .sha_start(sb_ss), .sha_rate(sb_sr), .sha_suffix(sb_su),
+        .sha_in_valid(sb_siv), .sha_in_data(sb_sid), .sha_in_flush(sb_sif),
+        .sha_in_ready(sha_in_ready && (owner == OWN_SIB)),
+        .sha_out_valid(sha_out_valid && (owner == OWN_SIB)),
+        .sha_out_ready(sb_sor), .sha_out_data(sha_out_data),
+        .rd_addr(sb_rd_addr), .rd_data(sb_rd_data));
+
+    // ---- NTT 核（③：c/z/t₁ 三组正变换，就地覆盖）----
+    reg         nt_start, nt_inv, nt_we;
+    reg  [7:0]  nt_waddr, nt_raddr;
+    reg signed [31:0] nt_wdata;
+    wire        nt_done;
+    wire signed [31:0] nt_rdata;
+    mldsa_ntt_core u_ntt (
+        .clk(clk), .rst_n(rst_n),
+        .start(nt_start), .inverse(nt_inv), .done(nt_done),
+        .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
+        .rd_addr(nt_raddr), .rd_data(nt_rdata));
 
     // ================= 位解包器 =================
     // z：18 位 → γ₁−v；t₁：10 位 → 直接用
@@ -168,6 +226,33 @@ module mldsa_verify (
     reg [7:0]  hprev;          // 上一个下标
     integer    ii;
 
+    // ②③ 用
+    reg [13:0] ai;             // 吸收字节指针（μ 支最长 66+ctx+msg，14 位）
+    reg [1:0]  hsel;           // 0 = tr(吸收 pk)，1 = μ，2 = c̃'
+    reg [1:0]  nstore;         // NTT 对象：0=c, 1=z, 2=t₁
+    reg        nt_lowseen;     // 「done 是电平」：先见它落一次再等它起
+
+    localparam [13:0] PKLEN = 14'd1312;
+
+    // ---- tr 支的吸收源：整个 pk ----
+    // ---- μ 支的吸收源：tr(64) ‖ 0x00 ‖ |ctx| ‖ ctx ‖ msg ----
+    wire [13:0] thr_ctxend = 14'd66 + {6'd0, ctx_len};
+    wire [13:0] thr_mu     = thr_ctxend + msg_len;
+    wire [13:0] ctx_off    = ai - 14'd66;
+    wire [13:0] msg_off    = ai - thr_ctxend;
+    reg  [7:0]  mu_byte;
+    always @(*) begin
+        if (ai < 14'd64)            mu_byte = tr_out[ai[5:0]*8 +: 8];
+        else if (ai == 14'd64)      mu_byte = 8'd0;
+        else if (ai == 14'd65)      mu_byte = ctx_len;
+        else if (ai <  thr_ctxend)  mu_byte = ctx_rdata;
+        else                        mu_byte = msg_rdata;
+    end
+
+    wire [7:0]  abs_byte  = (hsel == 2'd0) ? pk_rdata : mu_byte;
+    wire [13:0] abs_total = (hsel == 2'd0) ? PKLEN : thr_mu;
+    wire        abs_last  = (ai == abs_total - 14'd1);
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; valid <= 1'b0;
@@ -175,12 +260,18 @@ module mldsa_verify (
             hclr <= 10'd0; hidx <= 8'd0; hfirst <= 8'd0; hprev <= 8'd0;
             ctilde <= 256'd0; ctilde_p <= 256'd0; tr_out <= 512'd0; mu <= 512'd0;
             zbad <= 1'b0; hbad <= 1'b0;
-            sha_start <= 1'b0; sha_rate <= 8'd136; sha_suffix <= 8'h1F;
-            sha_in_valid <= 1'b0; sha_in_data <= 8'd0; sha_in_flush <= 1'b0;
-            sha_out_ready <= 1'b0;
+            ai <= 14'd0; hsel <= 2'd0; nstore <= 2'd0; nt_lowseen <= 1'b0;
+            owner <= OWN_FSM; sb_start <= 1'b0;
+            nt_start <= 1'b0; nt_inv <= 1'b0;
+            fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
+            fsm_siv <= 1'b0; fsm_sid <= 8'd0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
             for (ii = 0; ii < K; ii = ii + 1) hcnt[ii] <= 8'd0;
         end else begin
             done <= 1'b0;
+            fsm_ss <= 1'b0;
+            fsm_sif <= 1'b0;
+            nt_start <= 1'b0;
+            sb_start <= 1'b0;
 
             case (st)
             S_IDLE: if (start) begin
@@ -314,7 +405,8 @@ module mldsa_verify (
                         cnt <= 8'd0;
                         if (poly == 3'd3) begin
                             poly <= 3'd0;
-                            st <= S_FIN;      // 本里程碑到此（② 起接 tr/μ）
+                            hsel <= 2'd0;     // 进 ②：先算 tr = H(pk)
+                            st <= S_D_GO;
                         end else begin
                             poly <= poly + 3'd1;
                         end
@@ -331,10 +423,127 @@ module mldsa_verify (
                 end
             end
 
+            // ---------- ② tr = H(pk)、μ = H(tr‖M') ----------
+            S_D_GO: begin
+                owner <= OWN_FSM;
+                fsm_sr <= 8'd136; fsm_su <= 8'h1F;   // SHAKE256
+                fsm_ss <= 1'b1;
+                ai <= 14'd0; ph <= 1'b0; cnt <= 8'd0;
+                st <= S_D_ABS;
+            end
+            // 两拍一个字节：ph=0 摆 pk/ctx/msg 读地址，ph=1 数据到位、驱 valid。
+            S_D_ABS: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    fsm_siv <= 1'b1;
+                    fsm_sid <= abs_byte;
+                    if (fsm_siv && sha_in_ready) begin
+                        fsm_siv <= 1'b0;
+                        if (abs_last) begin
+                            st <= S_D_GAP;
+                        end else begin
+                            ai <= ai + 14'd1; ph <= 1'b0;
+                        end
+                    end
+                end
+            end
+            // ⚠️ 吸收长度恰为 rate(136) 整数倍时，最后一字节填满块触发置换、in_ready 落下；
+            // 此时拉 flush 会被整个忽略（只在核处于 S_ABSORB 且 in_valid 低时采样）
+            // → 永远吸不完。所以等 in_ready 重新拉高再冲刷（Sign 实测坑第 6 条）。
+            // μ 的吸收长度是变长的（66+|ctx|+|msg|），一定会有向量踩中。
+            S_D_GAP: if (sha_in_ready) st <= S_D_FLU;
+            S_D_FLU: begin fsm_sif <= 1'b1; cnt <= 8'd0; st <= S_D_SQ; end
+            S_D_SQ: begin
+                fsm_sor <= 1'b1;
+                if (sha_out_valid) begin
+                    if (hsel == 2'd0) tr_out <= {sha_out_data, tr_out[511:8]};
+                    else              mu     <= {sha_out_data, mu[511:8]};
+                    if (cnt == 8'd63) begin
+                        fsm_sor <= 1'b0;
+                        if (hsel == 2'd0) begin
+                            hsel <= 2'd1;          // tr 好了，接着算 μ
+                            st <= S_D_GO;
+                        end else begin
+                            st <= S_SIB_GO;        // μ 好了，进 ③
+                        end
+                    end else begin
+                        cnt <= cnt + 8'd1;
+                    end
+                end
+            end
+
+            // ---------- ③a c = SampleInBall(c̃) ----------
+            S_SIB_GO: begin owner <= OWN_SIB; sb_start <= 1'b1; st <= S_SIB_WT; end
+            S_SIB_WT: if (sb_done) begin
+                cnt <= 8'd0; ph <= 1'b0; owner <= OWN_FSM; st <= S_SIB_MV;
+            end
+            S_SIB_MV: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0; nstore <= 2'd0; poly <= 3'd0;
+                        st <= S_NT_LD;             // 进 ③b：ĉ = NTT(c)
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ③b ĉ/ẑ/t̂₁ 三组正变换（就地覆盖）----------
+            // nstore：0=c（1 条）、1=z（ℓ 条）、2=t₁（k 条，装载时左移 D）
+            S_NT_LD: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_NT_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_NT_GO: begin nt_start <= 1'b1; nt_inv <= 1'b0; nt_lowseen <= 1'b0; st <= S_NT_ST; end
+            S_NT_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_NT_WB; end
+            end
+            S_NT_WB: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (nstore == 2'd0) begin
+                            nstore <= 2'd1; poly <= 3'd0; st <= S_NT_LD;   // 接着 z
+                        end else if (poly == 3'd3) begin
+                            poly <= 3'd0;
+                            if (nstore == 2'd1) begin
+                                nstore <= 2'd2; st <= S_NT_LD;             // 接着 t₁
+                            end else begin
+                                st <= S_FIN;   // 本里程碑到此（④ 起接 w'₁/c̃'）
+                            end
+                        end else begin
+                            poly <= poly + 3'd1; st <= S_NT_LD;
+                        end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
             S_FIN: begin done <= 1'b1; valid <= !zbad && !hbad; st <= S_IDLE; end
             default: st <= S_IDLE;
             endcase
         end
+    end
+
+    // ================= 海绵接口三选一（组合）=================
+    always @(*) begin
+        case (owner)
+        OWN_SIB: begin
+            sha_start = sb_ss; sha_rate = sb_sr; sha_suffix = sb_su;
+            sha_in_valid = sb_siv; sha_in_data = sb_sid; sha_in_flush = sb_sif;
+            sha_out_ready = sb_sor;
+        end
+        default: begin
+            sha_start = fsm_ss; sha_rate = fsm_sr; sha_suffix = fsm_su;
+            sha_in_valid = fsm_siv; sha_in_data = fsm_sid; sha_in_flush = fsm_sif;
+            sha_out_ready = fsm_sor;
+        end
+        endcase
     end
 
     // ================= 端口/使能（组合）=================
@@ -349,7 +558,45 @@ module mldsa_verify (
         tu_clr = 1'b0; tu_iv = 1'b0; tu_or = 1'b0;
         pk_raddr = rdp[10:0];
         sig_raddr = rdp;
-        msg_raddr = 13'd0; ctx_raddr = 8'd0;
+        // ② μ 支按 ai 摆 ctx/msg 读地址；tr 支按 ai 读 pk
+        msg_raddr = msg_off[12:0];
+        ctx_raddr = ctx_off[7:0];
+        c_we = 1'b0; c_waddr = 8'd0; c_din = 32'd0; c_raddr = dbg_idx;
+        sb_rd_addr = cnt;
+        nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt;
+
+        if (st == S_D_ABS && hsel == 2'd0) pk_raddr = ai[10:0];
+
+        // ③a SampleInBall 结果 → c 存储
+        if (st == S_SIB_MV) begin
+            sb_rd_addr = cnt;
+            if (ph) begin c_we = 1'b1; c_waddr = cnt; c_din = sb_rd_data; end
+        end
+        // ③b NTT 装载：选中对象 → NTT 写口（t₁ 装载时左移 D，即 t₁·2ᴰ）
+        if (st == S_NT_LD) begin
+            case (nstore)
+                2'd0: c_raddr  = cnt;
+                2'd1: z_raddr  = {poly[1:0], cnt};
+                default: t1_raddr = {poly[1:0], cnt};
+            endcase
+            if (ph) begin
+                nt_we = 1'b1; nt_waddr = cnt;
+                nt_wdata = (nstore == 2'd0) ? c_dout
+                         : (nstore == 2'd1) ? z_dout
+                                            : (t1_dout <<< D);
+            end
+        end
+        // ③b NTT 写回：NTT 读口 → 选中对象（就地）
+        if (st == S_NT_WB) begin
+            nt_raddr = cnt;
+            if (ph) begin
+                case (nstore)
+                    2'd0: begin c_we = 1'b1; c_waddr = cnt; c_din = nt_rdata; end
+                    2'd1: begin z_we = 1'b1; z_waddr = {poly[1:0], cnt}; z_din = nt_rdata; end
+                    default: begin t1_we = 1'b1; t1_waddr = {poly[1:0], cnt}; t1_din = nt_rdata; end
+                endcase
+            end
+        end
 
         // 清 h
         if (st == S_HCLR) begin h_we = 1'b1; h_waddr = hclr; h_din = 1'b0; end

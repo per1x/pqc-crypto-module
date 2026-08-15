@@ -163,16 +163,21 @@ async def test_sigdecode(dut):
             f"tcId={rec.get('tcid')}：hbad 不一致 RTL={int(dut.hbad.value)} "
             f"oracle={o['hbad']}")
 
+        # z / t₁ 在 ③ 被就地 NTT 成 ẑ / t̂₁（t₁ 装载时左移 D），done 时读到的是变换后的。
+        # NTT 双射 ⇒ ẑ==ntt(z) 同时说明 18 位解包对、NTT 对（t₁ 同理）。
+        from mldsa_model import ntt as _ntt
         for j in range(ELL):
             got = await read_poly(dut, (0 << 2) | j)
-            assert got == o["z"][j], (
-                f"tcId={rec.get('tcid')}：z[{j}] 不一致，首个不同在第 "
-                f"{next(i for i in range(256) if got[i] != o['z'][j][i])} 个系数")
+            want = _ntt(list(o["z"][j]))
+            assert got == want, (
+                f"tcId={rec.get('tcid')}：ẑ[{j}] 不一致，首个不同在第 "
+                f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
         for i in range(K):
             got = await read_poly(dut, (1 << 2) | i)
-            assert got == o["t1"][i], (
-                f"tcId={rec.get('tcid')}：t₁[{i}] 不一致，首个不同在第 "
-                f"{next(n for n in range(256) if got[n] != o['t1'][i][n])} 个系数")
+            want = _ntt([x << 13 for x in o["t1"][i]])
+            assert got == want, (
+                f"tcId={rec.get('tcid')}：t̂₁[{i}] 不一致，首个不同在第 "
+                f"{next(n for n in range(256) if got[n] != want[n])} 个系数")
 
         # hint 位：只有结构合法时 oracle 才给出 h（非法时返回 None，位内容无意义）
         if o["h"] is not None:
@@ -184,4 +189,46 @@ async def test_sigdecode(dut):
 
         dut._log.info(f"  tcId={rec.get('tcid')} ok（zbad={o['zbad']} hbad={o['hbad']}）")
 
-    dut._log.info("① sigDecode/pkDecode：c̃/z/t₁/hint 与 zbad/hbad 全对上 oracle")
+    dut._log.info("① sigDecode/pkDecode：c̃/ẑ/t̂₁/hint 与 zbad/hbad 全对上 oracle")
+
+
+@cocotb.test()
+async def test_tr_mu_c(dut):
+    """②③ tr=H(pk)、μ=H(tr‖M')、ĉ=NTT(SampleInBall(c̃))，对上 oracle
+
+    tr 吸收整个 pk（1312 字节）；μ 走 M' 封装（含非空 ctx、长 msg）。
+    ĉ 由 c 就地 NTT 而来，双射 ⇒ 对上 ntt(sample_in_ball) 说明 c 与 NTT 都对。
+    """
+    from mldsa_oracle import h_shake256, _mprime, sample_in_ball
+    from mldsa_model import ntt as _ntt
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    # 挑一条应通过的（c̃ 是真签名的 c̃，SampleInBall 才有意义）
+    recs = d44_records()
+    rec = next(r for r in recs if r.get("result", "").lower() == "pass")
+    pk, sig, msg, ctx = await preload(dut, rec)
+    await run_to_done(dut)
+
+    tr_w = h_shake256(pk, 64)
+    mu_w = h_shake256(tr_w + _mprime(ctx, msg), 64)
+
+    got_tr = to_bytes(dut.tr_out.value, 64)
+    assert got_tr == tr_w, (
+        f"tr 不一致，首个不同在字节 "
+        f"{next(i for i in range(64) if got_tr[i] != tr_w[i])}")
+    got_mu = to_bytes(dut.mu.value, 64)
+    assert got_mu == mu_w, (
+        f"μ 不一致，首个不同在字节 "
+        f"{next(i for i in range(64) if got_mu[i] != mu_w[i])}")
+
+    c_w = sample_in_ball(sig[:32], 39)
+    chat_w = _ntt(list(c_w))
+    got_chat = await read_poly(dut, 3 << 2)
+    assert got_chat == chat_w, (
+        f"ĉ 不一致，首个不同在第 "
+        f"{next(i for i in range(256) if got_chat[i] != chat_w[i])} 个系数")
+
+    dut._log.info(f"②③ tr/μ 逐字节对上 oracle（pk 1312B 吸收、msg {len(msg)}B、"
+                  f"ctx {len(ctx)}B）；ĉ=NTT(SampleInBall(c̃)) 对上 oracle")
