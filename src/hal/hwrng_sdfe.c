@@ -26,68 +26,43 @@
 #include <string.h>
 
 #include "pqchsm/hwrng.h"
-#include "sdfe.h"
-
-/* 一个进程一个会话：连接是有状态的（远程还要认证），每次取随机数都重连
- * 会把 TCP 握手 + 认证摊到每一次调用上。失败之后置空重连，
- * 不缓存一个已经坏掉的句柄。 */
-static SDFE_HANDLE g_dev, g_ses;
-
-static void close_dev(void)
-{
-	if (g_ses) { SDFE_CloseSession(g_ses); g_ses = NULL; }
-	if (g_dev) { SDFE_CloseDevice(g_dev);  g_dev = NULL; }
-}
-
-static int ensure_open(void)
-{
-	const char *host = getenv("PQCHSM_SDFE_HOST");
-	const char *tok  = getenv("PQCHSM_SDFE_TOKEN");
-	const char *ps   = getenv("PQCHSM_SDFE_PORT");
-	int rv;
-
-	if (g_ses)
-		return 0;
-
-	if (host && tok)
-		rv = SDFE_OpenDeviceRemote(&g_dev, host, ps ? atoi(ps) : 0, tok);
-	else
-		rv = SDFE_OpenDevice(&g_dev);
-	if (rv != SDR_OK) {
-		g_dev = NULL;
-		return -1;
-	}
-	if (SDFE_OpenSession(g_dev, &g_ses) != SDR_OK) {
-		close_dev();
-		return -1;
-	}
-	return 0;
-}
+#include "sdfe_conn.h"
 
 static int sdfe_bytes(uint8_t *out, size_t n)
 {
 	size_t done = 0;
+	SDFE_HANDLE ses;
+	int rc = 0;
 
 	if (!out || n == 0)
 		return -1;
-	if (ensure_open())
+
+	/* 整段取数在锁里做：共享连接上请求与响应必须成对，
+	 * 中间被算法后端插一条进去，两边收到的都是对方的响应。 */
+	sdfe_conn_lock();
+	ses = sdfe_conn_get();
+	if (!ses) {
+		sdfe_conn_unlock();
 		return -1;
+	}
 
 	/* 线协议一次最多 8192 字节载荷，长请求要分段。
 	 * 分段边界不影响熵：每一段都是同一个环振源的新鲜输出。 */
 	while (done < n) {
 		uint32_t chunk = (uint32_t)((n - done) > 4096 ? 4096 : (n - done));
 
-		if (SDFE_GenerateRandom(g_ses, chunk, out + done) != SDR_OK) {
-			/* 连接可能已经坏了（服务重启、网络断）。关掉重来，
+		if (SDFE_GenerateRandom(ses, chunk, out + done) != SDR_OK) {
+			/* 连接可能已经坏了（服务重启、网络断）。丢掉重来，
 			 * 下一次调用会重连；但**本次仍然报失败** ——
 			 * 悄悄重试会把一次真实的硬件故障掩盖成偶发延迟。 */
-			close_dev();
-			return -1;
+			sdfe_conn_drop();
+			rc = -1;
+			break;
 		}
 		done += chunk;
 	}
-	return 0;
+	sdfe_conn_unlock();
+	return rc;
 }
 
 static const hwrng_byte_source_t g_src = {

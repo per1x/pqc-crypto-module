@@ -655,7 +655,14 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 		if (!hpk) {
 			return HSM_ERR_NOMEM;
 		}
-		if (pqc_keypair_hw(alg, hpk, &hh) == PQC_OK) {
+		pqc_status_t hst = pqc_keypair_hw(alg, hpk, &hh);
+
+		if (hst == PQC_ERR_UNSUPPORTED) {
+			/* 算法不匹配，不是硬件故障。硬件里只有 ML-KEM；要 ML-DSA
+			 * 就走软件。判据是算法，不是这次调用成没成 ——
+			 * 与 pqc_sdfe.c 里那条界线同源：换算法可以，换保证不行。 */
+			pqc_secure_free(hpk, info->pk_len);
+		} else if (hst == PQC_OK) {
 			slot_wipe_key_material(s);
 			s->pk = hpk;
 			s->pk_len = info->pk_len;
@@ -681,11 +688,12 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 				*out = make_handle(s);
 			}
 			return HSM_OK;
+		} else {
+			/* 硬件**真的失败了**（金库满、通信断、核报错）：不静默退回软件。
+			 * 上层要的是"私钥在硬件里"，悄悄给一把软件密钥是把承诺变成谎话。 */
+			pqc_secure_free(hpk, info->pk_len);
+			return HSM_ERR_CRYPTO;
 		}
-		/* 硬件路径失败：**不静默退回软件**。上层要的是"私钥在硬件里"，
-		 * 悄悄给一把软件密钥是把承诺变成谎话。 */
-		pqc_secure_free(hpk, info->pk_len);
-		return HSM_ERR_CRYPTO;
 	}
 
 	uint8_t *pk = pqc_secure_alloc(info->pk_len);

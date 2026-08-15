@@ -31,31 +31,7 @@
 #include <string.h>
 
 #include "pqchsm/pqc.h"
-#include "sdfe.h"
-
-static SDFE_HANDLE g_dev, g_ses;
-
-static void closedev(void)
-{
-	if (g_ses) { SDFE_CloseSession(g_ses); g_ses = NULL; }
-	if (g_dev) { SDFE_CloseDevice(g_dev);  g_dev = NULL; }
-}
-
-static int opendev(void)
-{
-	const char *host = getenv("PQCHSM_SDFE_HOST");
-	const char *tok  = getenv("PQCHSM_SDFE_TOKEN");
-	const char *ps   = getenv("PQCHSM_SDFE_PORT");
-	int rv;
-
-	if (g_ses)
-		return 0;
-	rv = (host && tok) ? SDFE_OpenDeviceRemote(&g_dev, host, ps ? atoi(ps) : 0, tok)
-	                   : SDFE_OpenDevice(&g_dev);
-	if (rv != SDR_OK) { g_dev = NULL; return -1; }
-	if (SDFE_OpenSession(g_dev, &g_ses) != SDR_OK) { closedev(); return -1; }
-	return 0;
-}
+#include "sdfe_conn.h"
 
 /* pqc_alg_t → SDF 的参数集编号。只有 ML-KEM 三档；其余算法这个后端做不了，
  * 如实回 UNSUPPORTED，让上层去用软件后端 —— 不猜、不代打。 */
@@ -75,14 +51,19 @@ static pqc_status_t sdfe_keypair_hw(pqc_alg_t alg, uint8_t *pk, uint32_t *hw)
 	uint32_t len = sizeof buf, h = 0;
 	int ps = pset_of(alg);
 
+	SDFE_HANDLE ses;
+
 	if (ps < 0 || !pk || !hw)
 		return PQC_ERR_UNSUPPORTED;
-	if (opendev())
-		return PQC_ERR_BACKEND;
-	if (SDFE_GenerateKeyPair_MLKEM(g_ses, (uint32_t)ps, buf, &len, &h) != SDR_OK) {
-		closedev();
+	sdfe_conn_lock();
+	ses = sdfe_conn_get();
+	if (!ses) { sdfe_conn_unlock(); return PQC_ERR_BACKEND; }
+	if (SDFE_GenerateKeyPair_MLKEM(ses, (uint32_t)ps, buf, &len, &h) != SDR_OK) {
+		sdfe_conn_drop();
+		sdfe_conn_unlock();
 		return PQC_ERR_BACKEND;
 	}
+	sdfe_conn_unlock();
 	memcpy(pk, buf, len);
 	*hw = h;
 	return PQC_OK;
@@ -94,15 +75,20 @@ static pqc_status_t sdfe_decaps_hw(pqc_alg_t alg, uint32_t hw,
 	const pqc_alg_info_t *info = pqc_alg_info(alg);
 	uint32_t ss_len = 32;
 
+	SDFE_HANDLE ses;
+
 	if (pset_of(alg) < 0 || !info || !ct || !ss)
 		return PQC_ERR_UNSUPPORTED;
-	if (opendev())
-		return PQC_ERR_BACKEND;
-	if (SDFE_Decapsulate_MLKEM(g_ses, hw, ct, (uint32_t)info->ct_len,
+	sdfe_conn_lock();
+	ses = sdfe_conn_get();
+	if (!ses) { sdfe_conn_unlock(); return PQC_ERR_BACKEND; }
+	if (SDFE_Decapsulate_MLKEM(ses, hw, ct, (uint32_t)info->ct_len,
 	                           ss, &ss_len) != SDR_OK) {
-		closedev();
+		sdfe_conn_drop();
+		sdfe_conn_unlock();
 		return PQC_ERR_BACKEND;
 	}
+	sdfe_conn_unlock();
 	return ss_len == info->ss_len ? PQC_OK : PQC_ERR_BACKEND;
 }
 
@@ -113,16 +99,21 @@ static pqc_status_t sdfe_encaps(pqc_alg_t alg, const uint8_t *pk,
 	uint32_t ct_len, ss_len = 32;
 	int ps = pset_of(alg);
 
+	SDFE_HANDLE ses;
+
 	if (ps < 0 || !info || !pk || !ct || !ss)
 		return PQC_ERR_UNSUPPORTED;
-	if (opendev())
-		return PQC_ERR_BACKEND;
+	sdfe_conn_lock();
+	ses = sdfe_conn_get();
+	if (!ses) { sdfe_conn_unlock(); return PQC_ERR_BACKEND; }
 	ct_len = (uint32_t)info->ct_len;
-	if (SDFE_Encapsulate_MLKEM(g_ses, (uint32_t)ps, pk, (uint32_t)info->pk_len,
+	if (SDFE_Encapsulate_MLKEM(ses, (uint32_t)ps, pk, (uint32_t)info->pk_len,
 	                           ss, &ss_len, ct, &ct_len) != SDR_OK) {
-		closedev();
+		sdfe_conn_drop();
+		sdfe_conn_unlock();
 		return PQC_ERR_BACKEND;
 	}
+	sdfe_conn_unlock();
 	return PQC_OK;
 }
 
