@@ -15,15 +15,17 @@
 // 头部字节序 / 握手 / 组合 ready / 空敏感列表用连续赋值等坑与 sampler.v 同源。
 `default_nettype none
 
-module mldsa_sample_in_ball #(
-    parameter integer TAU = 39,           // ML-DSA-44/65/87：39 / 49 / 60
-    parameter integer CTB = 32            // c̃ 字节数：32 / 48 / 64（λ/4）
-) (
+// ⚠️ τ 与 c̃ 长度是**运行时输入**（运行时选 44/65/87 的一部分）。
+//    seed 端口因此固定成**最宽的 512 位**（c̃ 最长 64 字节），只读前 ctb 字节；
+//    原来它是 CTB*8 位，宽度随参数变，运行时化之后不能再那样。
+module mldsa_sample_in_ball (
     input  wire        clk,
     input  wire        rst_n,
 
+    input  wire [6:0]  tau,               // 39 / 49 / 60
+    input  wire [6:0]  ctb,               // c̃ 字节数 32 / 48 / 64（λ/4）
     input  wire        start,
-    input  wire [CTB*8-1:0] seed,         // c̃，CTB 字节；seed[7:0] 是第 0 字节
+    input  wire [511:0] seed,             // c̃，低 ctb 字节有效；seed[7:0] 是第 0 字节
     output reg         done,
 
     output reg         sha_start,
@@ -41,8 +43,9 @@ module mldsa_sample_in_ball #(
     output wire signed [31:0] rd_data
 );
     localparam [7:0] RATE = 8'd136, SUFFIX = 8'h1F;   // SHAKE256
-    localparam integer START_I_INT = 256 - TAU;      // N − τ = 217（τ=39）
-    localparam [7:0]   START_I = START_I_INT[7:0];
+    // N − τ（τ=39 时 217）。在 9 位里算再截，免得 256 在 8 位里变成 0。
+    wire [8:0] start_i9 = 9'd256 - {2'b0, tau};
+    wire [7:0] START_I  = start_i9[7:0];
     assign sha_rate   = RATE;
     assign sha_suffix = SUFFIX;
 
@@ -61,7 +64,7 @@ module mldsa_sample_in_ball #(
     // 头部：c̃ 的 32 字节
     wire [6:0] hdr_nxt_i = hdr_i + 7'd1;
     // ⚠️ 末字节要钳位：hdr_nxt_i 在最后一拍会走到 CTB，直接切片会越界读到 X
-    wire [6:0] hdr_nxt_c = (hdr_nxt_i >= CTB[6:0]) ? (CTB[6:0] - 7'd1) : hdr_nxt_i;
+    wire [6:0] hdr_nxt_c = (hdr_nxt_i >= ctb) ? (ctb - 7'd1) : hdr_nxt_i;
     wire [7:0] hdr_byte     = seed[hdr_i*8 +: 8];
     wire [7:0] hdr_byte_nxt = seed[hdr_nxt_c*8 +: 8];
 
@@ -96,7 +99,7 @@ module mldsa_sample_in_ball #(
             S_ABS: begin
                 sha_in_valid <= 1'b1;
                 if (sha_in_valid && sha_in_ready) begin
-                    if (hdr_i == CTB[6:0] - 7'd1) begin
+                    if (hdr_i == ctb - 7'd1) begin
                         sha_in_valid <= 1'b0;
                         st <= S_GAP;
                     end else begin

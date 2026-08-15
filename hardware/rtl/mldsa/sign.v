@@ -247,8 +247,8 @@ module mldsa_sign #(
     wire signed [31:0] em_rd_data;
     wire        em_ss, em_siv, em_sif, em_sor;
     wire [7:0]  em_sr, em_su, em_sid;
-    mldsa_expand_mask #(.GAMMA1(GAMMA1), .CBITS(ZBITS)) u_em (
-        .clk(clk), .rst_n(rst_n),
+    mldsa_expand_mask u_em (
+        .clk(clk), .rst_n(rst_n), .cbits(ZBITS[4:0]),
         .start(em_start), .seed(rhopp), .nonce(em_nonce), .done(em_done),
         .sha_start(em_ss), .sha_rate(em_sr), .sha_suffix(em_su),
         .sha_in_valid(em_siv), .sha_in_data(em_sid), .sha_in_flush(em_sif),
@@ -337,9 +337,10 @@ module mldsa_sign #(
     wire signed [31:0] sb_rd_data;
     wire        sb_ss, sb_siv, sb_sif, sb_sor;
     wire [7:0]  sb_sr, sb_su, sb_sid;
-    mldsa_sample_in_ball #(.TAU(TAU), .CTB(CTB)) u_sib (
-        .clk(clk), .rst_n(rst_n),
-        .start(sb_start), .seed(ctilde), .done(sb_done),
+    // seed 端口已固定 512 位，c̃ 短于 64 字节时高位补零（模块只读前 ctb 字节）
+    mldsa_sample_in_ball u_sib (
+        .clk(clk), .rst_n(rst_n), .tau(TAU[6:0]), .ctb(CTB[6:0]),
+        .start(sb_start), .seed({{(512-CTB*8){1'b0}}, ctilde}), .done(sb_done),
         .sha_start(sb_ss), .sha_rate(sb_sr), .sha_suffix(sb_su),
         .sha_in_valid(sb_siv), .sha_in_data(sb_sid), .sha_in_flush(sb_sif),
         .sha_in_ready(sha_in_ready && (owner == OWN_SIB)),

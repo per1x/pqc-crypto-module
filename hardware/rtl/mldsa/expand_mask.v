@@ -17,13 +17,15 @@
 // sampler.v 完全同源，照抄它的写法（见那份文件的注释）。
 `default_nettype none
 
-module mldsa_expand_mask #(
-    parameter integer GAMMA1 = (1 << 17),   // ML-DSA-44/65/87：2¹⁷ 或 2¹⁹
-    parameter integer CBITS  = 18           // 1 + bitlen(γ₁−1)：18（2¹⁷）或 20（2¹⁹）
-) (
+// ⚠️ γ₁ 与它的位宽是**运行时输入**（运行时选 44/65/87 的一部分）。
+//    只需要一个 cbits：γ₁ 恒等于 1 << (cbits − 1)
+//    （cbits = 1 + bitlen(γ₁−1)，γ₁=2¹⁷→18，2¹⁹→20），
+//    两个口会给"两者对不上"留下出错的余地。
+module mldsa_expand_mask (
     input  wire        clk,
     input  wire        rst_n,
 
+    input  wire [4:0]  cbits,         // 18（γ₁=2¹⁷）或 20（γ₁=2¹⁹）
     input  wire        start,          // 脉冲
     input  wire [511:0] seed,          // ρ''，64 字节；seed[7:0] 是第 0 字节
     input  wire [15:0] nonce,          // κ + r
@@ -46,7 +48,8 @@ module mldsa_expand_mask #(
     output wire signed [31:0] rd_data
 );
     localparam [7:0] RATE = 8'd136, SUFFIX = 8'h1F;   // SHAKE256
-    localparam signed [31:0] G1 = GAMMA1;             // γ₁ 的 32 位有符号常量
+    // γ₁ = 1 << (cbits − 1)，32 位有符号
+    wire signed [31:0] G1 = 32'sd1 << (cbits - 5'd1);
     // 空敏感列表坑：连续赋值，不能用 always @(*)（见 sampler.v）
     assign sha_rate   = RATE;
     assign sha_suffix = SUFFIX;
@@ -75,7 +78,7 @@ module mldsa_expand_mask #(
     // 解包器的位宽现在是运行时口；这一层的 CBITS 仍是编译期参数，直接喂常量。
     // （engine 落地后由 engine 用运行时 pset 驱动，这里只需把口接出去。）
     mldsa_bitunpack u_bu (
-        .clk(clk), .rst_n(rst_n), .clr(st == S_IDLE), .w(CBITS[4:0]),
+        .clk(clk), .rst_n(rst_n), .clr(st == S_IDLE), .w(cbits),
         .in_byte(sha_out_data), .in_valid(bu_iv), .in_ready(bu_ir),
         .out_val(bu_val), .out_valid(bu_ov), .out_ready(bu_or));
 

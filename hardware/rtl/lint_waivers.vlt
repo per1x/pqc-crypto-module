@@ -42,6 +42,10 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/butterfly.v" -match "*'s
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/pack.v"   -match "*'w_mask'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/unpack.v" -match "*'w_mask'*"
 
+// SampleInBall 的起点 N−τ：**必须在 9 位里算**，否则 256 在 8 位里就是 0。
+// τ ∈ [39,60] ⇒ 结果 ∈ [196,217]，取低 8 位即可，第 8 位按构造恒为 0。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/sample_in_ball.v" -match "*'start_i9'*"
+
 // 压缩：折回 [0,q) 的中间量只取低 12 位；乘倒数的积只取高位段；商只取低 D 位
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'norm'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'prod'*"

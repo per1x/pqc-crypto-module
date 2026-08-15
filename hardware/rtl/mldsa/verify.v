@@ -202,9 +202,10 @@ module mldsa_verify #(
     wire signed [31:0] sb_rd_data;
     wire        sb_ss, sb_siv, sb_sif, sb_sor;
     wire [7:0]  sb_sr, sb_su, sb_sid;
-    mldsa_sample_in_ball #(.TAU(TAU), .CTB(CTB)) u_sib (
-        .clk(clk), .rst_n(rst_n),
-        .start(sb_start), .seed(ctilde), .done(sb_done),
+    // seed 端口已固定 512 位，c̃ 短于 64 字节时高位补零（模块只读前 ctb 字节）
+    mldsa_sample_in_ball u_sib (
+        .clk(clk), .rst_n(rst_n), .tau(TAU[6:0]), .ctb(CTB[6:0]),
+        .start(sb_start), .seed({{(512-CTB*8){1'b0}}, ctilde}), .done(sb_done),
         .sha_start(sb_ss), .sha_rate(sb_sr), .sha_suffix(sb_su),
         .sha_in_valid(sb_siv), .sha_in_data(sb_sid), .sha_in_flush(sb_sif),
         .sha_in_ready(sha_in_ready && (owner == OWN_SIB)),
