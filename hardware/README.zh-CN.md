@@ -47,8 +47,10 @@ hardware/
 | `mlkem_rej_uniform` | 收集器，每周期吃一组 3 字节，结果存在 `ram_dp` 里（读延迟 1 拍） | 约 430 / 个多项式 |
 | `mlkem_encode12`、`mlkem_decode12` | 组合逻辑 | — |
 | `mldsa_mont_reduce`、`mldsa_reduce32`、`mldsa_caddq` | 组合逻辑 | — |
-| `mldsa_butterfly_ct`、`mldsa_butterfly_gs` | 组合逻辑 | — |
-| `mldsa_ntt_core` | 单蝶形单元，ML-DSA 的完整 8 层 NTT，系数存在 `ram_dp` 块 RAM 里 | 正 2049 / 逆 2561（一个蝶形两拍） |
+| `mldsa_butterfly_ct`、`mldsa_butterfly_gs` | 组合逻辑；数学的参照实现，与 `mldsa_butterfly_pipe` 对同一份向量钉在一起 | — |
+| `mldsa_mont_mul_pipe` | 5 级流水的 `mont(x·y)`；NTT 与逐点/MAC 各段**共用这一条**乘法链 | 5 |
+| `mldsa_butterfly_pipe` | CT / GS / 缩放三合一，跑在一个 `mldsa_mont_mul_pipe` 上；旁路走 tag | 5 |
+| `mldsa_ntt_core` | 流水蝶形，ML-DSA 的完整 8 层 NTT，乒乓两块 `ram_dp`（读一块写另一块，层内无 RAW） | 正 1081 / 逆 1344（一个蝶形一拍） |
 | `mldsa_power2round`、`mldsa_decompose` | 组合逻辑，参数集由 `MODE` 选 | — |
 | `mldsa_make_hint`、`mldsa_use_hint` | 组合逻辑，参数集由 `MODE` 选 | — |
 | `mldsa_rej_uniform`、`mldsa_rej_eta` | 组合逻辑 | — |

@@ -16,6 +16,9 @@ hardware/tb/cocotb/sim_build*/
 # 并行跑多个用例时会用 SIM_BUILD=sb_xxx 各开一个构建目录（互不覆盖），一并忽略
 hardware/tb/cocotb/sb_*/
 hardware/tb/cocotb/results.xml
+# 并行跑九格矩阵时每格各一份结果与日志（COCOTB_RESULTS_FILE=results_<格>.xml）
+hardware/tb/cocotb/results_*.xml
+hardware/tb/cocotb/log_*.txt
 hardware/syn/rpt/
 
 # Test vectors are reproducible derivatives (tools/fetch_vectors.sh pins the ACVP

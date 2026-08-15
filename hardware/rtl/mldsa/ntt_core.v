@@ -16,13 +16,39 @@
 // accel.h 的契约是软件轮询 STATUS.DONE，而真实寄存器/AXI 轮询在任意时刻采样
 // 会漏掉 1 周期脉冲，所以核这一侧就要给出可锁存的电平。
 //
-// ⚠️ **读口是同步读，有一拍延迟**：系数存储是一块真双口 BRAM
-// （common/ram_dp.v），而 BRAM 没有组合读口。给出 rd_addr 之后要等一个上升沿，
-// rd_data 才是那个地址的内容。写口仍是同拍生效。
-// 一个蝶形也因此拆成两拍（S_RD 发地址 / S_WB 拿数算完写回），
-// 正变换 1025 → 2049 cycles，逆变换 1281 → 2561 cycles。
+// ⚠️ **读口是同步读，有一拍延迟**：系数存储是 BRAM（common/ram_dp.v），
+// 而 BRAM 没有组合读口。给出 rd_addr 之后要等一个上升沿，rd_data 才是那个地址的内容。
 // 理由与 ML-KEM 侧那一版相同：256×32 的寄存器阵列加多个组合读口，
 // 综合出来是几万个 LUT 的选择树，一颗 ZU3EG 放不下 —— 见 docs/TESTING.md 的 S3。
+//
+// ============================ 流水化改造 ============================
+// 起因是实测：组合蝶形版的 ML-DSA-87 Sign，post-route
+//   WNS @100MHz = −3.332ns  →  Fmax ≈ 75.0MHz，而系统时钟正好 75MHz，
+//   余量 ≈ +0.001ns，进整体设计必挂。
+// 关键路径 u_ntt/k_reg → u_ntt/u_mem/DINADIN[29]，逻辑层级 37：
+// 旋转因子 ROM 的 256:1 选择树、ζ·b、mont 里的两次乘法、蝶形加减，全串在一拍里。
+//
+// 改造分两件事：
+//
+// 一、蝶形切成 5 级流水（mldsa_butterfly_pipe），ROM 读出也打一拍，
+//    ζ 的取负挪到 ROM 之后的那一拍。CT / GS / 缩放合并成**一条**乘法链
+//    （原来三者各例化一份 mont_reduce，等于三套乘法器）。
+//
+// 二、存储从"一块 BRAM 就地做"改成**乒乓两块**：一层里只读 buf[sel]、只写 buf[~sel]，
+//    层末把 sel 翻过来。这样做的理由不是省事，是**从结构上消灭 RAW**——
+//    流水化之后同一层内先写的地址可能被后读命中，而读源与写目的分属两块存储时
+//    这件事根本不会发生，不需要旁路，也不需要"蝶形对地址跨度大于流水深度"这种
+//    随参数变化的脆弱前提。
+//    正确性还依赖一条已验证的性质（scratch 里用生成器逐层枚举确认，16 层全中）：
+//      **每一层的 128 个蝶形恰好覆盖 [0,256) 的全部 256 个地址，无重复**，
+//    所以目的 buf 每个地址恰好被写一次，不会留空洞。
+//    代价是多一块 256×32（半个 BRAM tile）。
+//
+//    层与层之间**必须排空流水**：下一层要读的正是上一层刚写完的那块。
+//    排空由 S_DRAIN 等 pipe_empty 完成，等价于 6 拍。
+//
+// 吞吐顺带从 2 拍/蝶形变成 1 拍/蝶形：
+//   正变换 2049 → 1081 cycles，逆变换 2561 → 1344 cycles（test_mldsa_ntt 实测）。
 `default_nettype none
 
 module mldsa_ntt_core (
@@ -139,129 +165,156 @@ module mldsa_ntt_core (
     end
 
     // ---- 状态机的控制寄存器（要在存储例化之前声明：端口 mux 用得到）----
-    localparam S_IDLE  = 3'd0, S_RD    = 3'd1, S_WB   = 3'd2,
-               S_SC_RD = 3'd3, S_SC_WB = 3'd4, S_DONE = 3'd5;
+    // S_RUN   每拍发一个蝶形（或一个缩放）
+    // S_DRAIN 本层发完，等流水线排空 —— 下一层要读的正是这一层刚写完的那块 buf
+    localparam S_IDLE = 2'd0, S_RUN = 2'd1, S_DRAIN = 2'd2, S_DONE = 2'd3;
 
-    reg [2:0] state;
+    reg [1:0] state;
     reg [8:0] len;        // 正变换 128..1，逆变换 1..128
     reg [8:0] grp;        // 当前组的起始下标
     reg [8:0] j;          // 组内偏移
     reg [8:0] k;          // 旋转因子下标
     reg       inv_r;
     reg [8:0] scale_i;
+    reg       ph_sc;      // 1 = 正处于逆变换末尾的统一缩放阶段
+    reg       sel;        // 哪一块 buf 持有**当前有效**的系数
 
-    wire [8:0] j_hi = j + len;
+    wire [8:0] j_hi  = j + len;
+    wire       busy_i = (state != S_IDLE);
+    wire       issue  = (state == S_RUN);
+    wire [7:0] issue_a = ph_sc ? scale_i[7:0] : j[7:0];
+    wire [7:0] issue_b = j_hi[7:0];
 
-    // ---- 系数存储：一块真双口 BRAM ----
-    // A 口：空闲时接外部写口，蝶形时管 mem[j]，缩放时管 mem[scale_i]；
-    // B 口：空闲时接外部读口，蝶形时管 mem[j+len]。
-    // 蝶形的两个地址恒不相等（len ≥ 1），不会触发 ram_dp 的同址写断言。
-    reg         pa_we,  pb_we;
-    reg  [7:0]  pa_addr, pb_addr;
-    reg  signed [31:0] pa_din, pb_din;
-    wire signed [31:0] pa_dout, pb_dout;
+    // ---- 发射级：把 valid / 写回地址 / 缩放标志打一拍，与 BRAM 的读出对齐 ----
+    // BRAM 是同步读：第 T 拍给地址，第 T+1 拍数据才出来。所以送进蝶形的所有伴随
+    // 信号都要延后一拍，否则地址会比数据早一拍，写回就错位。
+    reg        iv_r, isc_r;
+    reg  [7:0] ja_r, jb_r;
+    reg signed [31:0] zeta_q;
 
-    ram_dp #(.DW(32), .AW(8)) u_mem (
-        .clk    (clk),
-        .a_we   (pa_we), .a_addr(pa_addr), .a_din(pa_din), .a_dout(pa_dout),
-        .b_we   (pb_we), .b_addr(pb_addr), .b_din(pb_din), .b_dout(pb_dout)
-    );
-
-    assign rd_data = pb_dout;
-
-    wire signed [31:0] a_val = pa_dout;
-    wire signed [31:0] b_val = pb_dout;
-    wire signed [31:0] zeta_raw = zetas[k[7:0]];
-    // 逆变换用 −zetas[k]
-    wire signed [31:0] zeta = inv_r ? -zeta_raw : zeta_raw;
-
-    wire signed [31:0] ct_a, ct_b, gs_a, gs_b;
-    mldsa_butterfly_ct u_bf_ct (
-        .a(a_val), .b(b_val), .zeta(zeta), .a_out(ct_a), .b_out(ct_b));
-    mldsa_butterfly_gs u_bf_gs (
-        .a(a_val), .b(b_val), .zeta(zeta), .a_out(gs_a), .b_out(gs_b));
-
-    // S_SC_WB 用：逆变换末尾统一乘 f。缩放只用 A 口，所以取的是 pa_dout。
-    wire signed [31:0] scale_in = pa_dout;
-    wire signed [63:0] finv_prod =
-        $signed({{32{FINV[31]}}, FINV}) * $signed({{32{scale_in[31]}}, scale_in});
-    wire signed [31:0] scale_mont;
-    mldsa_mont_reduce u_scale_mont (.a(finv_prod), .t_out(scale_mont));
-
-    // ---- 两个 BRAM 口的归属：完全由状态决定 ----
-    always @(*) begin
-        pa_we   = 1'b0;
-        pa_addr = 8'd0;
-        pa_din  = 32'sd0;
-        pb_we   = 1'b0;
-        pb_addr = 8'd0;
-        pb_din  = 32'sd0;
-        case (state)
-        S_IDLE: begin
-            pa_we   = wr_en;
-            pa_addr = wr_addr;
-            pa_din  = wr_data;
-            pb_addr = rd_addr;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            iv_r <= 1'b0; isc_r <= 1'b0; ja_r <= 8'd0; jb_r <= 8'd0;
+        end else begin
+            iv_r  <= issue;
+            isc_r <= ph_sc;
+            ja_r  <= issue_a;
+            jb_r  <= issue_b;
         end
-        S_RD: begin
-            pa_addr = j[7:0];
-            pb_addr = j_hi[7:0];
-        end
-        S_WB: begin
-            pa_we   = 1'b1;
-            pa_addr = j[7:0];
-            pa_din  = inv_r ? gs_a : ct_a;
-            pb_we   = 1'b1;
-            pb_addr = j_hi[7:0];
-            pb_din  = inv_r ? gs_b : ct_b;
-        end
-        S_SC_RD: pa_addr = scale_i[7:0];
-        S_SC_WB: begin
-            pa_we   = 1'b1;
-            pa_addr = scale_i[7:0];
-            pa_din  = scale_mont;
-        end
-        default: ;
-        endcase
     end
+
+    // 旋转因子 ROM 读出打一拍 —— 原来那条 256:1 组合选择树就在关键路径上。
+    // 取负放到 ROM 之后（进蝶形第 1 级寄存器之前），两段各自都短。
+    always @(posedge clk) zeta_q <= zetas[k[7:0]];
+
+    // ---- 系数存储：乒乓两块真双口 BRAM ----
+    // 忙的时候：buf[sel] 只读（A 口 = j / scale_i，B 口 = j+len），
+    //           buf[~sel] 只写（A 口 = j，B 口 = j+len，来自流水线末级）。
+    // 空闲的时候：buf[sel] 的 A 口接外部写、B 口接外部读；buf[~sel] 闲置。
+    // 读源与写目的分属两块存储，所以层内不存在 RAW，也不需要旁路。
+    wire        r0_a_we,  r0_b_we,  r1_a_we,  r1_b_we;
+    wire [7:0]  r0_a_addr, r0_b_addr, r1_a_addr, r1_b_addr;
+    wire signed [31:0] r0_a_din, r0_b_din, r1_a_din, r1_b_din;
+    wire signed [31:0] r0_a_dout, r0_b_dout, r1_a_dout, r1_b_dout;
+
+    ram_dp #(.DW(32), .AW(8)) u_mem0 (
+        .clk(clk),
+        .a_we(r0_a_we), .a_addr(r0_a_addr), .a_din(r0_a_din), .a_dout(r0_a_dout),
+        .b_we(r0_b_we), .b_addr(r0_b_addr), .b_din(r0_b_din), .b_dout(r0_b_dout));
+    ram_dp #(.DW(32), .AW(8)) u_mem1 (
+        .clk(clk),
+        .a_we(r1_a_we), .a_addr(r1_a_addr), .a_din(r1_a_din), .a_dout(r1_a_dout),
+        .b_we(r1_b_we), .b_addr(r1_b_addr), .b_din(r1_b_din), .b_dout(r1_b_dout));
+
+    // ---- 流水化的蝶形：CT / GS / 缩放共用一条乘法链 ----
+    // tag 里带的是两个写回地址，让地址与数据在同一个模块里同步前进 ——
+    // 改流水深度时不可能忘记同步改地址延迟。
+    wire signed [31:0] src_a = sel ? r1_a_dout : r0_a_dout;
+    wire signed [31:0] src_b = sel ? r1_b_dout : r0_b_dout;
+
+    wire        wb_valid, wb_scale, bf_busy;
+    wire [15:0] wb_tag;
+    wire signed [31:0] wb_a, wb_b;
+
+    mldsa_butterfly_pipe #(.TAGW(16)) u_bf (
+        .clk(clk), .rst_n(rst_n),
+        .in_valid(iv_r), .in_tag({ja_r, jb_r}),
+        .mode(inv_r), .scale(isc_r),
+        .a(src_a), .b(src_b),
+        // 缩放阶段送 f = mont²/256；逆变换的蝶形送 −zetas[k]（与组合版同一约定）
+        .zeta(isc_r ? FINV : (inv_r ? -zeta_q : zeta_q)),
+        .out_valid(wb_valid), .out_tag(wb_tag), .out_scale(wb_scale),
+        .a_out(wb_a), .b_out(wb_b), .pipe_busy(bf_busy));
+
+    wire [7:0] wb_ja = wb_tag[15:8];
+    wire [7:0] wb_jb = wb_tag[7:0];
+    // 发射级也在流水里，排空要连它一起看
+    wire       pipe_empty = ~iv_r & ~bf_busy;
+
+    // ---- 端口归属 ----
+    // 有效 buf：忙时读、闲时接外部口
+    wire       act_a_we   = busy_i ? 1'b0    : wr_en;
+    wire [7:0] act_a_addr = busy_i ? issue_a : wr_addr;
+    wire [7:0] act_b_addr = busy_i ? issue_b : rd_addr;
+    // 目的 buf：流水线末级写回。缩放只写 A 口（B 口没有第二个结果）。
+    wire       dst_a_we = wb_valid;
+    wire       dst_b_we = wb_valid & ~wb_scale;
+
+    assign r0_a_we   = (sel == 1'b0) ? act_a_we   : dst_a_we;
+    assign r0_a_addr = (sel == 1'b0) ? act_a_addr : wb_ja;
+    assign r0_a_din  = (sel == 1'b0) ? wr_data    : wb_a;
+    assign r0_b_we   = (sel == 1'b0) ? 1'b0       : dst_b_we;
+    assign r0_b_addr = (sel == 1'b0) ? act_b_addr : wb_jb;
+    assign r0_b_din  = wb_b;
+
+    assign r1_a_we   = (sel == 1'b1) ? act_a_we   : dst_a_we;
+    assign r1_a_addr = (sel == 1'b1) ? act_a_addr : wb_ja;
+    assign r1_a_din  = (sel == 1'b1) ? wr_data    : wb_a;
+    assign r1_b_we   = (sel == 1'b1) ? 1'b0       : dst_b_we;
+    assign r1_b_addr = (sel == 1'b1) ? act_b_addr : wb_jb;
+    assign r1_b_din  = wb_b;
+
+    // 空闲时 B 口发的就是 rd_addr，所以外部读口直接取有效 buf 的 B 口输出。
+    assign rd_data = src_b;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state   <= S_IDLE;
             done    <= 1'b0;
-            // 数据通路寄存器也给确定初值：不复位会让复位后头几拍在 4-state 仿真
-            // （Icarus）里出现 X，也不符合"计数器/控制寄存器要有复位"的通行要求。
+            // 计数器/控制寄存器一律给确定初值：不复位会让复位后头几拍在 4-state
+            // 仿真（Icarus）里出现 X。
             len     <= 9'd128;
             grp     <= 9'd0;
             j       <= 9'd0;
             k       <= 9'd1;
             inv_r   <= 1'b0;
             scale_i <= 9'd0;
+            ph_sc   <= 1'b0;
+            sel     <= 1'b0;
         end else begin
             case (state)
             S_IDLE: begin
                 // done 保持到下一次 start，这里不无条件清。
-                // 系数写入由上面的端口 mux 直接落到 BRAM 的 A 口，这里不用管。
+                // 系数写入由上面的端口 mux 直接落到有效 buf 的 A 口，这里不用管。
                 if (start) begin
-                    done  <= 1'b0;
-                    inv_r <= inverse;
-                    len   <= inverse ? 9'd1 : 9'd128;
-                    grp   <= 9'd0;
-                    j     <= 9'd0;
-                    k     <= inverse ? 9'd255 : 9'd1;
-                    state <= S_RD;
+                    done    <= 1'b0;
+                    inv_r   <= inverse;
+                    len     <= inverse ? 9'd1 : 9'd128;
+                    grp     <= 9'd0;
+                    j       <= 9'd0;
+                    k       <= inverse ? 9'd255 : 9'd1;
+                    ph_sc   <= 1'b0;
+                    scale_i <= 9'd0;
+                    state   <= S_RUN;
                 end
             end
 
-            // 第一拍：地址已经由 mux 发给 BRAM，等一个沿把 mem[j] / mem[j+len]
-            // 装进输出寄存器，下一拍才能用。
-            S_RD: state <= S_WB;
-
-            S_WB: begin
-                // 第二拍：蝶形结果由 mux 写回两个地址，这里只推进下标。
-                state <= S_RD;
-
-                if (j + 1 < grp + len) begin
+            // 每拍发一个。下标推进的逻辑与两拍版逐字相同，只是不再隔一拍。
+            S_RUN: begin
+                if (ph_sc) begin
+                    if (scale_i == 9'd255) state <= S_DRAIN;
+                    else                   scale_i <= scale_i + 9'd1;
+                end else if (j + 1 < grp + len) begin
                     j <= j + 1;
                 end else begin
                     // 一组做完，换旋转因子
@@ -270,39 +323,37 @@ module mldsa_ntt_core (
                         grp <= grp + 2 * len;
                         j   <= grp + 2 * len;
                     end else begin
-                        // 一层做完
-                        if (inv_r) begin
-                            if (len == 9'd128) begin
-                                scale_i <= 9'd0;
-                                state   <= S_SC_RD;
-                            end else begin
-                                len <= len << 1;
-                                grp <= 9'd0;
-                                j   <= 9'd0;
-                            end
-                        end else begin
-                            if (len == 9'd1) begin
-                                state <= S_DONE;
-                            end else begin
-                                len <= len >> 1;
-                                grp <= 9'd0;
-                                j   <= 9'd0;
-                            end
-                        end
+                        state <= S_DRAIN;   // 一层发完
                     end
                 end
             end
 
-            // 缩放也是两拍：读一个系数，乘完写回同一地址。
-            S_SC_RD: state <= S_SC_WB;
-
-            S_SC_WB: begin
-                // 写回由端口 mux 完成，这里只推进下标。
-                if (scale_i == 9'd255) begin
+            // 排空之后才翻 sel：翻的那一刻起，刚写满的 buf[~sel] 成为新的有效 buf。
+            // 必须等空 —— 否则还在飞的写会落到已经改了归属的存储上。
+            S_DRAIN: if (pipe_empty) begin
+                sel <= ~sel;
+                if (ph_sc) begin
                     state <= S_DONE;
+                end else if (inv_r) begin
+                    if (len == 9'd128) begin
+                        ph_sc   <= 1'b1;    // 8 层做完，进统一缩放
+                        scale_i <= 9'd0;
+                        state   <= S_RUN;
+                    end else begin
+                        len <= len << 1;
+                        grp <= 9'd0;
+                        j   <= 9'd0;
+                        state <= S_RUN;
+                    end
                 end else begin
-                    scale_i <= scale_i + 9'd1;
-                    state   <= S_SC_RD;
+                    if (len == 9'd1) begin
+                        state <= S_DONE;
+                    end else begin
+                        len <= len >> 1;
+                        grp <= 9'd0;
+                        j   <= 9'd0;
+                        state <= S_RUN;
+                    end
                 end
             end
 

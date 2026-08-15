@@ -93,6 +93,101 @@ async def test_butterfly(dut):
 
 
 @cocotb.test()
+async def test_butterfly_pipe(dut):
+    """流水版蝶形：与组合版对**同一份向量**，逐位一致
+
+    这一条是流水化改造的地基。综合进 bitstream 的是 mldsa_butterfly_pipe，
+    而 mldsa_butterfly_ct/gs 只剩"数学的参照实现"的身份 —— 两者靠这道对拍钉在一起，
+    否则就成了"一套数学两个实现，谁也不知道哪个对"。
+
+    逐条发、等满 5 拍再收，先把**数值**钉死；流水的连续吞吐由下面一条单独验。
+    """
+    LAT = 5
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    dut.rst_n.value = 0
+    dut.bfp_valid.value = 0
+    dut.bfp_scale.value = 0
+    dut.bfp_mode.value = 0
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+    rows = load("mldsa_butterfly.hex")
+    n = 0
+    for kind, a_h, b_h, z_h, ao_h, bo_h in rows:
+        a, b, z = s32(int(a_h, 16)), s32(int(b_h, 16)), s32(int(z_h, 16))
+        mode = 1 if int(kind, 16) else 0
+        dut.bf_a.value = a & 0xFFFFFFFF
+        dut.bf_b.value = b & 0xFFFFFFFF
+        dut.bf_zeta.value = z & 0xFFFFFFFF
+        dut.bfp_mode.value = mode
+        dut.bfp_valid.value = 1
+        await RisingEdge(dut.clk)
+        dut.bfp_valid.value = 0
+        for _ in range(LAT - 1):
+            await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        assert int(dut.bfp_out_valid.value) == 1, f"第 {n} 条：out_valid 没在第 {LAT} 拍出现"
+        got = (s32(int(dut.bfp_ao.value)), s32(int(dut.bfp_bo.value)))
+        exp = (s32(int(ao_h, 16)), s32(int(bo_h, 16)))
+        model = gs_butterfly(a, b, z) if mode else ct_butterfly(a, b, z)
+        assert got == exp == model, (
+            f"流水蝶形 kind={kind} 不匹配：RTL={got} 向量={exp} 模型={model}")
+        await RisingEdge(dut.clk)
+        n += 1
+    dut._log.info(f"mldsa 流水蝶形：{n} 条与组合版/向量/模型四方一致")
+
+
+@cocotb.test()
+async def test_butterfly_pipe_streaming(dut):
+    """流水版蝶形：**背靠背连发**，结果顺序与数值都不能乱
+
+    单条发测不出流水级之间串话或旁路错位（每次只有一条在飞）。这一条把向量
+    一拍一条灌满，出口按同样顺序收 —— NTT 核正是这样用它的。
+    """
+    LAT = 5
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    dut.rst_n.value = 0
+    dut.bfp_valid.value = 0
+    dut.bfp_scale.value = 0
+    for _ in range(3):
+        await RisingEdge(dut.clk)
+    dut.rst_n.value = 1
+    await RisingEdge(dut.clk)
+
+    rows = load("mldsa_butterfly.hex")
+    cases = []
+    for kind, a_h, b_h, z_h, ao_h, bo_h in rows:
+        cases.append((1 if int(kind, 16) else 0,
+                      s32(int(a_h, 16)), s32(int(b_h, 16)), s32(int(z_h, 16)),
+                      (s32(int(ao_h, 16)), s32(int(bo_h, 16)))))
+
+    got = []
+    # 多跑 LAT 拍把流水排空
+    for i in range(len(cases) + LAT):
+        if i < len(cases):
+            mode, a, b, z, _ = cases[i]
+            dut.bfp_valid.value = 1
+            dut.bfp_mode.value = mode
+            dut.bf_a.value = a & 0xFFFFFFFF
+            dut.bf_b.value = b & 0xFFFFFFFF
+            dut.bf_zeta.value = z & 0xFFFFFFFF
+        else:
+            dut.bfp_valid.value = 0
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        if int(dut.bfp_out_valid.value):
+            got.append((s32(int(dut.bfp_ao.value)), s32(int(dut.bfp_bo.value))))
+
+    exp = [c[4] for c in cases]
+    assert len(got) == len(exp), f"背靠背发 {len(exp)} 条只收到 {len(got)} 条结果"
+    for i, (g, e) in enumerate(zip(got, exp)):
+        assert g == e, f"背靠背第 {i} 条乱了：RTL={g} 期望={e}"
+    dut._log.info(f"mldsa 流水蝶形：{len(exp)} 条背靠背连发，顺序与数值全对")
+
+
+@cocotb.test()
 async def test_rounding(dut):
     """Power2Round / Decompose：向量、模型三方一致，并验证分解式与取值范围"""
     rows = load("mldsa_rounding.hex")

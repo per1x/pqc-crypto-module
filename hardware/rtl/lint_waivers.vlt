@@ -28,6 +28,11 @@ lint_off -rule DECLFILENAME -file "*/hardware/rtl/*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/mont_reduce.v" -match "*'diff'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/mont_reduce.v" -match "*'diff'*"
 
+// mldsa_mont_mul_pipe（同一文件里的流水版）第 5 级那次减法：与上面 'diff' 是
+// **同一件事**，只是被切进了流水线。(p − m·Q) 算满 64 位、结果取高 32 位，
+// 低 32 位按 Montgomery 的构造恒为 0，本来就不该有读者。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/mont_reduce.v" -match "*'diff_s4'*"
+
 // Barrett 约减：乘积右移 26 位后只用低 16 位
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/butterfly.v" -match "*'shifted'*"
 

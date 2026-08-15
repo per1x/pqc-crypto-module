@@ -30,6 +30,14 @@ module tb_mldsa_units (
     output wire signed [31:0] gs_ao,
     output wire signed [31:0] gs_bo,
 
+    // 流水版蝶形（综合真正用的那个）—— 与上面的组合版对同一份向量
+    input  wire               bfp_valid,
+    input  wire               bfp_mode,
+    input  wire               bfp_scale,
+    output wire               bfp_out_valid,
+    output wire signed [31:0] bfp_ao,
+    output wire signed [31:0] bfp_bo,
+
     // 高低位拆分
     input  wire signed [31:0] rnd_a,
     output wire signed [31:0] p2r_a0,
@@ -78,6 +86,17 @@ module tb_mldsa_units (
         .a(bf_a), .b(bf_b), .zeta(bf_zeta), .a_out(ct_ao), .b_out(ct_bo));
     mldsa_butterfly_gs u_gs (
         .a(bf_a), .b(bf_b), .zeta(bf_zeta), .a_out(gs_ao), .b_out(gs_bo));
+
+    // 流水版：同样的 a/b/ζ 输入，mode 选 CT/GS，5 拍后出结果。
+    // 组合版是"数学的参照"，这一份是**真正综合进 bitstream 的**，
+    // 两者对同一份 mldsa_butterfly.hex 都必须逐位一致。
+    mldsa_butterfly_pipe #(.TAGW(8)) u_bfp (
+        .clk(clk), .rst_n(rst_n),
+        .in_valid(bfp_valid), .in_tag(8'd0),
+        .mode(bfp_mode), .scale(bfp_scale),
+        .a(bf_a), .b(bf_b), .zeta(bf_zeta),
+        .out_valid(bfp_out_valid), .out_tag(), .out_scale(),
+        .a_out(bfp_ao), .b_out(bfp_bo), .pipe_busy());
 
     mldsa_power2round u_p2r (.a(rnd_a), .a0(p2r_a0), .a1(p2r_a1));
     mldsa_decompose #(.MODE(0)) u_d88 (.a(rnd_a), .a0(d88_a0), .a1(d88_a1));

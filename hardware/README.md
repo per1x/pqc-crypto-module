@@ -49,8 +49,10 @@ anywhere, so the same sources target Xilinx, Intel, or Lattice unchanged.
 | `mlkem_rej_uniform` | collector, one 3-byte group per cycle; results live in a `ram_dp` (1-cycle read latency) | ~430 per polynomial |
 | `mlkem_encode12`, `mlkem_decode12` | combinational | — |
 | `mldsa_mont_reduce`, `mldsa_reduce32`, `mldsa_caddq` | combinational | — |
-| `mldsa_butterfly_ct`, `mldsa_butterfly_gs` | combinational | — |
-| `mldsa_ntt_core` | single butterfly unit, full 8-layer ML-DSA NTT, coefficients in a `ram_dp` block RAM | 2049 forward, 2561 inverse (2 cycles per butterfly) |
+| `mldsa_butterfly_ct`, `mldsa_butterfly_gs` | combinational; reference implementations of the maths, pinned to `mldsa_butterfly_pipe` by shared vectors | — |
+| `mldsa_mont_mul_pipe` | 5-stage pipelined `mont(x·y)`; the single multiply chain shared by the NTT and by the pointwise/MAC loops | 5 |
+| `mldsa_butterfly_pipe` | CT / GS / scaling on one `mldsa_mont_mul_pipe`; bypass travels in the tag | 5 |
+| `mldsa_ntt_core` | pipelined butterfly, full 8-layer ML-DSA NTT, ping-pong `ram_dp` buffers (read one, write the other — no intra-layer RAW) | 1081 forward, 1344 inverse (1 cycle per butterfly) |
 | `mldsa_power2round`, `mldsa_decompose` | combinational, parameterised by `MODE` | — |
 | `mldsa_make_hint`, `mldsa_use_hint` | combinational, parameterised by `MODE` | — |
 | `mldsa_rej_uniform`, `mldsa_rej_eta` | combinational | — |
