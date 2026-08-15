@@ -13,6 +13,8 @@ __pycache__/
 # Simulation and synthesis outputs
 # Makefile.trng 给每个顶层单开一个构建目录（sim_build_trng_axi 等），所以带通配。
 hardware/tb/cocotb/sim_build*/
+# 并行跑多个用例时会用 SIM_BUILD=sb_xxx 各开一个构建目录（互不覆盖），一并忽略
+hardware/tb/cocotb/sb_*/
 hardware/tb/cocotb/results.xml
 hardware/syn/rpt/
 
