@@ -7,7 +7,9 @@
 > `expand_mask.v`（ExpandMask）、`sample_in_ball.v`（SampleInBall）。
 > 途中实际踩到的坑（已修，见文末「实测坑」）：状态常量位宽、SampleInBall 常量强转、
 > w₁/z 打包器换条 clr、hint 填充区 BRAM 残留、hint 权重位宽、**吸收长度为 rate 整数倍时的 flush 时机**。
-> 65/87 参数化待做；Verify 待做。
+> **65/87 参数化已完成**：sign.v 提参数 K/L/ETA/TAU/G1LOG/MODE/OMG/BETA/CTB，
+> 三个参数集各自对上 ACVP siggen（条数见文末「参数化实测」）。Verify 见
+> `mldsa-verify-design.zh-CN.md`。
 
 本文记录 ML-DSA Sign 硬核的设计与逐段规划，写法照抄 KeyGen 那份
 （`mldsa-keygen-design.zh-CN.md`）：**增量搭建、每加一段就对黄金模型验一段、
@@ -289,3 +291,34 @@ i 从 N−τ 到 N−1。SHAKE 是**流**：一个 136 B 块可能不够，要�
    （非 S_ABSORB）被整个忽略 → 永远吸不完、卡在挤压（现象：kappa=0、st=S_D_SQ 死等）。
    **`S_D_GAP` 要等 `sha_in_ready` 重新拉高（置换完、回到 S_ABSORB）再冲刷**；非整数倍时
    in_ready 一直高、立刻通过，行为不变。KeyGen 的吸收都是定长非整数倍，从没暴露这条。
+
+
+---
+
+## 10. 参数化（44 / 65 / 87）
+
+三处结构性分叉，其余都是尺寸：
+
+| 分叉 | 44 | 65 | 87 | 影响 |
+|---|---|---|---|---|
+| γ₂ | (q−1)/88 | (q−1)/32 | (q−1)/32 | `decompose`/`make_hint`/`use_hint` 的 MODE；w1Encode 位宽 6/4 |
+| γ₁ | 2¹⁷ | 2¹⁹ | 2¹⁹ | ExpandMask 与 z 打包位宽 18/20；每条 z 576/640 字节 |
+| η | 2 | 4 | 2 | skDecode 解包位宽 3/4；每条 s 打包 96/128 字节 |
+
+其余随参数走：τ(39/49/60)、ω(80/55/75)、β(78/196/120)、c̃(32/48/64)、
+σ(2420/3309/4627)、pk(1312/1952/2592)、sk(2560/4032/4896)。
+存储与位宽一律按最大的 87 开（多项式下标 3 位、sk/sig 缓冲 AW 13、poly/vi/vj 4 位）。
+
+跑法：`MLDSA_ALG=ML-DSA-65 PARAM_K=6 PARAM_L=5 PARAM_ETA=4 PARAM_TAU=49 \
+PARAM_G1LOG=19 PARAM_MODE=1 PARAM_OMG=55 PARAM_BETA=196 PARAM_CTB=48 \
+MODULE=test_mldsa_sign TOPLEVEL=tb_mldsa_sign SIM_BUILD=sb_x make`
+（并行跑多个参数集要各用一个 SIM_BUILD，否则互相覆盖）。
+
+### 参数化时踩到的两条（都只在 k>4 或位宽变化时现形，44 全程蒙对）
+
+1. **ExpandS 的 s₂ nonce 写死成常数 4 加 j**（KeyGen）：正确是 ℓ+j。44 恰好 ℓ=4
+   蒙对，65(ℓ=5)/87(ℓ=7) 立刻错，且症状很干净 —— s₁pack 全对、sk 从 SK_S2 起全错。
+2. **下标切片没跟着加宽**：批量替换只匹配了 `{poly[1:0], cnt}` 这一种写法，
+   第二个字段不是 `cnt` 的那处（Verify 里 hint 置位用 `{poly[1:0], sig_rdata}`）漏网；
+   同理 ExpandA 的 nonce 拼接 `{5'd0,vi,5'd0,vj}` 在 vi/vj 加宽到 4 位后变成
+   18 位塞进 16 位。**加宽下标时要把所有拼接处一起 grep 出来核**，别只按一种模式替换。

@@ -4,6 +4,9 @@
 绿了才提交**，最后整体对 **ACVP sigver**。黄金判据是 `mldsa_oracle.py` 的 `mldsa_verify()`
 （预言机 E，已对上全部 ACVP sigver）。
 
+> **状态：44 / 65 / 87 三个参数集全部对上 ACVP sigver**（应通过 true、应拒绝 false），
+> 并各自补了 ACVP 不覆盖的两类自造反例。参数化见文末第 7 节。
+
 **第一目标：ML-DSA-44 对上 ACVP sigver —— 应通过的返回 true、应拒绝的返回 false。**
 
 ---
@@ -105,3 +108,33 @@ valid = (c̃' == c̃) 且 !zbad 且 !hbad
 ### V7.（继承 Sign）其余
 状态常量与 `st` 位宽一起改；打包器只在最开头 clr 一次；NTT/sha3 的 done 是电平，
 连算要先等它落一次；计数位宽够最长段（μ 吸收 ≤ 8449 → 14 位；pk 吸收 1312 → 11 位）。
+
+
+---
+
+## 7. 参数化（44 / 65 / 87）
+
+参数 K/L/TAU/G1LOG/MODE/OMG/BETA/CTB，分叉与 Sign 同源（γ₂→use_hint 的 MODE
+与 w1Encode 位宽 6/4，γ₁→z 解包位宽 18/20）。随参数走的还有 PKLEN=32+k·320、
+SIG_H0=c̃+ℓ·ZB、c̃' 吸收长度 64+k·W1B、清 h 的上限 k·256−1、‖z‖∞ 界 γ₁−β。
+
+**三个参数集的 ACVP sigver 构成**（用 oracle 分的类，决定了自造反例必须补什么）：
+
+| | 应通过 | hint 结构非法 | c̃ 不匹配 | ‖z‖∞ 越界 |
+|---|---|---|---|---|
+| ML-DSA-44 | 3 | 3 | 9 | **0** |
+| ML-DSA-65 | 3 | 4 | 8 | **0** |
+| ML-DSA-87 | 3 | 3 | 9 | **0** |
+
+三个参数集**都没有** ‖z‖∞ 越界这一类，hint 计数非单调 / >ω 也都没有 ——
+所以每个参数集都跑同一组自造反例（z 越界 / 计数非单调 / 计数 >ω），
+且断言的是 `zbad`/`hbad` 标志本身而不是只看 `valid=false`
+（c̃ 不匹配也会让 valid=false，只看它等于没验到那条路径）。
+
+### 参数化时踩到的一条
+
+hint 置位的地址是 `{poly[?:0], sig_rdata}`，加宽多项式下标时**批量替换按
+`{poly[1:0], cnt}` 这个模式做，第二个字段是 `sig_rdata` 的这处漏网** →
+65 的 poly=4/5 绕回 0/1，把它们的 hint 位并进 poly0/poly1，而读侧已是 11 位、
+读 poly4/5 全空。定位办法：用 dbg 口把 RTL 与 oracle 各自「为 1 的下标」列出来，
+一眼看出 `RTL poly0 = oracle poly0 ∪ oracle poly4`，比看波形快得多。
