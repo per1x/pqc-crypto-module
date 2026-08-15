@@ -166,7 +166,7 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 | `CKM_AES_GCM` | AEAD DEM over the KEM shared secret (`C_Encrypt`/`C_Decrypt`) | Software GCM; KEM half in hardware |
 | `CKM_AES_ECB` / `CKM_AES_CBC` | `sym_axi` AES-128/256 | **Hardware** |
 | `CKM_SHA3_256` | `sha3_core` (currently reached only through ML-KEM) | Needs a dedicated path |
-| `CKM_ML_DSA` (0x1D) | ML-DSA operators, not chained into cores | ❌ Software only |
+| `CKM_ML_DSA` (0x1D) | RTL KeyGen/Sign/Verify exist and pass ACVP **in simulation** (44/65/87), but are **not yet wired to AXI or built into the bitstream** | ❌ Software at runtime |
 | SM4 / SM3 | No standard mechanism code exists | Vendor-defined codes |
 
 `C_GenerateKeyPair` → `CMD_GENERATE` → `mlkem_axi` KeyGen;
