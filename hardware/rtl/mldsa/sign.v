@@ -136,6 +136,7 @@ module mldsa_sign (
         S_SIG_CT = 6'd44,    // sig[0..31] = c̃
         S_SIG_Z  = 6'd45,    // sig z 段：polyz_pack（4 条 z 连续打包）
         S_SIG_ZD = 6'd47,    // 等 z 打包器把最后 1~2 字节吐完
+        S_HP_CLR = 6'd49,    // 先把 hint 下标/填充区（ω 字节）清零（BRAM 无复位、跨签名有残留）
         S_HP     = 6'd46,    // HintBitPack：扫描 hint[vi]，1 的下标写进 sig
         S_HP_CNT = 6'd48,    // 写累计计数 sig[SIG_H0+ω+vi] = hidx
         S_FIN    = 6'd63;
@@ -977,9 +978,19 @@ module mldsa_sign (
                 end
             end
             // 等打包器把最后 1~2 字节吐完（sigptr 走到 hint 段起点）
-            S_SIG_ZD: if (sigptr == SIG_H0[11:0]) begin
-                vi <= 3'd0; cnt <= 8'd0; ph <= 1'b0; hidx <= 8'd0;
-                st <= S_HP;
+            S_SIG_ZD: if (sigptr == SIG_H0) begin
+                cnt <= 8'd0; st <= S_HP_CLR;
+            end
+
+            // 清 hint 下标/填充区（ω=80 字节）。sig RAM 无复位，上一条签名的残留
+            // 会污染填充区 —— 本条 hint 权重更小时那些字节没被覆盖，就对不上 ACVP。
+            S_HP_CLR: begin
+                if (cnt == OMEGA[7:0] - 8'd1) begin
+                    vi <= 3'd0; cnt <= 8'd0; ph <= 1'b0; hidx <= 8'd0;
+                    st <= S_HP;
+                end else begin
+                    cnt <= cnt + 8'd1;
+                end
             end
 
             // HintBitPack：对每个 i 扫 hint[i][0..255]，为 1 的下标顺次写进 sig；
@@ -1194,6 +1205,10 @@ module mldsa_sign (
         end
         // z 打包器吐字节 → sig[sigptr]（S_SIG_Z / S_SIG_ZD 都可能吐）
         if (pz_ov) begin sig_we = 1'b1; sig_waddr = sigptr; sig_din = pz_ob; end
+        // ⑩ 清 hint 下标/填充区：sig[SIG_H0+cnt] = 0（cnt=0..ω-1）
+        if (st == S_HP_CLR) begin
+            sig_we = 1'b1; sig_waddr = SIG_H0 + {4'd0, cnt}; sig_din = 8'd0;
+        end
         // ⑩ HintBitPack 扫描：命中就把下标 cnt 写进 sig[SIG_H0+hidx]
         if (st == S_HP) begin
             hn_raddr = {vi[1:0], cnt};
