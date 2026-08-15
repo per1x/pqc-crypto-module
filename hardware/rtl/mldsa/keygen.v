@@ -43,18 +43,28 @@ module mldsa_keygen (
     // ---- 派生量（done 之后有效）----
     output reg [255:0] rho,
     output reg [511:0] rho_prime,
-    output reg [255:0] key_out
+    output reg [255:0] key_out,
+
+    // ---- 调试读口：done 之后读 s₁/s₂ 的系数，供逐段验证 ----
+    // sel[3] 选 s₁(0)/s₂(1)，sel[1:0] 选第几条（ℓ=k=4，用不到 sel[2]），
+    // idx 选系数。
+    input  wire [3:0]  dbg_sel,
+    input  wire [7:0]  dbg_idx,
+    output wire signed [31:0] dbg_coef
 );
     // k、ℓ 用 8 位常量而不是 integer：尾字节要直接取它们的低 8 位
     // （FIPS 204 的 H 输入是 ξ‖IntegerToBytes(k,1)‖IntegerToBytes(ℓ,1)）。
     localparam [7:0] K = 8'd4, L = 8'd4;
     localparam [7:0] RATE256 = 8'd136, SUF = 8'h1F;   // SHAKE256
+    localparam integer ETA = 2;
 
-    localparam [2:0]
-        S_IDLE  = 3'd0, S_H_ABS = 3'd1, S_H_GAP = 3'd2,
-        S_H_FLU = 3'd3, S_H_SQ  = 3'd4, S_FIN   = 3'd5;
+    localparam [3:0]
+        S_IDLE  = 4'd0, S_H_ABS = 4'd1, S_H_GAP = 4'd2,
+        S_H_FLU = 4'd3, S_H_SQ  = 4'd4,
+        S_S_GEN = 4'd5, S_S_WAIT = 4'd6, S_S_MOVE = 4'd7,
+        S_FIN   = 4'd8;
 
-    reg [2:0] st;
+    reg [3:0] st;
     reg [8:0] cnt;        // 吸收/挤压计数
 
     // H 的输入：ξ(32) ‖ k ‖ ℓ，一共 34 字节
@@ -65,59 +75,160 @@ module mldsa_keygen (
     wire [7:0] h_byte_nxt = (cnxt < 9'd32) ? xi[cnxt*8 +: 8]
                           : (cnxt == 9'd32) ? K[7:0] : L[7:0];
 
+    // ================= 海绵归属（FSM ↔ η 采样器）=================
+    // 只在换手方空闲时切（见设计文档）。均匀采样器留到第 ④ 段再接。
+    localparam OWN_FSM = 1'b0, OWN_ETA = 1'b1;
+    reg owner;
+
+    // ---- η 采样器（ExpandS）----
+    reg         et_start;
+    reg  [15:0] et_nonce;
+    wire        et_done;
+    reg  [7:0]  et_rd_addr;
+    wire signed [31:0] et_rd_data;
+    wire        et_ss, et_siv, et_sif, et_sor;
+    wire [7:0]  et_sr, et_su, et_sid;
+
+    mldsa_poly_eta #(.ETA(ETA)) u_eta (
+        .clk(clk), .rst_n(rst_n),
+        .start(et_start), .seed(rho_prime), .nonce(et_nonce), .done(et_done),
+        .sha_start(et_ss), .sha_rate(et_sr), .sha_suffix(et_su),
+        .sha_in_valid(et_siv), .sha_in_data(et_sid), .sha_in_flush(et_sif),
+        .sha_in_ready(sha_in_ready && (owner == OWN_ETA)),
+        .sha_out_valid(sha_out_valid && (owner == OWN_ETA)),
+        .sha_out_ready(et_sor), .sha_out_data(sha_out_data),
+        .rd_addr(et_rd_addr), .rd_data(et_rd_data), .count());
+
+    // FSM 自己驱动海绵时用的那组线
+    reg        fsm_ss, fsm_siv, fsm_sif, fsm_sor;
+    reg [7:0]  fsm_sr, fsm_su, fsm_sid;
+
+    // ---- 系数存储：s₁(ℓ 条) 与 s₂(k 条)，各 1024×32 ----
+    reg         s1_we;  reg [9:0] s1_waddr; reg signed [31:0] s1_din;
+    wire signed [31:0] s1_dout;
+    reg         s2_we;  reg [9:0] s2_waddr; reg signed [31:0] s2_din;
+    wire signed [31:0] s2_dout;
+    reg  [9:0]  s1_raddr, s2_raddr;
+    ram_dp #(.DW(32), .AW(10)) u_s1 (
+        .clk(clk), .a_we(s1_we), .a_addr(s1_waddr), .a_din(s1_din), .a_dout(),
+        .b_we(1'b0), .b_addr(s1_raddr), .b_din(32'd0), .b_dout(s1_dout));
+    ram_dp #(.DW(32), .AW(10)) u_s2 (
+        .clk(clk), .a_we(s2_we), .a_addr(s2_waddr), .a_din(s2_din), .a_dout(),
+        .b_we(1'b0), .b_addr(s2_raddr), .b_din(32'd0), .b_dout(s2_dout));
+
+    // 调试读口挂 b 口（done 后才用，与写不重叠）
+    assign dbg_coef = dbg_sel[3] ? s2_dout : s1_dout;
+
+    // η 打包器留到 sk 组装段再接：第 ② 段只做「采样 + 存储」，
+    // 而 η 打包（对 polyeta_pack）已在 test_mldsa_pack 里独立验过，
+    // 这里空转它只会多一堆未接的输出。
+    // 海绵接口二选一
+    always @(*) begin
+        if (owner == OWN_ETA) begin
+            sha_start = et_ss; sha_rate = et_sr; sha_suffix = et_su;
+            sha_in_valid = et_siv; sha_in_data = et_sid; sha_in_flush = et_sif;
+            sha_out_ready = et_sor;
+        end else begin
+            sha_start = fsm_ss; sha_rate = fsm_sr; sha_suffix = fsm_su;
+            sha_in_valid = fsm_siv; sha_in_data = fsm_sid; sha_in_flush = fsm_sif;
+            sha_out_ready = fsm_sor;
+        end
+    end
+
+    reg       ph;             // 同步读的两拍相位
+    reg [2:0] vj;             // 第几条多项式
+    reg       s2phase;        // 在做 s₂ 而不是 s₁
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; cnt <= 9'd0;
-            sha_start <= 1'b0; sha_in_valid <= 1'b0; sha_in_flush <= 1'b0;
-            sha_out_ready <= 1'b0; sha_in_data <= 8'd0;
-            sha_rate <= RATE256; sha_suffix <= SUF;
+            owner <= OWN_FSM; vj <= 3'd0; ph <= 1'b0; s2phase <= 1'b0;
+            et_start <= 1'b0; et_nonce <= 16'd0;
+            fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
+            fsm_sr <= RATE256; fsm_su <= SUF; fsm_sid <= 8'd0;
             rho <= 256'd0; rho_prime <= 512'd0; key_out <= 256'd0;
         end else begin
-            sha_start    <= 1'b0;
-            sha_in_valid <= 1'b0;
-            sha_in_flush <= 1'b0;
-            done         <= 1'b0;
+            fsm_ss  <= 1'b0;
+            fsm_siv <= 1'b0;
+            fsm_sif <= 1'b0;
+            et_start <= 1'b0;
+            done    <= 1'b0;
 
             case (st)
             S_IDLE: if (start) begin
-                cnt <= 9'd0;
-                sha_rate <= RATE256; sha_suffix <= SUF;
-                sha_start <= 1'b1;
-                sha_in_data <= xi[7:0];
+                cnt <= 9'd0; owner <= OWN_FSM;
+                fsm_sr <= RATE256; fsm_su <= SUF;
+                fsm_ss <= 1'b1;
+                fsm_sid <= xi[7:0];
                 st <= S_H_ABS;
             end
 
+            // ---------- ① H(ξ‖k‖ℓ) → ρ ‖ ρ' ‖ K ----------
             S_H_ABS: begin
-                sha_in_valid <= 1'b1;
-                if (sha_in_valid && sha_in_ready) begin
+                fsm_siv <= 1'b1;
+                if (fsm_siv && sha_in_ready) begin
                     if (cnt == 9'd33) begin
-                        sha_in_valid <= 1'b0;
+                        fsm_siv <= 1'b0;
                         st <= S_H_GAP;
                     end else begin
                         cnt <= cnxt;
-                        sha_in_data <= h_byte_nxt;
+                        fsm_sid <= h_byte_nxt;
                     end
                 end else begin
-                    sha_in_data <= h_byte;   // 还没握上，保持当前字节
+                    fsm_sid <= h_byte;
                 end
             end
-
-            // 空一拍让 in_valid 落下来，flush 才被采样（见设计文档）
             S_H_GAP: st <= S_H_FLU;
-            S_H_FLU: begin sha_in_flush <= 1'b1; cnt <= 9'd0; st <= S_H_SQ; end
+            S_H_FLU: begin fsm_sif <= 1'b1; cnt <= 9'd0; st <= S_H_SQ; end
 
             S_H_SQ: begin
-                sha_out_ready <= 1'b1;
+                fsm_sor <= 1'b1;
                 if (sha_out_valid) begin
-                    // 低地址字节先出：从高位塞、整体右移
                     if (cnt < 9'd32)       rho       <= {sha_out_data, rho[255:8]};
                     else if (cnt < 9'd96)  rho_prime <= {sha_out_data, rho_prime[511:8]};
                     else                   key_out   <= {sha_out_data, key_out[255:8]};
                     if (cnt == 9'd127) begin
-                        sha_out_ready <= 1'b0;
-                        st <= S_FIN;
+                        fsm_sor <= 1'b0;
+                        cnt <= 9'd0; vj <= 3'd0; s2phase <= 1'b0;
+                        owner <= OWN_ETA;      // 换手给 η 采样器
+                        st <= S_S_GEN;
                     end else begin
                         cnt <= cnt + 9'd1;
+                    end
+                end
+            end
+
+            // ---------- ② ExpandS：先 ℓ 条 s₁，再 k 条 s₂ ----------
+            // nonce：s₁ 用 j，s₂ 用 ℓ+j（ℓ=4）
+            S_S_GEN: begin
+                et_nonce <= s2phase ? (16'd4 + {13'd0, vj}) : {13'd0, vj};
+                et_start <= 1'b1;
+                st <= S_S_WAIT;
+            end
+            S_S_WAIT: if (et_done) begin
+                cnt <= 9'd0; ph <= 1'b0;
+                st <= S_S_MOVE;
+            end
+
+            // 采样器读口同步，两拍一个系数：ph=0 摆地址，ph=1 用数据。
+            // 用数据这一拍：写进 s1/s2 存储 + 喂 η 打包器（有反压）。
+            // 无打包器反压了（打包留到 sk 组装段），所以两拍一个系数直接推进。
+            S_S_MOVE: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 9'd255) begin
+                        cnt <= 9'd0; ph <= 1'b0;
+                        if (!s2phase && vj == 3'd3) begin
+                            s2phase <= 1'b1; vj <= 3'd0; st <= S_S_GEN;
+                        end else if (s2phase && vj == 3'd3) begin
+                            vj <= 3'd0; owner <= OWN_FSM;
+                            st <= S_FIN;       // 第 ② 段到此为止
+                        end else begin
+                            vj <= vj + 3'd1; st <= S_S_GEN;
+                        end
+                    end else begin
+                        cnt <= cnt + 9'd1; ph <= 1'b0;
                     end
                 end
             end
@@ -125,6 +236,22 @@ module mldsa_keygen (
             S_FIN: begin done <= 1'b1; st <= S_IDLE; end
             default: st <= S_IDLE;
             endcase
+        end
+    end
+
+    // ================= 端口归属（组合）=================
+    always @(*) begin
+        s1_we = 1'b0; s1_waddr = 10'd0; s1_din = 32'd0;
+        s2_we = 1'b0; s2_waddr = 10'd0; s2_din = 32'd0;
+        s1_raddr = {dbg_sel[1:0], dbg_idx};   // 默认给调试口
+        s2_raddr = {dbg_sel[1:0], dbg_idx};
+        et_rd_addr = cnt[7:0];
+        if (st == S_S_MOVE && ph) begin
+            if (!s2phase) begin
+                s1_we = 1'b1; s1_waddr = {vj[1:0], cnt[7:0]}; s1_din = et_rd_data;
+            end else begin
+                s2_we = 1'b1; s2_waddr = {vj[1:0], cnt[7:0]}; s2_din = et_rd_data;
+            end
         end
     end
 endmodule

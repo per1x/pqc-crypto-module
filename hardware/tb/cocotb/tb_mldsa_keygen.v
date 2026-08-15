@@ -7,7 +7,10 @@ module tb_mldsa_keygen (
     output wire        done,
     output wire [255:0] rho,
     output wire [511:0] rho_prime,
-    output wire [255:0] key_out
+    output wire [255:0] key_out,
+    input  wire [3:0]  dbg_sel,
+    input  wire [7:0]  dbg_idx,
+    output wire signed [31:0] dbg_coef
 );
     wire        ss, siv, sif, sor;
     wire [7:0]  sr, su, sid, sod;
@@ -19,7 +22,8 @@ module tb_mldsa_keygen (
         .sha_in_valid(siv), .sha_in_data(sid), .sha_in_flush(sif),
         .sha_in_ready(sir), .sha_out_valid(sov), .sha_out_ready(sor),
         .sha_out_data(sod),
-        .rho(rho), .rho_prime(rho_prime), .key_out(key_out));
+        .rho(rho), .rho_prime(rho_prime), .key_out(key_out),
+        .dbg_sel(dbg_sel), .dbg_idx(dbg_idx), .dbg_coef(dbg_coef));
 
     sha3_core u_sha (
         .clk(clk), .rst_n(rst_n), .rate_bytes(sr), .suffix(su),

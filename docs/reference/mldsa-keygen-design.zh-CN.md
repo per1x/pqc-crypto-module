@@ -17,7 +17,7 @@
 | `mldsa_polyt1_pack` / `polyt0_pack` / `polyeta_pack` | 完成 | 逐字节对 `mldsa_oracle.py` |
 | `mldsa_poly_uniform`（RejNTTPoly, SHAKE128） | 完成 | 逐系数对黄金模型 |
 | `mldsa_poly_eta`（RejBoundedPoly, SHAKE256） | 完成 | 逐系数对黄金模型 |
-| **KeyGen 顶层 FSM** | **未完成** | 目标：ACVP `ML-DSA-keyGen-FIPS204` |
+| **KeyGen 顶层 FSM** | **进行中**：① H、② ExpandS 已逐段验（`test_mldsa_keygen`） | 目标：ACVP `ML-DSA-keyGen-FIPS204` |
 
 黄金模型 `hardware/model/mldsa_oracle.py` 的 `mldsa_keygen()` 已对过 ACVP，
 是 FSM 的唯一判据，也是逐段调试时的中间量来源。
