@@ -55,12 +55,18 @@ for P in 44 65 87; do
     B="g_${SIMU}_${P}_${M}"; rm -rf "$B"
     # 各 tb 的参数表不同：keygen 只有 K/L/ETA，verify 没有 ETA。
     # 多传一个 iverilog/verilator 都会报 "parameter not found"。
-    # axi 那一格顶层是 mldsa_axi（不是 tb_*），参数表与 engine 一样是全套 + PSET。
+    #
+    # ⚠️ **axi 那一格一个参数都不传。** mldsa_axi 与它下面的 engine 现在是
+    #    **运行时选参数集**的（engine 没有任何参数，从机的长度计算用 MODE
+    #    寄存器里的 pset 线），所以参数集靠**测试用例写寄存器**来切，不靠
+    #    编译期覆盖。这一格因此天然就是"同一份 RTL 跑三套"的证据。
+    #    这里曾经传过全套 + PSET —— 那是三个核还只支持编译期单参数集时的写法，
+    #    运行时化之后再传就会报 "Parameters ... were not found in the design"。
     case $M in
       keygen) PA="PARAM_K=$K PARAM_L=$L PARAM_ETA=$ETA" ;;
       sign)   PA="PARAM_K=$K PARAM_L=$L PARAM_ETA=$ETA PARAM_TAU=$TAU PARAM_G1LOG=$G1 PARAM_MODE=$MD PARAM_OMG=$OMG PARAM_BETA=$BETA PARAM_CTB=$CTB" ;;
       verify) PA="PARAM_K=$K PARAM_L=$L PARAM_TAU=$TAU PARAM_G1LOG=$G1 PARAM_MODE=$MD PARAM_OMG=$OMG PARAM_BETA=$BETA PARAM_CTB=$CTB" ;;
-      axi)    PA="PARAM_K=$K PARAM_L=$L PARAM_ETA=$ETA PARAM_TAU=$TAU PARAM_G1LOG=$G1 PARAM_MODE=$MD PARAM_OMG=$OMG PARAM_BETA=$BETA PARAM_CTB=$CTB PARAM_PSET=$PS" ;;
+      axi)    PA="" ;;
     esac
     case $M in
       axi) TOP=mldsa_axi ;;
@@ -69,9 +75,12 @@ for P in 44 65 87; do
     LOG=/tmp/grid_${SIMU}_${P}_${M}.log
     env SIM="$SIMU" SIM_BUILD="$B" MLDSA_ALG="ML-DSA-$P" $PA \
         make MODULE="test_mldsa_$M" TOPLEVEL="$TOP" > "$LOG" 2>&1
-    line=$(grep -E 'TESTS=' "$LOG" | tail -1 | sed 's/.*\*\* //; s/ *\*\*.*//')
+    # ⚠️ grep 必须带 -a。日志里有 cocotb 打的中文与制表符，grep 偶尔会把整个
+    #    文件判成二进制，然后只输出 "Binary file ... matches" —— 那一格看起来
+    #    就像失败了，实际测试是过的。踩过一次，别再拿掉这个 -a。
+    line=$(grep -a -E 'TESTS=' "$LOG" | tail -1 | sed 's/.*\*\* //; s/ *\*\*.*//')
     if [ -z "$line" ]; then
-      echo "  $P/$M  ❌ 没跑起来 —— $(grep -iE 'error|not found' "$LOG" | head -1)"
+      echo "  $P/$M  ❌ 没跑起来 —— $(grep -a -iE 'error|not found' "$LOG" | head -1)"
     else
       echo "  $P/$M  $line"
     fi

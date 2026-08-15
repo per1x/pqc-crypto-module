@@ -72,6 +72,8 @@ ALG = os.environ.get("MLDSA_ALG", "ML-DSA-44")
 PSET_OF = {"ML-DSA-44": 0, "ML-DSA-65": 1, "ML-DSA-87": 2}
 PSET = PSET_OF[ALG]
 # 与本次综合**不符**的那个 pset：用来验"对不上就拒绝启动"
+# 与本次跑的参数集不同的一个**合法** pset。运行时化之后它不再是"非法值"，
+# 只用来触发"槽里记的 pset 与本次运算的 pset 对不上"那条防线（那条还在）。
 PSET_BAD = (PSET + 1) % 3
 
 # ---- 寄存器映射（槽内偏移）----
@@ -824,7 +826,9 @@ async def test_illegal_params_refused(dut):
         ("op=3", mode_word(3), 0),
         ("pset=3", mode_word(0, 3), 0),
         ("op=3 且 pset=3", mode_word(3, 3), 0),
-        (f"pset={PSET_BAD}（本次综合的是 {ALG}）", mode_word(0, PSET_BAD), 0),
+        # 注意这里**没有**"pset 与本次综合的参数集不符"这一条了：
+        # engine 已经运行时支持 44/65/87，三个 pset 全都合法，只有 3 是非法值。
+        # 这一条以前在，是三个核还只支持编译期单参数集时的形态。
         ("slot=8（只有 8 个槽）", mode_word(0, to_slot=True, slot=8), 0),
         ("slot=15", mode_word(0, to_slot=True, slot=15), 0),
         ("ctx_len=256（FIPS 204 上限 255）", mode_word(1), 256),
@@ -1010,16 +1014,18 @@ async def test_refused_start_invalidates_previous_result(dut):
     # 连字节也拿不到了
     assert await out_bytes(dut, 0, 4) == bytes(4), "被拒之后还能读到上一次的输出字节"
 
-    # ⚠️ pset 对不上的那一次同样要作废 —— 这一条最容易漏：engine 自己拒绝时
+    # ⚠️ 非法 pset 那一次同样要作废 —— 这一条最容易漏：engine 自己拒绝时
     #    不更新 op_r，本层若放它进去就会抄下上一次的 out_len。
+    #    用 pset=3（真正的非法值）。**不能再用"与综合参数集不符"来触发**：
+    #    engine 运行时支持 44/65/87，那三个值现在都是合法的。
     assert await run_op(dut, OP_KEYGEN, xi) == PKL + SKL
-    assert await wr(dut, MODE, mode_word(OP_KEYGEN, PSET_BAD)) == RESP_OKAY
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, 3)) == RESP_OKAY
     assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
     await fill(dut, xi)
     assert await wr(dut, CTRL, C_START) == RESP_OKAY
     st, _ = await rd(dut, STATUS)
     assert st & ST_PARAMERR and not (st & ST_DONE), \
-        f"pset 对不上却没有当场作废（STATUS={st:#x}）"
+        f"非法 pset 却没有当场作废（STATUS={st:#x}）"
     n, _ = await rd(dut, OUT_LEN)
     assert n == 0, f"pset 对不上之后 OUT_LEN 还是 {n} —— 那是上一次的长度"
 
