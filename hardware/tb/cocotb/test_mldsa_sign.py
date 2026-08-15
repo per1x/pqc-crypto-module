@@ -224,11 +224,10 @@ def derive_rhopp(rec):
 
 @cocotb.test()
 async def test_ymask_ntt(dut):
-    """④+⑤a ŷ = NTT(ExpandMask(ρ'', κ=0))：done 后读 y 存储（已被 NTT 覆盖）
+    """④ y = ExpandMask(ρ'',κ=0)（原值，组 100）+ ⑤a ŷ = NTT(y)（组 001）
 
-    y 在 ⑤ 被就地 NTT 成 ŷ，done 时读到的是 ŷ。NTT 双射，所以 ŷ 对上
-    ntt(expand_mask) 同时说明 ExpandMask 的 18 位解包 / γ₁−v 对、NTT 对，
-    并间接验到整条 sk→μ→ρ'' 前置链（ρ'' 是 ExpandMask 的种子）。
+    y 保留原值（⑦ z=y+cs₁ 要用），ŷ 另存。直接验 y 对上 expand_mask（18 位解包
+    / γ₁−v），再验 ŷ 对上 ntt(y)。
     """
     from mldsa_oracle import expand_mask
     from mldsa_model import ntt as _ntt
@@ -242,13 +241,15 @@ async def test_ymask_ntt(dut):
 
     y_w = expand_mask(derive_rhopp(rec), 0, 1 << 17, 4)   # κ=0, γ₁=2¹⁷, ℓ=4
     for j in range(4):
-        got = await read_poly(dut, 0b10000 | j)           # dbg_sel[4:2]=100 → y[j]（=ŷ[j]）
-        want = _ntt(list(y_w[j]))
-        assert got == want, (
-            f"ŷ[{j}] 不一致，首个不同在第 "
-            f"{next(i for i in range(256) if got[i] != want[i])} 个系数")
+        got_y = await read_poly(dut, 0b10000 | j)         # 组 100 → y[j]（原值）
+        assert got_y == y_w[j], (
+            f"y[{j}] 不一致，首个不同在第 "
+            f"{next(i for i in range(256) if got_y[i] != y_w[j][i])} 个系数")
+        got_yh = await read_poly(dut, 0b00100 | j)        # 组 001 → ŷ[j]
+        want_yh = _ntt(list(y_w[j]))
+        assert got_yh == want_yh, f"ŷ[{j}] 不一致"
 
-    dut._log.info("④+⑤a ŷ[0..3] = NTT(ExpandMask(ρ'',0)) 全对上 oracle")
+    dut._log.info("④ y[0..3]=ExpandMask(ρ'',0) 原值 + ⑤a ŷ[0..3]=NTT(y) 全对上 oracle")
 
 
 @cocotb.test()
@@ -329,6 +330,7 @@ async def test_ctilde_and_c(dut):
     μ‖w1pack 的 SHAKE256、以及 SampleInBall 的 τ=39 个 ±1 稀疏放置全验到。
     """
     from mldsa_oracle import polyw1_pack, sample_in_ball
+    from mldsa_model import ntt as _ntt
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -347,10 +349,102 @@ async def test_ctilde_and_c(dut):
         f"c̃ 不一致，首个不同在字节 "
         f"{next(i for i in range(32) if got_ct[i] != ctilde_w[i])}")
 
-    got_c = await read_poly(dut, 0b11100)     # dbg_sel[4:2]=111 → c
-    assert got_c == c_w, (
-        f"c 不一致，首个不同在第 "
-        f"{next(i for i in range(256) if got_c[i] != c_w[i])} 个系数")
+    # c 在 ⑦ 被就地 NTT 成 ĉ，done 时读到的是 ĉ；NTT 双射 ⇒ ĉ==ntt(c) 说明
+    # SampleInBall 的 c 对、c-NTT 对（c 的原值也由 ⑦ z 用例间接验）。
+    got_chat = await read_poly(dut, 7 << 2)   # 组 7 → c（=ĉ）
+    chat_w = _ntt(list(c_w))
+    assert got_chat == chat_w, (
+        f"ĉ 不一致，首个不同在第 "
+        f"{next(i for i in range(256) if got_chat[i] != chat_w[i])} 个系数")
 
-    dut._log.info("⑥ c̃ 对上 H(μ‖w1pack)、c 对上 SampleInBall(c̃)（κ=0 轮，τ=39）")
+    dut._log.info("⑥ c̃ 对上 H(μ‖w1pack)；ĉ=NTT(SampleInBall(c̃)) 对上 oracle（κ=0，τ=39）")
+
+
+async def read_flag(dut, group):
+    """读一个标志/标量（dbg 组 group，idx=0）"""
+    dut.dbg_sel.value = group << 2
+    dut.dbg_idx.value = 0
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    return int(dut.dbg_coef.value)
+
+
+def oracle_round0(rec):
+    """复现 oracle κ=0 轮的全部中间量：y, ŝ₁/ŝ₂/t̂₀, c, z, r0, hint, weight, 各拒绝判据"""
+    from mldsa_oracle import expand_mask, rej_uniform_poly, sample_in_ball, polyw1_pack
+    from mldsa_model import (ntt as _ntt, invntt_tomont as _intt,
+                             montgomery_reduce as _mont, reduce32 as _r32,
+                             caddq as _cad, decompose as _dec, chknorm as _chk,
+                             make_hint as _mkh)
+    sk = bytes.fromhex(rec["sk"])
+    rho_w, key_w, tr_w, s1, s2, t0 = sk_decode(sk, "ML-DSA-44")
+    gamma1, gamma2, beta, tau, omega = 1 << 17, 95232, 78, 39, 80
+    s1h = [_ntt(list(p)) for p in s1]
+    s2h = [_ntt(list(p)) for p in s2]
+    t0h = [_ntt(list(p)) for p in t0]
+    mu_w = derive_mu(rec)
+    rhopp = derive_rhopp(rec)
+    y = expand_mask(rhopp, 0, gamma1, 4)
+    yhat = [_ntt(list(p)) for p in y]
+    w0, w1 = [], []
+    for i in range(4):
+        acc = [0] * 256
+        for j in range(4):
+            a = rej_uniform_poly(rho_w, (i << 8) + j)
+            for n in range(256):
+                acc[n] += _mont(a[n] * yhat[j][n])
+        acc = _intt([_r32(x) for x in acc])
+        pr = [_dec(_cad(x), gamma2) for x in acc]
+        w0.append([p[0] for p in pr]); w1.append([p[1] for p in pr])
+    ctil = h_shake256(mu_w + b"".join(polyw1_pack(w1[i], gamma2) for i in range(4)), 32)
+    c = sample_in_ball(ctil, tau)
+    chat = _ntt(list(c))
+    # z
+    z = []
+    for j in range(4):
+        cs1 = _intt([_mont(chat[n] * s1h[j][n]) for n in range(256)])
+        z.append([_r32(y[j][n] + cs1[n]) for n in range(256)])
+    z_bad = any(_chk(x, gamma1 - beta) for p in z for x in p)
+    # r0
+    r0 = []
+    for i in range(4):
+        cs2 = _intt([_mont(chat[n] * s2h[i][n]) for n in range(256)])
+        r0.append([_r32(w0[i][n] - cs2[n]) for n in range(256)])
+    r0_bad = any(_chk(x, gamma2 - beta) for p in r0 for x in p)
+    # hint
+    hint, weight, ct0_bad = [], 0, False
+    for i in range(4):
+        ct0 = [_r32(x) for x in _intt([_mont(chat[n] * t0h[i][n]) for n in range(256)])]
+        if any(_chk(x, gamma2) for x in ct0):
+            ct0_bad = True
+        a0 = [_r32(r0[i][n] + ct0[n]) for n in range(256)]
+        hi = [_mkh(a0[n], w1[i][n], gamma2) for n in range(256)]
+        weight += sum(hi); hint.append(hi)
+    reject = z_bad or r0_bad or ct0_bad or (weight > omega)
+    return dict(y=y, z=z, z_bad=z_bad, r0=r0, r0_bad=r0_bad, w1=w1, c=c,
+               hint=hint, weight=weight, ct0_bad=ct0_bad, reject=reject)
+
+
+@cocotb.test()
+async def test_z_norm(dut):
+    """⑦ z[j]=reduce32(y[j]+invNTT(ĉ∘ŝ₁[j])) 及 ‖z‖∞ 检查（κ=0 轮），对上 oracle"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    rec = first_d44()
+    await preload_all(dut, rec)
+    await run_to_done(dut)
+
+    o = oracle_round0(rec)
+    for j in range(4):
+        got = await read_poly(dut, (8 << 2) | j)      # 组 8 → z[j]
+        assert got == o["z"][j], (
+            f"z[{j}] 不一致，首个不同在第 "
+            f"{next(n for n in range(256) if got[n] != o['z'][j][n])} 个系数")
+
+    # κ=0 轮的 z-norm 拒绝判据（此段只算了 z，reject 只反映 ‖z‖∞）
+    rej = await read_flag(dut, 10)
+    assert bool(rej) == o["z_bad"], f"z-norm 拒绝标志不一致：RTL={rej} oracle={o['z_bad']}"
+
+    dut._log.info(f"⑦ z[0..3] 对上 oracle κ=0 轮；‖z‖∞ 拒绝标志={bool(rej)}（=oracle）")
 

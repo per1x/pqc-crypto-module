@@ -22,7 +22,7 @@ module tb_mldsa_sign (
     output wire [511:0] mu,
     output wire [511:0] rhopp,
     output wire [255:0] ctilde,
-    input  wire [4:0]  dbg_sel,
+    input  wire [5:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
     input  wire [11:0] sig_addr,

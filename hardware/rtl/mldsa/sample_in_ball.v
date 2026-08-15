@@ -40,7 +40,8 @@ module mldsa_sample_in_ball #(
     output wire signed [31:0] rd_data
 );
     localparam [7:0] RATE = 8'd136, SUFFIX = 8'h1F;   // SHAKE256
-    localparam [7:0] START_I = 8'd256 - TAU[7:0];     // N − τ
+    localparam integer START_I_INT = 256 - TAU;      // N − τ = 217（τ=39）
+    localparam [7:0]   START_I = START_I_INT[7:0];
     assign sha_rate   = RATE;
     assign sha_suffix = SUFFIX;
 

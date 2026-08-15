@@ -61,9 +61,8 @@ module mldsa_sign (
     output reg [511:0] rhopp,
     output reg [255:0] ctilde,       // c̃ = H(μ‖w1pack)，⑥ 之后有效（当前 κ 轮）
 
-    // ---- 调试读口：done 之后读系数 ----
-    //   dbg_sel[3:2]=00 → s₁，=10 → s₂，=11 → t₀；dbg_sel[1:0] = 第几条多项式
-    input  wire [4:0]  dbg_sel,
+    // ---- 调试读口：done 之后读系数。dbg_sel[5:2]=组，[1:0]=第几条多项式 ----
+    input  wire [5:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
 
@@ -80,7 +79,7 @@ module mldsa_sign (
     localparam integer SK_S2 = SK_S1 + L*POLYETA_B;      // 512
     localparam integer SK_T0 = SK_S2 + K*POLYETA_B;      // 896
 
-    localparam [4:0]
+    localparam [5:0]
         S_IDLE   = 5'd0,
         S_HDR    = 5'd1,     // ρ/K/tr ← sk[0..127]
         S_UNP_I  = 5'd2,     // 清 unpacker、置初值
@@ -109,13 +108,37 @@ module mldsa_sign (
         S_INV_ST = 5'd21,    // 等 done 落一次再起
         S_DEC    = 5'd22,    // caddq(invNTT) → decompose → w0/w1
         // ⑥ c̃ = H(μ‖w1pack)（走 S_D_* 引擎）+ SampleInBall 出 c
-        S_W1_PK  = 5'd23,    // w₁ → w1pk 缓冲
-        S_SIB_GO = 5'd24,    // 起 SampleInBall
-        S_SIB_WT = 5'd25,    // 等 sb_done
-        S_SIB_MV = 5'd26,    // sb 的 c → c 存储
-        S_FIN    = 5'd31;
+        S_W1_PK  = 6'd23,    // w₁ → w1pk 缓冲
+        S_SIB_GO = 6'd24,    // 起 SampleInBall
+        S_SIB_WT = 6'd25,    // 等 sb_done
+        S_SIB_MV = 6'd26,    // sb 的 c → c 存储
+        // ⑦ ĉ=NTT(c)；z[j]=y[j]+invNTT(ĉ∘ŝ₁[j])；‖z‖∞ 检查
+        S_CN_LD  = 6'd27,    // c → NTT 写口（正变换 ĉ）
+        S_CN_GO  = 6'd28,
+        S_CN_ST  = 6'd29,
+        S_CN_WB  = 6'd30,    // NTT 读口 → c（就地 ĉ）
+        S_Z_MUL  = 6'd31,    // ĉ∘ŝ₁[vj] → invNTT 写口
+        S_Z_GO   = 6'd32,
+        S_Z_ST   = 6'd33,
+        S_Z_WB   = 6'd34,    // z[vj]=reduce32(y[vj]+invNTT)；norm 检查
+        // ⑧ r₀[i]=w0[i]−invNTT(ĉ∘ŝ₂[i])；‖r₀‖∞ 检查
+        S_R_MUL  = 6'd35,
+        S_R_GO   = 6'd36,
+        S_R_ST   = 6'd37,
+        S_R_WB   = 6'd38,    // r0[vi]=reduce32(w0[vi]−invNTT)；norm 检查
+        // ⑨ ct₀=invNTT(ĉ∘t̂₀[i])；‖ct₀‖∞ 检查；hint=MakeHint(r0+ct0, w1)；权重
+        S_H_MUL  = 6'd39,
+        S_H_GO   = 6'd40,
+        S_H_ST   = 6'd41,
+        S_H_WB   = 6'd42,    // ct0 检查 + hint + 权重
+        // ⑩ 拒绝判定 + sigEncode
+        S_REJ    = 6'd43,    // 这一轮是否作废
+        S_SIG_CT = 6'd44,    // sig[0..31] = c̃
+        S_SIG_Z  = 6'd45,    // sig z 段：polyz_pack
+        S_SIG_H  = 6'd46,    // sig hint 段：HintBitPack
+        S_FIN    = 6'd63;
 
-    reg [4:0] st;
+    reg [5:0] st;
 
     // ================= 输入缓冲 =================
     reg  [11:0] sk_raddr;
@@ -194,12 +217,17 @@ module mldsa_sign (
         .sha_out_ready(em_sor), .sha_out_data(sha_out_data),
         .rd_addr(em_rd_addr), .rd_data(em_rd_data));
 
-    // ---- y 存储：ℓ 条 × 256 × 32b（④ 存，⑤ NTT 就地覆盖成 ŷ）----
+    // ---- y 存储：ℓ 条 × 256 × 32b。y 保留原值（⑦ z=y+cs₁ 要用），ŷ=NTT(y) 另存 ----
     reg         y_we; reg [9:0] y_waddr; reg signed [31:0] y_din; reg [9:0] y_raddr;
     wire signed [31:0] y_dout;
     ram_dp #(.DW(32), .AW(10)) u_y (
         .clk(clk), .a_we(y_we), .a_addr(y_waddr), .a_din(y_din), .a_dout(),
         .b_we(1'b0), .b_addr(y_raddr), .b_din(32'd0), .b_dout(y_dout));
+    reg         yh_we; reg [9:0] yh_waddr; reg signed [31:0] yh_din; reg [9:0] yh_raddr;
+    wire signed [31:0] yh_dout;
+    ram_dp #(.DW(32), .AW(10)) u_yh (
+        .clk(clk), .a_we(yh_we), .a_addr(yh_waddr), .a_din(yh_din), .a_dout(),
+        .b_we(1'b0), .b_addr(yh_raddr), .b_din(32'd0), .b_dout(yh_dout));
 
     // ---- ⑤ MAC 累加缓冲 acc（k×256×32），w0（k×256×32），w1（k×256×6）----
     reg         ac_we; reg [9:0] ac_waddr; reg signed [31:0] ac_din; reg [9:0] ac_raddr;
@@ -237,7 +265,7 @@ module mldsa_sign (
         .rd_addr(un_rd_addr), .rd_data(un_rd_data), .count());
 
     // 逐系数 mont 乘：Â(23 无符号) × ŷ(32 有符号)
-    wire signed [63:0] mac_prod = $signed({41'd0, un_rd_data}) * y_dout;
+    wire signed [63:0] mac_prod = $signed({41'd0, un_rd_data}) * yh_dout;
     wire signed [31:0] mac_mont;
     mldsa_mont_reduce u_mont (.a(mac_prod), .t_out(mac_mont));
     // reduce32：MAC 累加值灌进 invNTT 前先规约
@@ -290,16 +318,69 @@ module mldsa_sign (
         .clk(clk), .a_we(c_we), .a_addr(c_waddr), .a_din(c_din), .a_dout(),
         .b_we(1'b0), .b_addr(c_raddr), .b_din(32'd0), .b_dout(c_dout));
 
+    // ---- z 存储：ℓ 条 × 256 × 32b（⑦ 存，⑩ sigEncode 读）----
+    reg         z_we; reg [9:0] z_waddr; reg signed [31:0] z_din; reg [9:0] z_raddr;
+    wire signed [31:0] z_dout;
+    ram_dp #(.DW(32), .AW(10)) u_z (
+        .clk(clk), .a_we(z_we), .a_addr(z_waddr), .a_din(z_din), .a_dout(),
+        .b_we(1'b0), .b_addr(z_raddr), .b_din(32'd0), .b_dout(z_dout));
+
+    // ---- hint 存储：k 条 × 256 × 1b（⑨ 存，⑩ HintBitPack 读）----
+    reg         hn_we; reg [9:0] hn_waddr; reg hn_din; reg [9:0] hn_raddr;
+    wire        hn_dout;
+    ram_dp #(.DW(1), .AW(10)) u_hn (
+        .clk(clk), .a_we(hn_we), .a_addr(hn_waddr), .a_din(hn_din), .a_dout(),
+        .b_we(1'b0), .b_addr(hn_raddr), .b_din(1'd0), .b_dout(hn_dout));
+
+    // ---- ⑦⑧⑨ 共用：逐点 ĉ∘ŝ（mont 乘），及 invNTT 后的合成 + norm 检查 ----
+    //   MUL 状态选第二乘子：S_R_MUL→ŝ₂，S_H_MUL→t̂₀，其余（S_Z_MUL）→ŝ₁
+    wire signed [31:0] pw_b = (st == S_R_MUL) ? s2_dout
+                            : (st == S_H_MUL) ? t0_dout : s1_dout;
+    wire signed [63:0] pw_prod = c_dout * pw_b;
+    wire signed [31:0] pw_mont;
+    mldsa_mont_reduce u_mont2 (.a(pw_prod), .t_out(pw_mont));
+
+    // 合成（invNTT 结果在 nt_rdata）：z=y+cs₁，r0=w0−cs₂，ct0=cs（都过 reduce32）
+    wire signed [31:0] comb_in = (st == S_R_WB) ? (w0_dout - nt_rdata)
+                               : (st == S_H_WB) ? nt_rdata
+                                                : (y_dout + nt_rdata);   // S_Z_WB
+    wire signed [31:0] comb_red;
+    mldsa_reduce32 u_red2 (.a(comb_in), .r(comb_red));
+
+    // norm 检查：|居中系数| ≥ bound。三个 bound 别记混。
+    wire [31:0] cabs = comb_red[31] ? (-comb_red) : comb_red;
+    wire [31:0] norm_bound = (st == S_Z_WB) ? 32'd130994    // γ₁−β
+                           : (st == S_R_WB) ? 32'd95154     // γ₂−β
+                                            : 32'd95232;     // γ₂（ct₀）
+    wire norm_bad = (cabs >= norm_bound);
+
+    // MakeHint(a0, w1) 用 ⑨：a0 = reduce32(r0 + ct0)。r0 存在 w0 存储（⑧ 就地覆盖）。
+    wire signed [31:0] a0_in = w0_dout + comb_red;   // comb_red 此时是 ct0
+    wire signed [31:0] a0_red;
+    mldsa_reduce32 u_reda0 (.a(a0_in), .r(a0_red));
+    wire hint_bit;
+    mldsa_make_hint #(.MODE(0)) u_mh (.a0(a0_red), .a1(w1_dout), .hint(hint_bit));
+
+    // ⑦⑧⑨⑩ 拒绝循环状态
+    reg        reject;     // 本轮任一 norm / 权重越界 → 作废重来
+    reg [8:0]  weight;     // hint 总权重（≤ 256×4，9 位）
+
     // 调试读口挂 b 口（done 后用，与写不重叠）。dbg_sel[4:2] 选组，[1:0] 选第几条。
-    //   000 s₁  010 s₂  011 t₀  100 y  101 w0  110 w1  111 c（=ĉ 覆盖后）
+    //  组（dbg_sel[5:2]）：0 s₁  1 ŷ  2 s₂  3 t₀  4 y  5 w0/r0  6 w1  7 c/ĉ
+    //                     8 z  9 hint
     assign dbg_coef =
-          (dbg_sel[4:2] == 3'b000) ? s1_dout
-        : (dbg_sel[4:2] == 3'b010) ? s2_dout
-        : (dbg_sel[4:2] == 3'b011) ? t0_dout
-        : (dbg_sel[4:2] == 3'b100) ? y_dout
-        : (dbg_sel[4:2] == 3'b101) ? w0_dout
-        : (dbg_sel[4:2] == 3'b110) ? {{26{1'b0}}, w1_dout}
-        : (dbg_sel[4:2] == 3'b111) ? c_dout
+          (dbg_sel[5:2] == 4'd0)  ? s1_dout
+        : (dbg_sel[5:2] == 4'd1)  ? yh_dout
+        : (dbg_sel[5:2] == 4'd2)  ? s2_dout
+        : (dbg_sel[5:2] == 4'd3)  ? t0_dout
+        : (dbg_sel[5:2] == 4'd4)  ? y_dout
+        : (dbg_sel[5:2] == 4'd5)  ? w0_dout
+        : (dbg_sel[5:2] == 4'd6)  ? {{26{1'b0}}, w1_dout}
+        : (dbg_sel[5:2] == 4'd7)  ? c_dout
+        : (dbg_sel[5:2] == 4'd8)  ? z_dout
+        : (dbg_sel[5:2] == 4'd9)  ? {31'd0, hn_dout}
+        : (dbg_sel[5:2] == 4'd10) ? {31'd0, reject}       // 本轮拒绝标志
+        : (dbg_sel[5:2] == 4'd11) ? {23'd0, weight}       // hint 总权重
         : 32'd0;
 
     assign sig_data = 8'd0;   // 后续段填
@@ -398,6 +479,7 @@ module mldsa_sign (
             kappa <= 16'd0; vi <= 3'd0; vj <= 3'd0;
             un_start <= 1'b0; un_nonce <= 16'd0;
             wp_ptr <= 10'd0; sb_start <= 1'b0; ctilde <= 256'd0;
+            reject <= 1'b0; weight <= 9'd0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
             fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
@@ -602,6 +684,7 @@ module mldsa_sign (
             // 然后 done；⑤ 起再往下接 ŷ/w/…，并把 done 往后挪。
             S_EM_GO: begin
                 owner <= OWN_EM;
+                if (poly == 3'd0) begin reject <= 1'b0; weight <= 9'd0; end  // 新一轮清标志
                 em_nonce <= kappa + {13'd0, poly};
                 em_start <= 1'b1;
                 st <= S_EM_WT;
@@ -716,7 +799,59 @@ module mldsa_sign (
                 end else begin
                     if (cnt == 8'd255) begin
                         cnt <= 8'd0; ph <= 1'b0;
-                        st <= S_FIN;          // 本里程碑到此（⑦ 起接 ĉ/z/…）
+                        st <= S_CN_LD;        // 进 ⑦：ĉ = NTT(c)
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑦ ĉ=NTT(c)；z[j]=reduce32(y[j]+invNTT(ĉ∘ŝ₁[j]))；‖z‖∞ 检查 ----------
+            // ĉ = NTT(c) 就地覆盖 c 存储（c 之后不再需要原值）。
+            S_CN_LD: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_CN_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_CN_GO: begin nt_start <= 1'b1; nt_inv <= 1'b0; nt_lowseen <= 1'b0; st <= S_CN_ST; end
+            S_CN_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_CN_WB; end
+            end
+            S_CN_WB: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; vj <= 3'd0; st <= S_Z_MUL; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // 对每个 j：pointwise ĉ∘ŝ₁[vj] → invNTT 写口
+            S_Z_MUL: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 8'd255) begin cnt <= 8'd0; ph <= 1'b0; st <= S_Z_GO; end
+                    else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+            S_Z_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_Z_ST; end
+            S_Z_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 8'd0; ph <= 1'b0; st <= S_Z_WB; end
+            end
+            // z[vj][n]=reduce32(y[vj][n]+cs₁[n])；越界置 reject
+            S_Z_WB: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (norm_bad) reject <= 1'b1;
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vj == 3'd3) begin
+                            vj <= 3'd0;
+                            st <= S_FIN;      // 本里程碑到此（⑧ 起接 r₀）
+                        end else begin
+                            vj <= vj + 3'd1; st <= S_Z_MUL;
+                        end
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
             end
@@ -776,6 +911,8 @@ module mldsa_sign (
 
         y_we = 1'b0; y_waddr = 10'd0; y_din = 32'd0;
         y_raddr = {dbg_sel[1:0], dbg_idx};    // 默认给调试口
+        yh_we = 1'b0; yh_waddr = 10'd0; yh_din = 32'd0;
+        yh_raddr = {dbg_sel[1:0], dbg_idx};
         em_rd_addr = cnt;
         ac_we = 1'b0; ac_waddr = 10'd0; ac_din = 32'd0;
         ac_raddr = {dbg_sel[1:0], dbg_idx};
@@ -785,7 +922,11 @@ module mldsa_sign (
         w1_raddr = {dbg_sel[1:0], dbg_idx};
         un_rd_addr = cnt;
         c_we = 1'b0; c_waddr = 8'd0; c_din = 32'd0;
-        c_raddr = {dbg_sel[1:0], dbg_idx};   // c 只有 256 项，dbg_idx 直接寻址
+        c_raddr = dbg_idx;                   // c 只有 256 项，dbg_idx 直接寻址
+        z_we = 1'b0; z_waddr = 10'd0; z_din = 32'd0;
+        z_raddr = {dbg_sel[1:0], dbg_idx};
+        hn_we = 1'b0; hn_waddr = 10'd0; hn_din = 1'b0;
+        hn_raddr = {dbg_sel[1:0], dbg_idx};
         p6_clr = 1'b0; p6_iv = 1'b0;
         wp_we = 1'b0; wp_waddr = 10'd0; wp_din = 8'd0;
         wp_raddr = (ai >= 14'd64) ? (ai[9:0] - 10'd64) : 10'd0;   // c̃ 吸收时读 w1pk
@@ -803,7 +944,7 @@ module mldsa_sign (
         // ⑤ MAC：Â[cnt]·ŷ[vj][cnt] 累加到 acc[vi][cnt]（j==0 直接放）
         if (st == S_MAC) begin
             un_rd_addr = cnt;
-            y_raddr    = {vj[1:0], cnt};
+            yh_raddr   = {vj[1:0], cnt};
             ac_raddr   = {vi[1:0], cnt};
             if (ph) begin
                 ac_we    = 1'b1;
@@ -844,6 +985,28 @@ module mldsa_sign (
             if (ph) begin c_we = 1'b1; c_waddr = cnt; c_din = sb_rd_data; end
         end
 
+        // ⑦ ĉ = NTT(c)：装载 c → NTT，写回 NTT → c（就地）
+        if (st == S_CN_LD) begin
+            c_raddr = cnt;
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = c_dout; end
+        end
+        if (st == S_CN_WB) begin
+            nt_raddr = cnt;
+            if (ph) begin c_we = 1'b1; c_waddr = cnt; c_din = nt_rdata; end
+        end
+        // ⑦ z：pointwise ĉ∘ŝ₁[vj] → invNTT 写口
+        if (st == S_Z_MUL) begin
+            c_raddr  = cnt;
+            s1_raddr = {vj[1:0], cnt};
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt; nt_wdata = pw_mont; end
+        end
+        // ⑦ z 写回：z[vj]=reduce32(y[vj]+invNTT)
+        if (st == S_Z_WB) begin
+            nt_raddr = cnt;
+            y_raddr  = {vj[1:0], cnt};
+            if (ph) begin z_we = 1'b1; z_waddr = {vj[1:0], cnt}; z_din = comb_red; end
+        end
+
         // ③/⑤a NTT 装载：选中 store[poly] → NTT 写口（nstore：0=s₁,1=s₂,2=t₀,3=y）
         if (st == S_NT_LD) begin
             case (nstore)
@@ -862,7 +1025,7 @@ module mldsa_sign (
                     2'd0: begin s1_we = 1'b1; s1_waddr = {poly[1:0], cnt}; s1_din = nt_rdata; end
                     2'd1: begin s2_we = 1'b1; s2_waddr = {poly[1:0], cnt}; s2_din = nt_rdata; end
                     2'd2: begin t0_we = 1'b1; t0_waddr = {poly[1:0], cnt}; t0_din = nt_rdata; end
-                    default: begin y_we = 1'b1; y_waddr = {poly[1:0], cnt}; y_din = nt_rdata; end
+                    default: begin yh_we = 1'b1; yh_waddr = {poly[1:0], cnt}; yh_din = nt_rdata; end
                 endcase
             end
         end
