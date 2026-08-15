@@ -21,6 +21,7 @@ module tb_mldsa_sign (
     output wire [511:0] tr_out,
     output wire [511:0] mu,
     output wire [511:0] rhopp,
+    output wire [255:0] ctilde,
     input  wire [4:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
@@ -43,7 +44,7 @@ module tb_mldsa_sign (
         .sha_in_ready(sir), .sha_out_valid(sov), .sha_out_ready(sor),
         .sha_out_data(sod),
         .rho(rho), .key_out(key_out), .tr_out(tr_out),
-        .mu(mu), .rhopp(rhopp),
+        .mu(mu), .rhopp(rhopp), .ctilde(ctilde),
         .dbg_sel(dbg_sel), .dbg_idx(dbg_idx), .dbg_coef(dbg_coef),
         .sig_addr(sig_addr), .sig_data(sig_data));
 

@@ -205,15 +205,21 @@ async def test_ntt_prep(dut):
     dut._log.info("③ ŝ₁/ŝ₂/t̂₀ 全部对上 ntt(sk_decode)，整条 sk→解包→NTT 链都对")
 
 
-def derive_rhopp(rec):
-    """从一条 KAT 复现 ρ''（ExpandMask 的种子）"""
+def derive_mu(rec):
+    """从一条 KAT 复现 μ = H(tr‖M')"""
     sk = bytes.fromhex(rec["sk"])
     msg = bytes.fromhex(rec["msg"])
     ctx = bytes.fromhex(rec.get("context", "") or "")
+    _, _, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
+    return h_shake256(tr_w + _mprime(ctx, msg), 64)
+
+
+def derive_rhopp(rec):
+    """从一条 KAT 复现 ρ''（ExpandMask 的种子）"""
+    sk = bytes.fromhex(rec["sk"])
+    key_w = sk_decode(sk, "ML-DSA-44")[1]
     rnd = bytes.fromhex(rec["rnd"])
-    _, key_w, tr_w, _, _, _ = sk_decode(sk, "ML-DSA-44")
-    mu_w = h_shake256(tr_w + _mprime(ctx, msg), 64)
-    return h_shake256(key_w + rnd + mu_w, 64)
+    return h_shake256(key_w + rnd + derive_mu(rec), 64)
 
 
 @cocotb.test()
@@ -291,4 +297,60 @@ async def test_w_decompose(dut):
             f"{next(n for n in range(256) if got_w1[n] != w1_want[n])} 个系数")
 
     dut._log.info("⑤ w0/w1[0..3] 对上 oracle κ=0 轮（ExpandA+MAC+invNTT+caddq+decompose 全链）")
+
+
+def oracle_w1_kappa0(rec):
+    """复现 oracle κ=0 轮的 w1（列表 of k 条多项式），供 ⑥ 用"""
+    from mldsa_oracle import expand_mask, rej_uniform_poly
+    from mldsa_model import (ntt as _ntt, invntt_tomont as _intt,
+                             montgomery_reduce as _mont, reduce32 as _r32,
+                             caddq as _cad, decompose as _dec)
+    rho_w = bytes.fromhex(rec["sk"])[:32]
+    y_w = expand_mask(derive_rhopp(rec), 0, 1 << 17, 4)
+    yhat = [_ntt(list(p)) for p in y_w]
+    w1 = []
+    for i in range(4):
+        acc = [0] * 256
+        for j in range(4):
+            a = rej_uniform_poly(rho_w, (i << 8) + j)
+            for n in range(256):
+                acc[n] += _mont(a[n] * yhat[j][n])
+        acc = _intt([_r32(x) for x in acc])
+        w = [_cad(x) for x in acc]
+        w1.append([_dec(x, 95232)[1] for x in w])
+    return w1
+
+
+@cocotb.test()
+async def test_ctilde_and_c(dut):
+    """⑥ c̃ = H(μ‖w1pack)、c = SampleInBall(c̃)（κ=0 轮），对上 oracle
+
+    c̃ 走 ctilde 端口比对；c 经 dbg 组 111 读出比对。这条把 w₁ 的 6 位打包、
+    μ‖w1pack 的 SHAKE256、以及 SampleInBall 的 τ=39 个 ±1 稀疏放置全验到。
+    """
+    from mldsa_oracle import polyw1_pack, sample_in_ball
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    rec = first_d44()
+    await preload_all(dut, rec)
+    await run_to_done(dut)
+
+    mu_w = derive_mu(rec)
+    w1 = oracle_w1_kappa0(rec)
+    ctilde_w = h_shake256(mu_w + b"".join(polyw1_pack(w1[i], 95232) for i in range(4)), 32)
+    c_w = sample_in_ball(ctilde_w, 39)
+
+    got_ct = to_bytes(dut.ctilde.value, 32)
+    assert got_ct == ctilde_w, (
+        f"c̃ 不一致，首个不同在字节 "
+        f"{next(i for i in range(32) if got_ct[i] != ctilde_w[i])}")
+
+    got_c = await read_poly(dut, 0b11100)     # dbg_sel[4:2]=111 → c
+    assert got_c == c_w, (
+        f"c 不一致，首个不同在第 "
+        f"{next(i for i in range(256) if got_c[i] != c_w[i])} 个系数")
+
+    dut._log.info("⑥ c̃ 对上 H(μ‖w1pack)、c 对上 SampleInBall(c̃)（κ=0 轮，τ=39）")
 

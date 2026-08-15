@@ -56,9 +56,10 @@ module mldsa_sign (
     output reg [255:0] key_out,
     output reg [511:0] tr_out,
 
-    // ---- 派生哈希（后续段填；本段恒 0）----
+    // ---- 派生哈希 ----
     output reg [511:0] mu,
     output reg [511:0] rhopp,
+    output reg [255:0] ctilde,       // c̃ = H(μ‖w1pack)，⑥ 之后有效（当前 κ 轮）
 
     // ---- 调试读口：done 之后读系数 ----
     //   dbg_sel[3:2]=00 → s₁，=10 → s₂，=11 → t₀；dbg_sel[1:0] = 第几条多项式
@@ -107,6 +108,11 @@ module mldsa_sign (
         S_INV_GO = 5'd20,    // nt_start（inverse）
         S_INV_ST = 5'd21,    // 等 done 落一次再起
         S_DEC    = 5'd22,    // caddq(invNTT) → decompose → w0/w1
+        // ⑥ c̃ = H(μ‖w1pack)（走 S_D_* 引擎）+ SampleInBall 出 c
+        S_W1_PK  = 5'd23,    // w₁ → w1pk 缓冲
+        S_SIB_GO = 5'd24,    // 起 SampleInBall
+        S_SIB_WT = 5'd25,    // 等 sb_done
+        S_SIB_MV = 5'd26,    // sb 的 c → c 存储
         S_FIN    = 5'd31;
 
     reg [4:0] st;
@@ -163,7 +169,7 @@ module mldsa_sign (
     // ================= 海绵归属（FSM ↔ ExpandMask 采样器）=================
     // 只在换手方空闲时切（KeyGen 坑表第 1 条）。后续段（SampleInBall / ExpandA）
     // 再往 owner 里加成员。
-    localparam [1:0] OWN_FSM = 2'd0, OWN_EM = 2'd1, OWN_UNI = 2'd2;
+    localparam [1:0] OWN_FSM = 2'd0, OWN_EM = 2'd1, OWN_UNI = 2'd2, OWN_SIB = 2'd3;
     reg [1:0] owner;
 
     // FSM 自己驱动海绵时用的那组线
@@ -244,8 +250,48 @@ module mldsa_sign (
     wire        [5:0]  dec_a1;
     mldsa_decompose #(.MODE(0)) u_dec (.a(cad_out), .a0(dec_a0), .a1(dec_a1));
 
+    // ---- ⑥ w₁ 打包器（6 位/系数，GAMMA2_88）→ w1pk 缓冲，供 c̃ 吸收 ----
+    reg         p6_clr, p6_iv;
+    wire        p6_ir, p6_ov;
+    wire [7:0]  p6_ob;
+    mldsa_bitpack #(.W(6)) u_p6 (
+        .clk(clk), .rst_n(rst_n), .clr(p6_clr),
+        .in_val({7'd0, w1_dout}), .in_valid(p6_iv), .in_ready(p6_ir),
+        .out_byte(p6_ob), .out_valid(p6_ov));
+    // w1pk 缓冲：k×192 = 768 字节
+    reg         wp_we; reg [9:0] wp_waddr; reg [7:0] wp_din; reg [9:0] wp_raddr;
+    wire [7:0]  wp_dout;
+    reg  [9:0]  wp_ptr;         // 打包落盘指针
+    ram_dp #(.DW(8), .AW(10)) u_wp (
+        .clk(clk), .a_we(wp_we), .a_addr(wp_waddr), .a_din(wp_din), .a_dout(),
+        .b_we(1'b0), .b_addr(wp_raddr), .b_din(8'd0), .b_dout(wp_dout));
+
+    // ---- ⑥ SampleInBall：c = SampleInBall(c̃)，τ=39 个 ±1 ----
+    reg         sb_start;
+    wire        sb_done;
+    reg  [7:0]  sb_rd_addr;
+    wire signed [31:0] sb_rd_data;
+    wire        sb_ss, sb_siv, sb_sif, sb_sor;
+    wire [7:0]  sb_sr, sb_su, sb_sid;
+    mldsa_sample_in_ball #(.TAU(39)) u_sib (
+        .clk(clk), .rst_n(rst_n),
+        .start(sb_start), .seed(ctilde), .done(sb_done),
+        .sha_start(sb_ss), .sha_rate(sb_sr), .sha_suffix(sb_su),
+        .sha_in_valid(sb_siv), .sha_in_data(sb_sid), .sha_in_flush(sb_sif),
+        .sha_in_ready(sha_in_ready && (owner == OWN_SIB)),
+        .sha_out_valid(sha_out_valid && (owner == OWN_SIB)),
+        .sha_out_ready(sb_sor), .sha_out_data(sha_out_data),
+        .rd_addr(sb_rd_addr), .rd_data(sb_rd_data));
+
+    // ---- c 存储：256 × 32b（⑥ 存，⑦ NTT 就地覆盖成 ĉ）----
+    reg         c_we; reg [7:0] c_waddr; reg signed [31:0] c_din; reg [7:0] c_raddr;
+    wire signed [31:0] c_dout;
+    ram_dp #(.DW(32), .AW(8)) u_c (
+        .clk(clk), .a_we(c_we), .a_addr(c_waddr), .a_din(c_din), .a_dout(),
+        .b_we(1'b0), .b_addr(c_raddr), .b_din(32'd0), .b_dout(c_dout));
+
     // 调试读口挂 b 口（done 后用，与写不重叠）。dbg_sel[4:2] 选组，[1:0] 选第几条。
-    //   000 s₁  010 s₂  011 t₀  100 y  101 w0  110 w1
+    //   000 s₁  010 s₂  011 t₀  100 y  101 w0  110 w1  111 c（=ĉ 覆盖后）
     assign dbg_coef =
           (dbg_sel[4:2] == 3'b000) ? s1_dout
         : (dbg_sel[4:2] == 3'b010) ? s2_dout
@@ -253,6 +299,7 @@ module mldsa_sign (
         : (dbg_sel[4:2] == 3'b100) ? y_dout
         : (dbg_sel[4:2] == 3'b101) ? w0_dout
         : (dbg_sel[4:2] == 3'b110) ? {{26{1'b0}}, w1_dout}
+        : (dbg_sel[4:2] == 3'b111) ? c_dout
         : 32'd0;
 
     assign sig_data = 8'd0;   // 后续段填
@@ -287,9 +334,9 @@ module mldsa_sign (
     reg [11:0] skp;        // sk 读指针（进解包器的字节）
     reg        feed;       // S_UNP 内两拍：0=抽/摆地址，1=喂字节
 
-    // ② 派生哈希用
+    // ② / ⑥ 派生哈希用（共用一套吸收/挤压引擎）
     reg [13:0] ai;         // 吸收字节指针（μ 支最长 66+ctx+msg，≤ ~8500，14 位）
-    reg        dsel;       // 0 = 正在算 μ，1 = 正在算 ρ''
+    reg [1:0]  hsel;       // 0 = μ，1 = ρ''，2 = c̃
 
     // ③ NTT prep 用
     reg [1:0]  nstore;     // 0=s₁, 1=s₂, 2=t₀
@@ -330,21 +377,27 @@ module mldsa_sign (
         else                   rp_byte = mu[(rp_i[5:0])*8 +: 8];     // ai−64 的低 6 位
     end
 
-    // 当前吸收的字节 / 总长 / 结束判据
-    wire [7:0]  abs_byte  = dsel ? rp_byte : mu_byte;
-    wire [13:0] abs_total = dsel ? 14'd128 : thr_total_mu;
+    // ---- c̃ 支的吸收源：μ(64) ‖ w1pk(k×192=768) = 832 字节 ----
+    wire [7:0]  ct_byte = (ai < 14'd64) ? mu[ai[5:0]*8 +: 8] : wp_dout;
+
+    // 当前吸收的字节 / 总长 / 结束判据（hsel：0=μ,1=ρ'',2=c̃）
+    wire [7:0]  abs_byte  = (hsel == 2'd0) ? mu_byte
+                          : (hsel == 2'd1) ? rp_byte : ct_byte;
+    wire [13:0] abs_total = (hsel == 2'd0) ? thr_total_mu
+                          : (hsel == 2'd1) ? 14'd128 : 14'd832;
     wire        abs_last  = (ai == abs_total - 14'd1);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st <= S_IDLE; done <= 1'b0; cnt <= 8'd0; ph <= 1'b0;
             poly <= 3'd0; t0phase <= 1'b0; skp <= 12'd0; feed <= 1'b0;
-            ai <= 14'd0; dsel <= 1'b0;
+            ai <= 14'd0; hsel <= 2'd0;
             nstore <= 2'd0; nt_lowseen <= 1'b0;
             nt_start <= 1'b0; nt_inv <= 1'b0;
             owner <= OWN_FSM; em_start <= 1'b0; em_nonce <= 16'd0;
             kappa <= 16'd0; vi <= 3'd0; vj <= 3'd0;
             un_start <= 1'b0; un_nonce <= 16'd0;
+            wp_ptr <= 10'd0; sb_start <= 1'b0; ctilde <= 256'd0;
             rho <= 256'd0; key_out <= 256'd0; tr_out <= 512'd0;
             mu <= 512'd0; rhopp <= 512'd0;
             fsm_ss <= 1'b0; fsm_sr <= 8'd136; fsm_su <= 8'h1F;
@@ -357,6 +410,9 @@ module mldsa_sign (
             nt_start <= 1'b0;
             em_start <= 1'b0;
             un_start <= 1'b0;
+            sb_start <= 1'b0;
+            // w₁ 打包器每吐一字节，落盘指针前进（同 KeyGen 的 pe_ptr）
+            if (p6_ov) wp_ptr <= wp_ptr + 10'd1;
 
             case (st)
             S_IDLE: if (start) begin
@@ -423,7 +479,7 @@ module mldsa_sign (
                         if (cnt == 8'd255) begin
                             cnt <= 8'd0;
                             if (poly == 3'd3) begin
-                                dsel <= 1'b0;      // 先算 μ
+                                hsel <= 2'd0;      // 先算 μ
                                 st <= S_D_GO;
                             end else begin
                                 poly <= poly + 3'd1;
@@ -442,8 +498,8 @@ module mldsa_sign (
                 end
             end
 
-            // ---------- ② μ = H(tr‖M')，ρ'' = H(K‖rnd‖μ) ----------
-            // dsel=0 算 μ，dsel=1 算 ρ''，共用这一套吸收/挤压状态。
+            // ---------- ②/⑥ 派生哈希：μ=H(tr‖M')、ρ''=H(K‖rnd‖μ)、c̃=H(μ‖w1pack) ----------
+            // hsel=0 算 μ、1 算 ρ''、2 算 c̃，共用这一套吸收/挤压状态。
             S_D_GO: begin
                 owner <= OWN_FSM;
                 fsm_sr <= 8'd136; fsm_su <= 8'h1F;   // SHAKE256
@@ -473,21 +529,26 @@ module mldsa_sign (
             S_D_GAP: st <= S_D_FLU;
             S_D_FLU: begin fsm_sif <= 1'b1; cnt <= 8'd0; st <= S_D_SQ; end
 
-            // 挤 64 字节，低地址先出、从高位塞右移，进 μ 或 ρ''。
+            // 挤字节：μ/ρ'' 挤 64，c̃ 挤 32；低地址先出、从高位塞右移。
             S_D_SQ: begin
                 fsm_sor <= 1'b1;
                 if (sha_out_valid) begin
-                    if (!dsel) mu    <= {sha_out_data, mu[511:8]};
-                    else       rhopp <= {sha_out_data, rhopp[511:8]};
-                    if (cnt == 8'd63) begin
+                    if (hsel == 2'd0)      mu     <= {sha_out_data, mu[511:8]};
+                    else if (hsel == 2'd1) rhopp  <= {sha_out_data, rhopp[511:8]};
+                    else                   ctilde <= {sha_out_data, ctilde[255:8]};
+                    if (cnt == ((hsel == 2'd2) ? 8'd31 : 8'd63)) begin
                         fsm_sor <= 1'b0;
-                        if (!dsel) begin
-                            dsel <= 1'b1;      // μ 好了，接着算 ρ''
+                        if (hsel == 2'd0) begin
+                            hsel <= 2'd1;      // μ 好了，接着算 ρ''
                             st <= S_D_GO;
-                        end else begin
+                        end else if (hsel == 2'd1) begin
                             // ρ'' 好了，进 ③ NTT prep
                             nstore <= 2'd0; poly <= 3'd0; cnt <= 8'd0; ph <= 1'b0;
                             st <= S_NT_LD;
+                        end else begin
+                            // c̃ 好了，进 SampleInBall
+                            owner <= OWN_FSM;
+                            st <= S_SIB_GO;
                         end
                     end else begin
                         cnt <= cnt + 8'd1;
@@ -613,12 +674,49 @@ module mldsa_sign (
                         cnt <= 8'd0; ph <= 1'b0;
                         if (vi == 3'd3) begin
                             vi <= 3'd0;
-                            st <= S_FIN;        // 本里程碑到此（⑥ 起接 c̃/c）
+                            // 进 ⑥：先把 w₁ 打包进 w1pk 缓冲
+                            vi <= 3'd0; cnt <= 8'd0; ph <= 1'b0; wp_ptr <= 10'd0;
+                            st <= S_W1_PK;
                         end else begin
                             vi <= vi + 3'd1;
                             vj <= 3'd0; owner <= OWN_UNI;
                             st <= S_A_GO;       // 下一个 i 的 MAC
                         end
+                    end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑥a w₁ → w1pk 缓冲（6 位/系数打包）----------
+            // 与 KeyGen 的 S_S_MOVE 同构：两拍一个系数，pe_ir 反压时不推进。
+            S_W1_PK: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else if (p6_ir) begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        if (vi == 3'd3) begin
+                            vi <= 3'd0;
+                            hsel <= 2'd2;      // 进 c̃ = H(μ‖w1pk)
+                            st <= S_D_GO;
+                        end else begin
+                            vi <= vi + 3'd1;
+                        end
+                    end else begin
+                        cnt <= cnt + 8'd1; ph <= 1'b0;
+                    end
+                end
+            end
+
+            // ---------- ⑥b c = SampleInBall(c̃) ----------
+            S_SIB_GO: begin owner <= OWN_SIB; sb_start <= 1'b1; st <= S_SIB_WT; end
+            S_SIB_WT: if (sb_done) begin cnt <= 8'd0; ph <= 1'b0; owner <= OWN_FSM; st <= S_SIB_MV; end
+            S_SIB_MV: begin
+                if (!ph) begin
+                    ph <= 1'b1;
+                end else begin
+                    if (cnt == 8'd255) begin
+                        cnt <= 8'd0; ph <= 1'b0;
+                        st <= S_FIN;          // 本里程碑到此（⑦ 起接 ĉ/z/…）
                     end else begin cnt <= cnt + 8'd1; ph <= 1'b0; end
                 end
             end
@@ -641,6 +739,11 @@ module mldsa_sign (
             sha_start = un_ss; sha_rate = un_sr; sha_suffix = un_su;
             sha_in_valid = un_siv; sha_in_data = un_sid; sha_in_flush = un_sif;
             sha_out_ready = un_sor;
+        end
+        OWN_SIB: begin
+            sha_start = sb_ss; sha_rate = sb_sr; sha_suffix = sb_su;
+            sha_in_valid = sb_siv; sha_in_data = sb_sid; sha_in_flush = sb_sif;
+            sha_out_ready = sb_sor;
         end
         default: begin
             sha_start = fsm_ss; sha_rate = fsm_sr; sha_suffix = fsm_su;
@@ -681,6 +784,12 @@ module mldsa_sign (
         w1_we = 1'b0; w1_waddr = 10'd0; w1_din = 6'd0;
         w1_raddr = {dbg_sel[1:0], dbg_idx};
         un_rd_addr = cnt;
+        c_we = 1'b0; c_waddr = 8'd0; c_din = 32'd0;
+        c_raddr = {dbg_sel[1:0], dbg_idx};   // c 只有 256 项，dbg_idx 直接寻址
+        p6_clr = 1'b0; p6_iv = 1'b0;
+        wp_we = 1'b0; wp_waddr = 10'd0; wp_din = 8'd0;
+        wp_raddr = (ai >= 14'd64) ? (ai[9:0] - 10'd64) : 10'd0;   // c̃ 吸收时读 w1pk
+        sb_rd_addr = cnt;
 
         // S_UNP_I：进循环前清两个累加器
         if (st == S_UNP_I) begin eu_clr = 1'b1; tu_clr = 1'b1; end
@@ -714,6 +823,25 @@ module mldsa_sign (
                 w0_we = 1'b1; w0_waddr = {vi[1:0], cnt}; w0_din = dec_a0;
                 w1_we = 1'b1; w1_waddr = {vi[1:0], cnt}; w1_din = dec_a1;
             end
+        end
+
+        // ⑥a w₁ → w1pk：读 w1[vi][cnt] 喂 6 位打包器
+        // ⚠️ 只在最开头清一次累加器，**不能每条清**：每条 w₁ 恰好 192 字节（256×6=1536
+        // 位，字节对齐），4 条连续打包与逐条打包等价；而打包器最后 1~2 字节比最后一个
+        // 系数晚出（滞后），若在换条时 clr 会把这些待吐字节抹掉 —— KeyGen 靠采样器的
+        // 间隔盖过了这段滞后，这里 w₁ 各条背靠背没有间隔，会中招。
+        if (st == S_W1_PK) begin
+            w1_raddr = {vi[1:0], cnt};
+            if (!ph && cnt == 8'd0 && vi == 3'd0) p6_clr = 1'b1;   // 仅最开头清一次
+            if (ph) p6_iv = 1'b1;                                 // 数据到位，喂系数
+        end
+        // 打包器吐字节 → w1pk 缓冲
+        if (p6_ov) begin wp_we = 1'b1; wp_waddr = wp_ptr; wp_din = p6_ob; end
+
+        // ⑥b SampleInBall 结果 → c 存储（两拍：ph=0 摆 sb 读地址，ph=1 写 c）
+        if (st == S_SIB_MV) begin
+            sb_rd_addr = cnt;
+            if (ph) begin c_we = 1'b1; c_waddr = cnt; c_din = sb_rd_data; end
         end
 
         // ③/⑤a NTT 装载：选中 store[poly] → NTT 写口（nstore：0=s₁,1=s₂,2=t₀,3=y）
