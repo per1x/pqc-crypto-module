@@ -419,6 +419,29 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 		}
 	}
 
+	/* ---- 算法后端：PQCHSM_BACKEND=sdfe 时 ML-KEM 整条走 FPGA ----
+	 *
+	 * 装上之后 C_GenerateKeyPair 生成的 ML-KEM 私钥**留在 PL 的片内金库**，
+	 * 本进程只拿到公钥和一个句柄；C_Decapsulate 把句柄交给硬件，
+	 * 私钥连指针都不存在。
+	 *
+	 * 与熵源那个开关分开，是因为它们的失败方式不同：熵源取不到就该停机，
+	 * 而算法后端不支持某个算法（比如 ML-DSA，硬件里还没有）时要能回落到
+	 * 软件 —— 后端的 vtable 里那几项填 NULL，pqc_* 包装会回
+	 * PQC_ERR_UNSUPPORTED，上层据此选择。**回落是显式的，不是静默的。**
+	 */
+	{
+		const char *be = getenv("PQCHSM_BACKEND");
+
+		if (be && !strcmp(be, "sdfe")) {
+			pqc_set_backend(pqc_backend_sdfe());
+			if (!pqc_backend_has_hw_keys()) {
+				rv = CKR_DEVICE_ERROR;
+				goto out;
+			}
+		}
+	}
+
 	g_tok = hsm_token_new((size_t)g_n_slots);
 	if (!g_tok) {
 		rv = CKR_HOST_MEMORY;

@@ -126,16 +126,102 @@ static pqc_status_t sdfe_encaps(pqc_alg_t alg, const uint8_t *pk,
 	return PQC_OK;
 }
 
+/* ============================================================================
+ * 【按算法分派，而不是按操作降级 —— 这条界线是本文件的要害】
+ * ============================================================================
+ * PL 里现在只有 ML-KEM。ML-DSA 的签名/验签、以及别的参数集，硬件做不了。
+ * 而 pqc_set_backend() 是进程全局的：装上这个后端之后，ML-DSA 也一起没了。
+ * 实测就是这样 —— 整套 PKCS#11 用例 93/254 失败，全是签名那一族。
+ *
+ * 所以这里对硬件做不了的**算法**转交软件后端。但界线必须划死：
+ *
+ *   · 转交的判据是**算法**，不是"这次调用能不能成"。
+ *     调用方要 ML-DSA，硬件没有，交给软件 —— 这是如实回答。
+ *
+ *   · **ML-KEM 的私钥操作永不转交。** keypair/keypair_from_seed/decaps
+ *     一旦对 ML-KEM 回退到软件，"私钥在硬件里"当场变成谎话，
+ *     而调用方看到的是一次完全正常的成功。这类回退比失败危险得多。
+ *
+ * 一句话：**换算法可以，换保证不行。**
+ */
+static int is_hw_alg(pqc_alg_t alg)
+{
+	return pset_of(alg) >= 0;
+}
+
+static const pqc_backend_t *sw(void)
+{
+	return pqc_backend_liboqs();
+}
+
+static pqc_status_t sdfe_keypair(pqc_alg_t alg, uint8_t *pk, uint8_t *sk)
+{
+	/* ML-KEM：私钥必须留在片内，字节版没有正当实现 */
+	if (is_hw_alg(alg))
+		return PQC_ERR_UNSUPPORTED;
+	return sw()->keypair ? sw()->keypair(alg, pk, sk) : PQC_ERR_UNSUPPORTED;
+}
+
+static pqc_status_t sdfe_keypair_seed(pqc_alg_t alg, const uint8_t *seed,
+                                      size_t seed_len, uint8_t *pk, uint8_t *sk)
+{
+	if (is_hw_alg(alg))
+		return PQC_ERR_UNSUPPORTED;
+	return sw()->keypair_from_seed
+	       ? sw()->keypair_from_seed(alg, seed, seed_len, pk, sk)
+	       : PQC_ERR_UNSUPPORTED;
+}
+
+static pqc_status_t sdfe_decaps_bytes(pqc_alg_t alg, const uint8_t *sk,
+                                      const uint8_t *ct, uint8_t *ss)
+{
+	/* 只有 ML-KEM 是 KEM，所以这一条实际上等于"永远拒绝"。
+	 * 写成按算法判而不是直接 return，是为了将来加别的 KEM 时
+	 * 这里的规则仍然读得懂。 */
+	if (is_hw_alg(alg))
+		return PQC_ERR_UNSUPPORTED;
+	return sw()->decaps ? sw()->decaps(alg, sk, ct, ss) : PQC_ERR_UNSUPPORTED;
+}
+
+/* 确定性封装只用公钥，不碰私钥，交给软件不会削弱任何保证 ——
+ * 但它也就**不在硬件上跑**，ACVP 的 AFT 向量走的是软件路径。这一点要说出来，
+ * 免得有人拿 ACVP 全绿当成"封装在硬件上验过了"。 */
+static pqc_status_t sdfe_encaps_derand(pqc_alg_t alg, const uint8_t *pk,
+                                       const uint8_t *m, size_t m_len,
+                                       uint8_t *ct, uint8_t *ss)
+{
+	return sw()->encaps_derand
+	       ? sw()->encaps_derand(alg, pk, m, m_len, ct, ss) : PQC_ERR_UNSUPPORTED;
+}
+
+static pqc_status_t sdfe_sign(pqc_alg_t alg, const uint8_t *sk,
+                              const uint8_t *msg, size_t msg_len,
+                              const uint8_t *ctx, size_t ctx_len,
+                              const uint8_t *rnd, uint8_t *sig, size_t *sig_len)
+{
+	/* 签名算法硬件里还没有（ML-DSA 的核只做到算子层）。整族转交软件。 */
+	return sw()->sign ? sw()->sign(alg, sk, msg, msg_len, ctx, ctx_len,
+	                               rnd, sig, sig_len) : PQC_ERR_UNSUPPORTED;
+}
+
+static pqc_status_t sdfe_verify(pqc_alg_t alg, const uint8_t *pk,
+                                const uint8_t *msg, size_t msg_len,
+                                const uint8_t *ctx, size_t ctx_len,
+                                const uint8_t *sig, size_t sig_len)
+{
+	return sw()->verify ? sw()->verify(alg, pk, msg, msg_len, ctx, ctx_len,
+	                                   sig, sig_len) : PQC_ERR_UNSUPPORTED;
+}
+
 static const pqc_backend_t g_be = {
 	.name = "sdfe(FPGA via pqchsm_fpgad)",
-	/* 字节版私钥操作故意留 NULL —— 见文件头 */
-	.keypair = NULL,
-	.keypair_from_seed = NULL,
+	.keypair = sdfe_keypair,
+	.keypair_from_seed = sdfe_keypair_seed,
 	.encaps = sdfe_encaps,
-	.encaps_derand = NULL,   /* 硬件自取 m，给不了确定性版本；ACVP 走软件后端 */
-	.decaps = NULL,
-	.sign = NULL,
-	.verify = NULL,
+	.encaps_derand = sdfe_encaps_derand,
+	.decaps = sdfe_decaps_bytes,
+	.sign = sdfe_sign,
+	.verify = sdfe_verify,
 	.keypair_hw = sdfe_keypair_hw,
 	.decaps_hw = sdfe_decaps_hw,
 };
