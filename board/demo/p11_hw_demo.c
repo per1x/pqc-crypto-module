@@ -7,14 +7,17 @@
  * 而 PKCS#11 是**跨厂商的工业标准接口** —— 一个不认识这块板的应用，
  * 拿一个标准 C_* 调用过来，密钥就在 FPGA 里生成、私钥永不离开硬件。
  *
- * 具体证三件事：
+ * 具体证四件事（打印顺序 ①②③④）：
  *   ① C_GenerateKeyPair 生成 ML-KEM 密钥对 —— 私钥进 PL 的片内金库，
  *      应用只拿到公钥和一个对象句柄，dk 连一个字节都没经过软件；
- *   ② C_Encapsulate（用公钥）→ C_Decapsulate（用句柄）两端共享密钥一致；
- *   ③ 私钥对象的 CKA_EXTRACTABLE 是 false —— 想导出会被拒。
+ *   ② 私钥对象的 CKA_EXTRACTABLE 是 false —— 想导出会被拒；
+ *   ③ C_Encapsulate（用公钥）→ C_Decapsulate（用句柄）两端共享密钥一致；
+ *   ④ 用标准 C_Encrypt/C_Decrypt(CKM_AES_GCM) 公钥加密任意长度数据 ——
+ *      KEM 封装在 FPGA、私钥留片内，DEM 是带认证的对称加密（KEM-DEM）。
  *
  * 后端由环境变量选：PQCHSM_BACKEND=sdfe 打开 FPGA 路径。不设就是软件后端，
  * 同一段代码、同样通过 —— 这正是"标准接口"的意思：应用不需要知道底下是谁。
+ * ④ 的 GCM 在模块里算（本客户端仍是纯 dlopen，不链 OpenSSL）。
  *
  * 编译（不需要 liboqs/OpenSSL，纯 dlopen）：
  *   cc -I third_party/pkcs11-v3.2 -I src/p11 -o p11_hw_demo p11_hw_demo.c
@@ -133,15 +136,45 @@ int main(int argc, char **argv)
 	F->C_GetAttributeValue(s, ssobj1, &g1, 1);
 	F->C_GetAttributeValue(s, ssobj2, &g2, 1);
 	ss1len = g1.ulValueLen; ss2len = g2.ulValueLen;
+	int kem_ok = (ss1len == ss2len && !memcmp(ss1, ss2, ss1len));
 	printf("③ C_Encapsulate（公钥）→ C_Decapsulate（句柄）\n");
 	printf("   %s（%lu / %lu 字节）\n",
-	       (ss1len == ss2len && !memcmp(ss1, ss2, ss1len))
+	       kem_ok
 	         ? (hw ? "✅ 两端共享密钥一致 —— 完整 KEM，全程私钥没离开 FPGA"
 	            : "✅ 两端共享密钥一致 —— 完整 KEM（软件后端）")
 	         : "❌ 不一致",
 	       (unsigned long)ss1len, (unsigned long)ss2len);
 
+	/* ④ KEM-DEM：用标准 C_Encrypt/C_Decrypt 公钥加密任意长度数据。
+	 * ML-KEM 只封 32 字节共享秘密，任意数据靠 DEM（CKM_AES_GCM）加。
+	 * 封装端拿 ssobj1 加密、解封端拿 ssobj2 解密 —— 两个句柄同一个共享秘密。
+	 * 这一步全程只用标准 C_* 调用，应用不需要认识这块板。 */
+	int dem_ok = 0;
+	{
+		CK_BYTE iv[12] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+		CK_GCM_PARAMS gp = { iv, sizeof iv, sizeof iv * 8, NULL, 0, 128 };
+		CK_MECHANISM gm = { CKM_AES_GCM, &gp, sizeof gp };
+		CK_BYTE pt[] = "任意长度明文：ML-KEM 只封 32 字节共享秘密，这段靠 DEM 认证加密";
+		CK_ULONG ptlen = sizeof pt - 1;
+		CK_BYTE blob[256], back[256];
+		CK_ULONG blen = sizeof blob, rlen = sizeof back;
+		if (F->C_EncryptInit(s, &gm, ssobj1) == CKR_OK &&
+		    F->C_Encrypt(s, pt, ptlen, blob, &blen) == CKR_OK &&
+		    F->C_DecryptInit(s, &gm, ssobj2) == CKR_OK &&
+		    F->C_Decrypt(s, blob, blen, back, &rlen) == CKR_OK &&
+		    rlen == ptlen && !memcmp(back, pt, ptlen)) {
+			dem_ok = 1;
+		}
+		printf("④ C_EncryptInit/C_Encrypt(CKM_AES_GCM) → C_Decrypt\n");
+		printf("   %s（%lu 字节明文 → %lu 字节密文包）\n",
+		       dem_ok
+		         ? (hw ? "✅ 公钥加密任意数据 —— KEM 封装在 FPGA、私钥留片内，DEM 带认证"
+		            : "✅ 公钥加密任意数据 —— 完整 KEM-DEM（软件后端），DEM 带认证")
+		         : "❌ 往返不一致",
+		       (unsigned long)ptlen, (unsigned long)blen);
+	}
+
 	F->C_CloseSession(s);
 	F->C_Finalize(NULL);
-	return (ss1len == ss2len && !memcmp(ss1, ss2, ss1len)) ? 0 : 1;
+	return (kem_ok && dem_ok) ? 0 : 1;
 }

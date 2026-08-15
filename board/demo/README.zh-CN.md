@@ -119,7 +119,7 @@ PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=192.168.50.175 PQCHSM_SDFE_TOKEN=<口令> \
 | ② | 私钥不出硬件 | 对称密钥进 `key_vault`，**RTL 上没有通往总线的读路径**；ML-KEM 的 dk 进片内金库，KeyGen 只交出公钥 + 槽号，且有一次性闩锁封死出口 |
 | ③ | 扫地址读不出密钥 | 绕过接口直接读：四个密码核的版本号**全部读回 0**（真值 `0x00010000`） |
 | ④ | 怎么打都崩不了板 | 往被拒地址狂写 36000 笔，板子照常运行 |
-| ⑤ | **标准 PKCS#11 接口** → FPGA | `p11_hw_demo`：`C_GenerateKeyPair` 私钥留片内、读 `CKA_VALUE` 被拒（`CKR_ATTRIBUTE_SENSITIVE`）、`C_Encapsulate`/`C_Decapsulate` 两端一致 |
+| ⑤ | **标准 PKCS#11 接口** → FPGA | `p11_hw_demo`：`C_GenerateKeyPair` 私钥留片内、读 `CKA_VALUE` 被拒（`CKR_ATTRIBUTE_SENSITIVE`）、`C_Encapsulate`/`C_Decapsulate` 两端一致、`C_Encrypt`/`C_Decrypt`（`CKM_AES_GCM`）公钥加密任意数据（KEM-DEM，KEM 在 FPGA、私钥留片内，DEM 带认证） |
 
 第 ⑤ 条是给"这东西能不能接进现有系统"这个问题的答案：不用任何私有 SDK，
 一个只认 OASIS `pkcs11.h` 的应用就能用它，而私钥从生成到使用一步都不出 FPGA。
