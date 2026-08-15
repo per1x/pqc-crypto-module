@@ -173,22 +173,22 @@ async def test_ntt_s1(dut):
 
 
 @cocotb.test()
-async def test_mac_acc(dut):
-    """④ acc[i] = Σ_j mont(Â[i][j] ∘ ŝ₁[j])：done 后读累加缓冲，对黄金
+async def test_acc_after_invntt(dut):
+    """④+⑤ 合成：acc[i] = invNTT(reduce32(Σ_j mont(Â∘ŝ₁))) + s₂[i]
 
-    黄金值用 oracle 的算子逐一组装：
-        Â[i][j] = rej_uniform_poly(ρ, 256i+j)
-        ŝ₁[j]   = ntt(rej_eta_poly(ρ', j, 2))
-        acc[i][n] = Σ_j montgomery_reduce(Â[i][j][n] · ŝ₁[j][n])   （不取模，与 RTL 一致）
+    第 ⑤ 段把 acc 就地覆盖了，所以 done 时读到的是 invNTT+s₂ 之后的值 ——
+    这条用例因此同时验 ④（乘累加）和 ⑤（reduce32 → invNTT → +s₂）：
+    ρ/ρ'→采样→NTT→现采 Â→mont 累加→reduce32→invNTT→+s₂，整条都对才过。
 
-    验的是又一整条链：ρ/ρ' 对 → 采样对 → NTT 对 → 现采 Â 对 → mont 累加对，
-    而且证明了海绵三选一（FSM/η/均匀）换手无碍。
+    invNTT 复用同一个 NTT 核，会撞「done 是电平」的坑（第 7 条），
+    这条用例连算 k 次 invNTT，正是它暴露的场景。
     """
     import sys as _s
     from pathlib import Path as _P
     _s.path.insert(0, str(_P(__file__).resolve().parents[2] / "model"))
     from mldsa_oracle import rej_uniform_poly as _ru, rej_eta_poly as _re
-    from mldsa_model import ntt as _ntt, montgomery_reduce as _mont
+    from mldsa_model import (ntt as _ntt, invntt_tomont as _intt,
+                             montgomery_reduce as _mont, reduce32 as _r32)
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -198,28 +198,31 @@ async def test_mac_acc(dut):
     dut.start.value = 1
     await RisingEdge(dut.clk)
     dut.start.value = 0
-    for _ in range(2_000_000):
+    for _ in range(3_000_000):
         await RisingEdge(dut.clk)
         if int(dut.done.value):
             break
     else:
-        raise AssertionError("MAC 段一直没完成")
+        raise AssertionError("invNTT 段一直没完成")
     await Timer(1, unit="ns")
 
     rho = int(dut.rho.value).to_bytes(32, "little")
     rhop = int(dut.rho_prime.value).to_bytes(64, "little")
     shat = [_ntt(_re(rhop, j, 2)) for j in range(4)]
+    s2 = [_re(rhop, 4 + i, 2) for i in range(4)]
 
     for i in range(4):
         got = await read_poly(dut, 0b1100 | i)     # acc[i]
-        want = [0] * 256
+        acc = [0] * 256
         for j in range(4):
             a = _ru(rho, (i << 8) + j)
             for n in range(256):
-                want[n] += _mont(a[n] * shat[j][n])
+                acc[n] += _mont(a[n] * shat[j][n])
+        acc = [_r32(x) for x in acc]
+        acc = _intt(acc)
+        want = [acc[n] + s2[i][n] for n in range(256)]
         assert got == want, (
             f"acc[{i}] 不一致，首个不同在第 "
             f"{next(n for n in range(256) if got[n] != want[n])} 个系数")
 
-    dut._log.info("MAC：acc[0..3] 对上 Σ_j mont(Â∘ŝ₁)；"
-                  "整条链 ρ/ρ'→采样→NTT→现采 Â→mont 累加都对，海绵三选一无碍")
+    dut._log.info("④+⑤：acc[0..3] 对上 invNTT(reduce32(Σ mont(Â∘ŝ₁)))+s₂，整条链都对")

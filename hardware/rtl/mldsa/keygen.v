@@ -58,15 +58,16 @@ module mldsa_keygen (
     localparam [7:0] RATE256 = 8'd136, SUF = 8'h1F;   // SHAKE256
     localparam integer ETA = 2;
 
-    localparam [3:0]
-        S_IDLE  = 4'd0, S_H_ABS = 4'd1, S_H_GAP = 4'd2,
-        S_H_FLU = 4'd3, S_H_SQ  = 4'd4,
-        S_S_GEN = 4'd5, S_S_WAIT = 4'd6, S_S_MOVE = 4'd7,
-        S_NTT_LD = 4'd9, S_NTT_GO = 4'd10, S_NTT_ST = 4'd11, S_NTT_WB = 4'd12,
-        S_A_GEN = 4'd13, S_A_WAIT = 4'd14, S_MAC = 4'd15,
-        S_FIN   = 4'd8;
+    localparam [4:0]
+        S_IDLE  = 5'd0, S_H_ABS = 5'd1, S_H_GAP = 5'd2,
+        S_H_FLU = 5'd3, S_H_SQ  = 5'd4,
+        S_S_GEN = 5'd5, S_S_WAIT = 5'd6, S_S_MOVE = 5'd7,
+        S_NTT_LD = 5'd9, S_NTT_GO = 5'd10, S_NTT_ST = 5'd11, S_NTT_WB = 5'd12,
+        S_A_GEN = 5'd13, S_A_WAIT = 5'd14, S_MAC = 5'd15,
+        S_RED = 5'd16, S_INV_GO = 5'd17, S_INV_ST = 5'd18, S_INV_WB = 5'd19,
+        S_FIN   = 5'd8;
 
-    reg [3:0] st;
+    reg [4:0] st;
     reg [8:0] cnt;        // 吸收/挤压计数
 
     // H 的输入：ξ(32) ‖ k ‖ ℓ，一共 34 字节
@@ -120,14 +121,14 @@ module mldsa_keygen (
 
 
     // ---- NTT 核（第 ③ 段：对 ℓ 条 s₁ 做正变换，就地覆盖成 ŝ₁）----
-    reg         nt_start, nt_we;
+    reg         nt_start, nt_we, nt_inv;
     reg  [7:0]  nt_waddr, nt_raddr;
     reg signed [31:0] nt_wdata;
     wire        nt_done;
     wire signed [31:0] nt_rdata;
     mldsa_ntt_core u_ntt (
         .clk(clk), .rst_n(rst_n),
-        .start(nt_start), .inverse(1'b0), .done(nt_done),
+        .start(nt_start), .inverse(nt_inv), .done(nt_done),
         .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
         .rd_addr(nt_raddr), .rd_data(nt_rdata));
 
@@ -169,6 +170,10 @@ module mldsa_keygen (
     wire signed [31:0] mac_mont;
     mldsa_mont_reduce u_mont (.a(mac_prod), .t_out(mac_mont));
 
+    // reduce32：MAC 累加值在灌进 invNTT 前先规约（第 ⑤ 段）
+    wire signed [31:0] red_out;
+    mldsa_reduce32 u_red (.a(ac_dout), .r(red_out));
+
     // η 打包器留到 sk 组装段再接：第 ② 段只做「采样 + 存储」，
     // 而 η 打包（对 polyeta_pack）已在 test_mldsa_pack 里独立验过，
     // 这里空转它只会多一堆未接的输出。
@@ -204,7 +209,7 @@ module mldsa_keygen (
             st <= S_IDLE; done <= 1'b0; cnt <= 9'd0;
             owner <= OWN_FSM; vj <= 3'd0; ph <= 1'b0; s2phase <= 1'b0;
             nt_lowseen <= 1'b0;
-            vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0;
+            vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0; nt_inv <= 1'b0;
             et_start <= 1'b0; et_nonce <= 16'd0;
             nt_start <= 1'b0;
             fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
@@ -308,7 +313,7 @@ module mldsa_keygen (
                     else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
                 end
             end
-            S_NTT_GO: begin nt_start <= 1'b1; nt_lowseen <= 1'b0; st <= S_NTT_ST; end
+            S_NTT_GO: begin nt_start <= 1'b1; nt_inv <= 1'b0; nt_lowseen <= 1'b0; st <= S_NTT_ST; end
             // ⚠️ NTT 核的 done 是**电平、保持到下一次 start**（见 ntt_core 文件头）。
             // start 是非阻塞、要过两拍核才吃到，那之前 done 上挂着的还是**上一条**
             // 的 1 —— 直接看 done 会当场误判完成，于是第二条 NTT 整个被跳过、
@@ -356,14 +361,41 @@ module mldsa_keygen (
                         if (vj == 3'd3) begin
                             vj <= 3'd0;
                             if (vi == 3'd3) begin
-                                vi <= 3'd0; owner <= OWN_FSM;
-                                st <= S_FIN;       // 第 ④ 段到此为止
+                                vi <= 3'd0; ph <= 1'b0; owner <= OWN_FSM;
+                                st <= S_RED;       // acc 全算完，进 invNTT 段
                             end else begin
                                 vi <= vi + 3'd1; st <= S_A_GEN;
                             end
                         end else begin
                             vj <= vj + 3'd1; st <= S_A_GEN;
                         end
+                    end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑤ 对每个 i：acc[i] = invNTT(reduce32(acc[i])) + s₂[i] ----------
+            // 装载：reduce32(acc[vi]) → NTT 写口（两拍相位）
+            S_RED: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 9'd255) begin cnt <= 9'd0; ph <= 1'b0; st <= S_INV_GO; end
+                    else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
+                end
+            end
+            S_INV_GO: begin nt_start <= 1'b1; nt_inv <= 1'b1; nt_lowseen <= 1'b0; st <= S_INV_ST; end
+            // 同第 7 条坑：先等 done 落一次再等它起（invNTT 复用同一个核）
+            S_INV_ST: begin
+                if (!nt_done) nt_lowseen <= 1'b1;
+                if (nt_lowseen && nt_done) begin cnt <= 9'd0; ph <= 1'b0; st <= S_INV_WB; end
+            end
+            // 写回：invNTT 结果 + s₂[vi] → acc[vi]
+            S_INV_WB: begin
+                if (!ph) begin ph <= 1'b1; end
+                else begin
+                    if (cnt == 9'd255) begin
+                        cnt <= 9'd0; ph <= 1'b0;
+                        if (vi == 3'd3) begin vi <= 3'd0; st <= S_FIN; end
+                        else begin vi <= vi + 3'd1; st <= S_RED; end
                     end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
                 end
             end
@@ -385,6 +417,21 @@ module mldsa_keygen (
         ac_we = 1'b0; ac_waddr = 10'd0; ac_din = 32'd0;
         ac_raddr = {dbg_sel[1:0], dbg_idx};   // 默认给调试口读 acc
         un_rd_addr = cnt[7:0];
+
+        // ⑤ 装载：reduce32(acc[vi]) → NTT
+        if (st == S_RED) begin
+            ac_raddr = {vi[1:0], cnt[7:0]};
+            if (ph) begin nt_we = 1'b1; nt_waddr = cnt[7:0]; nt_wdata = red_out; end
+        end
+        // ⑤ 写回：invNTT[cnt] + s₂[vi][cnt] → acc[vi][cnt]
+        if (st == S_INV_WB) begin
+            nt_raddr = cnt[7:0];
+            s2_raddr = {vi[1:0], cnt[7:0]};
+            if (ph) begin
+                ac_we = 1'b1; ac_waddr = {vi[1:0], cnt[7:0]};
+                ac_din = nt_rdata + s2_dout;
+            end
+        end
 
         // MAC：Â[cnt]·ŝ₁[vj][cnt]，累加到 acc[vi][cnt]
         if (st == S_MAC) begin
