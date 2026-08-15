@@ -237,6 +237,106 @@ int SDFE_Decapsulate_MLKEM(SDFE_HANDLE hSession, uint32_t key_handle,
 	return rv;
 }
 
+/* ---- ML-DSA ---------------------------------------------------------------
+ * 三个函数都只做打包/拆包，一行密码运算都没有（文件头第一段）。
+ * 从机尚未落地，所以今天它们的正常结局是失败 —— 那是对的。 */
+
+/* pk 最大 2592（ML-DSA-87），加 4 字节句柄 */
+#define SDFE_MLDSA_PK_MAX  2592
+/* sig 最大 4627（ML-DSA-87） */
+#define SDFE_MLDSA_SIG_MAX 4627
+
+static const uint32_t sdfe_mldsa_pk[3]  = { 1312, 1952, 2592 };
+static const uint32_t sdfe_mldsa_sig[3] = { 2420, 3309, 4627 };
+
+int SDFE_GenerateKeyPair_MLDSA(SDFE_HANDLE hSession, uint32_t pset,
+			       uint8_t *pk, uint32_t *pk_len,
+			       uint32_t *key_handle)
+{
+	uint8_t buf[4 + SDFE_MLDSA_PK_MAX];
+	uint32_t n = 0;
+	int rv;
+
+	if (!pk || !pk_len || !key_handle || pset > 2)
+		return SDR_INARGERR;
+	rv = call(hSession, OP_MLDSA_KEYGEN, pset, 0, NULL, 0,
+		  buf, sizeof buf, &n);
+	if (rv != SDR_OK)
+		return rv;
+	if (n < 4)
+		return SDR_COMMFAIL;
+	memcpy(key_handle, buf, 4);
+	if (n - 4 > *pk_len)
+		return SDR_INARGERR;
+	/* 长度对不上就别把它当成公钥交出去：这里是软件侧唯一能自己核对
+	 * "sk 没跟着出来"的地方（daemon 侧也断言了一遍，两处都要有）。 */
+	if (n - 4 != sdfe_mldsa_pk[pset])
+		return SDR_HARDFAIL;
+	memcpy(pk, buf + 4, n - 4);
+	*pk_len = n - 4;
+	return SDR_OK;
+}
+
+int SDFE_Sign_MLDSA(SDFE_HANDLE hSession, uint32_t key_handle,
+		    const uint8_t *msg, uint32_t msg_len,
+		    const uint8_t *ctx, uint32_t ctx_len,
+		    uint8_t *sig, uint32_t *sig_len)
+{
+	uint32_t n = 0;
+	int rv;
+
+	if (!sig || !sig_len || (!msg && msg_len))
+		return SDR_INARGERR;
+	if (ctx_len)                       /* 非空 ctx：见 sdfe.h 那段 */
+		return SDR_INARGERR;
+	(void)ctx;
+	if (msg_len > PQCS_MAXPAY)
+		return SDR_INARGERR;
+	rv = call(hSession, OP_MLDSA_SIGN, key_handle, ctx_len,
+		  msg, msg_len, sig, *sig_len, &n);
+	if (rv != SDR_OK)
+		return rv;
+	*sig_len = n;
+	return SDR_OK;
+}
+
+int SDFE_Verify_MLDSA(SDFE_HANDLE hSession, uint32_t pset,
+		      const uint8_t *pk, uint32_t pk_len,
+		      const uint8_t *msg, uint32_t msg_len,
+		      const uint8_t *ctx, uint32_t ctx_len,
+		      const uint8_t *sig, uint32_t sig_len)
+{
+	uint32_t total, n = 0;
+	uint8_t *in;
+	int rv;
+
+	if (!pk || !sig || (!msg && msg_len) || pset > 2)
+		return SDR_INARGERR;
+	if (ctx_len)                       /* 非空 ctx：见 sdfe.h 那段 */
+		return SDR_INARGERR;
+	(void)ctx;
+	if (pk_len != sdfe_mldsa_pk[pset] || sig_len != sdfe_mldsa_sig[pset])
+		return SDR_INARGERR;
+	if ((uint64_t)pk_len + sig_len + msg_len > PQCS_MAXPAY)
+		return SDR_INARGERR;
+	total = pk_len + sig_len + msg_len;
+	/* 拼接缓冲最大 15 KB：不放栈上（板上线程栈不宽裕），也不放 static ——
+	 * 本库对外声称无状态，一个函数级 static 会让多线程调用方悄悄互相踩。 */
+	in = malloc(total);
+	if (!in)
+		return SDR_UNKNOWERR;
+	/* 硬件要的字节流就是 pk‖sig‖msg，这里拼一次、原样送下去 */
+	memcpy(in, pk, pk_len);
+	memcpy(in + pk_len, sig, sig_len);
+	if (msg_len)
+		memcpy(in + pk_len + sig_len, msg, msg_len);
+	/* 验不过时 daemon 回 SDR_VERIFYFAIL，原样透传：调用方按 != SDR_OK 判即可 */
+	rv = call(hSession, OP_MLDSA_VERIFY, pset, ctx_len,
+		  in, total, NULL, 0, &n);
+	free(in);
+	return rv;
+}
+
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
 		   const uint8_t *key, uint32_t key_len)
 {
@@ -274,6 +374,7 @@ const char *SDFE_StrError(int rv)
 	case SDR_KEYNOTEXIST: return "句柄不存在";
 	case SDR_HARDFAIL:    return "硬件运算失败";
 	case SDR_AUTHFAIL:    return "远程口令不对";
+	case SDR_VERIFYFAIL:  return "验签不通过（是结果，不是故障）";
 	default:              return "未知错误";
 	}
 }

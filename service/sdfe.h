@@ -34,6 +34,15 @@
  *
  *     出厂验证是个例外：ACVP 的 KeyGen 向量要核对 dk，所以那条路仍然留着，
  *     由 MODE 的 DK_TO_SLOT 位选择，且闩锁一置就永久关闭。
+ *
+ *   · **ML-DSA 私钥 sk**：口径与 dk 完全一致 —— KeyGen 把 sk 写进片内金库
+ *     （8 个槽），对外只交出 pk 和槽号；SDFE_Sign_MLDSA 按槽号使唤它，
+ *     sk 不经过 AXI 总线、不经过 daemon 的内存，交付形态同样有一道一次性闩锁。
+ *
+ *     ⚠️ **但这一条今天还没有硬件。** mldsa_axi 尚未落地，本库这三个函数
+ *     是照已定的寄存器约定写好的驱动：接口与线格式已就位，运算还没有地方跑。
+ *     在从机出现之前它们会如实失败（连不上/等不到 done），**不会**偷偷
+ *     回落到软件算一个签名回来 —— 那种回落正是本库文件头第一段拒绝的事。
  */
 #ifndef PQCHSM_SDFE_H
 #define PQCHSM_SDFE_H
@@ -55,6 +64,10 @@ extern "C" {
 #define SDR_KEYNOTEXIST   (SDR_BASE + 0x05)
 #define SDR_HARDFAIL      (SDR_BASE + 0x06)
 #define SDR_AUTHFAIL      (SDR_BASE + 0x07)   /* 远程连接口令不对 */
+/* 验签不通过。**这是结果，不是故障**，但仍然占一个非 SDR_OK 的码：
+ * 若用 SDR_OK + 一个"通过与否"的出参，忘了看那个出参就等于验过了。
+ * 让"没检查返回值"这个最常见的疏忽落在安全的一侧。 */
+#define SDR_VERIFYFAIL    (SDR_BASE + 0x08)
 
 typedef void *SDFE_HANDLE;
 
@@ -62,6 +75,11 @@ typedef void *SDFE_HANDLE;
 #define SDFE_MLKEM_512   0
 #define SDFE_MLKEM_768   1
 #define SDFE_MLKEM_1024  2
+
+/* ML-DSA 参数集 */
+#define SDFE_MLDSA_44    0
+#define SDFE_MLDSA_65    1
+#define SDFE_MLDSA_87    2
 
 /* 对称算法（与 sym_axi 的 ALG 字段一致） */
 #define SDFE_ALG_AES128  0
@@ -97,6 +115,31 @@ int SDFE_Encapsulate_MLKEM(SDFE_HANDLE hSession, uint32_t pset,
 int SDFE_Decapsulate_MLKEM(SDFE_HANDLE hSession, uint32_t key_handle,
                            const uint8_t *ct, uint32_t ct_len,
                            uint8_t *ss, uint32_t *ss_len);
+
+/* ---- ML-DSA ----
+ * 私钥 sk 留在 PL 片内的签名金库里，只回公钥 pk 和一个槽号（句柄）。
+ * 与 ML-KEM 那组的口径逐字一致，见文件头第三条 —— 包括"硬件尚未落地"那句。
+ *
+ * ctx（FIPS 204 的 domain separation 上下文串）：**当前只支持空 ctx**。
+ * 已定的寄存器约定里输入字节流没有给 ctx 字节留位置，只有一个 CTX_LEN；
+ * 与其猜一个位置、猜错了签到另一条 M' 上（合法、验得过、却不是你要签的消息），
+ * 不如现在明确拒绝，等从机落地与 RTL 对齐后再放开。ctx_len != 0 回 SDR_INARGERR。 */
+int SDFE_GenerateKeyPair_MLDSA(SDFE_HANDLE hSession, uint32_t pset,
+                               uint8_t *pk, uint32_t *pk_len,
+                               uint32_t *key_handle);
+/* 用句柄签名 —— 应用从头到尾没见过 sk。
+ * 签名随机数由硬件自取（FIPS 204 的 hedged 模式），接口上没有喂 rnd 的入口：
+ * 确定性签名要 rnd=0³²，而寄存器面不提供那条路，所以本接口不假装支持它。 */
+int SDFE_Sign_MLDSA(SDFE_HANDLE hSession, uint32_t key_handle,
+                    const uint8_t *msg, uint32_t msg_len,
+                    const uint8_t *ctx, uint32_t ctx_len,
+                    uint8_t *sig, uint32_t *sig_len);
+/* 用公钥验签。验不过回 SDR_VERIFYFAIL（是结果不是故障，但仍是非 OK 码）。 */
+int SDFE_Verify_MLDSA(SDFE_HANDLE hSession, uint32_t pset,
+                      const uint8_t *pk, uint32_t pk_len,
+                      const uint8_t *msg, uint32_t msg_len,
+                      const uint8_t *ctx, uint32_t ctx_len,
+                      const uint8_t *sig, uint32_t sig_len);
 
 /* ---- 对称：密钥进 key_vault，之后只按槽号使唤 ---- */
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
