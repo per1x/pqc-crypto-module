@@ -314,6 +314,16 @@ PARAM_G1LOG=19 PARAM_MODE=1 PARAM_OMG=55 PARAM_BETA=196 PARAM_CTB=48 \
 MODULE=test_mldsa_sign TOPLEVEL=tb_mldsa_sign SIM_BUILD=sb_x make`
 （并行跑多个参数集要各用一个 SIM_BUILD，否则互相覆盖）。
 
+### 参数化实测（全部对 ACVP siggen，逐字节）
+
+| 参数集 | 确定性 | 非确定性 | 逐段用例（对 oracle κ=0 轮） |
+|---|---|---|---|
+| ML-DSA-44 | 15/15 | 15/15 | 8/8 |
+| ML-DSA-65 | 15/15 | 15/15 | 8/8 |
+| ML-DSA-87 | 15/15 | 15/15 | 8/8 |
+
+44 的两组是**参数化之后重跑的回归**，与参数化之前的结论一致。
+
 ### 参数化时踩到的两条（都只在 k>4 或位宽变化时现形，44 全程蒙对）
 
 1. **ExpandS 的 s₂ nonce 写死成常数 4 加 j**（KeyGen）：正确是 ℓ+j。44 恰好 ℓ=4
