@@ -312,15 +312,15 @@ module mldsa_sign #(
     mldsa_caddq u_cad (.a(nt_rdata), .r(cad_out));
     wire signed [31:0] dec_a0;
     wire        [5:0]  dec_a1;
-    mldsa_decompose #(.MODE(MODE)) u_dec (.a(cad_out), .a0(dec_a0), .a1(dec_a1));
+    mldsa_decompose u_dec (.mode(MODE[0]), .a(cad_out), .a0(dec_a0), .a1(dec_a1));
 
     // ---- ⑥ w₁ 打包器（6 位/系数，GAMMA2_88）→ w1pk 缓冲，供 c̃ 吸收 ----
     reg         p6_clr, p6_iv;
     wire        p6_ir, p6_ov;
     wire [7:0]  p6_ob;
-    mldsa_bitpack #(.W(W1BITS)) u_p6 (
-        .clk(clk), .rst_n(rst_n), .clr(p6_clr),
-        .in_val({7'd0, w1_dout}), .in_valid(p6_iv), .in_ready(p6_ir),
+    mldsa_bitpack u_p6 (
+        .clk(clk), .rst_n(rst_n), .clr(p6_clr), .w(W1BITS[4:0]),
+        .in_val({14'd0, w1_dout}), .in_valid(p6_iv), .in_ready(p6_ir),
         .out_byte(p6_ob), .out_valid(p6_ov));
     // w1pk 缓冲：k×192 = 768 字节
     reg         wp_we; reg [9:0] wp_waddr; reg [7:0] wp_din; reg [9:0] wp_raddr;
@@ -387,7 +387,7 @@ module mldsa_sign #(
     wire signed [31:0] a0_red;
     mldsa_reduce32 u_reda0 (.a(a0_in), .r(a0_red));
     wire hint_bit;
-    mldsa_make_hint #(.MODE(MODE)) u_mh (.a0(a0_red), .a1(w1_dout), .hint(hint_bit));
+    mldsa_make_hint u_mh (.mode(MODE[0]), .a0(a0_red), .a1(w1_dout), .hint(hint_bit));
 
     // ⑦⑧⑨⑩ 拒绝循环状态
     reg        reject;     // 本轮任一 norm / 权重越界 → 作废重来
@@ -409,9 +409,9 @@ module mldsa_sign #(
     wire        pz_ir, pz_ov;
     wire [7:0]  pz_ob;
     wire [31:0] pz_full = G1_S - z_dout;             // γ₁ − z，落在 [0, 2γ₁)
-    wire [ZBITS-1:0] pz_in = pz_full[ZBITS-1:0];
-    mldsa_bitpack #(.W(ZBITS), .IW(ZBITS)) u_pz (
-        .clk(clk), .rst_n(rst_n), .clr(pz_clr),
+    wire [19:0] pz_in = pz_full[19:0];
+    mldsa_bitpack u_pz (
+        .clk(clk), .rst_n(rst_n), .clr(pz_clr), .w(ZBITS[4:0]),
         .in_val(pz_in), .in_valid(pz_iv), .in_ready(pz_ir),
         .out_byte(pz_ob), .out_valid(pz_ov));
 
@@ -442,23 +442,23 @@ module mldsa_sign #(
     // η（3 位）用于 s₁/s₂，t₀（13 位）单独一个。喂字节 / 抽系数按 mode 二选一。
     reg         eu_clr, eu_iv, eu_or;
     wire        eu_ir, eu_ov;
-    wire [EBITS-1:0] eu_val;
-    mldsa_bitunpack #(.W(EBITS)) u_eu (
-        .clk(clk), .rst_n(rst_n), .clr(eu_clr),
+    wire [19:0] eu_val;
+    mldsa_bitunpack u_eu (
+        .clk(clk), .rst_n(rst_n), .clr(eu_clr), .w(EBITS[4:0]),
         .in_byte(sk_rdata), .in_valid(eu_iv), .in_ready(eu_ir),
         .out_val(eu_val), .out_valid(eu_ov), .out_ready(eu_or));
 
     reg         tu_clr, tu_iv, tu_or;
     wire        tu_ir, tu_ov;
-    wire [12:0] tu_val;
-    mldsa_bitunpack #(.W(13)) u_tu (
-        .clk(clk), .rst_n(rst_n), .clr(tu_clr),
+    wire [19:0] tu_val;
+    mldsa_bitunpack u_tu (
+        .clk(clk), .rst_n(rst_n), .clr(tu_clr), .w(5'd13),
         .in_byte(sk_rdata), .in_valid(tu_iv), .in_ready(tu_ir),
         .out_val(tu_val), .out_valid(tu_ov), .out_ready(tu_or));
 
     // 逆变换（有符号搬移）：η−v / 2^(D−1)−v
-    wire signed [31:0] eta_coef = ETA_S - $signed({{(32-EBITS){1'b0}}, eu_val});
-    wire signed [31:0] t0_coef  = $signed(32'sd1 << (D-1)) - $signed({19'd0, tu_val});
+    wire signed [31:0] eta_coef = ETA_S - $signed({12'd0, eu_val});
+    wire signed [31:0] t0_coef  = $signed(32'sd1 << (D-1)) - $signed({12'd0, tu_val});
 
     // ================= 控制寄存器 =================
     reg [7:0]  cnt;        // 头部 / 系数计数（0..127 或 0..255）

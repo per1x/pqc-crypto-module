@@ -276,36 +276,36 @@ module mldsa_verify #(
     wire signed [31:0] cad_out;
     mldsa_caddq u_cad (.a(nt_rdata), .r(cad_out));
     wire [5:0] uh_a1;
-    mldsa_use_hint #(.MODE(MODE)) u_uh (.a(cad_out), .hint(h_dout), .a1_out(uh_a1));
+    mldsa_use_hint u_uh (.mode(MODE[0]), .a(cad_out), .hint(h_dout), .a1_out(uh_a1));
 
     // ---- w1Encode：6 位/系数打包进 w1pk ----
     reg         p6_clr, p6_iv;
     wire        p6_ir, p6_ov;
     wire [7:0]  p6_ob;
-    mldsa_bitpack #(.W(W1BITS)) u_p6 (
-        .clk(clk), .rst_n(rst_n), .clr(p6_clr),
-        .in_val({7'd0, uh_a1}), .in_valid(p6_iv), .in_ready(p6_ir),
+    mldsa_bitpack u_p6 (
+        .clk(clk), .rst_n(rst_n), .clr(p6_clr), .w(W1BITS[4:0]),
+        .in_val({14'd0, uh_a1}), .in_valid(p6_iv), .in_ready(p6_ir),
         .out_byte(p6_ob), .out_valid(p6_ov));
 
     // ================= 位解包器 =================
     // z：18 位 → γ₁−v；t₁：10 位 → 直接用
     reg         zu_clr, zu_iv, zu_or;
     wire        zu_ir, zu_ov;
-    wire [ZBITS-1:0] zu_val;
-    mldsa_bitunpack #(.W(ZBITS)) u_zu (
-        .clk(clk), .rst_n(rst_n), .clr(zu_clr),
+    wire [19:0] zu_val;
+    mldsa_bitunpack u_zu (
+        .clk(clk), .rst_n(rst_n), .clr(zu_clr), .w(ZBITS[4:0]),
         .in_byte(sig_rdata), .in_valid(zu_iv), .in_ready(zu_ir),
         .out_val(zu_val), .out_valid(zu_ov), .out_ready(zu_or));
     reg         tu_clr, tu_iv, tu_or;
     wire        tu_ir, tu_ov;
-    wire [9:0]  tu_val;
-    mldsa_bitunpack #(.W(10)) u_tu (
-        .clk(clk), .rst_n(rst_n), .clr(tu_clr),
+    wire [19:0] tu_val;
+    mldsa_bitunpack u_tu (
+        .clk(clk), .rst_n(rst_n), .clr(tu_clr), .w(5'd10),
         .in_byte(pk_rdata), .in_valid(tu_iv), .in_ready(tu_ir),
         .out_val(tu_val), .out_valid(tu_ov), .out_ready(tu_or));
 
-    wire signed [31:0] z_coef  = G1_S - $signed({{(32-ZBITS){1'b0}}, zu_val});
-    wire signed [31:0] t1_coef = $signed({22'd0, tu_val});
+    wire signed [31:0] z_coef  = G1_S - $signed({12'd0, zu_val});
+    wire signed [31:0] t1_coef = $signed({12'd0, tu_val});
     // ‖z‖∞：z 已居中，直接取绝对值比
     wire [31:0] z_abs = z_coef[31] ? (-z_coef) : z_coef;
     wire        z_over = (z_abs >= ZBOUND);

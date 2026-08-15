@@ -17,44 +17,49 @@
 // 让本模块的正确性只依赖「宽度对不对」一件事。
 `default_nettype none
 
-module mldsa_bitunpack #(
-    parameter integer W = 13          // 每个系数占的位数
-) (
+// ⚠️ 位宽 w 是**运行时输入**，理由与 mldsa_bitpack 那边一样（见 pack.v 的说明）：
+//    同一个 bitstream 要能运行时选 44/65/87，而 s₁/s₂ 随 η 变、z 随 γ₁ 变。
+module mldsa_bitunpack (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        clr,           // 每条多项式开始前拉一拍，清空累加器
 
+    input  wire [4:0]  w,             // 每个系数占的位数，运行时给（3…20）
     input  wire [7:0]  in_byte,
     input  wire        in_valid,
-    output wire        in_ready,      // 累加器不足 W 位时才收字节
+    output wire        in_ready,      // 累加器不足 w 位时才收字节
 
-    output wire [W-1:0] out_val,      // 低 W 位就是下一个系数的原始无符号值
-    output wire         out_valid,    // 累加器已够 W 位
-    input  wire         out_ready
+    output wire [19:0] out_val,       // 低 w 位就是下一个系数的原始无符号值
+    output wire        out_valid,     // 累加器已够 w 位
+    input  wire        out_ready
 );
-    // 累加器要装得下「吐一个系数前的残留（最多 W−1 位）」+「新吸的一整字节（8 位）」。
-    // W−1+8 = W+7，取 W+8 留一位余量，与 mldsa_bitpack 对称。
-    reg [W+8-1:0] acc;
-    reg [4:0]     nbits;
+    // 累加器要装得下「吐一个系数前的残留（最多 w−1 位）」+「新吸的一整字节（8 位）」。
+    // w 最大 20 ⇒ 19+8 = 27，取 28，与 mldsa_bitpack 对称。
+    reg [27:0] acc;
+    reg [4:0]  nbits;
 
-    assign out_valid = (nbits >= W[4:0]);
-    assign in_ready  = (nbits <  W[4:0]);
-    assign out_val   = acc[W-1:0];
+    assign out_valid = (nbits >= w);
+    assign in_ready  = (nbits <  w);
+
+    // 只取低 w 位。原来是静态位选 acc[W-1:0]，运行时要显式造掩码
+    // （掩码在 21 位里算：w=20 时 (1<<20) 在 20 位里会溢出成 0）。
+    wire [20:0] w_mask = (21'd1 << w) - 21'd1;
+    assign out_val = acc[19:0] & w_mask[19:0];
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            acc <= {(W+8){1'b0}};
+            acc <= 28'd0;
             nbits <= 5'd0;
         end else if (clr) begin
-            acc <= {(W+8){1'b0}};
+            acc <= 28'd0;
             nbits <= 5'd0;
         end else if (out_valid && out_ready) begin
-            // 吐掉低 W 位，剩下的下移
-            acc   <= acc >> W;
-            nbits <= nbits - W[4:0];
+            // 吐掉低 w 位，剩下的下移
+            acc   <= acc >> w;
+            nbits <= nbits - w;
         end else if (in_valid && in_ready) begin
             // 新字节拼到高位侧：低位在前的约定就是这一句（与 bitpack 对偶）
-            acc   <= acc | ({{(W){1'b0}}, in_byte} << nbits);
+            acc   <= acc | ({20'd0, in_byte} << nbits);
             nbits <= nbits + 5'd8;
         end
     end

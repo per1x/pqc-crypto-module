@@ -248,8 +248,8 @@ module mldsa_keygen #(
     reg  signed [12:0] pe_coef;
     wire        pe_ir, pe_ov;
     wire [7:0]  pe_ob;
-    mldsa_polyeta_pack #(.ETA(ETA)) u_pe (
-        .clk(clk), .rst_n(rst_n), .clr(pe_clr),
+    mldsa_polyeta_pack u_pe (
+        .clk(clk), .rst_n(rst_n), .clr(pe_clr), .eta(ETA[2:0]),
         .coef(pe_coef), .in_valid(pe_iv), .in_ready(pe_ir),
         .out_byte(pe_ob), .out_valid(pe_ov));
 

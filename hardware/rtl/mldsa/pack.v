@@ -27,25 +27,35 @@
 // ---------------------------------------------------------------------------
 // 通用位打包器：每个系数 W 位，低位在前，攒够 8 位吐一个字节
 // ---------------------------------------------------------------------------
-module mldsa_bitpack #(
-    parameter integer W  = 10,        // 每个系数占的位数
-    parameter integer IW = 13         // in_val 端口宽度（z 打包 W=18 时要放宽到 18）
-) (
+// ⚠️ 位宽 W 是**运行时输入**，不是参数。
+//    原来它是编译期参数，注释里写着"一个 bitstream 里两种参数集各例化一份"——
+//    那个前提已经不成立了：任务要求**同一个 bitstream 运行时可选 44/65/87**，
+//    而 s₁/s₂ 的位宽随 η 变（3 或 4）、z 随 γ₁ 变（18 或 20）、w₁ 随 γ₂ 变（6 或 4）。
+//    再走"各例化一份"就等于把三套参数集的打包器全放进去，
+//    而且调用方还得按运行时的 pset 去选 —— 那才是真的浪费与复杂。
+//    改成运行时之后端口按**最宽的 20 位**开，代价只有几个比较器。
+module mldsa_bitpack (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        clr,           // 清空累加器（每条多项式开始前拉一拍）
 
-    input  wire [IW-1:0] in_val,      // 已经做完变换的无符号值，只看低 W 位
+    input  wire [4:0]  w,             // 每个系数占的位数，运行时给（3…20）
+    input  wire [19:0] in_val,        // 已经做完变换的无符号值，只看低 w 位
     input  wire        in_valid,
     output wire        in_ready,      // 累加器满 8 位时拉低（见下面的说明）
 
     output reg  [7:0]  out_byte,
     output reg         out_valid
 );
-    // 累加器要装得下"接受一个新系数之前的残留" + "这一拍进来的 W 位"。
-    // 残留最多 7 位（8 位以上会先被吐出去），所以 W+7 位就够，取 W+8 留一位余量。
-    reg [W+8-1:0] acc;
-    reg [4:0]     nbits;              // 累加器里现在有多少位有效
+    // 累加器要装得下"接受一个新系数之前的残留" + "这一拍进来的 w 位"。
+    // 残留最多 7 位（8 位以上会先被吐出去），w 最大 20，所以 27 位就够，取 28。
+    reg [27:0] acc;
+    reg [4:0]  nbits;                 // 累加器里现在有多少位有效（最大 7+20=27）
+
+    // 只取低 w 位。原来这是静态位选 in_val[W-1:0]，运行时要显式造掩码。
+    // 掩码在 21 位里算：w=20 时 (1<<20) 在 20 位里会溢出成 0。
+    wire [20:0] w_mask = (21'd1 << w) - 21'd1;
+    wire [19:0] masked = in_val & w_mask[19:0];
 
     // ⚠️ **必须反压。** 第一版写的是 in_ready 恒为 1、只在没有新系数的拍次
     //    才吐字节 —— 那是错的：W=10 时每拍进 10 位、最多出 8 位，
@@ -58,7 +68,7 @@ module mldsa_bitpack #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            acc <= {(W+8){1'b0}};
+            acc <= 28'd0;
             nbits <= 5'd0;
             out_byte <= 8'd0;
             out_valid <= 1'b0;
@@ -66,12 +76,12 @@ module mldsa_bitpack #(
             out_valid <= 1'b0;
 
             if (clr) begin
-                acc <= {(W+8){1'b0}};
+                acc <= 28'd0;
                 nbits <= 5'd0;
             end else if (in_valid && in_ready) begin
                 // 新系数拼到高位侧：低位在前的约定就是这一句。
-                acc <= acc | ({{(W+8-W){1'b0}}, in_val[W-1:0]} << nbits);
-                nbits <= nbits + W[4:0];
+                acc <= acc | ({8'd0, masked} << nbits);
+                nbits <= nbits + w;
             end else if (nbits >= 5'd8) begin
                 out_byte  <= acc[7:0];
                 out_valid <= 1'b1;
@@ -100,9 +110,10 @@ module mldsa_polyt1_pack (
     output wire [7:0]  out_byte,
     output wire        out_valid
 );
-    mldsa_bitpack #(.W(10)) u_bp (
-        .clk(clk), .rst_n(rst_n), .clr(clr),
-        .in_val({3'd0, coef}), .in_valid(in_valid), .in_ready(in_ready),
+    // t₁ 的 10 位不随参数集变，w 直接给常量
+    mldsa_bitpack u_bp (
+        .clk(clk), .rst_n(rst_n), .clr(clr), .w(5'd10),
+        .in_val({10'd0, coef}), .in_valid(in_valid), .in_ready(in_ready),
         .out_byte(out_byte), .out_valid(out_valid));
 endmodule
 
@@ -130,35 +141,35 @@ module mldsa_polyt0_pack #(
     // 而这种不一致编译器不会说话（是 Verilator 的 UNUSEDPARAM 抓到的）。
     localparam [12:0] HALF = 13'd1 << (D - 1);
     wire [12:0] shifted = HALF - coef;
-    mldsa_bitpack #(.W(13)) u_bp (
-        .clk(clk), .rst_n(rst_n), .clr(clr),
-        .in_val(shifted), .in_valid(in_valid), .in_ready(in_ready),
+    // t₀ 的 13 位不随参数集变（D 恒为 13），w 直接给常量
+    mldsa_bitpack u_bp (
+        .clk(clk), .rst_n(rst_n), .clr(clr), .w(5'd13),
+        .in_val({7'd0, shifted}), .in_valid(in_valid), .in_ready(in_ready),
         .out_byte(out_byte), .out_valid(out_valid));
 endmodule
 
 // ---------------------------------------------------------------------------
 // s₁/s₂：η=2 时每系数 3 位，η=4 时 4 位；都先换成 η − a
 //
-// 位宽随 η 变，所以做成参数而不是运行时选择：一个 bitstream 里两种参数集
-// 各例化一份，比让位宽变成运行时信号简单得多，也没有额外代价 ——
-// 这几个模块小到可以忽略。
+// ⚠️ η 是**运行时输入**。原来它是编译期参数，注释里的理由是"一个 bitstream 里
+//    两种参数集各例化一份"—— 那个前提已被"运行时可选 44/65/87"推翻：
+//    真按那样做，调用方还得按运行时的 pset 在两份之间选，比直接运行时化更繁。
 // ---------------------------------------------------------------------------
-module mldsa_polyeta_pack #(
-    parameter integer ETA = 2,
-    parameter integer W   = (ETA == 2) ? 3 : 4
-) (
+module mldsa_polyeta_pack (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        clr,
+    input  wire [2:0]  eta,             // 2 或 4
     input  wire signed [12:0] coef,
     input  wire        in_valid,
     output wire        in_ready,
     output wire [7:0]  out_byte,
     output wire        out_valid
 );
-    wire [12:0] shifted = ETA[12:0] - coef;
-    mldsa_bitpack #(.W(W)) u_bp (
-        .clk(clk), .rst_n(rst_n), .clr(clr),
-        .in_val(shifted), .in_valid(in_valid), .in_ready(in_ready),
+    wire [12:0] shifted = {10'd0, eta} - coef;
+    wire [4:0]  w       = (eta == 3'd2) ? 5'd3 : 5'd4;
+    mldsa_bitpack u_bp (
+        .clk(clk), .rst_n(rst_n), .clr(clr), .w(w),
+        .in_val({7'd0, shifted}), .in_valid(in_valid), .in_ready(in_ready),
         .out_byte(out_byte), .out_valid(out_valid));
 endmodule

@@ -35,6 +35,9 @@ async def reset(dut):
     dut.clr.value = 0
     dut.in_valid.value = 0
     dut.coef.value = 0
+    # polyeta 顶层多一个运行时 η 口；另外两个顶层没有，所以要探一下再驱动
+    if hasattr(dut, "eta"):
+        dut.eta.value = 2
     for _ in range(3):
         await RisingEdge(dut.clk)
     dut.rst_n.value = 1
@@ -127,23 +130,34 @@ async def test_polyt0_pack(dut):
 
 @cocotb.test()
 async def test_polyeta_pack(dut):
-    """s₁/s₂：η−a 变换，位宽随 η（2→3 位，4→4 位）"""
+    """s₁/s₂：η−a 变换，位宽随 η（2→3 位，4→4 位）
+
+    ⚠️ η 从**编译期参数**改成了**运行时端口**（运行时选 44/65/87 的前提：
+    s₁/s₂ 的位宽随 η 变）。所以这条用例也跟着改成
+    **同一次仿真里先 η=2 再 η=4**，两种都对上黄金模型 ——
+    这正是"运行时可选"在叶子模块这一层的证据：
+    分两次编译各跑一个 η 是证明不了运行时可切的。
+    """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
-    eta = int(dut.ETA.value)
-    nbytes = 96 if eta == 2 else 128
-    random.seed(0xE7A)
-    for trial in range(3):
-        p = [random.randrange(-eta, eta + 1) for _ in range(N)]
-        got = await pack_poly(dut, p, signed=True)
-        want = polyeta_pack(p, eta)
-        assert len(got) == nbytes, \
-            f"η={eta} 第 {trial} 条：出了 {len(got)} 字节，应当是 {nbytes}"
-        assert got == want, f"η={eta} 第 {trial} 条与黄金模型不一致"
+    for eta in (2, 4):
+        dut.eta.value = eta
+        await RisingEdge(dut.clk)
+        nbytes = 96 if eta == 2 else 128
+        random.seed(0xE7A + eta)
+        for trial in range(3):
+            p = [random.randrange(-eta, eta + 1) for _ in range(N)]
+            got = await pack_poly(dut, p, signed=True)
+            want = polyeta_pack(p, eta)
+            assert len(got) == nbytes, \
+                f"η={eta} 第 {trial} 条：出了 {len(got)} 字节，应当是 {nbytes}"
+            assert got == want, f"η={eta} 第 {trial} 条与黄金模型不一致"
 
-    for p in ([-eta] * N, [eta] * N, [0] * N):
-        got = await pack_poly(dut, p, signed=True)
-        assert got == polyeta_pack(p, eta), f"η={eta} 端点 {p[0]} 打包不对"
+        for p in ([-eta] * N, [eta] * N, [0] * N):
+            got = await pack_poly(dut, p, signed=True)
+            assert got == polyeta_pack(p, eta), f"η={eta} 端点 {p[0]} 打包不对"
 
-    dut._log.info(f"η={eta} 打包：{nbytes} 字节，随机与端点都对上黄金模型")
+        dut._log.info(f"η={eta} 打包：{nbytes} 字节，随机与端点都对上黄金模型")
+
+    dut._log.info("polyeta：同一次仿真里 η=2 与 η=4 都对上 —— 位宽确实是运行时可切的")

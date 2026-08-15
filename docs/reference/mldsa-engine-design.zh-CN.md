@@ -213,7 +213,54 @@ u_ntt（invNTT 结果）→ u_red2(reduce32) → a0 = w0_dout + comb_red
 每拍发一个系数，写回地址与旁路量走 tag，段末排空。预计能把 Sign 也推过 100MHz。
 在那之前，Sign 在 75MHz 下已有 +1.72ns 实打实的余量（改造前只有 +0.001ns）。
 
-## 6. 海绵
+## 6. 运行时选参数集：进度与剩余工作
+
+目标是**同一个 bitstream 运行时选 44/65/87**。做法是自底向上：
+先把叶子模块里"随参数集变"的东西从**编译期参数**改成**运行时端口**，
+调用方暂时仍喂自己的编译期常量（行为不变，九格矩阵可继续当安全网），
+等 engine 落地时再由 engine 用 `pset` 锁存的配置寄存器去驱动。
+
+### 已完成（本轮）
+
+| 模块 | 原来 | 现在 | 验到哪一层 |
+|---|---|---|---|
+| `mldsa_bitpack` | `parameter W`（编译期） | `input [4:0] w`（运行时），端口按最宽 20 位开 | t₁/t₀ 打包对黄金模型 |
+| `mldsa_bitunpack` | `parameter W` | `input [4:0] w` | 随 sign/verify 的九格 |
+| `mldsa_polyeta_pack` | `parameter ETA` | `input [2:0] eta` | **同一次仿真里 η=2 与 η=4 都对上黄金模型** |
+| `mldsa_decompose` | `parameter MODE` | `input mode` | 两种 γ₂ 对向量一致 |
+| `mldsa_make_hint` | `parameter MODE` | `input mode` | 同上 |
+| `mldsa_use_hint` | `parameter MODE` | `input mode` | 同上 |
+
+`mldsa_polyeta_pack` 那条用例是**运行时可切的第一份证据**：
+分两次编译各跑一个 η 证明不了运行时可切，所以那条用例改成一次仿真里连跑两种。
+
+### 剩余工作（未做，按依赖顺序）
+
+1. **`mldsa_sample_in_ball`**：`TAU`/`CTB` 改运行时。
+   注意 `seed` 端口现在是 `CTB*8-1:0`，要固定成 512 位、只读前 `ctb` 字节；
+   这会牵动 sign/verify 里 `ctilde` 寄存器的宽度（同样固定 512 位）。
+2. **`mldsa_expand_mask`**：`GAMMA1`/`CBITS` 改运行时（γ₁ = 2¹⁷ 或 2¹⁹）。
+3. **三个核自己的 K/L/η/τ/ω/β/c̃**：改成 start 时锁存的配置寄存器。
+   K/L 出现的地方是集中的（`KM1`/`LM1` 循环边界、`SK_S1/SK_S2/SK_T0` 段偏移、
+   `PKLEN`），keygen 里约 15 处，sign/verify 各多一些。
+   段偏移里有 `L*PEB` 这类乘法，运行时化之后是一个小乘法器，不是问题。
+4. **`mldsa_engine.v` 组装**：三套 FSM 时分复用一套 NTT / `mldsa_mont_mul_pipe` /
+   采样器 / 打包解包器；对外换成**字节口**（15 位地址的输入缓冲 + 输出缓冲），
+   接口照 `hardware/tb/cocotb/stub_mldsa_engine.v` 那份（它已被 19 条 AXI 用例验过）。
+   ⚠️ 现在三个核的对外形态与 engine 差得很远（keygen 直接吃 256 位 `xi`、
+   sign 用 sk/msg/ctx 三个独立写口与各自的地址空间、都带 `dbg_*` 观察口），
+   这一层不是"包一层壳"，是要把三个核的输入输出全部改走统一字节缓冲。
+
+### 验收怎么做（照协调方的要求）
+
+* 九格矩阵全绿（三 op × 三参数集，各自的 ACVP）——每一步改完都要跑；
+* **运行时切换专用用例**：同一次仿真里先 44 再 65 再 87，各自对上 ACVP。
+  叶子这一层已经有了（`test_polyeta_pack`），核与 engine 那一层还没有；
+* `zeroize` 反证：擦除后逐地址读内部存储必须是 0，照 `mlkem_axi` 的 wipe FSM 验法；
+* OOC 时序不许退步：KeyGen/Verify 保持 MET，Sign 在 75MHz 下 ≥ +1.5ns 余量。
+  合成一个引擎后关键路径会变，**必须重新量**。
+
+## 7. 海绵
 
 引擎自带**一份** `sha3_core`，与 ML-KEM 那份是两份，不跨模块共享。
 Keccak 理论上能共享，但那要跨 AXI 从机仲裁、动到已验证的 ML-KEM 安全边界，

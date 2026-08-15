@@ -69,16 +69,18 @@ module mldsa_expand_mask #(
     // 位解包器（W=CBITS）
     reg  [8:0] n;            // 已收下的系数个数
     wire        bu_ir, bu_ov;
-    wire [CBITS-1:0] bu_val;
+    wire [19:0] bu_val;
     reg         bu_iv;
     wire        bu_or = bu_ov && (n < 9'd256);   // 有系数就抽
-    mldsa_bitunpack #(.W(CBITS)) u_bu (
-        .clk(clk), .rst_n(rst_n), .clr(st == S_IDLE),
+    // 解包器的位宽现在是运行时口；这一层的 CBITS 仍是编译期参数，直接喂常量。
+    // （engine 落地后由 engine 用运行时 pset 驱动，这里只需把口接出去。）
+    mldsa_bitunpack u_bu (
+        .clk(clk), .rst_n(rst_n), .clr(st == S_IDLE), .w(CBITS[4:0]),
         .in_byte(sha_out_data), .in_valid(bu_iv), .in_ready(bu_ir),
         .out_val(bu_val), .out_valid(bu_ov), .out_ready(bu_or));
 
     // 逆变换 y = γ₁ − v，写进存储
-    wire signed [31:0] coeff = G1 - $signed({{(32-CBITS){1'b0}}, bu_val});
+    wire signed [31:0] coeff = G1 - $signed({12'd0, bu_val});
 
     // 只在「解包器要字节 且 还没满 且 不在抽系数」的拍次消费 SHAKE 字节。
     // bu_ir 与 bu_ov 互斥，所以「抽」优先、「喂」其次，两者不同拍。

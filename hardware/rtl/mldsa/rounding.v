@@ -31,80 +31,76 @@ module mldsa_power2round (
     assign a0 = a - $signed({9'd0, t[9:0], 13'd0});
 endmodule
 
-module mldsa_decompose #(
-    parameter integer MODE = 0
-) (
+// ⚠️ γ₂ 的选择 mode 是**运行时输入**，不再是编译期参数。
+//    理由与 pack.v 那边一样：同一个 bitstream 要能运行时选 44/65/87，
+//    而 44 用 γ₂=(q−1)/88、65/87 用 (q−1)/32。
+//    两支的乘法器常量与移位量都不同，所以两支**并行算完再选**，
+//    而不是去 mux 乘法器的操作数 —— 后者省不下什么（17×17 很小），
+//    却要把两套"乘数/偏置/取哪几位"的对应关系揉进一条式子，很容易写错。
+module mldsa_decompose (
+    input  wire               mode,   // 0 = (q−1)/88，1 = (q−1)/32
     input  wire signed [31:0] a,
     output wire signed [31:0] a0,
     output wire        [5:0]  a1
 );
-    localparam signed [31:0] Q        = 32'sd8380417;
-    localparam signed [31:0] GAMMA2X2 = (MODE == 0) ? 32'sd190464 : 32'sd523776;
-    localparam signed [31:0] QHALF    = 32'sd4190208;   // (q−1)/2
+    localparam signed [31:0] Q     = 32'sd8380417;
+    localparam signed [31:0] QHALF = 32'sd4190208;   // (q−1)/2
+    wire signed [31:0] gamma2x2 = mode ? 32'sd523776 : 32'sd190464;
 
     wire [23:0] a1t_full = (a[23:0] + 24'd127) >> 7;
     wire [16:0] a1t      = a1t_full[16:0];
 
-    wire [5:0] a1_raw;
-    generate
-        if (MODE == 0) begin : g_88
-            wire [30:0] scaled = a1t * 17'd11275 + 31'd8388608;
-            wire [6:0]  quot   = scaled[30:24];
-            // 参考实现用 a1 ^= ((43 − a1) >> 31) & a1 把 44 钳到 0；
-            // 硬件里选择器与数据无关，直接写条件形式。
-            assign a1_raw = (quot > 7'd43) ? 6'd0 : quot[5:0];
-        end else begin : g_32
-            wire [27:0] scaled = a1t * 17'd1025 + 28'd2097152;
-            assign a1_raw = {2'd0, scaled[25:22]};
-        end
-    endgenerate
+    // γ₂=(q−1)/88 那一支
+    wire [30:0] scaled88 = a1t * 17'd11275 + 31'd8388608;
+    wire [6:0]  quot88   = scaled88[30:24];
+    // 参考实现用 a1 ^= ((43 − a1) >> 31) & a1 把 44 钳到 0；
+    // 硬件里选择器与数据无关，直接写条件形式。
+    wire [5:0]  a1_88    = (quot88 > 7'd43) ? 6'd0 : quot88[5:0];
 
-    assign a1 = a1_raw;
+    // γ₂=(q−1)/32 那一支
+    wire [27:0] scaled32 = a1t * 17'd1025 + 28'd2097152;
+    wire [5:0]  a1_32    = {2'd0, scaled32[25:22]};
 
-    wire signed [31:0] sub = a - $signed({26'd0, a1}) * GAMMA2X2;
+    assign a1 = mode ? a1_32 : a1_88;
+
+    wire signed [31:0] sub = a - $signed({26'd0, a1}) * gamma2x2;
     // a₀ 超过 (q−1)/2 时减一个 q，折回对称区间
     assign a0 = (sub > QHALF) ? (sub - Q) : sub;
 endmodule
 
-module mldsa_make_hint #(
-    parameter integer MODE = 0
-) (
+module mldsa_make_hint (
+    input  wire               mode,
     input  wire signed [31:0] a0,
     input  wire        [5:0]  a1,
     output wire               hint
 );
-    localparam signed [31:0] GAMMA2 = (MODE == 0) ? 32'sd95232 : 32'sd261888;
+    wire signed [31:0] GAMMA2 = mode ? 32'sd261888 : 32'sd95232;
 
     assign hint = (a0 > GAMMA2) || (a0 < -GAMMA2)
                || ((a0 == -GAMMA2) && (a1 != 6'd0));
 endmodule
 
-module mldsa_use_hint #(
-    parameter integer MODE = 0
-) (
+module mldsa_use_hint (
+    input  wire               mode,
     input  wire signed [31:0] a,
     input  wire               hint,
     output wire        [5:0]  a1_out
 );
     wire signed [31:0] a0;
     wire        [5:0]  a1;
-    mldsa_decompose #(.MODE(MODE)) u_dec (.a(a), .a0(a0), .a1(a1));
+    mldsa_decompose u_dec (.mode(mode), .a(a), .a0(a0), .a1(a1));
 
     wire up = (a0 > 32'sd0);
 
-    generate
-        if (MODE == 0) begin : g_88
-            // 高位在 [0, 44) 上循环
-            wire [5:0] inc = (a1 == 6'd43) ? 6'd0  : (a1 + 6'd1);
-            wire [5:0] dec = (a1 == 6'd0)  ? 6'd43 : (a1 - 6'd1);
-            assign a1_out = !hint ? a1 : (up ? inc : dec);
-        end else begin : g_32
-            // 高位在 [0, 16) 上循环，掩码即可
-            wire [5:0] inc = {2'd0, (a1[3:0] + 4'd1)};
-            wire [5:0] dec = {2'd0, (a1[3:0] - 4'd1)};
-            assign a1_out = !hint ? a1 : (up ? inc : dec);
-        end
-    endgenerate
+    // 高位的循环域随 γ₂ 变：(q−1)/88 时在 [0,44)，(q−1)/32 时在 [0,16)
+    wire [5:0] inc88 = (a1 == 6'd43) ? 6'd0  : (a1 + 6'd1);
+    wire [5:0] dec88 = (a1 == 6'd0)  ? 6'd43 : (a1 - 6'd1);
+    wire [5:0] inc32 = {2'd0, (a1[3:0] + 4'd1)};
+    wire [5:0] dec32 = {2'd0, (a1[3:0] - 4'd1)};
+    wire [5:0] inc   = mode ? inc32 : inc88;
+    wire [5:0] dec   = mode ? dec32 : dec88;
+
+    assign a1_out = !hint ? a1 : (up ? inc : dec);
 endmodule
 
 `default_nettype wire

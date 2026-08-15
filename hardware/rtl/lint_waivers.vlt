@@ -36,6 +36,12 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/mont_reduce.v" -match "*
 // Barrett 约减：乘积右移 26 位后只用低 16 位
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/butterfly.v" -match "*'shifted'*"
 
+// 运行时位宽的打包/解包：掩码 (1<<w)−1 **必须在 21 位里算**，
+// 因为 w 最大取到 20，在 20 位里 (1<<20) 会溢出成 0、掩码变成全 1 的反面。
+// 算完只取低 20 位用，第 20 位按构造恒为 0，本来就不该有读者。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/pack.v"   -match "*'w_mask'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/unpack.v" -match "*'w_mask'*"
+
 // 压缩：折回 [0,q) 的中间量只取低 12 位；乘倒数的积只取高位段；商只取低 D 位
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'norm'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/compress.v" -match "*'prod'*"
@@ -53,7 +59,11 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/ntt_core.v" -match "*'j_
 // 高低位拆分：舍入后的中间量与乘倒数的积都只取其中一段
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'t'*"
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'a1t_full'*"
-lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'scaled'*"
+// γ₂ 改成运行时选之后，原来 generate 里各自叫 'scaled' 的两支变成并列的
+// 'scaled88' / 'scaled32'（两支都算、最后按 mode 选），所以这里分两条列。
+// 现象不变：乘完算满宽度，只取其中一段当商。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'scaled88'*"
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/rounding.v" -match "*'scaled32'*"
 
 // 采样：均匀采样按定义丢掉候选的最高位（t & 0x7FFFFF）；
 //       有界采样的乘法只取高位段（205·t >> 10）

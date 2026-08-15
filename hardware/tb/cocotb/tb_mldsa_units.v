@@ -99,13 +99,15 @@ module tb_mldsa_units (
         .a_out(bfp_ao), .b_out(bfp_bo), .pipe_busy());
 
     mldsa_power2round u_p2r (.a(rnd_a), .a0(p2r_a0), .a1(p2r_a1));
-    mldsa_decompose #(.MODE(0)) u_d88 (.a(rnd_a), .a0(d88_a0), .a1(d88_a1));
-    mldsa_decompose #(.MODE(1)) u_d32 (.a(rnd_a), .a0(d32_a0), .a1(d32_a1));
+    // MODE 已是运行时口：两份例化只是把 mode 各接死成 0/1，
+    // 好让同一条用例仍能一次比完两种 γ₂（这本身也证明了同一份 RTL 两种都对）
+    mldsa_decompose u_d88 (.mode(1'b0), .a(rnd_a), .a0(d88_a0), .a1(d88_a1));
+    mldsa_decompose u_d32 (.mode(1'b1), .a(rnd_a), .a0(d32_a0), .a1(d32_a1));
 
-    mldsa_make_hint #(.MODE(0)) u_mh88 (.a0(mh_a0), .a1(mh_a1), .hint(mh88));
-    mldsa_make_hint #(.MODE(1)) u_mh32 (.a0(mh_a0), .a1(mh_a1), .hint(mh32));
-    mldsa_use_hint  #(.MODE(0)) u_uh88 (.a(uh_a), .hint(uh_hint), .a1_out(uh88));
-    mldsa_use_hint  #(.MODE(1)) u_uh32 (.a(uh_a), .hint(uh_hint), .a1_out(uh32));
+    mldsa_make_hint u_mh88 (.mode(1'b0), .a0(mh_a0), .a1(mh_a1), .hint(mh88));
+    mldsa_make_hint u_mh32 (.mode(1'b1), .a0(mh_a0), .a1(mh_a1), .hint(mh32));
+    mldsa_use_hint  u_uh88 (.mode(1'b0), .a(uh_a), .hint(uh_hint), .a1_out(uh88));
+    mldsa_use_hint  u_uh32 (.mode(1'b1), .a(uh_a), .hint(uh_hint), .a1_out(uh32));
 
     mldsa_rej_uniform u_ru (
         .bytes_in(ru_bytes), .cand(ru_cand), .cand_ok(ru_ok));
