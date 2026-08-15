@@ -130,6 +130,7 @@ module zu3eg_hsm_top (
     // 产物另起名字（zu3eg_hsm_char.bit），免得和产品 bitstream 混在一起。
 `ifdef PQC_CHARACTERIZE
     localparam integer RAW_TAP_EN = 1;
+    localparam [15:0] F_T0_UP = 16'd39462, F_T0_DN = 16'd39331;  // 29 / 28°C
     localparam [15:0] F_T1_UP = 16'd39592, F_T1_DN = 16'd39462;  // 30 / 29°C
     localparam [15:0] F_T2_UP = 16'd39852, F_T2_DN = 16'd39722;  // 32 / 31°C
     localparam [15:0] F_T3_UP = 16'd40113, F_T3_DN = 16'd39983;  // 34 / 33°C
@@ -137,6 +138,7 @@ module zu3eg_hsm_top (
     localparam [15:0] F_OT_ON = 16'd40634, F_OT_OFF = 16'd40374; // 38 / 36°C
 `else
     localparam integer RAW_TAP_EN = 0;
+    localparam [15:0] F_T0_UP = 16'd40243, F_T0_DN = 16'd39592;  // 35 / 30°C
     localparam [15:0] F_T1_UP = 16'd41547, F_T1_DN = 16'd40895;  // 45 / 40°C
     localparam [15:0] F_T2_UP = 16'd42850, F_T2_DN = 16'd42198;  // 55 / 50°C
     localparam [15:0] F_T3_UP = 16'd44153, F_T3_DN = 16'd43501;  // 65 / 60°C
@@ -470,6 +472,7 @@ module zu3eg_hsm_top (
     fan_ctrl #(.PWM_PERIOD(3000),          // 75 MHz / 3000 = 25 kHz
                .STALE_LIMIT(64_000_000),   // 约 0.85 秒没温度就强制满速
                .STUCK_LIMIT(30_000),       // 30000 次采样 ≈ 30 秒读数不变
+               .T0_UP(F_T0_UP), .T0_DN(F_T0_DN),
                .T1_UP(F_T1_UP), .T1_DN(F_T1_DN),
                .T2_UP(F_T2_UP), .T2_DN(F_T2_DN),
                .T3_UP(F_T3_UP), .T3_DN(F_T3_DN),
