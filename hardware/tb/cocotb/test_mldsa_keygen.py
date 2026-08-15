@@ -369,3 +369,98 @@ async def test_pk_and_t0(dut):
         f"{next(i for i in range(len(t0_all)) if got_t0[i] != t0_all[i])}")
 
     dut._log.info("⑥b：pk=ρ‖t₁pack 完整、sk 的 t₀pack 段对上黄金（就差 ⑦ tr）")
+
+
+@cocotb.test()
+async def test_keygen_full(dut):
+    """⑦ + 整体：完整 pk‖sk 逐字节对 mldsa_keygen（已对过 ACVP 的黄金）
+
+    这是 ML-DSA-44 KeyGen 的最终判据 —— tr 段补齐后 sk 完整，整个 pk（1312）
+    和整个 sk（2560）逐字节对上 oracle。任一段错都在这里露出来。
+    """
+    import sys as _s
+    from pathlib import Path as _P
+    _s.path.insert(0, str(_P(__file__).resolve().parents[2] / "model"))
+    from mldsa_oracle import mldsa_keygen as _kg
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+    dut.pk_addr.value = 0
+    dut.sk_addr.value = 0
+
+    xi = bytes([(i * 11 + 2) & 0xFF for i in range(32)])
+    dut.xi.value = int.from_bytes(xi, "little")
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    for _ in range(3_000_000):
+        await RisingEdge(dut.clk)
+        if int(dut.done.value):
+            break
+    else:
+        raise AssertionError("KeyGen 一直没完成")
+    await Timer(1, unit="ns")
+
+    pk_w, sk_w = _kg(xi, "ML-DSA-44")
+    pk = await read_pk(dut, 0, len(pk_w))
+    sk = await read_sk(dut, 0, len(sk_w))
+    assert pk == pk_w, (
+        f"pk 不一致，首个不同在字节 "
+        f"{next(i for i in range(len(pk_w)) if pk[i] != pk_w[i])}")
+    assert sk == sk_w, (
+        f"sk 不一致，首个不同在字节 "
+        f"{next(i for i in range(len(sk_w)) if sk[i] != sk_w[i])}")
+
+    dut._log.info(f"ML-DSA-44 KeyGen 完整通过：pk {len(pk)} 字节、"
+                  f"sk {len(sk)} 字节全部对上黄金")
+
+
+@cocotb.test()
+async def test_keygen_acvp(dut):
+    """整体对 **ACVP 官方向量**（不只是 oracle）：ML-DSA-44 一条 KAT
+
+    比 oracle 更硬 —— oracle 和 RTL 可能共享某个相同的错误假设，而 ACVP
+    的 pk/sk 是外部权威。用 KAT 的 seed 驱动 RTL，对 KAT 的 pk/sk。
+    """
+    import sys as _s
+    from pathlib import Path as _P
+    _s.path.insert(0, str(_P(__file__).resolve().parents[2] / "model"))
+    from mldsa_oracle import load_kat as _lk
+
+    recs = _lk(limit_per_alg=1)
+    if not recs:
+        raise AssertionError("找不到 mldsa_keygen.kat")
+    rec = next((r for r in recs if r.get("alg") == "ML-DSA-44"), None)
+    if rec is None:
+        raise AssertionError("KAT 里没有 ML-DSA-44")
+    seed = bytes.fromhex(rec["seed"])
+    pk_w = bytes.fromhex(rec["pk"])
+    sk_w = bytes.fromhex(rec["sk"])
+    assert len(seed) == 32
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+    dut.pk_addr.value = 0
+    dut.sk_addr.value = 0
+    dut.xi.value = int.from_bytes(seed, "little")
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    for _ in range(3_000_000):
+        await RisingEdge(dut.clk)
+        if int(dut.done.value):
+            break
+    else:
+        raise AssertionError("KeyGen 一直没完成")
+    await Timer(1, unit="ns")
+
+    pk = await read_pk(dut, 0, len(pk_w))
+    sk = await read_sk(dut, 0, len(sk_w))
+    assert pk == pk_w, (
+        f"pk 与 ACVP 不一致，首个不同在字节 "
+        f"{next(i for i in range(len(pk_w)) if pk[i] != pk_w[i])}")
+    assert sk == sk_w, (
+        f"sk 与 ACVP 不一致，首个不同在字节 "
+        f"{next(i for i in range(len(sk_w)) if sk[i] != sk_w[i])}")
+
+    dut._log.info("ML-DSA-44 KeyGen 对上 ACVP 官方向量：pk/sk 逐字节一致")

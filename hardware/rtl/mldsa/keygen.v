@@ -70,6 +70,7 @@ module mldsa_keygen (
         S_A_GEN = 5'd13, S_A_WAIT = 5'd14, S_MAC = 5'd15,
         S_RED = 5'd16, S_INV_GO = 5'd17, S_INV_ST = 5'd18, S_INV_WB = 5'd19,
         S_T_PACK = 5'd20,
+        S_TR_ABS = 5'd21, S_TR_GAP = 5'd22, S_TR_FLU = 5'd23, S_TR_SQ = 5'd24,
         S_FIN   = 5'd8;
 
     reg [4:0] st;
@@ -182,6 +183,7 @@ module mldsa_keygen (
     // ================= sk 输出缓冲 =================
     // 布局：ρ(32)‖K(32)‖tr(64)‖s₁pack(384)‖s₂pack(384)‖t₀pack(1664) = 2560
     localparam integer SK_S1 = 128, SK_S2 = SK_S1 + L*96, SK_T0 = SK_S2 + K*96;
+    localparam integer PKLEN = 32 + K*320;   // 1312
     reg         sk_we;  reg [11:0] sk_waddr; reg [7:0] sk_din;
     ram_dp #(.DW(8), .AW(12)) u_sk (
         .clk(clk), .a_we(sk_we), .a_addr(sk_waddr), .a_din(sk_din), .a_dout(),
@@ -206,8 +208,9 @@ module mldsa_keygen (
     // ================= pk 输出缓冲 =================
     // 布局：ρ(32)‖t₁pack(k*320=1280) = 1312
     reg         pk_we;  reg [11:0] pk_waddr; reg [7:0] pk_din;
+    wire [7:0] pk_adout;
     ram_dp #(.DW(8), .AW(12)) u_pk (
-        .clk(clk), .a_we(pk_we), .a_addr(pk_waddr), .a_din(pk_din), .a_dout(),
+        .clk(clk), .a_we(pk_we), .a_addr(pk_waddr), .a_din(pk_din), .a_dout(pk_adout),
         .b_we(1'b0), .b_addr(pk_addr), .b_din(8'd0), .b_dout(pk_data));
 
     // ---- ⑥b：caddq → power2round → t₁(pk) / t₀(sk) ----
@@ -263,6 +266,7 @@ module mldsa_keygen (
     reg [2:0] vj;             // 第几条多项式（j）
     reg [2:0] vi;             // 第几个 i（MAC 段）
     reg       s2phase;        // 在做 s₂ 而不是 s₁
+    reg [11:0] obyte;         // tr 阶段吸收 pk 的字节指针
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -271,7 +275,7 @@ module mldsa_keygen (
             nt_lowseen <= 1'b0;
             vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0; nt_inv <= 1'b0;
             pe_ptr <= SK_S1[11:0];
-            p1_ptr <= 12'd32; p0_ptr <= SK_T0[11:0];
+            p1_ptr <= 12'd32; p0_ptr <= SK_T0[11:0]; obyte <= 12'd0;
             et_start <= 1'b0; et_nonce <= 16'd0;
             nt_start <= 1'b0;
             fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
@@ -472,9 +476,40 @@ module mldsa_keygen (
                 else if (p1_ir && p0_ir) begin
                     if (cnt == 9'd255) begin
                         cnt <= 9'd0; ph <= 1'b0;
-                        if (vi == 3'd3) begin vi <= 3'd0; st <= S_FIN; end
-                        else begin vi <= vi + 3'd1; st <= S_T_PACK; end
+                        if (vi == 3'd3) begin
+                            vi <= 3'd0; obyte <= 12'd0; ph <= 1'b0;
+                            owner <= OWN_FSM;
+                            fsm_sr <= RATE256; fsm_su <= SUF;
+                            fsm_ss <= 1'b1;
+                            st <= S_TR_ABS;
+                        end else begin vi <= vi + 3'd1; st <= S_T_PACK; end
                     end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑦ tr = H(pk)，填 sk[64..127] ----------
+            // 吸收整个 pk（PKLEN=1312 字节，用 12 位 obyte）。pk 缓冲是同步读，
+            // 所以 ph=0 摆地址、ph=1 数据到位才发。
+            S_TR_ABS: begin
+                if (!ph) begin
+                    ph <= 1'b1;              // 这拍摆 pk 读地址（组合里）
+                end else begin
+                    fsm_siv <= 1'b1;
+                    fsm_sid <= pk_adout;     // 同步读，已就绪
+                    if (fsm_siv && sha_in_ready) begin
+                        fsm_siv <= 1'b0;
+                        if (obyte == PKLEN[11:0] - 12'd1) st <= S_TR_GAP;
+                        else begin obyte <= obyte + 12'd1; ph <= 1'b0; end
+                    end
+                end
+            end
+            S_TR_GAP: st <= S_TR_FLU;
+            S_TR_FLU: begin fsm_sif <= 1'b1; cnt <= 9'd0; st <= S_TR_SQ; end
+            S_TR_SQ: begin
+                fsm_sor <= 1'b1;
+                if (sha_out_valid) begin
+                    if (cnt == 9'd63) begin fsm_sor <= 1'b0; st <= S_FIN; end
+                    else cnt <= cnt + 9'd1;
                 end
             end
 
@@ -519,6 +554,12 @@ module mldsa_keygen (
                 ac_we = 1'b1; ac_waddr = {vi[1:0], cnt[7:0]};
                 ac_din = nt_rdata + s2_dout;
             end
+        end
+
+        // ⑦ tr：吸收阶段 pk 读地址 = obyte；挤压阶段写 sk[64+cnt]
+        if (st == S_TR_ABS) pk_waddr = obyte;
+        if (st == S_TR_SQ && sha_out_valid) begin
+            sk_we = 1'b1; sk_waddr = 12'd64 + {5'd0, cnt[6:0]}; sk_din = sha_out_data;
         end
 
         // H 挤压：ρ → sk[0..31] 且 → pk[0..31]，K → sk[32..63]（ρ' 不进）

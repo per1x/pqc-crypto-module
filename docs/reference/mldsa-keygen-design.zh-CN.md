@@ -1,6 +1,8 @@
-# ML-DSA KeyGen 顶层 FSM —— 设计与已知的坑
+| **KeyGen 顶层 FSM** | **完成（ML-DSA-44）**：七段逐段验 + 整体对 ACVP `ML-DSA-keyGen-FIPS204`（`test_mldsa_keygen`，8 用例） | ✅ pk/sk 逐字节对上官方向量 |
 
-本文记录 ML-DSA KeyGen 硬核的设计。**RTL 尚未完成**：算子、NTT、三种打包、
+本文记录 ML-DSA KeyGen 硬核的设计。**ML-DSA-44 已完成并对上 ACVP 官方向量**（2025-08 增量搭建，七段逐段验）；65/87 参数集待参数化。原始规划保留如下。
+
+（历史）算子、NTT、三种打包、
 两条采样器都已完成并对上黄金模型（见 `hardware/rtl/mldsa/`），
 缺的只有把它们串起来的顶层 FSM。
 
