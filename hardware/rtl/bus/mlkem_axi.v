@@ -108,7 +108,7 @@ module mlkem_axi #(
                      A_MODE    = 4'h3, A_INDATA = 4'h4, A_INPTR  = 4'h5,
                      A_OUTDATA = 4'h6, A_OUTLEN = 4'h7, A_OUTRD  = 4'h8,
                      A_VIOL    = 4'h9, A_PARAM0 = 4'hA,
-                     A_XBAR_VIOL = 4'hB, A_KEYSTAT = 4'hC;
+                     A_XBAR_VIOL = 4'hB, A_KEYSTAT = 4'hC, A_KEYPSET = 4'hD;
 
     localparam [1:0] M_KEYGEN = 2'd0, M_ENCAPS = 2'd1, M_DECAPS = 2'd2;
 
@@ -181,13 +181,18 @@ module mlkem_axi #(
     // 现在 dk 可以整个留在片内：KeyGen 把它写进下面这块 BRAM，只交出 ek；
     // Decaps 按槽号从这里取。**dk 一个字节都不经过总线。**
     //
-    // 【4 个槽、每槽 4096 字节】
+    // 【16 个槽、每槽 4096 字节】
     // dk 最大 3168 字节（ML-KEM-1024），跨度取 4096 是为了寻址就是拼接
-    // （{slot, offset}），不用乘法器。16 KB = 4 个 BRAM36，本设计现在只用了
-    // 216 片里的 15.5 片，这点开销买"私钥不出硬件"很划算。
-    reg         dkv_we;   reg [13:0] dkv_waddr; reg [7:0] dkv_din;
-    reg  [13:0] dkv_raddr; wire [7:0] dkv_dout;
-    ram_dp #(.DW(8), .AW(14)) u_dkvault (
+    // （{slot, offset}），不用乘法器。64 KB = 16 个 BRAM36。
+    //
+    // 槽数从 4 加到 16 是上层逼出来的：PKCS#11 的用例会连续生成很多把密钥，
+    // 4 个槽第 5 把就满，而"硬件生成失败不回退软件"是条硬规矩，
+    // 于是整条链挂掉（实测 81/254 条断言失败）。加槽是这里唯一的解 ——
+    // 上层不该为了迁就硬件容量去放宽那条规矩。
+    // 代价是 BRAM 从 19.5 片涨到约 35 片，216 片里仍然宽裕。
+    reg         dkv_we;   reg [15:0] dkv_waddr; reg [7:0] dkv_din;
+    reg  [15:0] dkv_raddr; wire [7:0] dkv_dout;
+    ram_dp #(.DW(8), .AW(16)) u_dkvault (
         .clk(clk),
         .a_we(dkv_we), .a_addr(dkv_waddr), .a_din(dkv_din), .a_dout(),
         .b_we(1'b0),   .b_addr(dkv_raddr), .b_din(8'd0),    .b_dout(dkv_dout));
@@ -195,8 +200,8 @@ module mlkem_axi #(
     // 每个槽：有没有装东西 + 装的是哪个参数集。
     // pset 必须跟着存 —— Decaps 的长度由它算，如果软件报一个和存进去时不同的
     // pset，长度就全错，而错法是"喂不满、永远等下去"，最难查的那种。
-    reg [3:0]  dkv_valid;
-    reg [7:0]  dkv_pset;      // 每槽 2 位
+    reg [15:0] dkv_valid;
+    reg [31:0] dkv_pset;      // 每槽 2 位，16 槽正好占满一个寄存器
 
     // 一次性闩锁：置上之后 KeyGen **再也不会**把 dk 送到 OUT_DATA，
     // 无论 MODE 里怎么写。只有复位能清掉它（zeroize 都不行 —— zeroize 是
@@ -212,19 +217,22 @@ module mlkem_axi #(
     // MODE 寄存器多出来的三样（这一批加的）：
     //   [4]   DK_TO_SLOT   KeyGen：dk 写进金库，**不**从 OUT_DATA 出来
     //   [5]   DK_FROM_SLOT Decaps：dk 从金库取，软件只需要送 c
-    //   [7:6] SLOT         用哪个槽
+    //   [9:6] SLOT         用哪个槽（16 个）
     reg        dk_to_slot, dk_from_slot;
-    reg [1:0]  slot;
+    reg [3:0]  slot;
     reg [12:0] in_ptr, out_len, out_rd;
     reg [13:0] ocnt;        // 本次运行核已经吐出的字节总数（含进金库的那部分）
     reg        zero_pulse;
 
     // ---- BRAM 擦除机 ----
     reg        wiping;
-    // 14 位：三块 BRAM 里最大的是 16 KB 的私钥金库。两块 8 KB 的缓冲
-    // 只用低 13 位，于是它们会被写两遍 —— 写两遍 0 和写一遍 0 没有区别，
+    // 16 位：三块 BRAM 里最大的是 64 KB 的私钥金库。两块 8 KB 的缓冲
+    // 只用低 13 位，于是它们会被写好几遍 —— 写几遍 0 和写一遍 0 没有区别，
     // 为此再加一个计数器不值得。
-    reg [13:0] wipe_addr;
+    //
+    // ⚠️ 擦除现在要 65536 拍（@75 MHz 约 874 µs），是加槽的直接代价。
+    // 软件轮询 WIPING 的上限要跟着放大，否则会误判成"擦除卡住"。
+    reg [15:0] wipe_addr;
     reg        zall_d;
 
     // ---- 非法参数 ----
@@ -468,13 +476,13 @@ module mlkem_axi #(
             f_bvalid <= 1'b0; f_bresp <= RESP_OKAY;
             f_rvalid <= 1'b0; f_rresp <= RESP_OKAY; f_rdata <= 32'd0;
             mode <= 2'd0; pset <= 2'd1;
-            dk_to_slot <= 1'b0; dk_from_slot <= 1'b0; slot <= 2'd0;
-            dkv_valid <= 4'd0; dkv_pset <= 8'd0;
+            dk_to_slot <= 1'b0; dk_from_slot <= 1'b0; slot <= 4'd0;
+            dkv_valid <= 16'd0; dkv_pset <= 32'd0;
             // 复位是唯一能把闩锁放开的事件。
             dk_lock <= 1'b0;
             in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0; ocnt <= 14'd0;
             zero_pulse <= 1'b0;
-            wiping <= 1'b0; wipe_addr <= 14'd0; zall_d <= 1'b0;
+            wiping <= 1'b0; wipe_addr <= 16'd0; zall_d <= 1'b0;
             param_err <= 1'b0;
             state <= S_IDLE; pre_cnt <= 7'd0; fp <= 13'd0; kickdly <= 2'd0;
             seed_a <= 256'd0; seed_b <= 256'd0;
@@ -491,12 +499,12 @@ module mlkem_axi #(
             zall_d <= zeroize_all;
             if (zeroize_all && !zall_d) begin
                 wiping    <= 1'b1;
-                wipe_addr <= 14'd0;
+                wipe_addr <= 16'd0;
             end else if (wiping) begin
                 // 最后一个地址那一拍 ina_we 仍为高（组合自 wiping），
                 // 所以 0x1FFF 也真的被写了 0，一个字节都不留。
-                if (wipe_addr == 14'h3FFF) wiping <= 1'b0;
-                else                       wipe_addr <= wipe_addr + 14'd1;
+                if (wipe_addr == 16'hFFFF) wiping <= 1'b0;
+                else                       wipe_addr <= wipe_addr + 16'd1;
             end
 
             if (zeroize_all) begin
@@ -505,7 +513,7 @@ module mlkem_axi #(
                 ocnt   <= 14'd0;
                 // 槽的有效位跟着 BRAM 一起作废。**dk_lock 不在这里** ——
                 // 它是一次性的方向，擦秘密不等于撤防线。
-                dkv_valid <= 4'd0; dkv_pset <= 8'd0;
+                dkv_valid <= 16'd0; dkv_pset <= 32'd0;
                 seed_a <= 256'd0; seed_b <= 256'd0;
                 state  <= S_IDLE; run_done <= 1'b0;
                 param_err <= 1'b0;
@@ -587,7 +595,7 @@ module mlkem_axi #(
                         mode <= wr_data[1:0]; pset <= wr_data[3:2];
                         dk_to_slot   <= wr_data[4];
                         dk_from_slot <= wr_data[5];
-                        slot         <= wr_data[7:6];
+                        slot         <= wr_data[9:6];
                     end
                     A_INDATA: if (state == S_IDLE) in_ptr <= in_ptr + 13'd1;
                     default: ;
@@ -614,8 +622,10 @@ module mlkem_axi #(
                 A_XBAR_VIOL: f_rdata <= xbar_viol_count;
                 // [3:0] 哪些槽装了东西；[11:4] 每槽 2 位的参数集；
                 // [16] 私钥外泄闩锁（1 = KeyGen 再也不会把 dk 交出来）。
-                A_KEYSTAT: f_rdata <= {15'd0, dk_lock, 4'd0,
-                                       dkv_pset, dkv_valid};
+                // 16 个槽之后 pset 要 32 位，一个寄存器装不下 valid+pset+lock，
+                // 所以拆两个：KEYSTAT 放有效位与闩锁，KEYPSET 放每槽的参数集。
+                A_KEYSTAT: f_rdata <= {15'd0, dk_lock, dkv_valid};
+                A_KEYPSET: f_rdata <= dkv_pset;
                 A_PARAM0:  f_rdata <= 32'h2000_2000;    // 两块 8 KB 缓冲
                 default:   f_rdata <= 32'd0;
                 endcase

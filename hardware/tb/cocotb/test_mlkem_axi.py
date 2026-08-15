@@ -346,10 +346,11 @@ def _mem_nonzero(mem):
     return bad, first
 
 
-async def _wait_wipe(dut, limit=9000):
-    # 上限从 4000 提到 9000：加了 16 KB 的片内私钥金库之后，擦除机要走
-    # 16384 拍（原来是 8192）—— 三块 BRAM 里最大的那块决定节拍数。
-    # 每次轮询是一笔 AXI 读，占好几拍，所以 9000 次轮询足够覆盖。
+async def _wait_wipe(dut, limit=40000):
+    # 上限随金库一起放大：金库从 16 KB 加到 64 KB（4→16 槽）之后，擦除机要走
+    # 65536 拍 —— 三块 BRAM 里最大的那块决定节拍数。每次轮询是一笔 AXI 读、
+    # 占好几拍，所以 40000 次轮询足够覆盖。
+    # 这个上限被动过两次了，每次都是加金库容量的直接代价，不是偶然。
     """等 WIPING 落下来，顺便断言它确实曾经高过
 
     用软件可见的 STATUS 位来等，而不是偷看内部信号 —— 板上程序能依赖的
@@ -456,7 +457,11 @@ async def test_tamper_wipes_bram_and_blocks_output(dut):
 
     # 等擦完（tamper 后总线关了，只能看内部的 wiping —— 这一处是唯一
     # 无法从软件侧观测的，因为软件侧此时已经被整体拒绝了）
-    for _ in range(20000):
+    # ⚠️ 这个循环是**逐时钟周期**轮询（不像别处是经 AXI 读 STATUS，
+    # 一次读要好几拍）。所以上限必须大于擦除的拍数本身：金库 64 KB →
+    # 65536 拍。上一版填 60000 就差在这里 —— 比 65536 少，
+    # 于是报"WIPING 一直没落下来"，看着像触发方式写错了，其实只是没等够。
+    for _ in range(80000):
         await RisingEdge(dut.clk)
         if not int(dut.wiping.value):
             break
@@ -647,6 +652,7 @@ async def test_underfill_refused_and_z_not_stale(dut):
 # 片内私钥金库：dk 从头到尾不越过总线
 # ============================================================================
 KEYSTAT = 0x30
+KEYPSET = 0x34          # 16 槽之后 pset 单独一个寄存器
 C_DK_LOCK = 1 << 4          # CTRL 的一次性闩锁
 M_DK_TO_SLOT = 1 << 4       # MODE：KeyGen 把 dk 写进金库
 M_DK_FROM_SLOT = 1 << 5     # MODE：Decaps 从金库取 dk
@@ -656,7 +662,7 @@ def mode_word(mode, name, *, to_slot=False, from_slot=False, slot=0):
     return (mode | (PSET[name] << 2)
             | (M_DK_TO_SLOT if to_slot else 0)
             | (M_DK_FROM_SLOT if from_slot else 0)
-            | (slot << 6))
+            | (slot << 6))   # SLOT 现在是 4 位 [9:6]
 
 
 async def run_raw(dut, mword, payload, limit=400_000):
@@ -713,7 +719,8 @@ async def test_dk_stays_on_chip(dut):
 
     ks, _ = await rd(dut, KEYSTAT)
     assert ks & (1 << 2), f"槽 2 没被标成有效：KEYSTAT=0x{ks:08x}"
-    assert (ks >> (4 + 2 * 2)) & 3 == PSET[name], "槽里记的参数集不对"
+    kp, _ = await rd(dut, KEYPSET)
+    assert (kp >> (2 * 2)) & 3 == PSET[name], "槽里记的参数集不对"
 
     # ---- Encaps（用刚拿到的 ek）----
     m = bytes([0x33] * 32)

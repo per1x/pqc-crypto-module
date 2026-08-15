@@ -122,11 +122,12 @@
 #define MKC_INRST 4u
 #define MKC_DKLOCK 0x10u                 /* CTRL[4]：一次性闩锁 */
 #define MK_KEYSTAT (S_MLKEM + 0x30)
+#define MK_KEYPSET (S_MLKEM + 0x34)
 /* MODE 里控制片内私钥金库的三个字段 */
 #define MKM_DK_TO_SLOT   0x10u           /* KeyGen：dk 进金库，不出总线 */
 #define MKM_DK_FROM_SLOT 0x20u           /* Decaps：dk 从金库取 */
-#define MKM_SLOT(s)      (((s) & 3u) << 6)
-#define PL_KEY_SLOTS     4               /* 金库有 4 个槽 */
+#define MKM_SLOT(s)      (((s) & 15u) << 6)   /* MODE[9:6]，16 个槽 */
+#define PL_KEY_SLOTS     16              /* 金库有 16 个槽（64 KB / 4096） */
 #define MKS_DONE  (1u << 1)
 #define MKS_PARER (1u << 5)
 
