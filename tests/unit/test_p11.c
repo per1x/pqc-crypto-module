@@ -71,8 +71,12 @@ int main(void)
 	CHECK(F->C_CreateObject != NULL);
 	CHECK(F->C_SignUpdate != NULL);
 	CHECK(F->C_SignFinal != NULL);
+	/* CKM_AES_GCM 认证加解密（DEM）已实现，2.40 表里也应可达 */
+	CHECK(F->C_EncryptInit != NULL);
+	CHECK(F->C_Encrypt != NULL);
+	CHECK(F->C_DecryptInit != NULL);
+	CHECK(F->C_Decrypt != NULL);
 	/* 未实现的接口仍必须是 NULL 表项，而不是填一个返回错误的桩 */
-	CHECK(F->C_Encrypt == NULL);
 	CHECK(F->C_DeriveKey == NULL);
 
 	TCASE("C_GetInterface：v3.2 表里才有 Encapsulate（2.40 表结构根本没这个字段）");
@@ -136,8 +140,8 @@ int main(void)
 		CK_MECHANISM_TYPE mechs[8];
 		CK_ULONG mn = 8;
 		CKCHECK(F->C_GetMechanismList(0, mechs, &mn), CKR_OK);
-		CHECK_EQ_INT(mn, 4);
-		int has_dsa = 0, has_kem = 0;
+		CHECK_EQ_INT(mn, 5);
+		int has_dsa = 0, has_kem = 0, has_gcm = 0;
 		for (CK_ULONG i = 0; i < mn; i++) {
 			if (mechs[i] == CKM_ML_DSA) {
 				has_dsa = 1;
@@ -145,13 +149,20 @@ int main(void)
 			if (mechs[i] == CKM_ML_KEM) {
 				has_kem = 1;
 			}
+			if (mechs[i] == CKM_AES_GCM) {
+				has_gcm = 1;
+			}
 		}
 		CHECK(has_dsa);
 		CHECK(has_kem);
+		CHECK(has_gcm);
 		CK_MECHANISM_INFO mi;
 		CKCHECK(F->C_GetMechanismInfo(0, CKM_ML_DSA, &mi), CKR_OK);
 		CHECK((mi.flags & CKF_SIGN) != 0);
 		CHECK((mi.flags & CKF_VERIFY) != 0);
+		CKCHECK(F->C_GetMechanismInfo(0, CKM_AES_GCM, &mi), CKR_OK);
+		CHECK((mi.flags & CKF_ENCRYPT) != 0);
+		CHECK((mi.flags & CKF_DECRYPT) != 0);
 		CKCHECK(F->C_GetMechanismInfo(0, CKM_RSA_PKCS, &mi), CKR_MECHANISM_INVALID);
 	}
 
@@ -632,6 +643,75 @@ int main(void)
 			CHECK(memcmp(vc, va, 32) != 0);
 			ct[5] ^= 0x01;
 			CKCHECK(F->C_DestroyObject(sk1, ssC), CKR_OK);
+		}
+
+		TCASE("★ KEM-DEM：C_Encrypt(CKM_AES_GCM,封装秘密) → C_Decrypt(解封秘密) 还原一致");
+		{
+			/* 标准组合、不用私有机制：封装端拿 ssA 做 GCM 加密，
+			 * 解封端拿 ssB（解封装得到、经硬件路径）做 GCM 解密。
+			 * ssA==ssB 已在上面逐字节验过，这里验 DEM 这一半接得上。 */
+			CK_BYTE iv[12] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+			CK_BYTE aad[] = "pqc-hsm KEM-DEM";
+			CK_GCM_PARAMS gp = { iv, sizeof(iv), sizeof(iv) * 8,
+			                     aad, sizeof(aad) - 1, 128 };
+			CK_MECHANISM gmech = { CKM_AES_GCM, &gp, sizeof(gp) };
+			CK_BYTE pt[] = "post-quantum public-key encryption over PKCS#11";
+			CK_ULONG ptlen = sizeof(pt) - 1;
+
+			/* 加密：先问长度，再算。输出 = 密文 ‖ tag(16) */
+			CKCHECK(F->C_EncryptInit(sk1, &gmech, ssA), CKR_OK);
+			CK_ULONG blen = 0;
+			CKCHECK(F->C_Encrypt(sk1, pt, ptlen, NULL, &blen), CKR_OK);
+			CHECK_EQ_INT(blen, ptlen + 16);
+			CK_BYTE blob[128];
+			blen = sizeof(blob);
+			CKCHECK(F->C_Encrypt(sk1, pt, ptlen, blob, &blen), CKR_OK);
+			CHECK_EQ_INT(blen, ptlen + 16);
+
+			/* 解密：用解封端的秘密 ssB，还原必须逐字节一致 */
+			CKCHECK(F->C_DecryptInit(sk1, &gmech, ssB), CKR_OK);
+			CK_BYTE back[128];
+			CK_ULONG rlen = sizeof(back);
+			CKCHECK(F->C_Decrypt(sk1, blob, blen, back, &rlen), CKR_OK);
+			CHECK_EQ_INT(rlen, ptlen);
+			CHECK_EQ_MEM(back, pt, ptlen);
+
+			/* 反证 1：改一个密文字节 → 认证失败，不吐明文 */
+			blob[0] ^= 0x01;
+			CKCHECK(F->C_DecryptInit(sk1, &gmech, ssB), CKR_OK);
+			rlen = sizeof(back);
+			CKCHECK(F->C_Decrypt(sk1, blob, blen, back, &rlen),
+			        CKR_ENCRYPTED_DATA_INVALID);
+			blob[0] ^= 0x01;
+
+			/* 反证 2：改 tag 最后一字节 → 同样拒绝 */
+			blob[blen - 1] ^= 0x80;
+			CKCHECK(F->C_DecryptInit(sk1, &gmech, ssB), CKR_OK);
+			rlen = sizeof(back);
+			CKCHECK(F->C_Decrypt(sk1, blob, blen, back, &rlen),
+			        CKR_ENCRYPTED_DATA_INVALID);
+			blob[blen - 1] ^= 0x80;
+
+			/* 反证 3：改 AAD → 认证失败（AAD 参与 tag 计算却不在密文里）*/
+			CK_BYTE aad2[] = "pqc-hsm KEM-DEN";   /* 末字符不同 */
+			CK_GCM_PARAMS gp2 = { iv, sizeof(iv), sizeof(iv) * 8,
+			                      aad2, sizeof(aad2) - 1, 128 };
+			CK_MECHANISM gmech2 = { CKM_AES_GCM, &gp2, sizeof(gp2) };
+			CKCHECK(F->C_DecryptInit(sk1, &gmech2, ssB), CKR_OK);
+			rlen = sizeof(back);
+			CKCHECK(F->C_Decrypt(sk1, blob, blen, back, &rlen),
+			        CKR_ENCRYPTED_DATA_INVALID);
+
+			/* 参数校验：非会话密钥对象、缺参数、tag 位数非法都该被拒 */
+			CKCHECK(F->C_EncryptInit(sk1, &gmech, kpub), CKR_KEY_HANDLE_INVALID);
+			CK_MECHANISM noparm = { CKM_AES_GCM, NULL, 0 };
+			CKCHECK(F->C_EncryptInit(sk1, &noparm, ssA), CKR_MECHANISM_PARAM_INVALID);
+			CK_GCM_PARAMS bad = { iv, sizeof(iv), sizeof(iv) * 8, NULL, 0, 40 };
+			CK_MECHANISM badm = { CKM_AES_GCM, &bad, sizeof(bad) };
+			CKCHECK(F->C_EncryptInit(sk1, &badm, ssA), CKR_MECHANISM_PARAM_INVALID);
+			/* 没 Init 就 Encrypt */
+			CK_ULONG z = sizeof(blob);
+			CKCHECK(F->C_Encrypt(sk1, pt, ptlen, blob, &z), CKR_OPERATION_NOT_INITIALIZED);
 		}
 
 		TCASE("共享秘密默认 sensitive：不给 EXTRACTABLE 时 CKA_VALUE 必须拒绝");

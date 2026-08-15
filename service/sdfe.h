@@ -106,6 +106,13 @@ int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
 int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
                  const uint8_t *in, uint8_t *out);
 
+/* ---- 后量子公钥加解密（KEM-DEM）----
+ * 用公钥加密任意长度数据。ML-KEM 只封装 32 字节共享秘密，加不了任意数据，
+ * 所以按标准 KEM-DEM 组合：Encaps 出共享秘密（KEM，硬件，dk 留片内），
+ * 再用它做带认证的对称加密（DEM）。原型、blob 线格式与「哪一半在硬件、
+ * 哪一半在软件」的诚实边界见 sdfe_pkenc.h。 */
+#include "sdfe_pkenc.h"
+
 const char *SDFE_StrError(int rv);
 
 #ifdef __cplusplus

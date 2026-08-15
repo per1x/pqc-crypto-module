@@ -46,6 +46,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include <openssl/evp.h>   /* DEM 的 AES-GCM（软件，见 C_EncryptInit 上方的诚实口径）*/
+
 #define P11_MANUFACTURER "pqc-hsm prototype"
 #define P11_LIBRARY_DESC "pqc-hsm PKCS#11 v3.2 front-end"
 #define P11_MODEL        "pqc-hsm-sw"
@@ -131,6 +133,24 @@ static int buf_append(p11_buf_t *b, const uint8_t *d, size_t n)
 	return 0;
 }
 
+/* C_EncryptInit/C_DecryptInit 的 AEAD 上下文（CKM_AES_GCM）。
+ * key 是会话密钥对象句柄（带 SECRET_BIT），运算时才取出字节；iv/aad/tag 参数
+ * 在 Init 时拷进来，单次 C_Encrypt/C_Decrypt 用掉。aad 变长，malloc 一份。
+ *
+ * 无需清零：本结构体不含密钥材料。key 是对象句柄（SECRET_BIT|序号），
+ * 真正的密钥字节始终留在 p11_secret_t 里、由 secrets_drop_owner 清零；
+ * iv/aad/tag 都是 GCM 的公开参数，明文/密文也从不落进这里。销毁走
+ * aead_ctx_reset（free 掉 malloc 的 aad 并整体归零），会话拆除时调用。 */
+typedef struct {
+	int              active;
+	CK_OBJECT_HANDLE key;
+	uint8_t          iv[16];
+	size_t           ivlen;
+	uint8_t         *aad;
+	size_t           aadlen;
+	size_t           taglen;   /* 字节 */
+} p11_aead_ctx;
+
 /* 每个会话的查找游标与运算上下文 */
 typedef struct {
 	hsm_session_t sess;
@@ -147,6 +167,8 @@ typedef struct {
 	CK_OBJECT_HANDLE sign_key, verify_key;
 	/* C_SignUpdate / C_VerifyUpdate 的累积缓冲（理由见 C_SignUpdate 上方） */
 	p11_buf_t     sign_acc, verify_acc;
+	/* C_EncryptInit / C_DecryptInit（CKM_AES_GCM）—— 加解密可各自活跃 */
+	p11_aead_ctx  enc, dec;
 } p11_session_t;
 
 #define MAX_P11_SESSIONS 32
@@ -214,6 +236,88 @@ static void secrets_drop_owner(CK_SESSION_HANDLE owner)
 			pqc_secure_zero(&g_secrets[i], sizeof(g_secrets[i]));
 		}
 	}
+}
+
+/* ---- AEAD（CKM_AES_GCM，DEM 用）----------------------------------------
+ *
+ * 【诚实口径：这一步在软件，不在 FPGA】
+ * 这个 GCM 用 OpenSSL 在本进程里算，密钥是会话密钥对象里的字节（AES-128/192/256）。
+ * KEM-DEM 的场景下，这个密钥就是 ML-KEM 解封装出来的共享秘密 —— 解封装那步
+ * （私钥 dk）在 FPGA 片内金库完成，dk 一步不出硬件；到了 DEM 这步，共享秘密
+ * 已经是一个普通对称密钥，用它做认证加密是软件的活。这与 sdfe_pkenc 的边界
+ * 一致，不把它含糊成「对称也在硬件」。FPGA 的 AES 核（key_vault、单块）走的是
+ * SDF 面的 SDFE_Encrypt，与这里的会话密钥对象是两条路。
+ *
+ * 硬件 GCM 要 GHASH 的 RTL，属未做项；补齐后可把这层换成硬件、口径同步更新。 */
+static void aead_ctx_reset(p11_aead_ctx *c)
+{
+	if (c->aad) {
+		free(c->aad);
+	}
+	memset(c, 0, sizeof(*c));
+}
+
+/* 选 EVP_aes_{128,192,256}_gcm，按密钥长度。非法长度返回 NULL。 */
+static const EVP_CIPHER *gcm_by_keylen(size_t klen)
+{
+	switch (klen) {
+	case 16: return EVP_aes_128_gcm();
+	case 24: return EVP_aes_192_gcm();
+	case 32: return EVP_aes_256_gcm();
+	default: return NULL;
+	}
+}
+
+/* 加密：out 写 ciphertext，tag 单独写（长度 taglen）。成功返回 0。 */
+static int aead_seal(const uint8_t *key, size_t klen,
+                     const p11_aead_ctx *c,
+                     const uint8_t *pt, int pt_len,
+                     uint8_t *ct, uint8_t *tag)
+{
+	const EVP_CIPHER *ciph = gcm_by_keylen(klen);
+	EVP_CIPHER_CTX *x = NULL;
+	int len = 0, ok = 0;
+
+	if (!ciph || (x = EVP_CIPHER_CTX_new()) == NULL) {
+		return -1;
+	}
+	if (EVP_EncryptInit_ex(x, ciph, NULL, NULL, NULL) != 1) goto out;
+	if (EVP_CIPHER_CTX_ctrl(x, EVP_CTRL_GCM_SET_IVLEN, (int)c->ivlen, NULL) != 1) goto out;
+	if (EVP_EncryptInit_ex(x, NULL, NULL, key, c->iv) != 1) goto out;
+	if (c->aadlen && EVP_EncryptUpdate(x, NULL, &len, c->aad, (int)c->aadlen) != 1) goto out;
+	if (EVP_EncryptUpdate(x, ct, &len, pt, pt_len) != 1) goto out;
+	if (EVP_EncryptFinal_ex(x, ct + len, &len) != 1) goto out;   /* GCM: len=0 */
+	if (EVP_CIPHER_CTX_ctrl(x, EVP_CTRL_GCM_GET_TAG, (int)c->taglen, tag) != 1) goto out;
+	ok = 1;
+out:
+	EVP_CIPHER_CTX_free(x);
+	return ok ? 0 : -1;
+}
+
+/* 解密并验证 tag。tag 不对返回 -1，且不输出明文。成功返回 0。 */
+static int aead_open(const uint8_t *key, size_t klen,
+                     const p11_aead_ctx *c,
+                     const uint8_t *ct, int ct_len,
+                     const uint8_t *tag, uint8_t *pt)
+{
+	const EVP_CIPHER *ciph = gcm_by_keylen(klen);
+	EVP_CIPHER_CTX *x = NULL;
+	int len = 0, ok = 0;
+
+	if (!ciph || (x = EVP_CIPHER_CTX_new()) == NULL) {
+		return -1;
+	}
+	if (EVP_DecryptInit_ex(x, ciph, NULL, NULL, NULL) != 1) goto out;
+	if (EVP_CIPHER_CTX_ctrl(x, EVP_CTRL_GCM_SET_IVLEN, (int)c->ivlen, NULL) != 1) goto out;
+	if (EVP_DecryptInit_ex(x, NULL, NULL, key, c->iv) != 1) goto out;
+	if (c->aadlen && EVP_DecryptUpdate(x, NULL, &len, c->aad, (int)c->aadlen) != 1) goto out;
+	if (EVP_DecryptUpdate(x, pt, &len, ct, ct_len) != 1) goto out;
+	if (EVP_CIPHER_CTX_ctrl(x, EVP_CTRL_GCM_SET_TAG, (int)c->taglen, (void *)tag) != 1) goto out;
+	if (EVP_DecryptFinal_ex(x, pt + len, &len) != 1) goto out;   /* 这里做 tag 校验 */
+	ok = 1;
+out:
+	EVP_CIPHER_CTX_free(x);
+	return ok ? 0 : -1;
 }
 
 /* ---- 小工具 ------------------------------------------------------------- */
@@ -483,6 +587,8 @@ CK_DEFINE_FUNCTION(CK_RV, C_Finalize)(CK_VOID_PTR pReserved)
 		for (int i = 0; i < MAX_P11_SESSIONS; i++) {
 			buf_free(&g_sessions[i].sign_acc);
 			buf_free(&g_sessions[i].verify_acc);
+			aead_ctx_reset(&g_sessions[i].enc);   /* free aad，别被随后的 memset 漏掉 */
+			aead_ctx_reset(&g_sessions[i].dec);
 		}
 		secrets_drop_owner(0);
 		memset(g_sessions, 0, sizeof(g_sessions));
@@ -636,6 +742,7 @@ out:
 static const CK_MECHANISM_TYPE MECHS[] = {
 	CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA,
 	CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM,
+	CKM_AES_GCM,   /* DEM：对 KEM 共享秘密（或导入的对称密钥）做认证加密 */
 };
 
 CK_DEFINE_FUNCTION(CK_RV, C_GetMechanismList)(CK_SLOT_ID slotID,
@@ -684,6 +791,11 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetMechanismInfo)(CK_SLOT_ID slotID, CK_MECHANISM_TY
 		break;
 	case CKM_ML_KEM:
 		pInfo->flags = CKF_ENCAPSULATE | CKF_DECAPSULATE;
+		break;
+	case CKM_AES_GCM:
+		pInfo->flags = CKF_ENCRYPT | CKF_DECRYPT;
+		pInfo->ulMinKeySize = 16;
+		pInfo->ulMaxKeySize = 32;
 		break;
 	default:
 		return CKR_MECHANISM_INVALID;
@@ -838,6 +950,8 @@ CK_DEFINE_FUNCTION(CK_RV, C_CloseSession)(CK_SESSION_HANDLE hSession)
 	(void)hsm_session_close(g_tok, s->sess);
 	buf_free(&s->sign_acc);
 	buf_free(&s->verify_acc);
+	aead_ctx_reset(&s->enc);   /* free aad，别被随后的 memset 漏掉 */
+	aead_ctx_reset(&s->dec);
 	secrets_drop_owner(hSession);
 	memset(s, 0, sizeof(*s));
 out:
@@ -855,6 +969,8 @@ CK_DEFINE_FUNCTION(CK_RV, C_CloseAllSessions)(CK_SLOT_ID slotID)
 			(void)hsm_session_close(g_tok, g_sessions[i].sess);
 			buf_free(&g_sessions[i].sign_acc);
 			buf_free(&g_sessions[i].verify_acc);
+			aead_ctx_reset(&g_sessions[i].enc);   /* free aad，别被随后的 memset 漏掉 */
+			aead_ctx_reset(&g_sessions[i].dec);
 			secrets_drop_owner((CK_SESSION_HANDLE)(i + 1));
 			memset(&g_sessions[i], 0, sizeof(p11_session_t));
 		}
@@ -2098,6 +2214,217 @@ out:
 	return rv;
 }
 
+/* ---- 对称认证加解密（CKM_AES_GCM）--------------------------------------
+ *
+ * 这是 KEM-DEM 的 DEM 一半在标准接口上的落点，也是"别裸 ECB、要带认证的
+ * 对称模式"的补齐。典型用法（与真商用 HSM 一致，不需要私有机制）：
+ *   加密方：C_EncapsulateKey(CKM_ML_KEM, 公钥) → 秘密对象 k
+ *           C_EncryptInit(CKM_AES_GCM, k, {iv}) + C_Encrypt(明文) → 密文‖tag
+ *   解密方：C_DecapsulateKey(CKM_ML_KEM, 私钥) → 秘密对象 k'（解封在硬件片内）
+ *           C_DecryptInit(CKM_AES_GCM, k', {iv}) + C_Decrypt(密文‖tag) → 明文
+ * GCM 本身在软件（见 aead_seal 上方的诚实口径）。输出沿用 PKCS#11 惯例：
+ * tag 紧跟在 ciphertext 之后，密文长度 = 明文长度 + tag 长度。
+ *
+ * 单次操作（不做 C_EncryptUpdate 流式）：与 C_Sign 一样，Init 存参数，一次算完。 */
+static CK_RV aead_init(p11_session_t *s, CK_MECHANISM_PTR pMechanism,
+                       CK_OBJECT_HANDLE hKey, p11_aead_ctx *c)
+{
+	if (pMechanism->mechanism != CKM_AES_GCM) {
+		return CKR_MECHANISM_INVALID;
+	}
+	if (c->active) {
+		return CKR_OPERATION_ACTIVE;
+	}
+	/* 密钥必须是会话密钥对象（KEM 共享秘密或导入的对称密钥），且长度合法 */
+	(void)s;
+	p11_secret_t *k = secret_at(hKey);
+	if (!k) {
+		return CKR_KEY_HANDLE_INVALID;
+	}
+	if (k->key_type != CKK_GENERIC_SECRET && k->key_type != CKK_AES) {
+		return CKR_KEY_TYPE_INCONSISTENT;
+	}
+	if (k->len != 16 && k->len != 24 && k->len != 32) {
+		return CKR_KEY_SIZE_RANGE;
+	}
+	if (!pMechanism->pParameter ||
+	    pMechanism->ulParameterLen != sizeof(CK_GCM_PARAMS)) {
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	CK_GCM_PARAMS *p = (CK_GCM_PARAMS *)pMechanism->pParameter;
+	if (!p->pIv || p->ulIvLen < 1 || p->ulIvLen > sizeof(c->iv)) {
+		return CKR_MECHANISM_PARAM_INVALID;   /* iv 1..16 字节 */
+	}
+	if ((p->ulTagBits % 8) != 0 || p->ulTagBits < 96 || p->ulTagBits > 128) {
+		return CKR_MECHANISM_PARAM_INVALID;   /* tag 96..128 位，8 的倍数 */
+	}
+	if (p->ulAADLen && !p->pAAD) {
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	aead_ctx_reset(c);
+	memcpy(c->iv, p->pIv, p->ulIvLen);
+	c->ivlen  = p->ulIvLen;
+	c->taglen = p->ulTagBits / 8;
+	if (p->ulAADLen) {
+		c->aad = malloc(p->ulAADLen);
+		if (!c->aad) {
+			return CKR_HOST_MEMORY;
+		}
+		memcpy(c->aad, p->pAAD, p->ulAADLen);
+		c->aadlen = p->ulAADLen;
+	}
+	c->key    = hKey;
+	c->active = 1;
+	return CKR_OK;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_EncryptInit)(CK_SESSION_HANDLE hSession,
+                                         CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pMechanism) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	rv = aead_init(s, pMechanism, hKey, &s->enc);
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_Encrypt)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData,
+                                     CK_ULONG ulDataLen, CK_BYTE_PTR pEncryptedData,
+                                     CK_ULONG_PTR pulEncryptedDataLen)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pulEncryptedDataLen) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (!s->enc.active) {
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+	{
+		CK_ULONG need = ulDataLen + (CK_ULONG)s->enc.taglen;
+		if (!pEncryptedData) {   /* 只问长度，操作仍然活跃 */
+			*pulEncryptedDataLen = need;
+			goto out;
+		}
+		if (*pulEncryptedDataLen < need) {
+			*pulEncryptedDataLen = need;
+			rv = CKR_BUFFER_TOO_SMALL;
+			goto out;
+		}
+		p11_secret_t *k = secret_at(s->enc.key);
+		if (!k) {
+			rv = CKR_KEY_HANDLE_INVALID;
+			goto out;
+		}
+		if (aead_seal(k->val, k->len, &s->enc, pData, (int)ulDataLen,
+		              pEncryptedData, pEncryptedData + ulDataLen) != 0) {
+			rv = CKR_FUNCTION_FAILED;
+			goto out;
+		}
+		*pulEncryptedDataLen = need;
+		aead_ctx_reset(&s->enc);   /* 单次操作，完成即结束 */
+	}
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_DecryptInit)(CK_SESSION_HANDLE hSession,
+                                         CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pMechanism) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	rv = aead_init(s, pMechanism, hKey, &s->dec);
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
+CK_DEFINE_FUNCTION(CK_RV, C_Decrypt)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pEncryptedData,
+                                     CK_ULONG ulEncryptedDataLen, CK_BYTE_PTR pData,
+                                     CK_ULONG_PTR pulDataLen)
+{
+	pthread_mutex_lock(&g_lock);
+	CK_RV rv = CKR_OK;
+	p11_session_t *s = NULL;
+	if (!g_init) {
+		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+		goto out;
+	}
+	s = sess_at(hSession);
+	if (!s || !pulDataLen) {
+		rv = s ? CKR_ARGUMENTS_BAD : CKR_SESSION_HANDLE_INVALID;
+		goto out;
+	}
+	if (!s->dec.active) {
+		rv = CKR_OPERATION_NOT_INITIALIZED;
+		goto out;
+	}
+	if (ulEncryptedDataLen < (CK_ULONG)s->dec.taglen) {
+		rv = CKR_ENCRYPTED_DATA_LEN_RANGE;   /* 连 tag 都不够 */
+		goto out;
+	}
+	{
+		CK_ULONG pt_len = ulEncryptedDataLen - (CK_ULONG)s->dec.taglen;
+		if (!pData) {   /* 只问长度，操作仍然活跃 */
+			*pulDataLen = pt_len;
+			goto out;
+		}
+		if (*pulDataLen < pt_len) {
+			*pulDataLen = pt_len;
+			rv = CKR_BUFFER_TOO_SMALL;
+			goto out;
+		}
+		p11_secret_t *k = secret_at(s->dec.key);
+		if (!k) {
+			rv = CKR_KEY_HANDLE_INVALID;
+			goto out;
+		}
+		/* tag 紧跟 ciphertext；校验不过不产生明文 */
+		if (aead_open(k->val, k->len, &s->dec,
+		              pEncryptedData, (int)pt_len,
+		              pEncryptedData + pt_len, pData) != 0) {
+			aead_ctx_reset(&s->dec);
+			rv = CKR_ENCRYPTED_DATA_INVALID;   /* tag 不符 / 密文被篡改 */
+			goto out;
+		}
+		*pulDataLen = pt_len;
+		aead_ctx_reset(&s->dec);
+	}
+out:
+	pthread_mutex_unlock(&g_lock);
+	return rv;
+}
+
 /* ---- 两张函数表 ---------------------------------------------------------
  * CK_FUNCTION_LIST 是 **2.40 形状**的表：它里面根本没有 C_EncapsulateKey /
  * C_DecapsulateKey 这两个字段（v3.2 新增的函数只出现在 CK_FUNCTION_LIST_3_2 里）。
@@ -2153,6 +2480,11 @@ static void build_function_list(void)
 	g_function_list.C_SignFinal         = C_SignFinal;
 	g_function_list.C_VerifyUpdate      = C_VerifyUpdate;
 	g_function_list.C_VerifyFinal       = C_VerifyFinal;
+	/* CKM_AES_GCM 认证加解密（DEM）—— 2.40 就有，两张表都填 */
+	g_function_list.C_EncryptInit       = C_EncryptInit;
+	g_function_list.C_Encrypt           = C_Encrypt;
+	g_function_list.C_DecryptInit       = C_DecryptInit;
+	g_function_list.C_Decrypt           = C_Decrypt;
 
 	/* 3.2 表：逐字段复制 2.40 那批，再补 v3.x 独有的。
 	 * 两个 struct 的字段名一致（都由 pkcs11f.h 生成），所以这里是纯搬运。 */
@@ -2176,6 +2508,8 @@ static void build_function_list(void)
 	COPY_FN(C_SignFinal);         COPY_FN(C_VerifyInit);
 	COPY_FN(C_Verify);            COPY_FN(C_VerifyUpdate);
 	COPY_FN(C_VerifyFinal);       COPY_FN(C_GenerateKeyPair);
+	COPY_FN(C_EncryptInit);       COPY_FN(C_Encrypt);
+	COPY_FN(C_DecryptInit);       COPY_FN(C_Decrypt);
 #undef COPY_FN
 	/* 只有 3.2 表里才有的字段 */
 	g_function_list_32.C_GetInterfaceList = C_GetInterfaceList;
