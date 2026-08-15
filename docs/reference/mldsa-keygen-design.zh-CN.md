@@ -17,7 +17,7 @@
 | `mldsa_polyt1_pack` / `polyt0_pack` / `polyeta_pack` | 完成 | 逐字节对 `mldsa_oracle.py` |
 | `mldsa_poly_uniform`（RejNTTPoly, SHAKE128） | 完成 | 逐系数对黄金模型 |
 | `mldsa_poly_eta`（RejBoundedPoly, SHAKE256） | 完成 | 逐系数对黄金模型 |
-| **KeyGen 顶层 FSM** | **进行中**：①H ②ExpandS ③NTT ④MAC ⑤invNTT+s₂ 已逐段验 | 目标：ACVP `ML-DSA-keyGen-FIPS204` |
+| **KeyGen 顶层 FSM** | **进行中**：①H ②ExpandS ③NTT ④MAC ⑤invNTT+s₂ ⑥t₁/t₀打包 已验（pk 完整，就差 ⑦tr） | 目标：ACVP `ML-DSA-keyGen-FIPS204` |
 
 黄金模型 `hardware/model/mldsa_oracle.py` 的 `mldsa_keygen()` 已对过 ACVP，
 是 FSM 的唯一判据，也是逐段调试时的中间量来源。
@@ -104,6 +104,22 @@ end
 
 tr 要吸收整个 pk（44 是 1312 字节），9 位的通用计数器装不下，会在 512 处回绕。
 SHAKE 不会因此报错，只会给出一个合法但错误的摘要。
+
+### 8. 两个打包器并喂：`in_valid` 必须门控「两个都 ready」
+
+t₁(10位)/t₀(13位) 两个打包器位宽不同、反压节奏不一样。**只在推进条件里判
+`p1_ir && p0_ir` 是不够的** —— 不推进的那拍相位 ph 仍为 1，若这拍
+p1_ir=1、p0_ir=0，p1 会重复吃同一个系数，打包从那里整体错位。
+
+`in_valid` 也要门控：
+
+```verilog
+if (ph && p1_ir && p0_ir) begin p1_iv=1; p0_iv=1; ... end
+```
+
+症状很典型：t₁pack **前几个字节对、从第 3 字节起错**（第一个跨字节的系数
+开始崩）。设计文档「两个都握上才推进」说的就是这件事，但推进条件与 iv
+两处都要判，漏一处就中招。
 
 ### 7. NTT / sha3 的 done 是**电平**，多条连算要先等它落一次
 

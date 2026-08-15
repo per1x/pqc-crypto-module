@@ -230,6 +230,6 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/bus/mlkem_axi.v" -match "*'dk_
 // 三个封装模块共用同一个 bitpack，收窄就得为每种位宽各写一份端口表。
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/pack.v" -match "*'in_val'*"
 
-// ML-DSA keygen 的 SK_T0（sk 里 t₀pack 段的起始偏移）暂未用 —— t₀ 打包是
-// 第 ⑥b 段的事，那一段接上后就用到，届时删掉本条。
-lint_off -rule UNUSEDPARAM -file "*/hardware/rtl/mldsa/keygen.v" -match "*'SK_T0'*"
+// ML-DSA keygen：power2round 的 t₀（a0）取值域是 (−2^(D−1), 2^(D−1)]，
+// 13 位就够；算子输出给满 32 位，高 19 位是符号扩展，打包只取低 13 位。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/keygen.v" -match "*'p2r_t0'*"

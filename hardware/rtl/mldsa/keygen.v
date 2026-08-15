@@ -50,7 +50,9 @@ module mldsa_keygen (
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
 
-    // ---- sk 输出缓冲：done 之后按字节读 ----
+    // ---- pk / sk 输出缓冲：done 之后按字节读 ----
+    input  wire [11:0] pk_addr,
+    output wire [7:0]  pk_data,
     input  wire [11:0] sk_addr,
     output wire [7:0]  sk_data
 );
@@ -67,6 +69,7 @@ module mldsa_keygen (
         S_NTT_LD = 5'd9, S_NTT_GO = 5'd10, S_NTT_ST = 5'd11, S_NTT_WB = 5'd12,
         S_A_GEN = 5'd13, S_A_WAIT = 5'd14, S_MAC = 5'd15,
         S_RED = 5'd16, S_INV_GO = 5'd17, S_INV_ST = 5'd18, S_INV_WB = 5'd19,
+        S_T_PACK = 5'd20,
         S_FIN   = 5'd8;
 
     reg [4:0] st;
@@ -200,6 +203,37 @@ module mldsa_keygen (
     // s₁pack 与 s₂pack 就是相邻的）。
     reg [11:0] pe_ptr;
 
+    // ================= pk 输出缓冲 =================
+    // 布局：ρ(32)‖t₁pack(k*320=1280) = 1312
+    reg         pk_we;  reg [11:0] pk_waddr; reg [7:0] pk_din;
+    ram_dp #(.DW(8), .AW(12)) u_pk (
+        .clk(clk), .a_we(pk_we), .a_addr(pk_waddr), .a_din(pk_din), .a_dout(),
+        .b_we(1'b0), .b_addr(pk_addr), .b_din(8'd0), .b_dout(pk_data));
+
+    // ---- ⑥b：caddq → power2round → t₁(pk) / t₀(sk) ----
+    wire signed [31:0] cad_out;
+    mldsa_caddq u_cad (.a(ac_dout), .r(cad_out));
+    wire signed [31:0] p2r_t0;
+    wire        [9:0]  p2r_t1;
+    mldsa_power2round u_p2r (.a(cad_out), .a0(p2r_t0), .a1(p2r_t1));
+
+    reg        p1_clr, p1_iv;  reg [9:0] p1_coef;
+    wire       p1_ir, p1_ov;   wire [7:0] p1_ob;
+    mldsa_polyt1_pack u_p1 (
+        .clk(clk), .rst_n(rst_n), .clr(p1_clr),
+        .coef(p1_coef), .in_valid(p1_iv), .in_ready(p1_ir),
+        .out_byte(p1_ob), .out_valid(p1_ov));
+
+    reg        p0_clr, p0_iv;  reg signed [12:0] p0_coef;
+    wire       p0_ir, p0_ov;   wire [7:0] p0_ob;
+    mldsa_polyt0_pack u_p0 (
+        .clk(clk), .rst_n(rst_n), .clr(p0_clr),
+        .coef(p0_coef), .in_valid(p0_iv), .in_ready(p0_ir),
+        .out_byte(p0_ob), .out_valid(p0_ov));
+
+    // 落盘指针：t₁ → pk（ρ 之后，从 32 起）；t₀ → sk（SK_T0 起）
+    reg [11:0] p1_ptr, p0_ptr;
+
     // η 打包器留到 sk 组装段再接：第 ② 段只做「采样 + 存储」，
     // 而 η 打包（对 polyeta_pack）已在 test_mldsa_pack 里独立验过，
     // 这里空转它只会多一堆未接的输出。
@@ -237,6 +271,7 @@ module mldsa_keygen (
             nt_lowseen <= 1'b0;
             vi <= 3'd0; un_start <= 1'b0; un_nonce <= 16'd0; nt_inv <= 1'b0;
             pe_ptr <= SK_S1[11:0];
+            p1_ptr <= 12'd32; p0_ptr <= SK_T0[11:0];
             et_start <= 1'b0; et_nonce <= 16'd0;
             nt_start <= 1'b0;
             fsm_ss <= 1'b0; fsm_siv <= 1'b0; fsm_sif <= 1'b0; fsm_sor <= 1'b0;
@@ -254,6 +289,7 @@ module mldsa_keygen (
             case (st)
             S_IDLE: if (start) begin
                 cnt <= 9'd0; owner <= OWN_FSM; pe_ptr <= SK_S1[11:0];
+                p1_ptr <= 12'd32; p0_ptr <= SK_T0[11:0];
                 fsm_sr <= RATE256; fsm_su <= SUF;
                 fsm_ss <= 1'b1;
                 fsm_sid <= xi[7:0];
@@ -421,8 +457,23 @@ module mldsa_keygen (
                 else begin
                     if (cnt == 9'd255) begin
                         cnt <= 9'd0; ph <= 1'b0;
-                        if (vi == 3'd3) begin vi <= 3'd0; st <= S_FIN; end
+                        if (vi == 3'd3) begin vi <= 3'd0; ph <= 1'b0; st <= S_T_PACK; end
                         else begin vi <= vi + 3'd1; st <= S_RED; end
+                    end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
+                end
+            end
+
+            // ---------- ⑥b 对每个 i：(t₁,t₀)=Power2Round(caddq(acc[i]))；
+            //            t₁ 打包进 pk，t₀ 打包进 sk ----------
+            // 两个打包器位宽不同（10 位 / 13 位）、空闲节奏不一样，
+            // **两个都握上才推进**，只看一个会丢系数（设计文档预警）。
+            S_T_PACK: begin
+                if (!ph) begin ph <= 1'b1; end
+                else if (p1_ir && p0_ir) begin
+                    if (cnt == 9'd255) begin
+                        cnt <= 9'd0; ph <= 1'b0;
+                        if (vi == 3'd3) begin vi <= 3'd0; st <= S_FIN; end
+                        else begin vi <= vi + 3'd1; st <= S_T_PACK; end
                     end else begin cnt <= cnt + 9'd1; ph <= 1'b0; end
                 end
             end
@@ -431,8 +482,10 @@ module mldsa_keygen (
             default: st <= S_IDLE;
             endcase
 
-            // η 打包器每吐一个字节，落盘指针前进一格
+            // 打包器每吐一个字节，各自的落盘指针前进一格
             if (pe_ov) pe_ptr <= pe_ptr + 12'd1;
+            if (p1_ov) p1_ptr <= p1_ptr + 12'd1;
+            if (p0_ov) p0_ptr <= p0_ptr + 12'd1;
         end
     end
 
@@ -446,7 +499,10 @@ module mldsa_keygen (
         nt_we = 1'b0; nt_waddr = 8'd0; nt_wdata = 32'd0; nt_raddr = cnt[7:0];
         ac_we = 1'b0; ac_waddr = 10'd0; ac_din = 32'd0;
         sk_we = 1'b0; sk_waddr = 12'd0; sk_din = 8'd0;
+        pk_we = 1'b0; pk_waddr = 12'd0; pk_din = 8'd0;
         pe_clr = 1'b0; pe_iv = 1'b0; pe_coef = 13'd0;
+        p1_clr = 1'b0; p1_iv = 1'b0; p1_coef = 10'd0;
+        p0_clr = 1'b0; p0_iv = 1'b0; p0_coef = 13'd0;
         ac_raddr = {dbg_sel[1:0], dbg_idx};   // 默认给调试口读 acc
         un_rd_addr = cnt[7:0];
 
@@ -465,10 +521,11 @@ module mldsa_keygen (
             end
         end
 
-        // H 挤压：ρ → sk[0..31]，K → sk[32..63]（ρ' 不进 sk）
+        // H 挤压：ρ → sk[0..31] 且 → pk[0..31]，K → sk[32..63]（ρ' 不进）
         if (st == S_H_SQ && sha_out_valid) begin
             if (cnt < 9'd32) begin
                 sk_we = 1'b1; sk_waddr = {5'd0, cnt[6:0]}; sk_din = sha_out_data;
+                pk_we = 1'b1; pk_waddr = {5'd0, cnt[6:0]}; pk_din = sha_out_data;
             end else if (cnt >= 9'd96) begin
                 sk_we = 1'b1; sk_waddr = {5'd0, cnt[6:0]} - 12'd64; sk_din = sha_out_data;
             end
@@ -484,6 +541,22 @@ module mldsa_keygen (
         if (pe_ov) begin
             sk_we = 1'b1; sk_waddr = pe_ptr; sk_din = pe_ob;
         end
+
+        // ⑥b：读 acc[vi] → caddq → power2round → 喂 t₁/t₀ 打包器
+        if (st == S_T_PACK) begin
+            ac_raddr = {vi[1:0], cnt[7:0]};
+            // ⚠️ iv 必须门控「两个都 ready」，不能只跟 ph。
+            // 只在推进条件里判 p1_ir&&p0_ir 是不够的：不推进的那拍 ph 仍为 1，
+            // 若这拍 p1_ir=1、p0_ir=0，p1 会**重复吃**同一个系数 —— 打包从
+            // 那里开始整体错位（症状：t₁pack 前几字节对、从第 3 字节起错）。
+            if (ph && p1_ir && p0_ir) begin
+                p1_iv = 1'b1; p1_coef = p2r_t1;
+                p0_iv = 1'b1; p0_coef = p2r_t0[12:0];
+            end
+        end
+        // t₁ → pk，t₀ → sk（不同缓冲，同拍写不冲突）
+        if (p1_ov) begin pk_we = 1'b1; pk_waddr = p1_ptr; pk_din = p1_ob; end
+        if (p0_ov) begin sk_we = 1'b1; sk_waddr = p0_ptr; sk_din = p0_ob; end
 
         // MAC：Â[cnt]·ŝ₁[vj][cnt]，累加到 acc[vi][cnt]
         if (st == S_MAC) begin

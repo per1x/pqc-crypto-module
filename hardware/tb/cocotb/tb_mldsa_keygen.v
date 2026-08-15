@@ -11,6 +11,8 @@ module tb_mldsa_keygen (
     input  wire [3:0]  dbg_sel,
     input  wire [7:0]  dbg_idx,
     output wire signed [31:0] dbg_coef,
+    input  wire [11:0] pk_addr,
+    output wire [7:0]  pk_data,
     input  wire [11:0] sk_addr,
     output wire [7:0]  sk_data
 );
@@ -26,6 +28,7 @@ module tb_mldsa_keygen (
         .sha_out_data(sod),
         .rho(rho), .rho_prime(rho_prime), .key_out(key_out),
         .dbg_sel(dbg_sel), .dbg_idx(dbg_idx), .dbg_coef(dbg_coef),
+        .pk_addr(pk_addr), .pk_data(pk_data),
         .sk_addr(sk_addr), .sk_data(sk_data));
 
     sha3_core u_sha (

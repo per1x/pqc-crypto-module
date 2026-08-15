@@ -289,3 +289,83 @@ async def test_sk_rho_key_s(dut):
     assert got_s2 == s2pack, "s₂pack 不对"
 
     dut._log.info("sk 组装：ρ‖K‖s₁pack‖s₂pack 逐字节对上黄金（t₀/tr 段留到 ⑥b/⑦）")
+
+
+async def read_pk(dut, start, n):
+    out = bytearray()
+    for a in range(start, start + n):
+        dut.pk_addr.value = a
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        out.append(int(dut.pk_data.value) & 0xFF)
+    return bytes(out)
+
+
+@cocotb.test()
+async def test_pk_and_t0(dut):
+    """⑥b：pk = ρ‖t₁pack，sk 的 t₀pack 段，逐字节对黄金
+
+    t = caddq(invNTT(reduce32(Σ mont(Â∘ŝ₁)))+s₂)，power2round(t)=(t₀,t₁)。
+    这是 KeyGen 除 tr 段外的最后一块 —— pk 至此完整（⑦ tr 只补 sk 的第三段）。
+    """
+    import sys as _s
+    from pathlib import Path as _P
+    _s.path.insert(0, str(_P(__file__).resolve().parents[2] / "model"))
+    from mldsa_oracle import (rej_uniform_poly as _ru, rej_eta_poly as _re,
+                              polyt1_pack as _p1p, polyt0_pack as _p0p)
+    from mldsa_model import (ntt as _ntt, invntt_tomont as _intt,
+                             montgomery_reduce as _mont, reduce32 as _r32,
+                             caddq as _cad, power2round as _p2r)
+
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+    dut.pk_addr.value = 0
+    dut.sk_addr.value = 0
+
+    xi = bytes([(i * 5 + 3) & 0xFF for i in range(32)])
+    dut.xi.value = int.from_bytes(xi, "little")
+    dut.start.value = 1
+    await RisingEdge(dut.clk)
+    dut.start.value = 0
+    for _ in range(3_000_000):
+        await RisingEdge(dut.clk)
+        if int(dut.done.value):
+            break
+    else:
+        raise AssertionError("⑥b 一直没完成")
+    await Timer(1, unit="ns")
+
+    rho = int(dut.rho.value).to_bytes(32, "little")
+    rhop = int(dut.rho_prime.value).to_bytes(64, "little")
+    shat = [_ntt(_re(rhop, j, 2)) for j in range(4)]
+    s2 = [_re(rhop, 4 + i, 2) for i in range(4)]
+
+    t1_all, t0_all = bytearray(), bytearray()
+    for i in range(4):
+        acc = [0] * 256
+        for j in range(4):
+            a = _ru(rho, (i << 8) + j)
+            for n in range(256):
+                acc[n] += _mont(a[n] * shat[j][n])
+        acc = [_r32(x) for x in acc]
+        acc = _intt(acc)
+        t = [_cad(acc[n] + s2[i][n]) for n in range(256)]
+        pr = [_p2r(x) for x in t]
+        t0_all += _p0p([x[0] for x in pr])
+        t1_all += _p1p([x[1] for x in pr])
+
+    # pk = ρ ‖ t₁pack
+    pk_rho = await read_pk(dut, 0, 32)
+    assert pk_rho == rho, "pk 的 ρ 段不对"
+    got_t1 = await read_pk(dut, 32, len(t1_all))
+    assert got_t1 == bytes(t1_all), (
+        f"t₁pack 不对，首个不同在字节 "
+        f"{next(i for i in range(len(t1_all)) if got_t1[i] != t1_all[i])}")
+
+    # sk 的 t₀pack：SK_T0 = 128 + 8*96 = 896
+    got_t0 = await read_sk(dut, 896, len(t0_all))
+    assert got_t0 == bytes(t0_all), (
+        f"t₀pack 不对，首个不同在字节 "
+        f"{next(i for i in range(len(t0_all)) if got_t0[i] != t0_all[i])}")
+
+    dut._log.info("⑥b：pk=ρ‖t₁pack 完整、sk 的 t₀pack 段对上黄金（就差 ⑦ tr）")
