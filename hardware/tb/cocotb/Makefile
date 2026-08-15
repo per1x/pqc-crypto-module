@@ -79,6 +79,13 @@ VERILOG_SOURCES = \
   $(PWD)/tb_mldsa_verify.v \
   $(PWD)/tb_trng_health.v
 
+# 地址译码按板级顶层的槽数再跑一遍：板上现在是 7 个槽（加了 ML-DSA）。
+# 不给就是模块默认的 NS=5。测试台从同名环境变量读槽数。
+ifneq ($(XBAR_NS),)
+COMPILE_ARGS += -Paxi4lite_xbar.NS=$(XBAR_NS)
+export XBAR_NS
+endif
+
 # ML-DSA 的共享引擎（mldsa_engine）还在另一条线上做。mldsa_axi 这条用例先用
 # 一个行为级替身顶着 —— 它按固定延迟出假数据，验的是 AXI 那一层，不是算法。
 # 只在这条用例里编进去：真 engine 落地之后这里换成 $(RTL_MLDSA)/mldsa_engine.v，

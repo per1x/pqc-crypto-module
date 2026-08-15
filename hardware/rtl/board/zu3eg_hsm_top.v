@@ -1,4 +1,4 @@
-// zu3eg_hsm_top —— 上板顶层：PS 的 M_AXI_HPM0_LPD 接到 PL 里的四个密码从机
+// zu3eg_hsm_top —— 上板顶层：PS 的 M_AXI_HPM0_LPD 接到 PL 里的五个密码从机
 //
 //   zynq_ultra_ps_e ──M_AXI_HPM0_LPD(AXI4-Lite,32bit)──▶ axi4lite_xbar
 //        │ pl_clk0 = 150 MHz                                  │
@@ -7,7 +7,8 @@
 //                                                             ├─ 0x8002_0000 sym_axi
 //                                                             ├─ 0x8003_0000 mlkem_axi
 //                                                             ├─ 0x8004_0000 金丝雀（只用来被拒）
-//                                                             └─ 0x8005_0000 风扇观测口
+//                                                             ├─ 0x8005_0000 风扇观测口
+//                                                             └─ 0x8006_0000 mldsa_axi
 //
 //   另有一条**完全不经过 AXI** 的通路：SYSMONE4 ──▶ fan_ctrl ──▶ AA11。
 //   风扇不依赖软件，理由见 hardware/platform/fan_ctrl/fan_ctrl.v 的文件头。
@@ -37,7 +38,7 @@
 // 表现是"偶尔上电起不来"这类最难查的问题。
 //
 // ============================================================================
-// 【SECURE_ONLY：四个功能从机全都是 1 —— 送检口径】
+// 【SECURE_ONLY：五个功能从机全都是 1 —— 送检口径】
 // ============================================================================
 // 防火墙的 AxPROT 门控要求 AxPROT[1]==0（secure）。板上的 Linux 跑在**非安全
 // 世界**，它经 /dev/mem 发出的每一笔事务 AxPROT[1] 恒为 1。
@@ -50,7 +51,7 @@
 // 但它留了一个缺口：**被证明受门控保护的只有金丝雀那个空壳，不是密码核本身。**
 //
 // 【这一版把缺口补上】
-// 四个功能从机（trng / key_vault / sym / mlkem）**全部 SECURE_ONLY=1**。
+// 五个功能从机（trng / key_vault / sym / mlkem / mldsa）**全部 SECURE_ONLY=1**。
 // 于是普通世界一个寄存器都摸不到，整套 KAT 改由**安全世界**驱动：
 // 打过补丁的 BL31 提供一个受限的安全 MMIO 读写 SiP（白名单只覆盖这几个核的
 // 合法寄存器偏移，见 boot/atf/patch_atf_secmmio.py），普通世界的测试程序
@@ -62,8 +63,14 @@
 //     VERSION 都是非零常量）—— 见下面 RAZ/WI 那段，判据从 DECERR 改成了
 //     "读回 0"，且这一条更强：它同时证明路是通的、值是拿不到的。
 //
-// 槽 4 的金丝雀保留：它现在是"同参数下的同类项"，用来说明槽 0..3 的拒绝
-// 不是因为核坏了。风扇（槽 5）保持 0 —— 它不在密码边界内，也不该在。
+// 槽 4 的金丝雀保留：它现在是"同参数下的同类项"，用来说明槽 0..3 与槽 6
+// 的拒绝不是因为核坏了。风扇（槽 5）保持 0 —— 它不在密码边界内，也不该在。
+//
+// ⚠️ 后来加的 ML-DSA（槽 6）跟着功能从机走，**槽 0..5 一个都没动** ——
+//    金丝雀那条判据（非安全世界读回 0，而它的 VERSION 是非零常量）在加槽
+//    前后必须完全一样，那是"AxPROT 门控真生效"的对照组。译码这一侧按
+//    NS=7 单独跑了一遍 cocotb（tools/rtl_sim.sh 里 axi4lite_xbar NS=7 那条）：
+//    槽 0..5 的落点逐个不变，槽 6 命中新从机，槽 7 仍然 RAZ/WI。
 //
 // ============================================================================
 // 【RAZ/WI：被拒的访问不产生总线错误 —— 任何程序都崩不了这块板】
@@ -149,7 +156,7 @@ module zu3eg_hsm_top (
     // ========================================================================
     // 【SECURE_ONLY_FUNCTIONAL：送检位流与开发位流是同一份 RTL 的两个配置】
     // ========================================================================
-    // 默认（不定义 PQC_DEV_OPEN）= **1**，也就是送检口径：四个功能从机全部
+    // 默认（不定义 PQC_DEV_OPEN）= **1**，也就是送检口径：五个功能从机全部
     // 只接受安全事务，普通世界零可达，整套 KAT 由安全世界经 BL31 的 SiP 驱动。
     //
     // 定义 PQC_DEV_OPEN 之后 = 0：功能从机对普通世界开放，Linux 能直连跑 KAT。
@@ -317,7 +324,10 @@ module zu3eg_hsm_top (
     wire tamper = 1'b0;
 
     // ================= 地址译码 =================
-    localparam integer NS = 6;
+    // 6 → 7：ML-DSA 挂在槽 6（0x8006_0000）。槽 0..5 的地址一个都没动 ——
+    // xbar 的槽选是 addr[SEL_LSB +: 3]，加一个槽只是让"槽号 < NS"这条多放行
+    // 一个值，已有槽的译码路径完全不变（按 NS=7 跑过同一套 cocotb）。
+    localparam integer NS = 7;
 
     wire [8*NS-1:0]  x_awaddr, x_araddr;
     wire [3*NS-1:0]  x_awprot, x_arprot;
@@ -506,6 +516,29 @@ module zu3eg_hsm_top (
         .dbg_req(fan_dbg_req), .dbg_addr(fan_dbg_addr),
         .dbg_data(fan_dbg_data), .dbg_valid(fan_dbg_valid),
         .dbg_timeout(fan_dbg_to));
+
+    // ================= 槽 6：ML-DSA =================
+    // ⚠️ **它自带一份 sha3_core**（在 mldsa_axi 里例化），不与 ML-KEM 共享。
+    //    共享要加一层跨从机仲裁，而那会动到已经验证过的安全边界：两个从机的
+    //    tamper / zeroize 会互相牵连（一个被擦，另一个正在算的海绵状态跟着没了），
+    //    "一根线打掉本从机的全部密码逻辑"这句话就不再成立。这一轮不做，
+    //    面积上 ZU3EG 还有余量。
+    //
+    // 槽 6 与槽 0..3 同一个口径（SECURE_ONLY_FUNCTIONAL）：送检位流下普通世界
+    // 一个寄存器都摸不到，KAT 由安全世界经 BL31 的 SiP 驱动。
+    mldsa_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL)) u_mldsa (
+        .clk(clk_sys), .rst_n(rst_n),
+        .s_axi_awaddr(x_awaddr[8*6 +: 8]), .s_axi_awprot(x_awprot[3*6 +: 3]),
+        .s_axi_awvalid(x_awvalid[6]), .s_axi_awready(x_awready[6]),
+        .s_axi_wdata(x_wdata[32*6 +: 32]), .s_axi_wstrb(x_wstrb[4*6 +: 4]),
+        .s_axi_wvalid(x_wvalid[6]), .s_axi_wready(x_wready[6]),
+        .s_axi_bresp(x_bresp[2*6 +: 2]), .s_axi_bvalid(x_bvalid[6]),
+        .s_axi_bready(x_bready[6]),
+        .s_axi_araddr(x_araddr[8*6 +: 8]), .s_axi_arprot(x_arprot[3*6 +: 3]),
+        .s_axi_arvalid(x_arvalid[6]), .s_axi_arready(x_arready[6]),
+        .s_axi_rdata(x_rdata[32*6 +: 32]), .s_axi_rresp(x_rresp[2*6 +: 2]),
+        .s_axi_rvalid(x_rvalid[6]), .s_axi_rready(x_rready[6]),
+        .tamper(tamper));
 
     wire _unused = &{1'b0, m_awlen, m_arlen,
                      m_awsize, m_arsize, m_awburst, m_arburst,

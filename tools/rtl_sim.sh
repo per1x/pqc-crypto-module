@@ -22,8 +22,8 @@ trap 'rm -f "$LOG"' EXIT
 fail=0
 total=0
 
-run() { # run <MODULE> <TOPLEVEL> [PARAM_D]
-  local label="$2"
+run() { # run <MODULE> <TOPLEVEL> [PARAM_D] [标签]
+  local label="${4:-$2}"
   [ -n "${3:-}" ] && label="$2 D=$3"
   # 必须清干净：残留的 sim_build 会让 make 认为没变化而跳过重新编译，
   # 于是新的 TOPLEVEL 用上一次的编译产物，报"找不到根句柄"
@@ -101,6 +101,12 @@ run test_sha3_core   sha3_core
 echo
 echo "  总线接口"
 run test_xbar        axi4lite_xbar
+# 板级顶层加了 ML-DSA（槽 6）之后 NS 从 6 变 7 —— 同一套用例按 NS=7 再跑一遍：
+# 槽 0..5 的落点必须逐个不变（**尤其是槽 4 那个金丝雀**，它是 AxPROT 门控的
+# 对照组），槽 6 命中新从机，槽 7 仍然 RAZ/WI。
+export XBAR_NS=7
+run test_xbar        axi4lite_xbar "" "axi4lite_xbar NS=7"
+unset XBAR_NS
 run test_firewall    axi4lite_firewall
 run test_axi         pqc_accel_axi
 run test_key_vault_core key_vault

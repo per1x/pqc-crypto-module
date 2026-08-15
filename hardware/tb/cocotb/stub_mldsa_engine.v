@@ -18,21 +18,25 @@
 // ============================================================================
 // 【替身的行为：一份可以在 Python 里算出来的假输出】
 // ============================================================================
-// ① 把输入缓冲里 [0, in_total) 的字节加起来，取低 8 位 → chk；
-//    in_total 按 mldsa_axi 那份排布自己算一遍（**故意重算一遍**：两边都算错
-//    同一个数的概率远低于抄一份，长度表因此被交叉验证了）。
-// ② 把 chk 这一个字节过一次 SHAKE256，挤出一个字节 → h。
-//    这一步不是为了"像算法"，是为了**让 sha3_core 的接线真的被走一遍**
-//    （start/rate/suffix/valid/ready/flush/out_valid 全在这条路上）。
-//    Python 侧一行 hashlib.shake_256(bytes([chk])).digest(1) 就能对上。
-// ③ 按 op 铺输出：
+// ① 把输入缓冲里 [0, in_total) 的字节**逐个吸收进 SHAKE256**，挤出一个字节 → h。
+//    in_total 按双方约定的排布自己算一遍（**故意重算一遍**：两边都算错同一个
+//    数的概率远低于抄一份，长度表因此被交叉验证了）。
+//    走真的 sha3_core 有两个用处：**它把接线走了一遍**（start/rate/suffix/
+//    valid/ready/flush/out_valid 全在这条路上），而且 Python 侧一行
+//    hashlib.shake_256(buf).digest(1) 就能对上。
+//
+//    ⚠️ 用哈希而不是"字节和"是有意的：和是**与顺序无关**的，那样
+//    "金库供的 sk 到底落在 engine 的哪个偏移"就验不出来了（错位、甚至整段
+//    调换顺序，和都一样）。改成哈希之后，用例里"按槽签 == 自送 sk 签"那条
+//    断言才真的钉住了**逐字节相同的一份排布**。
+// ② 按 op 铺输出：
 //      KeyGen : pk[i] = h + i          sk[j] = (h ^ 0xA5) + j
 //      Sign   : sig[i] = h + i
-//      Verify : 不出字节，verify_ok = (chk == 0)
-//    —— chk 是**全部输入**的和，所以 sk 是不是真从金库进来了、msg 有没有到，
-//    都会体现在输出上。用例据此反证金库那条路确实通了。
-//    verify_ok 挂在 chk 上是为了让两种判定都能确定性地造出来（Python 调一个
-//    字节就能把和凑成 0）。
+//      Verify : 不出字节，verify_ok = (h == 0)
+//    —— h 取决于**整个输入缓冲**，所以 sk 是不是真从金库进来了、rnd/ctx/msg
+//    有没有落在该落的地方，都会体现在输出上。用例据此反证金库那条路确实通了。
+//    verify_ok 挂在 h 上是为了让两种判定都能确定性地造出来（Python 调两个
+//    字节搜一下就能把 h 凑成 0）。
 //
 // done 是**电平**，保持到下一次 start 才清 —— 与三个 ML-KEM 核一样。
 // 这是有意的：mlkem_axi 在真硅上栽过"第二次运行读到残留 done"那个坑，
@@ -99,10 +103,14 @@ module mldsa_engine (
     wire [12:0] sig_len = (pset_r == 2'd0) ? 13'd2420
                         : (pset_r == 2'd1) ? 13'd3309 : 13'd4627;
 
-    // 输入排布：ctx ‖ msg ‖ (sk | pk‖sig)；KeyGen 只有 ξ(32)
+    // 输入排布（与 mldsa_axi 文件头那份契约一致）：
+    //   KeyGen : ξ(32)
+    //   Sign   : sk ‖ rnd(32) ‖ ctx ‖ msg      —— sk 由软件送或由金库供，
+    //                                             对 engine 而言没有区别
+    //   Verify : pk ‖ sig ‖ ctx ‖ msg
     wire [16:0] var_len  = {1'b0, ctx_r} + {1'b0, msg_r};
     wire [16:0] in_total = (op_r == OP_KEYGEN) ? 17'd32
-                         : (op_r == OP_SIGN)   ? (var_len + {4'd0, sk_len})
+                         : (op_r == OP_SIGN)   ? ({4'd0, sk_len} + 17'd32 + var_len)
                          : (var_len + {4'd0, pk_len} + {4'd0, sig_len});
     wire [16:0] out_total = (op_r == OP_KEYGEN) ? ({4'd0, pk_len} + {4'd0, sk_len})
                           : (op_r == OP_SIGN)   ? {4'd0, sig_len} : 17'd0;
@@ -112,8 +120,7 @@ module mldsa_engine (
                      S_WORK = 4'd6, S_EMIT = 4'd7, S_DONE = 4'd8;
     reg [3:0]  state;
     reg [16:0] idx;
-    reg        wait1;
-    reg [7:0]  chk, h;
+    reg [7:0]  h;
     reg [15:0] out_len_r;
     reg        done_r, vok_r;
     reg [5:0]  work_cnt;
@@ -127,17 +134,19 @@ module mldsa_engine (
     assign sha_suffix    = 8'h1F;
     assign sha_start     = (state == S_SHA_GO);
     assign sha_in_valid  = (state == S_SHA_PUT);
-    assign sha_in_data   = chk;
+    assign sha_in_data   = scan_data;
     assign sha_in_flush  = (state == S_SHA_FLUSH);
     assign sha_out_ready = (state == S_SHA_GET);
 
-    // 扫描地址要比 idx 提前一个（ram_dp 是同步读）
-    always @(*) scan_addr = wait1 ? idx[14:0] : (idx[14:0] + 15'd1);
+    // 地址一直跟着 idx。ram_dp 是同步读，所以每个字节要两拍：
+    // S_FETCH 那一拍把地址摆上，S_PUSH 那一拍 scan_data 才是 mem[idx]
+    // （idx 不动，地址就不动，被 sha 背压顶住时数据也稳）。
+    always @(*) scan_addr = idx[14:0];
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE; idx <= 17'd0; wait1 <= 1'b0;
-            chk <= 8'd0; h <= 8'd0;
+            state <= S_IDLE; idx <= 17'd0;
+            h <= 8'd0;
             op_r <= 2'd0; pset_r <= 2'd0; msg_r <= 16'd0; ctx_r <= 16'd0;
             out_len_r <= 16'd0; done_r <= 1'b0; vok_r <= 1'b0;
             ow_we <= 1'b0; ow_addr <= 15'd0; ow_data <= 8'd0;
@@ -147,28 +156,25 @@ module mldsa_engine (
             case (state)
             S_IDLE: if (start) begin
                 op_r <= op; pset_r <= pset; msg_r <= msg_len; ctx_r <= ctx_len;
-                chk <= 8'd0; idx <= 17'd0; wait1 <= 1'b1;
+                idx <= 17'd0;
                 done_r <= 1'b0; vok_r <= 1'b0; out_len_r <= 16'd0;
-                state <= S_SCAN;
+                state <= S_SHA_GO;
             end
 
-            S_SCAN: begin
-                if (wait1) begin
-                    wait1 <= 1'b0;
-                end else begin
-                    chk <= chk + scan_data;
-                    if (idx + 17'd1 == in_total) state <= S_SHA_GO;
-                    else                         idx   <= idx + 17'd1;
+            // 整个输入缓冲逐字节吸收进 SHAKE256（每字节两拍：摆地址 / 推数据）
+            S_SHA_GO:  state <= S_SCAN;
+            S_SCAN:    state <= S_SHA_PUT;          // 等 ram_dp 的同步读
+            S_SHA_PUT: if (sha_in_ready) begin
+                if (idx + 17'd1 == in_total) state <= S_SHA_FLUSH;
+                else begin
+                    idx   <= idx + 17'd1;
+                    state <= S_SCAN;
                 end
             end
-
-            // 把 chk 过一次 SHAKE256 —— 目的是走一遍 sha3_core 的接线
-            S_SHA_GO:    state <= S_SHA_PUT;
-            S_SHA_PUT:   if (sha_in_ready) state <= S_SHA_FLUSH;
-            S_SHA_FLUSH: state <= S_SHA_GET;
+            S_SHA_FLUSH: state <= S_SHA_GET;        // flush 只在 in_valid 低时被采样
             S_SHA_GET:   if (sha_out_valid) begin
                 h        <= sha_out_data;
-                work_cnt <= 6'd32;      // 假装算了一会儿
+                work_cnt <= 6'd32;      // 假装又算了一会儿
                 state    <= S_WORK;
             end
 
@@ -177,7 +183,7 @@ module mldsa_engine (
                     work_cnt <= work_cnt - 6'd1;
                 end else begin
                     idx <= 17'd0;
-                    vok_r <= (op_r == OP_VERIFY) ? (chk == 8'd0) : 1'b0;
+                    vok_r <= (op_r == OP_VERIFY) ? (h == 8'd0) : 1'b0;
                     state <= (out_total == 17'd0) ? S_DONE : S_EMIT;
                 end
             end

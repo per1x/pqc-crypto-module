@@ -27,11 +27,17 @@ VERSION 都是非零常量，所以"读到 0"本身就是"没命中"的信号）
   ③ 槽号 ≥ NS           —— 0x8005_0000（这一条旧版就是对的，防回归）
   ④ 未对齐               —— 0x8001_0005（旧版：读到 0x04 那个寄存器）
 """
+import os
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
-NS = 5                       # 与 axi4lite_xbar 的默认参数一致
+# 默认 5 = axi4lite_xbar 的默认参数。板级顶层现在是 NS=7（多了 ML-DSA 那个槽），
+# 所以同一套用例还要按 NS=7 再跑一遍：**加一个槽不许动到已有槽的落点** ——
+# 尤其是槽 4 那个金丝雀，它是"AxPROT 门控真生效"的对照组，落点一变整条判据
+# 就换了对象。跑法见 tools/rtl_sim.sh（XBAR_NS=7）。
+NS = int(os.environ.get("XBAR_NS", "5"))
 BASE = 0x8000_0000
 ALL_READY = (1 << NS) - 1
 

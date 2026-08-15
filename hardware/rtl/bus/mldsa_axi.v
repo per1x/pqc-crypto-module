@@ -18,23 +18,34 @@
 //      改成靠 OUT_LEN 卡住读指针 —— 见下面【sk 怎么做到不出总线】。
 //
 // ============================================================================
-// 【输入缓冲的排布：软件送的东西在前，金库供的 sk 在最后】
+// 【输入缓冲的排布 —— 这是与 engine 那条线共用的一份契约】
 // ============================================================================
-// 一切都往 IN_DATA 里灌，顺序固定：
+// 一切都往 IN_DATA 里灌，顺序固定（engine 侧照同一份实现）：
 //
 //   KeyGen : ξ(32)
-//   Sign   : ctx(CTX_LEN) ‖ msg(MSG_LEN) ‖ sk(2560/4032/4896)
-//   Verify : ctx(CTX_LEN) ‖ msg(MSG_LEN) ‖ pk(1312/1952/2592) ‖ sig(2420/3309/4627)
+//   Sign   : [sk(2560/4032/4896)，仅当 SK_FROM_SLOT=0] ‖ rnd(32)
+//            ‖ ctx(CTX_LEN) ‖ msg(MSG_LEN)
+//   Verify : pk(1312/1952/2592) ‖ sig(2420/3309/4627) ‖ ctx(CTX_LEN) ‖ msg(MSG_LEN)
 //
-// **sk 排在最后不是随便定的**：SK_FROM_SLOT 那条路上 sk 不由软件送，而是本层
-// 从金库搬进 engine。sk 若排在前面，软件写的字节就得从偏移 skLen 开始 ——
-// 于是"写 IN_DATA 落在哪"依赖 MODE 写没写、什么时候写，是个一改顺序就静默
-// 出错的形状。排在最后之后：**软件写的字节永远从 0 开始**，金库供的那一段
-// 接在 ctx‖msg 后面，而且两条路（软件自带 sk / 金库供 sk）在 engine 眼里
-// 是**完全相同的一份排布**，engine 不需要知道 sk 是谁送的。
+// 两条要点：
+//   · **rnd 永远在流里**（32 字节，紧跟 sk）。确定性签名就写 32 个零 ——
+//     不另开 mode 位。ACVP 的 siggen 确定性条目正是 rnd = 0³²，没有这个入口
+//     就没法对固定期望值验签名（hedged 每次取随机数，签出来必然对不上）。
+//   · ctx 在 msg 之前，与 FIPS 204 的 M′ = 0x00 ‖ |ctx| ‖ ctx ‖ M 同序；
+//     CTX_LEN 可以是 0（PKCS#11 那条路永远是 0，但 ACVP 里有非空 ctx）。
 //
-// ctx 在 msg 之前，与 FIPS 204 的 M′ = 0x00 ‖ |ctx| ‖ ctx ‖ M 同序，
-// engine 吸收 μ 时可以从地址 0 一路读下去。
+// **engine 看到的永远是完整的一份**：SK_FROM_SLOT=1 时软件不送 sk，本层把
+// 金库里的 sk 写进 engine 输入存储的 [0, skLen)，软件后面送的 rnd‖ctx‖msg
+// 顺延到 skLen 之后。也就是说两条路（软件自带 sk / 金库供 sk）在 engine 眼里
+// 是**逐字节相同的一份排布**，engine 不需要知道 sk 是谁送的。
+//
+// ⚠️ 由此带来一个必须挡住的顺序陷阱：sk 排在最前，于是"软件写的字节落在
+//    engine 的哪个地址"**取决于 MODE**（SK_FROM_SLOT 与 PSET）。先灌字节
+//    再改 MODE 的话，那些字节就按另一份排布被解读了 —— 而且**毫无痕迹**。
+//    所以这里定死一条：**写 MODE 就把 IN_PTR 清零**。
+//    先灌后改 MODE 的写法于是会在 START 处报欠填（LEN_ERR），
+//    而不是安静地算出一个错东西。宁可吵，不可静。
+//    正常顺序本来就是 MODE → CLEAR → 灌字节 → START。
 //
 // ============================================================================
 // 【START 前的校验：喂不够就不许启动】
@@ -62,7 +73,7 @@
 //     sk 那一段**不经过 OUT_DATA**，由本层从 engine 的输出口直接搬进金库；
 //     软件拿到的只有 pk 和槽号。
 //   · Sign 时 SK_FROM_SLOT 置上：sk 从金库搬进 engine 的输入口，软件只送
-//     ctx‖msg。
+//     rnd‖ctx‖msg。
 //
 // 【8 个槽、每槽 8192 字节】
 // sk 最大 4896 字节（ML-DSA-87），跨度取 8192 是为了寻址就是拼接
@@ -70,6 +81,9 @@
 // 槽数取 8 而不是 ML-KEM 那边的 16：签名密钥的用量形态和 KEM 不一样
 // （PKCS#11 那边连续生成很多把 KEM 密钥的是封装，签名密钥是长期的），
 // 8 个槽 + 64 KB 是这一版的取舍，不够了再加是同样的一行改动。
+//
+// Sign 那一趟软件送的是 rnd‖ctx‖msg（不含 sk），所以 START 的长度门槛也跟着
+// 降到 32+CTX_LEN+MSG_LEN —— 否则一个完全正确的调用会被判成喂不够。
 //
 // 【sk 怎么做到不出总线 —— 这一层没有输出缓冲，所以判据换了地方】
 // mlkem_axi 是靠"dk 那一段根本不往输出缓冲里写"。本层的输出缓冲在 engine
@@ -257,9 +271,12 @@ module mldsa_axi #(
     wire store_sk = (op == OP_KEYGEN) && (sk_to_slot || sk_lock);
 
     // ---- 软件必须写够多少字节（见文件头【START 前的校验】）----
+    //   KeyGen : ξ(32)
+    //   Sign   : rnd(32) + ctx + msg，再加 sk（**除非从金库取**）
+    //   Verify : pk + sig + ctx + msg
     wire [17:0] var_len = {2'd0, ctx_len} + {2'd0, msg_len};
     wire [17:0] need_sw = (op == OP_KEYGEN) ? 18'd32
-                        : (op == OP_SIGN)   ? (var_len
+                        : (op == OP_SIGN)   ? (18'd32 + var_len
                                                + (take_sk ? 18'd0 : {5'd0, sk_len}))
                         :                     (var_len + {5'd0, pk_len}
                                                + {5'd0, sig_len});
@@ -338,10 +355,13 @@ module mldsa_axi #(
     // （见 mlkem_axi 的 kickdly）。这里照抄，连同那条用例一起。
     reg [1:0]  kickdly;
 
-    // 软件写的字节落在 engine 输入存储的哪里：永远从 0 开始（见文件头）
-    wire [14:0] sw_addr = in_ptr[14:0];
-    // 金库供的 sk 接在 ctx‖msg 后面
-    wire [14:0] sk_base = var_len[14:0];
+    // 软件写的字节落在 engine 输入存储的哪里：SK_FROM_SLOT 那一趟，前面
+    // skLen 个字节是金库供的 sk，软件的 rnd‖ctx‖msg 顺延到它后面。
+    // 这个偏移取决于 MODE —— 所以写 MODE 会把 IN_PTR 清零（见文件头那条⚠️）。
+    wire [14:0] sw_base = take_sk ? {2'd0, sk_len} : 15'd0;
+    wire [14:0] sw_addr = in_ptr[14:0] + sw_base;
+    // 金库供的 sk 就摆在最前面
+    wire [14:0] sk_base = 15'd0;
 
     // ================= 写通道 =================
     reg aw_got, w_got;
@@ -368,6 +388,21 @@ module mldsa_axi #(
     // 而这正是上面那条校验要挡的东西。非零的写回 SLVERR，不是静默忽略。
     wire wr_inptr_bad = wr_now && wr_strb[0] && (wr_addr[5:2] == A_INPTR)
                         && (wr_data != 32'd0);
+
+    // ---- 运行期间：参数寄存器与 IN_DATA 是只读的 ----
+    // MODE / MSG_LEN / CTX_LEN 在一次运行的中途被改掉的后果是**换前提**：
+    // 长度、槽号、sk 的去向全跟着变 —— 搬 sk 搬到一半跳去另一个槽、
+    // 或者按新 pset 去算 OUT_LEN。IN_DATA 则是白写（engine 的输入口这时
+    // 归搬运用）。
+    //
+    // 两者都**明确回 SLVERR**。静默丢弃是这里最危险的选项：软件会以为参数改了、
+    // 字节灌进去了，接着按一个错误的前提往下走 —— 与擦除期间拒写同一条理由。
+    // CTRL 不在此列：CLEAR / ZEROIZE / SK_LOCK 在运行途中本来就该能写。
+    wire wr_busy_reject = wr_now && wr_strb[0] && (state != S_IDLE)
+                          && ((wr_addr[5:2] == A_MODE)
+                              || (wr_addr[5:2] == A_MSGLEN)
+                              || (wr_addr[5:2] == A_CTXLEN)
+                              || (wr_addr[5:2] == A_INDATA));
 
     // ================= 读通道 =================
     assign f_arready = !f_rvalid;
@@ -474,7 +509,8 @@ module mldsa_axi #(
                 f_bresp  <= (wiping
                              || (wr_strb[0] && (wr_addr[5:2] == A_INDATA)
                                  && (state == S_IDLE) && in_full)
-                             || wr_inptr_bad) ? RESP_SLVERR : RESP_OKAY;
+                             || wr_inptr_bad
+                             || wr_busy_reject) ? RESP_SLVERR : RESP_OKAY;
                 if (wr_strb[0] && !wiping) begin
                     case (wr_addr[5:2])
                     A_CTRL: begin
@@ -531,11 +567,17 @@ module mldsa_axi #(
                             end
                         end
                     end
-                    A_MODE: begin
+                    // 运行途中改参数一律不认（回 SLVERR，见 wr_busy_reject）
+                    A_MODE: if (state == S_IDLE) begin
                         op   <= wr_data[1:0]; pset <= wr_data[3:2];
                         sk_to_slot   <= wr_data[4];
                         sk_from_slot <= wr_data[5];
                         slot         <= wr_data[9:6];
+                        // ⚠️ 写 MODE 就把写指针清零。MODE 决定软件字节落在
+                        // engine 的哪个偏移（SK_FROM_SLOT 那趟要让开前面的 sk），
+                        // 所以"先灌字节再改 MODE"必须变成一个**吵闹**的错误：
+                        // 指针归零 → START 处报欠填，而不是按新排布去解读旧字节。
+                        in_ptr <= 16'd0;
                     end
                     A_INDATA: if (wr_indata) begin
                         // 直写 engine 的输入存储：一笔 AXI 写就是一次存储写
@@ -549,8 +591,8 @@ module mldsa_axi #(
                     // OUT_PTR 反过来可以随便写：它只是个读游标，读的时候还要
                     // 被 OUT_LEN 卡一道，seek 回去重读一段是正当用法。
                     A_OUTPTR: out_ptr  <= wr_data[15:0];
-                    A_MSGLEN: msg_len  <= wr_data[15:0];
-                    A_CTXLEN: ctx_len  <= wr_data[15:0];
+                    A_MSGLEN: if (state == S_IDLE) msg_len <= wr_data[15:0];
+                    A_CTXLEN: if (state == S_IDLE) ctx_len <= wr_data[15:0];
                     default: ;
                     endcase
                 end

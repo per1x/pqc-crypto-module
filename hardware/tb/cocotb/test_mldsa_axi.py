@@ -5,13 +5,20 @@
 **不证明任何算法正确性** —— 算法在 test_mldsa_keygen / _sign / _verify 里
 对着 ACVP 官方向量逐字节验过，两件事不要混着说。
 
-替身按固定延迟出一份**可以在 Python 里算出来**的假输出（见 stub 的文件头）：
-输出取决于**整个输入缓冲的字节和**，于是"sk 到底有没有从金库进到 engine 里"
-这种事会直接体现在输出上 —— 用例据此反证金库那条路是通的。
+替身按固定延迟出一份**可以在 Python 里算出来**的假输出：把整个输入缓冲
+逐字节吸收进 SHAKE256，挤出一个字节 h，输出全按 h 铺开（见 stub 的文件头）。
+关键在于**用哈希而不是字节和**：哈希与顺序有关，于是"金库供的 sk 落在
+engine 的哪个偏移""rnd/ctx/msg 有没有接在该接的位置"这些事都会体现在输出上。
+
+输入字节流的排布（与 engine 那条线共用的契约）：
+    KeyGen : ξ(32)
+    Sign   : [sk，仅当 SK_FROM_SLOT=0] ‖ rnd(32) ‖ ctx(CTX_LEN) ‖ msg(MSG_LEN)
+    Verify : pk ‖ sig ‖ ctx(CTX_LEN) ‖ msg(MSG_LEN)
 
 覆盖：
   ① 三种 OP × 三个 PSET 的寄存器时序与长度；
-  ② START 前的长度校验：喂不够就 PARAM_ERR|LEN_ERR 且**不启动**；
+  ② START 前的长度校验：喂不够就 PARAM_ERR|LEN_ERR 且**不启动**
+     （走金库/不走金库 × ctx 空/非空 四种组合都覆盖）；
   ③ 金库：SK_TO_SLOT 时 sk 不出现在 OUT_DATA；SK_FROM_SLOT 时软件不送 sk
      也能签，且两条路签出来的字节完全相同；
   ④ 一次性闩锁：置上后强制走金库，且**没有任何写法能把它清掉**（反证）；
@@ -19,7 +26,8 @@
   ⑥ 陈旧状态：被拒的 START 不留上一次的 DONE/OUT_LEN；CLEAR 清得干净；
   ⑦ 同一个 OP 连跑两次（残留 done 那个上板才暴露的坑）；
   ⑧ 防火墙：non-secure 被拦且无副作用；
-  ⑨ ZEROIZE / tamper 真的把 64 KB 金库逐字节擦掉。
+  ⑨ ZEROIZE / tamper 真的把 64 KB 金库逐字节擦掉；
+  ⑩ 排布相关的两条防呆：写 MODE 清写指针、运行途中改参数回 SLVERR。
 """
 import hashlib
 
@@ -41,13 +49,15 @@ ST_TAMPER, ST_WIPING = 1 << 5, 1 << 6
 OP_KEYGEN, OP_SIGN, OP_VERIFY = 0, 1, 2
 M_SK_TO_SLOT, M_SK_FROM_SLOT = 1 << 4, 1 << 5
 
-KS_LOCK = 1 << 8            # KEYSTAT：[7:0] 槽有效位，[8] 闩锁
+KS_LOCK = 1 << 8            # KEYSTAT：[7:0] 槽有效位，[8] 闩锁，[31:16] 每槽 pset
 
 # FIPS 204 表 2
 PK = {0: 1312, 1: 1952, 2: 2592}
 SK = {0: 2560, 1: 4032, 2: 4896}
 SIG = {0: 2420, 1: 3309, 2: 4627}
 PSNAME = {0: "ML-DSA-44", 1: "ML-DSA-65", 2: "ML-DSA-87"}
+
+RND0 = bytes(32)            # 确定性签名：rnd = 0³²（ACVP 的确定性条目就是它）
 
 PROT_SECURE, PROT_NONSEC = 0b000, 0b010
 RESP_OKAY, RESP_SLVERR = 0, 2
@@ -59,36 +69,55 @@ RESP_REFUSED = RESP_OKAY
 # ============================================================================
 # 替身 engine 的模型（与 stub_mldsa_engine.v 一一对应）
 # ============================================================================
-def eng_input(op, pset, xi=b"", ctx=b"", msg=b"", sk=b"", pk=b"", sig=b""):
-    """engine 输入缓冲里应当是什么 —— 排布见 mldsa_axi.v 的文件头"""
+def eng_input(op, *, xi=b"", rnd=b"", ctx=b"", msg=b"", sk=b"", pk=b"", sig=b""):
+    """engine 输入缓冲里应当是什么 —— **engine 看到的永远是完整的一份**，
+    sk 是软件送的还是金库供的，对它没有区别。"""
     if op == OP_KEYGEN:
         return xi
     if op == OP_SIGN:
-        return ctx + msg + sk
-    return ctx + msg + pk + sig
+        return sk + rnd + ctx + msg
+    return pk + sig + ctx + msg
 
 
 def stub_h(eng_in: bytes) -> int:
-    chk = sum(eng_in) & 0xFF
-    return hashlib.shake_256(bytes([chk])).digest(1)[0]
+    return hashlib.shake_256(eng_in).digest(1)[0]
 
 
 def stub_keygen(pset, xi):
     """替身的 KeyGen 输出：pk‖sk"""
-    h = stub_h(eng_input(OP_KEYGEN, pset, xi=xi))
+    h = stub_h(eng_input(OP_KEYGEN, xi=xi))
     pk = bytes((h + i) & 0xFF for i in range(PK[pset]))
     sk = bytes(((h ^ 0xA5) + j) & 0xFF for j in range(SK[pset]))
     return pk, sk
 
 
-def stub_sign(pset, ctx, msg, sk):
-    h = stub_h(eng_input(OP_SIGN, pset, ctx=ctx, msg=msg, sk=sk))
+def stub_sign(pset, sk, rnd, ctx, msg):
+    h = stub_h(eng_input(OP_SIGN, sk=sk, rnd=rnd, ctx=ctx, msg=msg))
     return bytes((h + i) & 0xFF for i in range(SIG[pset]))
 
 
-def stub_verify_ok(pset, ctx, msg, pk, sig):
-    return (sum(eng_input(OP_VERIFY, pset, ctx=ctx, msg=msg,
-                          pk=pk, sig=sig)) & 0xFF) == 0
+def stub_verify_ok(pk, sig, ctx, msg):
+    return stub_h(eng_input(OP_VERIFY, pk=pk, sig=sig, ctx=ctx, msg=msg)) == 0
+
+
+def make_verify_pass(pk, sig, ctx, msg):
+    """调最后两个 sig 字节，凑出一份让替身判"通过"的输入
+
+    替身的假判定是 h == 0，所以造一个通过的例子要搜一下。搜的是确定性的：
+    同一组输入每次都得到同一个答案。
+    """
+    s = bytearray(sig)
+    for v in range(4096):
+        s[-1] = v & 0xFF
+        s[-2] = (v >> 8) & 0xFF
+        if stub_verify_ok(pk, bytes(s), ctx, msg):
+            return bytes(s)
+    raise AssertionError("没搜到能让替身判通过的 sig（4096 次都没中）")
+
+
+def sign_payload(sk, rnd, ctx, msg, *, from_slot=False):
+    """软件该往 IN_DATA 里灌什么 —— 走金库时不送 sk"""
+    return (b"" if from_slot else sk) + rnd + ctx + msg
 
 
 # ============================================================================
@@ -212,7 +241,10 @@ async def out_bytes(dut, first, count):
 
 async def run_op(dut, op, pset, payload, *, to_slot=False, from_slot=False,
                  slot=0, msg_len=0, ctx_len=0, limit=40_000):
-    """一次完整调用：设参数 → 清 → 灌字节 → 启动 → 等完成。返回 OUT_LEN"""
+    """一次完整调用：设参数 → 清 → 灌字节 → 启动 → 等完成。返回 OUT_LEN
+
+    ⚠️ 顺序是 MODE 在最前 —— 写 MODE 会清 IN_PTR（排布依赖 MODE，见 RTL 文件头）。
+    """
     assert await wr(dut, MODE, mode_word(op, pset, to_slot=to_slot,
                                          from_slot=from_slot, slot=slot)) == RESP_OKAY
     assert await wr(dut, MSG_LEN, msg_len) == RESP_OKAY
@@ -263,19 +295,22 @@ async def test_three_ops_three_psets(dut):
         assert n == PK[pset], f"{name} 存槽时 OUT_LEN={n}，应当恰好是 pk 的 {PK[pset]}"
 
         ctx, msg = b"\xC1\xC2", b"hello-mldsa"
-        sig_ref = stub_sign(pset, ctx, msg, sk_ref)
-        n = await run_op(dut, OP_SIGN, pset, ctx + msg, from_slot=True, slot=pset,
+        sig_ref = stub_sign(pset, sk_ref, RND0, ctx, msg)
+        n = await run_op(dut, OP_SIGN, pset,
+                         sign_payload(sk_ref, RND0, ctx, msg, from_slot=True),
+                         from_slot=True, slot=pset,
                          msg_len=len(msg), ctx_len=len(ctx))
         assert n == SIG[pset], f"{name} Sign OUT_LEN={n}，应当是 {SIG[pset]}"
         assert await out_bytes(dut, 0, 8) == sig_ref[:8], \
             f"{name} 按槽签出来的签名不对 —— 金库里的 sk 没有正确进到 engine"
 
         # ---- Verify ----
-        n = await run_op(dut, OP_VERIFY, pset, ctx + msg + pk_ref + sig_ref,
+        n = await run_op(dut, OP_VERIFY, pset,
+                         pk_ref + sig_ref + ctx + msg,
                          msg_len=len(msg), ctx_len=len(ctx))
         assert n == 0, f"{name} Verify 不该有输出字节，OUT_LEN={n}"
         st, _ = await rd(dut, STATUS)
-        want = stub_verify_ok(pset, ctx, msg, pk_ref, sig_ref)
+        want = stub_verify_ok(pk_ref, sig_ref, ctx, msg)
         assert bool(st & ST_VOK) == want, \
             f"{name} verify_ok={bool(st & ST_VOK)}，替身模型说应当是 {want}"
 
@@ -287,7 +322,7 @@ async def test_verify_ok_both_ways(dut):
     """verify_ok 两种结果都能确定性地造出来
 
     只验"通过"是不够的：一个把 verify_ok 恒接成 1 的实现同样能过。
-    替身的假判定是"输入字节和 ≡ 0"，Python 调一个字节就能翻转它。
+    替身的假判定挂在整份输入的摘要上，Python 调两个字节就能翻转它。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -295,15 +330,10 @@ async def test_verify_ok_both_ways(dut):
     pset = 0
     ctx, msg = b"", b"\x01\x02\x03\x04"
     pk = bytes((i * 7 + 1) & 0xFF for i in range(PK[pset]))
-    sig = bytearray((i * 3 + 5) & 0xFF for i in range(SIG[pset]))
+    sig0 = bytes((i * 3 + 5) & 0xFF for i in range(SIG[pset]))
+    good = make_verify_pass(pk, sig0, ctx, msg)
 
-    # 把最后一个字节调成让整体和 ≡ 0 —— 替身据此判"通过"
-    total = sum(eng_input(OP_VERIFY, pset, ctx=ctx, msg=msg, pk=pk, sig=bytes(sig)))
-    sig[-1] = (sig[-1] - total) & 0xFF
-    good = bytes(sig)
-    assert stub_verify_ok(pset, ctx, msg, pk, good)
-
-    n = await run_op(dut, OP_VERIFY, pset, ctx + msg + pk + good,
+    n = await run_op(dut, OP_VERIFY, pset, pk + good + ctx + msg,
                      msg_len=len(msg), ctx_len=len(ctx))
     assert n == 0
     st, _ = await rd(dut, STATUS)
@@ -311,8 +341,8 @@ async def test_verify_ok_both_ways(dut):
 
     bad = bytearray(good)
     bad[0] ^= 0x01
-    assert not stub_verify_ok(pset, ctx, msg, pk, bytes(bad))
-    await run_op(dut, OP_VERIFY, pset, ctx + msg + pk + bytes(bad),
+    assert not stub_verify_ok(pk, bytes(bad), ctx, msg)
+    await run_op(dut, OP_VERIFY, pset, pk + bytes(bad) + ctx + msg,
                  msg_len=len(msg), ctx_len=len(ctx))
     st, _ = await rd(dut, STATUS)
     assert not (st & ST_VOK), \
@@ -355,27 +385,73 @@ async def test_underfill_refused_and_not_started(dut):
     n, _ = await rd(dut, OUT_LEN)
     assert n == 0, f"欠填之后 OUT_LEN = {n}"
 
-    # Sign 少一个字节的 sk，同样要被挡住
-    xi = bytes([0x5A] * 32)
-    _, sk_ref = stub_keygen(pset, xi)
-    assert await run_op(dut, OP_SIGN, pset, b"m" + sk_ref[:-1],
-                        msg_len=1) is None, "Sign 少一个字节 sk 却跑起来了"
-    st, _ = await rd(dut, STATUS)
-    assert st & ST_LENERR
-
     # 喂满就照常
     assert await run_op(dut, OP_KEYGEN, pset, bytes(32)) == PK[pset] + SK[pset]
     st, _ = await rd(dut, STATUS)
     assert not (st & (ST_PARAMERR | ST_LENERR)), "喂满之后错误位还挂着"
 
-    dut._log.info("欠填（KeyGen 31/32、Sign 少一字节 sk）全部被拒且未启动 engine")
+    dut._log.info("KeyGen 喂 31/32 被拒且未启动 engine；喂满照常")
+
+
+@cocotb.test()
+async def test_length_check_covers_all_stream_shapes(dut):
+    """长度校验：走金库/不走金库 × ctx 空/非空，**少一个字节就必须被拒**
+
+    这四种组合的欠填门槛各不相同：
+        不走金库 : sk + 32(rnd) + ctx + msg
+        走金库   : 32(rnd) + ctx + msg          ← sk 不由软件送，不能算进去
+    算错任何一边都会出安静的错误：门槛算高了，一个完全正确的调用被判参数错；
+    算低了，engine 拿残留当 rnd 或 sk 去签 —— 签出来的东西**照样能验过**
+    （用的是同一份坏材料对应的 pk），没有任何痕迹。
+
+    每种组合都做两次：少一个字节必须被拒，正好喂满必须跑完且签名对得上。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    pset = 0
+    xi = bytes([0x33] * 32)
+    _, sk = stub_keygen(pset, xi)
+    rnd = bytes(range(32))
+    msg = b"length-check"
+
+    # 金库那条路要先有 sk 在槽里
+    await run_op(dut, OP_KEYGEN, pset, xi, to_slot=True, slot=0)
+
+    for from_slot in (False, True):
+        for ctx in (b"", b"\xAA\xBB\xCC"):
+            label = ("走金库" if from_slot else "自送 sk") + \
+                    ("、ctx 非空" if ctx else "、ctx 空")
+            full = sign_payload(sk, rnd, ctx, msg, from_slot=from_slot)
+            want = (32 + len(ctx) + len(msg)
+                    + (0 if from_slot else SK[pset]))
+            assert len(full) == want, f"{label}：用例自己的长度就不对"
+
+            # 少一个字节
+            r = await run_op(dut, OP_SIGN, pset, full[:-1], from_slot=from_slot,
+                             slot=0, msg_len=len(msg), ctx_len=len(ctx),
+                             limit=3000)
+            assert r is None, f"{label}：少一个字节居然跑起来了"
+            st, _ = await rd(dut, STATUS)
+            assert st & ST_LENERR, f"{label}：少一个字节应当置 LEN_ERR（{st:#x}）"
+
+            # 正好喂满
+            n = await run_op(dut, OP_SIGN, pset, full, from_slot=from_slot,
+                             slot=0, msg_len=len(msg), ctx_len=len(ctx))
+            assert n == SIG[pset], f"{label}：喂满之后 OUT_LEN={n}"
+            assert await out_bytes(dut, 0, 8) == \
+                stub_sign(pset, sk, rnd, ctx, msg)[:8], \
+                f"{label}：签名字节不对 —— 排布或长度算错了"
+
+    dut._log.info("四种流形态（走金库/自送 × ctx 空/非空）：少一字节全被拒，"
+                  "喂满全对上")
 
 
 @cocotb.test()
 async def test_msg_len_counts_toward_need(dut):
-    """MSG_LEN/CTX_LEN 报大了而字节没跟上 —— 也是欠填
+    """MSG_LEN 报大了而字节没跟上 —— 也是欠填
 
-    这一条单列，是因为它是软件最容易犯的错：sk 送全了，msg 只送了一半。
+    这一条单列，是因为它是软件最容易犯的错：sk 与 rnd 送全了，msg 只送了一半。
     长度校验必须把 MSG_LEN/CTX_LEN 算进去，否则 engine 会拿残留当消息签名，
     签出来的东西**一样能通过验证**（验的是同一份残留），错得毫无痕迹。
     """
@@ -387,17 +463,54 @@ async def test_msg_len_counts_toward_need(dut):
     msg = b"0123456789"
 
     # 报 10 字节 msg，只送 4 个
-    assert await run_op(dut, OP_SIGN, pset, msg[:4] + sk,
-                        msg_len=len(msg)) is None, "msg 欠填却跑起来了"
+    assert await run_op(dut, OP_SIGN, pset,
+                        sign_payload(sk, RND0, b"", msg[:4]),
+                        msg_len=len(msg), limit=3000) is None, "msg 欠填却跑起来了"
     st, _ = await rd(dut, STATUS)
     assert st & ST_LENERR, f"msg 欠填应当置 LEN_ERR（STATUS={st:#x}）"
 
     # 送齐就过
-    n = await run_op(dut, OP_SIGN, pset, msg + sk, msg_len=len(msg))
+    n = await run_op(dut, OP_SIGN, pset, sign_payload(sk, RND0, b"", msg),
+                     msg_len=len(msg))
     assert n == SIG[pset]
-    assert await out_bytes(dut, 0, 8) == stub_sign(pset, b"", msg, sk)[:8]
+    assert await out_bytes(dut, 0, 8) == stub_sign(pset, sk, RND0, b"", msg)[:8]
 
     dut._log.info("MSG_LEN 报了而字节没送齐：被判欠填；送齐之后签名逐字节对上")
+
+
+@cocotb.test()
+async def test_rnd_reaches_engine(dut):
+    """rnd 那 32 个字节确实进了 engine，而且位置没错
+
+    没有 rnd 入口就没法对 ACVP 的确定性 siggen 条目（rnd=0³²）验签名，
+    所以这条要证明的不只是"长度算上了它"，而是**它真的被送进去了**：
+    只改 rnd、别的一律不动，签出来的字节必须变。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    pset = 0
+    _, sk = stub_keygen(pset, bytes([0x77] * 32))
+    msg, ctx = b"same-message", b"\x01"
+
+    n = await run_op(dut, OP_SIGN, pset, sign_payload(sk, RND0, ctx, msg),
+                     msg_len=len(msg), ctx_len=len(ctx))
+    assert n == SIG[pset]
+    det = await out_bytes(dut, 0, 16)
+    assert det == stub_sign(pset, sk, RND0, ctx, msg)[:16], "确定性那一份不对"
+
+    rnd1 = bytes([0xA5] * 32)
+    n = await run_op(dut, OP_SIGN, pset, sign_payload(sk, rnd1, ctx, msg),
+                     msg_len=len(msg), ctx_len=len(ctx))
+    assert n == SIG[pset]
+    hedged = await out_bytes(dut, 0, 16)
+    assert hedged == stub_sign(pset, sk, rnd1, ctx, msg)[:16], "换了 rnd 那一份不对"
+
+    assert det != hedged, (
+        "只改 rnd 而签名一个字节没变 —— rnd 根本没进 engine，"
+        "那 ACVP 的确定性条目就无从对起")
+
+    dut._log.info("rnd 进到了 engine：rnd=0³² 与 rnd=0xA5×32 签出来的字节不同")
 
 
 # ============================================================================
@@ -413,6 +526,8 @@ async def test_sk_stays_on_chip(dut):
         读指针要是没被卡住，软件照样能把 sk 捞出来）。
       · **还能用**：拿槽里的 sk 去签，签出来的字节与"软件自己送 sk"那一路
         **逐字节相同**。少了这一半，一个"把 sk 直接丢掉"的实现也能过上一半。
+        替身的输出挂在整份输入的**摘要**上，所以这条相等还顺带证明了
+        金库供的 sk 落在了与软件自送时**完全相同的偏移**上。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -437,17 +552,19 @@ async def test_sk_stays_on_chip(dut):
 
     ks, _ = await rd(dut, KEYSTAT)
     assert ks & (1 << slot), f"槽 {slot} 没被标成有效：KEYSTAT=0x{ks:08x}"
-    assert (ks >> 16) & 0x3 == 0 or True    # 参数集在 [31:16]，逐槽 2 位
     assert ((ks >> 16) >> (2 * slot)) & 3 == pset, "槽里记的参数集不对"
 
     # 用槽签 vs 自己送 sk：必须逐字节相同
     ctx, msg = b"\xAA", b"sign-me"
-    by_slot = await run_op(dut, OP_SIGN, pset, ctx + msg, from_slot=True,
-                           slot=slot, msg_len=len(msg), ctx_len=len(ctx))
+    by_slot = await run_op(dut, OP_SIGN, pset,
+                           sign_payload(sk_ref, RND0, ctx, msg, from_slot=True),
+                           from_slot=True, slot=slot,
+                           msg_len=len(msg), ctx_len=len(ctx))
     assert by_slot == SIG[pset], f"按槽签的 OUT_LEN={by_slot}"
     sig_slot = await out_bytes(dut, 0, 32)
 
-    by_hand = await run_op(dut, OP_SIGN, pset, ctx + msg + sk_ref,
+    by_hand = await run_op(dut, OP_SIGN, pset,
+                           sign_payload(sk_ref, RND0, ctx, msg),
                            msg_len=len(msg), ctx_len=len(ctx))
     assert by_hand == SIG[pset]
     sig_hand = await out_bytes(dut, 0, 32)
@@ -455,7 +572,8 @@ async def test_sk_stays_on_chip(dut):
     assert sig_slot == sig_hand, (
         "按槽签与自己送 sk 签出来的不一样 —— 金库里的 sk 或者它进 engine 的"
         "位置是错的")
-    assert sig_slot == stub_sign(pset, ctx, msg, sk_ref)[:32], "与替身模型不一致"
+    assert sig_slot == stub_sign(pset, sk_ref, RND0, ctx, msg)[:32], \
+        "与替身模型不一致"
 
     dut._log.info(f"sk 全程留在片内：OUT_LEN={PK[pset]}（正好 pk），"
                   "seek 到 sk 段读回全 0，按槽签与自送 sk 逐字节相同")
@@ -471,7 +589,8 @@ async def test_sign_from_empty_or_mismatched_slot_refused(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
-    assert await run_op(dut, OP_SIGN, 0, b"m", from_slot=True, slot=5,
+    payload = sign_payload(b"", RND0, b"", b"m", from_slot=True)
+    assert await run_op(dut, OP_SIGN, 0, payload, from_slot=True, slot=5,
                         msg_len=1, limit=3000) is None, "空槽居然签起来了"
     st, _ = await rd(dut, STATUS)
     assert st & ST_PARAMERR, "空槽应当报 PARAM_ERR"
@@ -479,13 +598,13 @@ async def test_sign_from_empty_or_mismatched_slot_refused(dut):
 
     # 往槽 5 存一把 44 的 sk，再按 65 去用它
     await run_op(dut, OP_KEYGEN, 0, bytes([7] * 32), to_slot=True, slot=5)
-    assert await run_op(dut, OP_SIGN, 1, b"m", from_slot=True, slot=5,
+    assert await run_op(dut, OP_SIGN, 1, payload, from_slot=True, slot=5,
                         msg_len=1, limit=3000) is None, "参数集不匹配居然签起来了"
     st, _ = await rd(dut, STATUS)
     assert st & ST_PARAMERR, "参数集不匹配应当报 PARAM_ERR"
 
     # 用对参数集就正常
-    assert await run_op(dut, OP_SIGN, 0, b"m", from_slot=True, slot=5,
+    assert await run_op(dut, OP_SIGN, 0, payload, from_slot=True, slot=5,
                         msg_len=1) == SIG[0]
 
     dut._log.info("空槽与参数集不匹配都在 START 处判掉，没有跑到超时")
@@ -520,10 +639,13 @@ async def test_sk_lock_is_one_way(dut):
     assert ks & (1 << 1), "闩锁强制走金库时槽没有被标成有效"
 
     # 而且确实是"进了金库"而不是"被丢掉"：拿它签，与自送 sk 一致
-    sig_slot_len = await run_op(dut, OP_SIGN, pset, b"z", from_slot=True,
-                                slot=1, msg_len=1)
-    assert sig_slot_len == SIG[pset]
-    assert await out_bytes(dut, 0, 16) == stub_sign(pset, b"", b"z", sk_ref)[:16]
+    msg = b"z"
+    n = await run_op(dut, OP_SIGN, pset,
+                     sign_payload(b"", RND0, b"", msg, from_slot=True),
+                     from_slot=True, slot=1, msg_len=len(msg))
+    assert n == SIG[pset]
+    assert await out_bytes(dut, 0, 16) == \
+        stub_sign(pset, sk_ref, RND0, b"", msg)[:16]
 
     # ---- 反证：没有任何写法能把它清掉 ----
     for label, addr, val in (
@@ -585,7 +707,7 @@ async def test_illegal_params_refused(dut):
         assert await wr(dut, CTX_LEN, ctx) == RESP_OKAY
         assert await wr(dut, MSG_LEN, 0) == RESP_OKAY
         assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
-        await fill(dut, bytes(64))     # 喂够任何一种合法组合的最小量还多
+        await fill(dut, bytes(64))     # 比任何一种合法组合的最小量还多
 
         assert await wr(dut, CTRL, C_START) == RESP_OKAY
         busy_seen = False
@@ -620,6 +742,7 @@ async def test_in_ptr_only_accepts_zero(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, 0)) == RESP_OKAY
     await fill(dut, bytes(10))
     p, _ = await rd(dut, IN_PTR)
     assert p == 10
@@ -629,7 +752,6 @@ async def test_in_ptr_only_accepts_zero(dut):
     assert p == 10, f"非零写居然改动了写指针（IN_PTR={p}）"
 
     # 拿这个"被拒的 seek"去启动 KeyGen：仍然是欠填
-    assert await wr(dut, MODE, mode_word(OP_KEYGEN, 0)) == RESP_OKAY
     assert await wr(dut, CTRL, C_START) == RESP_OKAY
     st, _ = await rd(dut, STATUS)
     assert st & ST_LENERR, "seek 被拒之后仍然按 10 字节判 —— 这一条才是重点"
@@ -639,6 +761,83 @@ async def test_in_ptr_only_accepts_zero(dut):
     assert p == 0, "写 0 没有把指针复位"
 
     dut._log.info("IN_PTR 非零写回 SLVERR 且指针不动；写 0 正常复位")
+
+
+@cocotb.test()
+async def test_mode_write_resets_in_ptr(dut):
+    """写 MODE 就清写指针 —— 挡的是"先灌字节再改 MODE"
+
+    软件字节落在 engine 的哪个偏移**取决于 MODE**（SK_FROM_SLOT 那趟要给
+    金库的 sk 让开前面 skLen 个字节）。所以"灌完再改 MODE"必须变成一个
+    吵闹的错误，而不是按新排布去解读旧字节 —— 后者没有任何痕迹。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, 0)) == RESP_OKAY
+    await fill(dut, bytes(32))
+    p, _ = await rd(dut, IN_PTR)
+    assert p == 32
+
+    # 改 MODE（哪怕只是换个 pset）→ 指针归零
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, 1)) == RESP_OKAY
+    p, _ = await rd(dut, IN_PTR)
+    assert p == 0, f"写 MODE 之后 IN_PTR={p}，应当被清零"
+
+    # 于是这时候 START 会报欠填，而不是拿旧字节按新排布跑
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_LENERR, f"改完 MODE 直接 START 应当报欠填（{st:#x}）"
+    assert not (st & ST_BUSY)
+
+    dut._log.info("写 MODE 清 IN_PTR：先灌后改 MODE 变成 LEN_ERR，不会安静跑错")
+
+
+@cocotb.test()
+async def test_params_are_read_only_while_busy(dut):
+    """运行途中写 MODE / MSG_LEN / CTX_LEN / IN_DATA：回 SLVERR 且不生效
+
+    中途改参数等于**换前提**：长度、槽号、sk 的去向全跟着变（搬 sk 搬到一半
+    跳去另一个槽）。静默丢弃最危险 —— 软件会以为改成功了。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    # 起一次长活（ML-DSA-87 KeyGen，替身要铺 7488 字节输出）
+    pset = 2
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, pset)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    await fill(dut, bytes(32))
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
+
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_BUSY, "先决条件不成立：START 之后没 BUSY"
+
+    assert await wr(dut, MODE, mode_word(OP_SIGN, 0)) == RESP_SLVERR, \
+        "运行途中写 MODE 没有回 SLVERR"
+    assert await wr(dut, MSG_LEN, 999) == RESP_SLVERR
+    assert await wr(dut, CTX_LEN, 7) == RESP_SLVERR
+    assert await wr(dut, IN_DATA, 0x5A) == RESP_SLVERR, \
+        "运行途中写 IN_DATA 没有回 SLVERR（静默丢字节最危险）"
+
+    # 一个都没生效
+    m, _ = await rd(dut, MODE)
+    assert m == mode_word(OP_KEYGEN, pset), f"运行途中的 MODE 写生效了（{m:#x}）"
+    v, _ = await rd(dut, MSG_LEN)
+    assert v == 0, f"运行途中的 MSG_LEN 写生效了（{v}）"
+    v, _ = await rd(dut, CTX_LEN)
+    assert v == 0
+
+    for _ in range(40_000):
+        st, _ = await rd(dut, STATUS)
+        if st & ST_DONE:
+            break
+    else:
+        raise AssertionError("这一趟没跑完")
+    n, _ = await rd(dut, OUT_LEN)
+    assert n == PK[pset] + SK[pset], f"被打扰之后结果不对：OUT_LEN={n}"
+
+    dut._log.info("运行途中改参数一律 SLVERR 且不生效，这一趟的结果不受影响")
 
 
 # ============================================================================
@@ -699,10 +898,9 @@ async def test_clear_leaves_nothing_behind(dut):
     pset = 0
     ctx, msg = b"", b"\x01\x02"
     pk = bytes((i + 1) & 0xFF for i in range(PK[pset]))
-    sig = bytearray((i * 5) & 0xFF for i in range(SIG[pset]))
-    total = sum(eng_input(OP_VERIFY, pset, ctx=ctx, msg=msg, pk=pk, sig=bytes(sig)))
-    sig[-1] = (sig[-1] - total) & 0xFF
-    await run_op(dut, OP_VERIFY, pset, msg + pk + bytes(sig), msg_len=len(msg))
+    sig = make_verify_pass(pk, bytes((i * 5) & 0xFF for i in range(SIG[pset])),
+                           ctx, msg)
+    await run_op(dut, OP_VERIFY, pset, pk + sig + ctx + msg, msg_len=len(msg))
     st, _ = await rd(dut, STATUS)
     assert (st & ST_DONE) and (st & ST_VOK), f"先决条件不成立（STATUS={st:#x}）"
 
@@ -718,8 +916,8 @@ async def test_clear_leaves_nothing_behind(dut):
     assert p == 0, f"CLEAR 之后 OUT_PTR={p}"
 
     # 错误位也清
-    await fill(dut, bytes(4))
     assert await wr(dut, MODE, mode_word(OP_KEYGEN, 0)) == RESP_OKAY
+    await fill(dut, bytes(4))
     assert await wr(dut, CTRL, C_START) == RESP_OKAY
     st, _ = await rd(dut, STATUS)
     assert st & ST_LENERR
@@ -753,9 +951,11 @@ async def test_repeat_same_op_twice(dut):
     # Sign 也连跑两次
     _, sk = stub_keygen(0, bytes([0x61] * 32))
     for i, msg in enumerate([b"aaaa", b"bbbb"]):
-        n = await run_op(dut, OP_SIGN, 0, msg + sk, msg_len=len(msg))
+        n = await run_op(dut, OP_SIGN, 0, sign_payload(sk, RND0, b"", msg),
+                         msg_len=len(msg))
         assert n == SIG[0], f"第 {i+1} 次 Sign OUT_LEN={n}"
-        assert await out_bytes(dut, 0, 8) == stub_sign(0, b"", msg, sk)[:8]
+        assert await out_bytes(dut, 0, 8) == \
+            stub_sign(0, sk, RND0, b"", msg)[:8]
 
     dut._log.info("KeyGen 连跑两次、Sign 连跑两次，中间不复位 —— 全对")
 
