@@ -131,7 +131,22 @@
 
 module mldsa_axi #(
     parameter [31:0]  VERSION     = 32'h0001_0000,
-    parameter integer SECURE_ONLY = 1
+    parameter integer SECURE_ONLY = 1,
+    // ---- ML-DSA 参数集（编译期）----
+    // 三个核这一版仍是编译期参数化的，engine 也是，所以本层要把整套参数原样
+    // 透传下去。**以前这里一个参数都不传**，于是 engine 取默认值 —— 板上那份
+    // bitstream 里的 ML-DSA 其实是 44，而"塞不塞得下"问的是最大的 87。
+    // 默认值仍是 44（与 engine 的默认一致），由顶层显式选。
+    parameter integer K     = 4,
+    parameter integer L     = 4,
+    parameter integer ETA   = 2,
+    parameter integer TAU   = 39,
+    parameter integer G1LOG = 17,
+    parameter integer MODE  = 0,
+    parameter integer OMG   = 80,
+    parameter integer BETA  = 78,
+    parameter integer CTB   = 32,
+    parameter integer PSET  = 0     // 0=44 1=65 2=87
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -182,6 +197,10 @@ module mldsa_axi #(
 
     // engine 的输入存储深度（in_addr 是 15 位）
     localparam [17:0] IN_CAP = 18'd32768;
+    // 消息长度的真实上限。**不是 IN_CAP 算出来的那个数** —— 三个核内部的
+    // msg 缓冲是 AW=13（sign.v / verify.v 里的 `ram_dp #(.DW(8), .AW(13)) u_msg`），
+    // 也就是 8192 字节；地址空间算出来的"还能再喂两万字节"是够不着的。
+    localparam [15:0] MSGMAX = 16'd8192;
 
     // ================= 防火墙 =================
     wire [7:0]  f_awaddr;  wire [2:0] f_awprot;
@@ -273,9 +292,24 @@ module mldsa_axi #(
     // pset==2 那条分支算、op 会落到 default，于是 engine 收到一份对不上号的
     // 输入。软件看到的是 BUSY 一直不落，与"算得慢"分不开。
     wire op_ok = (op == OP_KEYGEN) || (op == OP_SIGN) || (op == OP_VERIFY);
-    wire params_ok = op_ok && (pset != 2'd3) && (slot < 4'd8)
+
+    // ⚠️ **pset 必须与本次综合的参数集一致，而且要在本层判。**
+    // engine 自己也查这一条，但它的拒绝路径是"置 param_err、立刻 done、
+    // 不启动任何核"，而**它不更新 op_r** —— 于是本层在 S_FIN 里抄下来的
+    // eng_out_len 是**上一次运算**那个 op 的长度。软件看到的是 DONE=1 加一个
+    // 像模像样的 OUT_LEN，读出来却是上一次的输出字节。比不报错更糟：它看起来
+    // 成功了（与"被拒的 START 要作废上一次结果"是同一个坑的两个入口）。
+    // 所以本层在 START 处就判掉、根本不启动 engine，engine 那份留作第二道。
+    wire pset_ok = (pset == PSET[1:0]);
+
+    // 消息上限：见 MSGMAX 的声明处。超了**不启动**，而不是让核里的地址
+    // 安静回绕 —— 回绕算出来的是一个长度、格式全对但内容错的签名。
+    wire msg_ok = (msg_len <= MSGMAX);
+
+    wire params_ok = op_ok && (pset != 2'd3) && pset_ok && (slot < 4'd8)
                      // FIPS 204：|ctx| ≤ 255。超了在这里判，不要送进 engine
-                     && (ctx_len <= 16'd255);
+                     && (ctx_len <= 16'd255)
+                     && msg_ok;
 
     // 本次要从金库取 sk / 把 sk 收进金库
     wire take_sk  = (op == OP_SIGN)   && sk_from_slot;
@@ -323,7 +357,9 @@ module mldsa_axi #(
     // ⚠️ rst_n 是**纯复位**，不再 `&& !zeroize_all`：有了真的 zeroize 口之后
     //    就不该再拿复位当擦除用 —— 复位本来也擦不掉 BRAM，那种写法只是看起来
     //    像擦了。擦除靠 zeroize，engine 擦完把 wiping 落下。
-    mldsa_engine u_eng (
+    mldsa_engine #(.K(K), .L(L), .ETA(ETA), .TAU(TAU), .G1LOG(G1LOG),
+                   .MODE(MODE), .OMG(OMG), .BETA(BETA), .CTB(CTB),
+                   .PSET(PSET)) u_eng (
         .clk(clk), .rst_n(rst_n),
         .zeroize(zeroize_all), .wiping(eng_wiping),
         .start(eng_start), .op(op), .pset(pset),
@@ -455,12 +491,36 @@ module mldsa_axi #(
         //    整个错位，而"搬进去了 sk_len 个字节"这件事看起来完全正常。
         skv_raddr = {slot[2:0], cp + (cp_wait ? 13'd0 : 13'd1)};
 
-        // engine 输出口的地址。S_STORE 那一趟由搬运用（同样要提前一个），
-        // 其余时间跟着读游标 —— 这一拍读命中就把地址推到下一个。
+        // engine 输出口的地址。S_STORE 那一趟由搬运用（要提前一个：同步读），
+        // 其余时间**就是读游标本身，不提前**。
+        //
+        // ⚠️⚠️ 这里原来是 `out_ptr + rd_outdata`（读命中的那一拍就把地址推到
+        //    下一个，给同步读多买一拍余量）。接行为级替身时一直是对的，接**真
+        //    engine** 之后会稳定地读错 **pk 的最后一个字节**，别的字节全对。
+        //
+        //    成因在两层的配合上：engine 的出口是
+        //        out_data = (out_addr < PKLEN) ? kg_pk_data : kg_sk_data
+        //    —— **选择器用的是本拍的 out_addr，而数据是上一拍的 out_addr 取出来
+        //    的**（ram_dp 同步读，一拍延迟）。于是当读游标停在 PKLEN-1 时，
+        //    本层把地址提前到了 PKLEN，选择器当场翻到 sk 那一侧，交出来的是
+        //    kg_sk_data 在地址 (PKLEN-1)-PKLEN = -1（回绕成 8191）上的值，
+        //    也就是 0x00。段边界上差一拍，正好差一个字节。
+        //
+        //    为什么不在 engine 里修：那是另一条线的文件（三个核正在改成运行时
+        //    选参数集）。而且**这一层本来就不需要那个提前量** —— AXI 的读握手
+        //    最快也要隔两拍（f_arready = !f_rvalid），同步读一拍就够：
+        //      T   命中，采 out_data（= 上一拍地址 out_ptr 取出来的），out_ptr+1
+        //      T+1 out_addr 变成新的 out_ptr，存储在 T+1→T+2 沿上取
+        //      T+2 最早的下一次命中，数据正好就位
+        //    所以去掉提前量既修了边界、又不损失吞吐。
+        //
+        //    ⚠️ S_STORE 那一路**保留**提前量：它每拍搬一个字节，没有 AXI 握手
+        //       撑出来的两拍间隔；而且它的地址永远 ≥ PKLEN，选择器不会翻面，
+        //       踩不到上面那个坑。两条路的写法不同是有理由的，别顺手统一。
         if (state == S_STORE)
             out_addr = {2'd0, pk_len} + {2'd0, cp} + {14'd0, !cp_wait};
         else
-            out_addr = out_ptr[14:0] + {14'd0, rd_outdata};
+            out_addr = out_ptr[14:0];
     end
 
     // ================= 时序 =================
@@ -574,7 +634,9 @@ module mldsa_axi #(
                                 // LEN_ERR 是其中"喂不够"那一类的细分，软件靠它
                                 // 分得清是参数写错了还是字节没送完。
                                 param_err <= 1'b1;
-                                len_err   <= (!len_ok || !cap_ok);
+                                // msg_len 超上限也算在"长度"这一类里：软件靠
+                                // LEN_ERR 分得清是参数写错了还是字节的事。
+                                len_err   <= (!len_ok || !cap_ok || !msg_ok);
                             end else begin
                                 param_err <= 1'b0;
                                 len_err   <= 1'b0;

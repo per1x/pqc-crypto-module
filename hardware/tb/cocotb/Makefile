@@ -78,6 +78,7 @@ VERILOG_SOURCES = \
   $(PWD)/tb_mldsa_sign.v \
   $(PWD)/tb_mldsa_verify.v \
   $(PWD)/tb_mldsa_engine.v \
+  $(RTL_MLDSA)/mldsa_engine.v \
   $(PWD)/tb_trng_health.v
 
 # 地址译码按板级顶层的槽数再跑一遍：板上现在是 7 个槽（加了 ML-DSA）。
@@ -87,23 +88,13 @@ COMPILE_ARGS += $(PDEF)NS=$(XBAR_NS)
 export XBAR_NS
 endif
 
-# ML-DSA 的共享引擎（mldsa_engine）还在另一条线上做。mldsa_axi 这条用例先用
-# 一个行为级替身顶着 —— 它按固定延迟出假数据，验的是 AXI 那一层，不是算法。
-# 只在这条用例里编进去：真 engine 落地之后这里换成 $(RTL_MLDSA)/mldsa_engine.v，
-# 用例一条都不用改（用例只经寄存器说话）。
+# ⚠️ 这里以前按 TOPLEVEL 二选一：mldsa_axi 编行为级替身 stub_mldsa_engine.v，
+#    其余编真 engine（两者同时进会重复定义 mldsa_engine）。替身已经删掉 ——
+#    真 engine 落地之后再留着它，就等于把"AXI 那一层过了"说成"整条链路过了"。
+#    现在 mldsa_axi 直接接真 engine，判据是 ACVP 官方向量（见 test_mldsa_axi.py）。
 #
-# ⚠️ 真 engine（hardware/rtl/mldsa/mldsa_engine.v）已经落地，但 mldsa_axi 那 19 条
-#    用例的判据是**替身的假数据模型**（h=SHAKE(整个输入缓冲)、pk[i]=h+i …），
-#    换成真 engine 之后那些期望值全部不成立 —— 那是另一件事，要把用例的判据
-#    改成对 mldsa_oracle 算真 ML-DSA。所以这里仍按 TOPLEVEL 二选一：
-#      TOPLEVEL=mldsa_axi        → 替身（验 AXI 层）
-#      TOPLEVEL=tb_mldsa_engine  → 真 engine（验适配层 + 算法）
-#    两者**不能同时进**，否则 mldsa_engine 这个模块名会重复定义。
-ifeq ($(TOPLEVEL),mldsa_axi)
-VERILOG_SOURCES += $(PWD)/stub_mldsa_engine.v
-else
-VERILOG_SOURCES += $(RTL_MLDSA)/mldsa_engine.v
-endif
+# ⚠️ 于是 mldsa_axi 这条用例也**必须带参数集**跑：engine 是编译期参数化的，
+#    pset 端口对不上就拒绝启动。九格里 mldsa_axi 那一路见 tools/mldsa_grid.sh。
 
 # ============================================================================
 # 【两个仿真器的参数覆盖语法不同 —— 这里抹平】

@@ -112,10 +112,10 @@ run test_axi         pqc_accel_axi
 run test_key_vault_core key_vault
 run test_key_vault   key_vault_axi
 run test_mlkem_axi   mlkem_axi
-# ⚠️ mldsa_axi 这条用的是**行为级替身 engine**（hardware/tb/cocotb/
-# stub_mldsa_engine.v），验的是 AXI 那一层：寄存器时序、长度校验、私钥金库、
-# 一次性闩锁、非法输入、陈旧状态。**它不证明 ML-DSA 算法正确** ——
-# 算法在上面 test_mldsa_* 那几条里对着 ACVP 官方向量逐字节验。
+# mldsa_axi 现在接的是**真 engine**（替身已删），判据就是 ACVP 官方向量：
+# 这一条是 AXI → engine → 三个核**整条链路**的端到端对拍，同时还验 AXI 那一层
+# （寄存器时序、长度校验、私钥金库、一次性闩锁、非法输入、陈旧状态）。
+# ⚠️ 不带参数就是 ML-DSA-44。另外两个参数集在 tools/mldsa_grid.sh 的九格里跑。
 run test_mldsa_axi   mldsa_axi
 
 echo

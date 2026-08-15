@@ -104,22 +104,42 @@ set devopen [expr {[info exists ::env(PQC_DEV_OPEN)]
                    && $::env(PQC_DEV_OPEN) ne "0"}]
 set bitname [expr {$characterize ? "zu3eg_hsm_char"
                    : ($devopen ? "zu3eg_hsm_dev" : "zu3eg_hsm")}]
+
+# ---- ML-DSA 参数集 -----------------------------------------------------------
+# 一份 bitstream 里只有一套（三个核这一版是编译期参数化的）。默认 2 = ML-DSA-87，
+# 也就是最大的那一套 —— "塞不塞得下"问的就是它。
+# 塞不下时的退路：`PQC_MLDSA_PSET=1`（65）或 `=0`（44）。
+# ⚠️ 退到 65/44 是合法的工程取舍，但**必须写清楚上的是哪一套**，
+#    含糊成"ML-DSA 全在硬件"就不是了。所以这个数会打进日志与
+#    timing_<bitname>.txt，跟着产物走。
+set mldsa_pset [expr {[info exists ::env(PQC_MLDSA_PSET)]
+                      ? $::env(PQC_MLDSA_PSET) : 2}]
+set mldsa_name [lindex {ML-DSA-44 ML-DSA-65 ML-DSA-87} $mldsa_pset]
+if {$mldsa_name eq ""} {
+    puts "错误：PQC_MLDSA_PSET = $mldsa_pset，只认 0/1/2"
+    exit 1
+}
+puts "=========================================================="
+puts "  ML-DSA 参数集：$mldsa_name （MLDSA_PSET=$mldsa_pset）"
+puts "=========================================================="
+set gen_args [list -generic MLDSA_PSET=$mldsa_pset]
 if {$characterize} {
     puts "=========================================================="
     puts "  ⚠️ 表征构建：风扇低阈值 + TRNG 原始抽头打开"
     puts "     这一份**不是产品形态**，取完数就换回默认构建"
     puts "=========================================================="
-    synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
-                 -verilog_define PQC_CHARACTERIZE=1
+    eval synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
+                 -verilog_define PQC_CHARACTERIZE=1 $gen_args
 } elseif {$devopen} {
     puts "=========================================================="
     puts "  ⚠️ 开发位流：功能从机 SECURE_ONLY=0，普通世界可直连"
     puts "     这**不是**送检形态。产物 zu3eg_hsm_dev.bit"
     puts "=========================================================="
-    synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
-                 -verilog_define PQC_DEV_OPEN=1
+    eval synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
+                 -verilog_define PQC_DEV_OPEN=1 $gen_args
 } else {
-    synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt
+    eval synth_design -top zu3eg_hsm_top -part $part -flatten_hierarchy rebuilt \
+                 $gen_args
 }
 
 # ---- 断言：位流形态与文件名必须一致 ------------------------------------------
@@ -294,6 +314,7 @@ puts "  有效保持余量 = WHS $whs + 不确定度 $hold_unc = $whs_eff ns"
 
 set fh [open $outdir/timing_$bitname.txt w]
 puts $fh "wns=$wns whs=$whs hold_unc=$hold_unc whs_eff=$whs_eff"
+puts $fh "mldsa_pset=$mldsa_pset mldsa=$mldsa_name"
 close $fh
 
 # ---- 保持时间的**下限**，不只是"非负" ----------------------------------------

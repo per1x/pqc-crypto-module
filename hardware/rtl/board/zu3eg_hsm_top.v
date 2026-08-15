@@ -114,9 +114,38 @@
 // 那一个 bitstream 就是全部，分成两个"设计"没有意义（载了谁另一个就没了）。
 // 但**代码是分开的**（hardware/platform/fan_ctrl/ vs hardware/rtl/）：风扇不碰密码的任何
 // 信号，密码也不碰风扇的，两边只共用时钟和复位。
-module zu3eg_hsm_top (
+module zu3eg_hsm_top #(
+    // ========================================================================
+    // 【MLDSA_PSET：这一份 bitstream 里的 ML-DSA 究竟是哪一套参数集】
+    // ========================================================================
+    // 三个 ML-DSA 核这一版仍是**编译期参数化**的（运行时可选还在另一条线上做），
+    // 所以一份 bitstream 里只有一套参数集，而它是几**必须在这里显式写清楚**。
+    //
+    // ⚠️ 以前这里什么都不传，`mldsa_axi` 也什么都不传，于是 engine 取默认值 ——
+    //    板上那份其实是 **ML-DSA-44**，而所有面积/时序的估算都是按最大的 87 算的。
+    //    这种"默认值决定了产品形态"是最不该有的一类含糊：它不写在任何地方，
+    //    只能从三层默认参数里推出来。所以改成显式的、能被综合脚本覆盖的参数。
+    //
+    // 默认取 2（ML-DSA-87）：安全等级最高、面积最大，"塞不塞得下"问的就是它。
+    // 塞不下时的退路是 87 → 65 → 44，用 `PQC_MLDSA_PSET=1` 之类覆盖
+    // （见 hardware/syn/impl_bitstream.tcl），**并且必须在交付文档里写清楚
+    // 上的是哪一套** —— 退到 65/44 是合法的工程取舍，含糊成"ML-DSA 全在硬件"
+    // 就不是了。
+    parameter integer MLDSA_PSET = 2      // 0=ML-DSA-44  1=ML-DSA-65  2=ML-DSA-87
+) (
     output wire fan          // AA11，低=转（见 hardware/platform/fan_ctrl/fan_ctrl.v）
 );
+    // FIPS 204 Table 1。这张表在 ooc_mldsa.tcl 与 tools/mldsa_grid.sh 里各有
+    // 一份副本（那两处是 Tcl / shell，进不了 Verilog）—— 改一处要三处一起改。
+    localparam integer MLDSA_K     = (MLDSA_PSET == 0) ? 4  : (MLDSA_PSET == 1) ? 6   : 8;
+    localparam integer MLDSA_L     = (MLDSA_PSET == 0) ? 4  : (MLDSA_PSET == 1) ? 5   : 7;
+    localparam integer MLDSA_ETA   = (MLDSA_PSET == 1) ? 4  : 2;
+    localparam integer MLDSA_TAU   = (MLDSA_PSET == 0) ? 39 : (MLDSA_PSET == 1) ? 49  : 60;
+    localparam integer MLDSA_G1LOG = (MLDSA_PSET == 0) ? 17 : 19;
+    localparam integer MLDSA_MODE  = (MLDSA_PSET == 0) ? 0  : 1;
+    localparam integer MLDSA_OMG   = (MLDSA_PSET == 0) ? 80 : (MLDSA_PSET == 1) ? 55  : 75;
+    localparam integer MLDSA_BETA  = (MLDSA_PSET == 0) ? 78 : (MLDSA_PSET == 1) ? 196 : 120;
+    localparam integer MLDSA_CTB   = (MLDSA_PSET == 0) ? 32 : (MLDSA_PSET == 1) ? 48  : 64;
     // ========================================================================
     // 【PQC_CHARACTERIZE：表征构建，不是产品形态】
     // ========================================================================
@@ -526,7 +555,14 @@ module zu3eg_hsm_top (
     //
     // 槽 6 与槽 0..3 同一个口径（SECURE_ONLY_FUNCTIONAL）：送检位流下普通世界
     // 一个寄存器都摸不到，KAT 由安全世界经 BL31 的 SiP 驱动。
-    mldsa_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL)) u_mldsa (
+    //
+    // 参数集由顶层的 MLDSA_PSET 决定，**一路显式传到底**（顶层 → mldsa_axi →
+    // mldsa_engine → 三个核）。中间任何一层漏传，出来的就是那一层的默认值 44，
+    // 而且不会有任何报错 —— 只有 pset 端口在运行时对不上才会现形。
+    mldsa_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL),
+                .K(MLDSA_K), .L(MLDSA_L), .ETA(MLDSA_ETA), .TAU(MLDSA_TAU),
+                .G1LOG(MLDSA_G1LOG), .MODE(MLDSA_MODE), .OMG(MLDSA_OMG),
+                .BETA(MLDSA_BETA), .CTB(MLDSA_CTB), .PSET(MLDSA_PSET)) u_mldsa (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*6 +: 8]), .s_axi_awprot(x_awprot[3*6 +: 3]),
         .s_axi_awvalid(x_awvalid[6]), .s_axi_awready(x_awready[6]),
