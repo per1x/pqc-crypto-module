@@ -20,7 +20,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 # 与 fan_ctrl.v 里的 localparam 一致（括号是对应摄氏度）
-T0_UP, T0_DN = 40243, 39592      # 35 / 30   ← 2026-08 新加的安静档
+T0_UP, T0_DN = 40504, 40243      # 37 / 35   ← 安静档，阈值按上板实测定（见 fan_ctrl.v）
 T1_UP, T1_DN = 41547, 40895      # 45 / 40
 T2_UP, T2_DN = 42850, 42198      # 55 / 50
 T3_UP, T3_DN = 44153, 43501      # 65 / 60
@@ -108,7 +108,7 @@ async def test_steps_and_hysteresis(dut):
     # 在 45°C 边界来回抖：档位不应反复跳
     #
     # ⚠️ 必须**从下方逼近**才谈得上"停在 1 档"：41°C 落在 1 档的迟滞带
-    #    (T0_DN 30 ~ T1_UP 45) 里，也同样落在 2 档的迟滞带 (T1_DN 40 ~
+    #    (T0_DN 35 ~ T1_UP 45) 里，也同样落在 2 档的迟滞带 (T1_DN 40 ~
     #    T2_UP 55) 里。所以 41°C 本身不唯一决定档位 —— 从高处降下来它会停在
     #    2 档，从低处升上去才停在 1 档。这正是迟滞的定义（状态与历史有关），
     #    写测试时先回到 29°C 把历史清干净。
@@ -147,39 +147,46 @@ async def test_min_duty_is_not_off(dut):
 
 @cocotb.test()
 async def test_quiet_tier_and_first_ramp(dut):
-    """新加的安静档：低温 8%，过 35°C 回到 25%
+    """安静档：低温 8%，过 T0_UP(37°C) 升到 25%
 
-    这条同时验证了一件以前在这块板上**从来没被执行过**的事：
-    原来最低档一路管到 45°C，而这块板满载都到不了 45°C（风扇全停也只
-    36.5°C）—— 也就是说"温度升就提速"一次都没真正发生过。
-    加了 35°C 这一档之后，它才第一次可观测。
+    这条验证的是一件以前在这块板上**从来没被执行过**的事：原来最低档一路
+    管到 45°C，而这块板满载都到不了 45°C —— "温度升就提速"一次都没真正
+    发生过。加 T0 这一档就是为了让它可观测。
+
+    ⚠️ 用例里这几个温度点**是按上板实测选的，不是随手挑的**：
+        32°C = 板子空载稳态（8% 时 31.7~32.7）→ 必须落在安静档
+        38°C = 风扇全停 + 四核满载能到的温区（38.7）→ 必须能跨过 T0_UP
+        36°C = 迟滞带内（35~37）→ 不该降档
+    第一版阈值定的是 30/35，仿真同样全绿，但**上板一次都没进过安静档** ——
+    因为板子空载就有 31.5°C 以上。所以这些点换成实测值之后，这个用例才
+    真正在守"这块板上有效"这条性质，而不只是"逻辑自洽"。
     """
     cocotb.start_soon(Clock(dut.clk, 13, unit="ns").start())
     await reset(dut)
 
-    # 29°C —— 板子实测的空载温区，应当落在最安静那一档
-    await feed(dut, c2code(29), 10)
-    assert int(dut.cur_step.value) == 0, "29°C 应当在安静档"
-    d_quiet = await measure_duty(dut, keep_temp=c2code(29))
+    # 32°C —— 板子实测的空载温区，应当落在最安静那一档
+    await feed(dut, c2code(32), 10)
+    assert int(dut.cur_step.value) == 0, "32°C（板子实测空载温区）应当在安静档"
+    d_quiet = await measure_duty(dut, keep_temp=c2code(32))
     assert 5 < d_quiet < 12, f"安静档占空比 {d_quiet:.1f}%，应当在 8% 附近"
 
-    # 升到 36°C（过 T0_UP=35）→ 升一档到 25%
-    await feed(dut, c2code(36), 4)
-    assert int(dut.cur_step.value) == 1, "36°C 过了 T0_UP(35)，应当升到 1 档"
-    d_mid = await measure_duty(dut, keep_temp=c2code(36))
+    # 升到 38°C（过 T0_UP=37）→ 升一档到 25%。38 是板子实测满载能到的温区
+    await feed(dut, c2code(38), 4)
+    assert int(dut.cur_step.value) == 1, "38°C 过了 T0_UP(37)，应当升到 1 档"
+    d_mid = await measure_duty(dut, keep_temp=c2code(38))
     assert 20 < d_mid < 30, f"1 档占空比 {d_mid:.1f}%，应当在 25% 附近"
     assert d_mid > d_quiet, "温度升了转速却没升 —— 控制律方向反了"
 
-    # 迟滞：降到 32°C（低于 T0_UP 但高于 T0_DN=30）不该马上降回去
-    await feed(dut, c2code(32), 6)
-    assert int(dut.cur_step.value) == 1, "32°C 仍在 T0_DN(30) 之上，不该降档"
+    # 迟滞：降到 36°C（低于 T0_UP=37 但高于 T0_DN=35）不该马上降回去
+    await feed(dut, c2code(36), 6)
+    assert int(dut.cur_step.value) == 1, "36°C 仍在 T0_DN(35) 之上，不该降档"
 
-    # 降到 29°C（低于 T0_DN）→ 回到安静档
-    await feed(dut, c2code(29), 6)
-    assert int(dut.cur_step.value) == 0, "29°C 低于 T0_DN(30)，应当回到安静档"
+    # 降到 34°C（低于 T0_DN=35）→ 回到安静档
+    await feed(dut, c2code(34), 6)
+    assert int(dut.cur_step.value) == 0, "34°C 低于 T0_DN(35)，应当回到安静档"
 
     dut._log.info(
-        f"安静档：29°C→{d_quiet:.1f}%，36°C→{d_mid:.1f}%，迟滞 30~35°C 生效")
+        f"安静档：32°C→{d_quiet:.1f}%，38°C→{d_mid:.1f}%，迟滞 35~37°C 生效")
 
 
 @cocotb.test()

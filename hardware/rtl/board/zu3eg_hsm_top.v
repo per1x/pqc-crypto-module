@@ -168,7 +168,10 @@ module zu3eg_hsm_top (
     localparam [15:0] F_OT_ON = 16'd40634, F_OT_OFF = 16'd40374; // 38 / 36°C
 `else
     localparam integer RAW_TAP_EN = 0;
-    localparam [15:0] F_T0_UP = 16'd40243, F_T0_DN = 16'd39592;  // 35 / 30°C
+    // ⚠️ 35/37 是**上板量出来的**，不是按散热直觉拍的：板子空载稳在
+    //    31.5~32.7°C，第一版拍的 30/35 让安静档一次都没进过。
+    //    完整实测与推导见 fan_ctrl.v 里 T0_UP/T0_DN 的注释。
+    localparam [15:0] F_T0_UP = 16'd40504, F_T0_DN = 16'd40243;  // 37 / 35°C
     localparam [15:0] F_T1_UP = 16'd41547, F_T1_DN = 16'd40895;  // 45 / 40°C
     localparam [15:0] F_T2_UP = 16'd42850, F_T2_DN = 16'd42198;  // 55 / 50°C
     localparam [15:0] F_T3_UP = 16'd44153, F_T3_DN = 16'd43501;  // 65 / 60°C
