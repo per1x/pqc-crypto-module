@@ -40,7 +40,11 @@ D=/media/sd-mmcblk1p2/hsm
 ROWS="${1:-200}"
 COLS="${2:-1000}"
 OUT="${3:-$D/restart_plreload.bin}"
-BIT=$D/zu3eg_hsm_dev.bit
+# ⚠️ **必须用表征形态位流。** 原始抽头（src_valid/src_bit）只在
+#    PQC_CHARACTERIZE=1 时才编进位流 —— 拿演示位流跑会一行都采不到
+#    （"第 0 行只取到 0 个样本"，实测栽过一次）。
+#    跑完记得换回演示位流并把 daemon 起回来，这个脚本不替你做。
+BIT=$D/zu3eg_hsm_char.bit
 LOG=$D/restart_plreload.log
 
 say() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; sync; }

@@ -174,6 +174,35 @@ so this document is not mistaken for a statement of readiness.
 | **ML-KEM private keys leave the hardware** | `KeyGen` returns `ek ‖ dk` over AXI, because ACVP checking requires it. The daemon holds `dk` and gives applications only a handle, so it does not cross the *interface* — but "the private key never leaves the hardware" is false and is not claimed. Fixing it means adding private-key storage and handle-based use inside `mlkem_axi` |
 | **No device binding** | The key derivation root (`src/crypto/kdr.c`) is a compiled-in constant whose literal text says so. A real device sources it from eFUSE, BBRAM or a PUF. eFUSE is irreversible and there is one board; BBRAM needs JTAG |
 | **No secure boot** | BBRAM key provisioning needs JTAG. The PL configuration is loaded at runtime, not from a signed golden image |
+
+> ### ⚠️ BBRAM is **not** a trust root — say this before building it
+>
+> On ZynqMP these are three separate things, and conflating them produces an
+> overstated claim:
+>
+> * **BBRAM** holds an **AES-256 encryption key**: battery-backed, rewritable,
+>   JTAG-programmable. It buys **confidentiality and integrity** (AES-GCM) for the
+>   boot image.
+> * **The authentication root (RSA) lives in eFUSE**: the PPK hash plus `RSA_EN`.
+>   **Without burning eFUSE the BootROM does not enforce authentication** — an
+>   attacker swaps in an image declared as neither encrypted nor authenticated and
+>   the BootROM boots it happily.
+> * `ENC_ONLY` is the same story: without eFUSE the BootROM does not enforce
+>   encrypted boot either.
+>
+> **So BBRAM alone gives confidentiality and integrity, not resistance to
+> replacement.** Real replacement resistance requires burning eFUSE, and eFUSE is
+> irreversible with exactly one board available — **permanently excluded here**.
+>
+> After BBRAM the accurate statement is: "any root user swapping a bitstream
+> replaces the whole cryptographic boundary" has been downgraded to "this now
+> requires physical access and the ability to rebuild the entire image." It is
+> **not** "a hardware trust root has been established" — that would be a fresh
+> overstatement of the same kind the independent review flagged as H5 and H6.
+>
+> Two deployment costs come with it: the BBRAM key becomes a new key-management
+> problem of its own, and **BBRAM is battery-backed — a dead battery means the
+> board will not boot.**
 | **No module integrity check** | Nothing verifies the module image before use |
 | **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
 | **Conditional self-tests missing** | No pairwise consistency test on generated key pairs, no continuous RNG test |

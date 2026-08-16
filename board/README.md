@@ -47,7 +47,8 @@ real runs and should stay that way — the numbers quoted in
 | `RESULT_seckem3.txt` | ML-KEM 512/768/1024 ACVP, throughput, constant-time sampling, from the secure world |
 | `RESULT_sechwtest.txt` | Board self-test driven through EL3 against `SECURE_ONLY=1` cores |
 | `RESULT_secproof.txt`, `RESULT_secneg.txt` | The AxPROT gate closed in both directions |
-| `RESULT_restart.txt` | SP 800-90B restart test |
+| `RESULT_restart.txt` | SP 800-90B restart matrix, restart = TRNG zeroize (1000 rows) |
+| `RESULT_restart_plreload.txt` | The same matrix with restart = **PL reconfiguration** (200 rows): the ring oscillator is re-instantiated from the bitstream, which is closer to power-on. Still not a POR, and 200 rows is below the 1000 the standard suggests — both stated in the data file's own header |
 | `RESULT_service.txt` | End-to-end through the SDF interface, with the direct-access counter-proof |
 | `RESULT_harness.log` | Harness log from the corresponding run |
 | `RESULT_ctbprobe_before.txt`, `RESULT_ctbprobe_after.txt` | The c̃-comparison defect on silicon: 61 ordered Verify steps before and after the `verify.v` fix |

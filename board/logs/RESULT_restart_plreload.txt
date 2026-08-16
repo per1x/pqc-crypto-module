@@ -1,0 +1,29 @@
+########## PL 重配当 restart（200 行 × 1000 样本，表征形态位流 9322b14b）
+
+=== 采集端写进文件头的口径 ===
+  #SP800-90B-restart-matrix rows=200 cols=1000
+  #restart=PL-RECONFIGURATION (whole fabric reprogrammed; the ring
+  # oscillator is re-instantiated and every flop returns to its
+  # bitstream init value. Closer to power-on than a TRNG zeroize, but
+  # still NOT a power-on reset: the chip stayed powered, the supplies
+  # were not re-established, and the die temperature did not return to
+  # ambient.)
+  #tap=RAW (pre-conditioning, src_valid/src_bit)
+  #sampling=AFTER startup_done AND draining 128 raw words (operational)
+  #rows=200 is BELOW the 1000 that SP 800-90B suggests; the per-column
+  # estimate therefore has less statistical power. Do not report this as
+  # a 1000-row result.
+  #binary payload follows: rows x ceil(cols/8) bytes, MSB-first within each byte
+
+=== 重启矩阵 200 x 1000 ===
+采集端写进文件头的口径：
+
+按行（一次重启之内）  最小 0.776956  中位 0.860558  最大 0.886972
+按列（跨重启同一位置）最小 0.506660  中位 0.698568  最大 0.758043
+
+H_restart = min(行, 列) = 0.506660 比特/样本
+H_原始（顺序采集）      = 0.871234 比特/样本
+判据：H_restart >= H_原始 / 2 = 0.435617
+→ **通过**
+
+整体 1 占比 0.499120（99824 / 200000）
