@@ -257,8 +257,67 @@ DRAM 内容。`mlock` 是尽力而为，且未在内存压力下验证过。
 > * 整个过程 golden 槽没动过、**一次电都没断**：每次都是 JTAG 写
 >   `CSU_MULTI_BOOT = 0` 加系统复位救回来的。
 
+> ### 2026-08-17（第二会话）PUF 黑钥加密启动：**根因已定位到具体一字，修正镜像已构建，板上验证待一次断电**
+>
+> 先纠正一条本文档此前的错误结论：**PUF 黑钥这条路不依赖 eFUSE。**
+> `bootgen -bif_help fsbl_config` 原文写着 `bh_auth_enable` 的语义是
+> "RSA authentication of the bootimage will be done **excluding the verification of
+> PPK hash and SPK ID**"，而 AMD 的 Embedded Design Tutorial 也明确写着
+> PUF boot header 模式 "**does not require programming of eFUSEs**"。
+> 所以"PUF 黑密钥依赖烧 eFUSE"是错的，下面把它从"永久排除"里拿出来。
+>
+> **上一轮为什么被 BootROM 拒收 —— 三个缺陷，全部有权威出处，全部与"猜"无关**
+>
+> | # | 缺陷 | 权威依据 | 实测证据 |
+> |---|---|---|---|
+> | ① | bif 缺 `puf4kmode`。bootgen **默认 12K**，而注册是 4K | `bootgen -bif_help fsbl_config`："puf4kmode — PUF is tuned to use in 4k bit syndrome configuration. **(Default is 12k bit)**"；注册端 `xilskey_puf_registration.h:148` = `XSK_PUF_MODE4K` | 旧镜像启动头 `0x44` 的 `[17:16]`（`BH_PUF_MODE_BIT_SHIFT=16`，`PufMode::PUF4K=3`）= **0** |
+> | ② | bif 缺 `shutter=0x0100005E`，bootgen 写了默认值 | 注册端 `xilskey_eps_zynqmp_puf.h:72` `XSK_ZYNQMP_PUF_SHUTTER_VALUE = 0x0100005e`，注册时写进 `CSU_PUF_SHUT` | 旧镜像启动头 `0x6c` = **`0x01000020`**，与注册值不符 → PUF 再生必然失败 |
+> | ③ | **辅助数据最后一字被上一轮"修"坏了** | `xilskey_eps_zynqmp_puf.c` 注册函数结尾：`Aux = (PufStatus & AUX_MASK) >> 4;` 而 `SyndromeData[386-1] = (PufStatus & AUX_MASK) << 4;` —— **两者差 8 位移位** | 上一轮把结构体 `Aux` 字段值 `0x00864FE2` 直接写进最后一字；正确值是 **`0x864FE200`** |
+>
+> ③ 是最隐蔽的一条，值得完整记下来，因为它是一次**"修复"造成的回归**：
+>
+> * 上一轮第一版把 `PufInstance.SyndromeData[]` 的 386 字**原样**写进 `puf_file` ——
+>   **那是对的**。库自己就会把 CHASH 放进 `SyndromeData[384]`、把 `AUX<<4` 放进
+>   `[385]`（源码见上表 ③ 行）。
+> * 然后作者在镜像里搜 `AUX = 0x00864FE2` 搜不到，就判定"AUX 没进去"，于是第二版
+>   改成"384 字辅助数据 + CHASH + AUX"。**搜不到是必然的**——真正该在那里的是
+>   `0x864FE200`，不是 `0x00864FE2`。这个假阴性把一份正确的数据改坏了。
+> * 一个附带的佐证：现在文件里 `word[383]` 与 `word[384]` **都是 CHASH**。
+>   这不是错误，正是库的行为 —— 4K 模式读数循环停在 `Index=383`，最后读到的那一
+>   字就是 CHASH，随后又被复制到 `[384]`。这条也说明**文件没有错位**，
+>   坏的只有最后一字。
+>
+> **本轮做了什么（两次上板，都在非 golden 槽，golden 全程未动）**
+>
+> | 变体 | 配置 | BootROM 行为 | 说明 |
+> |---|---|---|---|
+> | A | `pufhd_bh, puf4kmode, shutter=0x0100005E`，辅助数据仍是坏的 | `MULTI_BOOT` 6 → **7**，继续往下搜 | 槽 7 事先换成 `BOOT.BIN` 的副本当安全网，板子自己回到了可用状态 |
+> | B | A + `bh_auth_enable` + 全分区 RSA-4096 | **停住**，`MULTI_BOOT` 停在 6，APU 一直在 Reset | 比 A 走得更远（进到了认证/解密阶段），但也因此把板子锁到了需要 POR |
+> | C | A + **修正后的辅助数据**（`word[385] = 0x864FE200`） | **待验证** | 已构建、启动头与 386 字辅助数据逐字自检全过 |
+>
+> **变体 C 的自检结果**（`/home/build/build_puf_c.sh`，产物 `BOOT_PUF_C.BIN`，
+> md5 `7142f40e26d4b0088374783b2c7e12d9`）：
+>
+> ```
+> OK  keysrc(0x28) bh_blk_key: 0xa35c7c53
+> OK  shutter(0x6c): 0x0100005e
+> OK  PUF_HD=BH: 3      OK  PUF_MODE=4K: 3
+> OK  黑钥(0x4c) / 黑钥IV(0xac) 与源文件一致
+> OK  镜像中不含红钥明文
+> OK  辅助数据 386 字与 puf_hd_fixed.txt 逐字一致
+>     word[383]=0x5d5fbdbc  word[384]=CHASH 0x5d5fbdbc  word[385]=AUX<<4 0x864fe200
+> ```
+>
+> ⚠️ **口径**：以上是"根因有权威依据、修正镜像已构建并通过全部可离线核对的自检"，
+> **不是"安全启动已经做通"**。C 没有上板跑过。见下面"必须有人动手"一节。
+>
+> ⚠️ **即便 C 成功，天花板不变**：不烧 eFUSE 就没有 `ENC_ONLY` / `RSA_EN`，
+> BootROM **不强制**加密或认证 —— 换一份"声明为不加密"的镜像照启不误。
+> PUF 买到的是**机密性 + 设备绑定**（换块板同一份 BOOT.BIN 解不开），
+> **不是防替换的信任根**。
+
 | **没有模块完整性检查** | 使用之前没有任何东西校验模块镜像 |
-| **OP-TEE 的安全内存 root 仍读得到**（已部分收窄） | **2026-08-17 实测**：`devmem 0x60000000` 从 Linux 用户态读出 `0xAA0003F3` —— 一条 AArch64 指令，OP-TEE 的安全世界代码。原因是厂家启动链**一个 XMPU_DDR 区域都没配**。现在 BL31 会给 OP-TEE 的 core 段（`0x6000_0000+0x1000_0000`）在六个 XMPU_DDR 实例上各配一条安全区域（`cfg=0x17`，位定义抄自 Xilinx 的 `xddr_xmpu0_cfg.h`）。**它确实在挡**：`ERR_MASTER` 记到 `0xa0`/`0xac` 两个非安全 DMA 主控被拒并置了 ISR。**但它挡不住 APU 自己的非安全读** —— 同一地址前后对照，`devmem` 读出来的值与没有 XMPU 时逐字节相同。所以"密钥交给 OP-TEE 就受保护了"在这块板上**仍然不成立**，只是流氓外设 DMA 这条路被堵了。为什么 APU 的访问不受检查，需要 UG1085 里 DDR 通路的架构才能定。证据见 `board/logs/RESULT_protunit.txt` |
+| **OP-TEE 的安全内存 root 仍读得到**（已部分收窄） | **2026-08-17 实测**：`devmem 0x60000000` 从 Linux 用户态读出 `0xAA0003F3` —— 一条 AArch64 指令，OP-TEE 的安全世界代码。原因是厂家启动链**一个 XMPU_DDR 区域都没配**。现在 BL31 会给 OP-TEE 的 core 段（`0x6000_0000+0x1000_0000`）在六个 XMPU_DDR 实例上各配一条安全区域（`cfg=0x17`，位定义抄自 Xilinx 的 `xddr_xmpu0_cfg.h`）。**它确实在检测**：`ERR_MASTER` 记到 `0xa0`/`0xac` 两个非安全 DMA 主控并置了 ISR。**但它挡不住 APU 自己的非安全读** —— 同一地址前后对照，`devmem` 读出来的值与没有 XMPU 时逐字节相同。所以"密钥交给 OP-TEE 就受保护了"在这块板上**仍然不成立**，只是流氓外设 DMA 这条路被**检测**到了。**根因见下面一节（2026-08-17 第二会话）：XMPU 本身根本不拦截事务。** 证据见 `board/logs/RESULT_protunit.txt` |
 | **没有物理安全** | 只有逻辑层面的强制。`tamper` 输入在 RTL 中存在并会清零密钥仓；没有任何东西接到它上面 |
 | **缺少条件自测** | 对生成的密钥对没有成对一致性测试，也没有连续随机数发生器测试 |
 | **没有 SM2** | SM4 与 SM3 已实现；SM2 非对称算法没有 |
@@ -272,9 +331,64 @@ DRAM 内容。`mlock` 是尽力而为，且未在内存压力下验证过。
 | **主机 RNG 是 OpenSSL** | PL 熵源在边界之内，但主机软件仍然经 OpenSSL 从操作系统取种子 |
 | **保持时序余量很薄** | 经显式管理之后，有效保持余量为 0.110 ns。保持违例不能靠放慢时钟解决，所以 RTL 一改动就必须重新核对这个数字；实现流程在低于 0.050 ns 底线时中止 |
 
-有两项卡在 JTAG 硬件上，而不是卡在设计工作上：把 PL 配置固化进黄金 `BOOT.BIN`，
-以及 BBRAM 支撑的安全启动。有两项在这块板上被永久排除：烧 eFUSE（不可逆，只有
-一块板）与 PUF 黑密钥（依赖于前者）。
+> ### 2026-08-17（第二会话）XMPU 为什么挡不住 APU：**它本来就不负责"挡"**
+>
+> 上一轮把这条记成"需要 UG1085 的 DDR 通路架构才能定"。**定下来了，而且答案与
+> 通路架构无关 —— 是 XMPU 的工作方式被理解错了。**
+>
+> **权威出处**：XAPP1320《Isolation Methods in Zynq UltraScale+ MPSoCs》v3.0
+> （2020-04-30）第 10 页：
+>
+> > "If an illegal transaction is attempted, the XMPU asserts AxUser[10] but the
+> > transaction **is passed to the memory controller**. This mechanism is referred to
+> > as poison by attribute. **The transaction is gated by the end point, not the XMPU
+> > itself.** … While there is a second way of poisoning the transaction (by address),
+> > poisoning by attribute is recommended for the XMPU."
+>
+> 也就是说：**XMPU 只做"检测 + 打毒标记"，真正把事务掐掉的是终点（DDR 控制器）。**
+> 而我们这份配置里，毒化根本没开：
+>
+> ```
+> DDR0..5  CTRL = 0x0000000b   → bit2 POISONCFG = 0（不是按属性毒化）
+> DDR0..5  POISON = 0x00000000 → ATTRIB(bit20) = 0，BASE = 0
+> ```
+>
+> 于是现象完全自洽：**区域配置是对的、检测是活的（DMA 主控的违规被锁存了），
+> 但没有任何东西去 gate，所以数据照样返回。**
+>
+> **顺带排掉的三个假设**（都查了 Xilinx 自己的定义，不是猜的，省下后来人的时间）：
+>
+> * **位定义没错。** `xddr_xmpu0_cfg.h`：`[0]EN [1]RDALWD [2]WRALWD [3]REGNNS
+>   [4]NSCHKTYPE`，`0x17` = EN|RDALWD|WRALWD|NSCHKTYPE 且 REGNNS=0，**语义正确**。
+>   Xilinx QEMU 模型 `hw/misc/xlnx-xmpu.c:205-228` 给出严格模式的判据
+>   `sec_access_check = (sec != regionns)` —— 非安全访问撞上 REGNNS=0 的区域
+>   就是 security violation，正是我们想要的。
+> * **地址粒度没错。** 曾怀疑 `CTRL.ALIGNCFG=1` 会把 START/END 变成 MB 单位。
+>   `hw/misc/xlnx-zynqmp-xmpu.c:283-292` 显示字段**恒定是 `addr>>12`**
+>   （`xr->start <<= 12`），ALIGNCFG 只是在 327-328 行把区域**对齐**到 1 MB
+>   （`xr->start &= ~addr_mask`）。我们写的 `0x00060000/0x0006FFFF` 是对的。
+>   实测也印证：`ERR_ADDR = 0x0006002a` → `0x6002a000`，正落在区域内。
+> * **`MASTER = 0` 没错。** 同文件 330 行：
+>   `id_match = (mask & id) == (mask & master_id)`，掩码为 0 即**匹配所有主控**。
+>
+> **下一步（未做，因为要改 BL31 并上板）**：按 XAPP1320 的建议开启**按属性毒化**
+> （`CTRL.POISONCFG` + `POISON.ATTRIB`），让 DDR 控制器去 gate。
+>
+> **一个零风险、可先做的判决性实验**（只读，不用改 BL31）：
+> 六个实例里 `DDR0/3/4/5` 的 `ERR_ADDR`/`ERR_MASTER` **至今是 0**（只有 DDR1/DDR2
+> 被 DMA 那次锁存过）。DDR 地址在六个实例间交织，所以只要用 APU 读一串跨越足够多
+> 交织条带的地址、再把六个实例全 dump 一遍：
+> * 若仍有实例是 0 → **APU 的访问根本没到达 XMPU_DDR**（通路问题）；
+> * 若全部锁存到 APU 的主控号 → **到达了、也检测到了，纯粹是没 gate**（毒化问题）。
+>
+> 这一步能把"通路"与"毒化"两种解释一次分开，**代价只有一次只读遍历**。
+> ⚠️ `ERR_ADDR`/ISR 是**粘的**，所以这个实验只有一次机会，做之前别让别的主控先违规。
+
+有一项卡在 JTAG 硬件上，而不是卡在设计工作上：把 PL 配置固化进黄金 `BOOT.BIN`。
+BBRAM 支撑的安全启动卡在板级硬件（`VCC_BATT` 没电池）。
+**只有烧 eFUSE 一项在这块板上被永久排除**（不可逆，只有一块板）——
+`ENC_ONLY` / `RSA_EN` 这类"防替换的信任根"因此永远拿不到。
+**PUF 黑密钥不依赖 eFUSE**（此前记成"依赖"，已更正），根因已定位，见上。
 
 一份 FIPS 140-3 / GM/T 0028 风格的安全策略草稿，带有它自己的差距清单，见
 [reference/security-policy.zh-CN.md](reference/security-policy.zh-CN.md)。
