@@ -1,0 +1,22 @@
+=== 设备绑定密钥根：上板结果 2026-08-17 ===
+
+--- ① 库跑在板上：直读 /dev/secmmio（EL3 只读白名单窗口）---
+DNA = 260427310b5a3bdb7fbee59b8327b4e3
+写 0xFFCA0050 被 EL3 拒绝 —— 只读窗口成立
+
+--- ② 库跑在远端主机（本机 macOS）：DNA 经 OP_DEVICE_DNA 取回 ---
+DNA = 260427310b5a3bdb7fbee59b8327b4e3   （公开值，不是密钥）
+provider = device-dna(bound to this chip, NOT secret)
+device_bound=1  hardware_backed=0   （第二个是 0：DNA 不是秘密）
+同 label 同盐，两个根派生结果不同 —— 换板打不开，防克隆成立
+
+--- ③ JTAG 侧独立读同一组寄存器（交叉核对，值必须一致）---
+0xFFCA0050 = 0x26042731
+0xFFCA0054 = 0x0B5A3BDB
+0xFFCA0058 = 0x7FBEE59B
+0xFFCA005C = 0x8327B4E3
+
+⚠️ 未验证项：DNA **在不同芯片之间不同**没有证据 —— 手上只有一块板。
+   跨复位不变是实测的（多次重启 + 一轮 BBRAM 烧写之间逐字相同）。
+⚠️ DNA 不是秘密：有 JTAG 就能读到同样的值（上面第 ③ 段就是这么来的）。
+   它给的是防克隆，不是机密性。hardware_backed 因此是 0。

@@ -38,6 +38,14 @@ axi4lite_xbar 文件头里写的那个坑 —— 改一处忘另一处，而且�
     槽 5  0x8005_0000  fan_ctrl_axi    ——   ——     整核排除
     槽 6  0x8006_0000  mldsa_axi       0x00-0x3C   读 写
 
+另有一个**不在 PL 里**的只读窗口：
+
+    ——    0xFFCA_0050-5C  设备 DNA（CSU）        读 ——   写一律拒绝
+
+它在 CSU 里，EL1 直接读会挨总线错误。放它出来只为一件事：把密钥派生根从
+"编译进去的常量"换成"绑到这块芯片"。**DNA 不是秘密**（有 JTAG 就能读），
+所以它给的是防克隆，不是密钥的硬件保护 —— 详见下面 CSU_DNA_LO 处的长注释。
+
 风扇整核排除：KAT 用不着它，而它的 DRP 窗口被写坏会扰动 SYSMON 的温度采样。
 最小权限不是姿态，是少一个能出事的地方。
 
@@ -101,6 +109,28 @@ DEFS = BEG + '''
 #define ZYNQMP_SIP_SVC_PL_RD\t\t0x8200ff12
 #define ZYNQMP_SIP_SVC_PL_WR\t\t0x8200ff13
 
+/*
+ * ---- 设备 DNA 只读窗口 ------------------------------------------------------
+ * 0xFFCA0050..0xFFCA005C 在 CSU 里，**EL1 直接读会挨总线错误**（板上实测：
+ * devmem 读这几个地址一律 "Bus error"，进程被 SIGBUS 打掉，板子本身没事 ——
+ * 这也印证了本项目的老结论：读的拒绝接得住，写的拒绝是 SError、接不住）。
+ *
+ * 为什么要放它出来：密钥派生根（src/crypto/kdr.c）本来是一个编译进去的常量，
+ * 换句话说把 keystore 整个拷到另一块板上照样能打开。绑到 DNA 之后就不能了。
+ *
+ * ⚠️ **DNA 不是秘密。** 谁有 JTAG 谁就能读到它（本项目就是这么读到的）。
+ *    所以它给的是**设备绑定 / 防克隆**，不是"密钥受硬件保护"。OP-TEE 在这颗
+ *    片子上的 HUK 也是 SHA-256(Device DNA)，性质完全一样 —— 不比它强，也不比
+ *    它弱。文档里必须按这个口径写，别升级成"硬件密钥根"。
+ *
+ * ⚠️ 这些字**跨复位不变**是实测的（多次重启 + 一轮 BBRAM 烧写之间逐字相同）。
+ *    但"它在不同芯片之间不同"**没有验证过** —— 手上只有一块板，无法证伪。
+ *
+ * 写一律拒绝：这个窗口只读。
+ */
+#define CSU_DNA_LO\t\t\t0xFFCA0050ULL
+#define CSU_DNA_HI\t\t\t0xFFCA005CULL
+
 #define PL_BASE\t\t\t\t0x80000000ULL
 #define PL_SLOT_SHIFT\t\t\t16
 #define PL_NSLOT\t\t\t7
@@ -140,6 +170,10 @@ static int pl_permit(uint64_t a, int is_write)
 
 \tif ((a & 3ULL) != 0ULL)
 \t\treturn 0;
+\t/* 设备 DNA：只读，且必须在 PL 区间判定之前 —— 它的地址远在 PL_BASE 之上，
+\t * 落到下面的 rel 计算里会被当成越界槽直接拒掉。 */
+\tif (a >= CSU_DNA_LO && a <= CSU_DNA_HI)
+\t\treturn is_write ? 0 : 1;
 \tif (a < PL_BASE)
 \t\treturn 0;
 \trel = a - PL_BASE;

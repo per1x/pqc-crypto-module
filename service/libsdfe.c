@@ -429,6 +429,19 @@ int SDFE_Hash_SM3(SDFE_HANDLE h, const uint8_t *in, uint32_t len, uint8_t out[32
 	return (n == 32) ? SDR_OK : SDR_UNKNOWERR;
 }
 
+int SDFE_GetDeviceDNA(SDFE_HANDLE h, uint8_t out[16])
+{
+	uint32_t n = 0;
+	int rv;
+
+	if (!out)
+		return SDR_INARGERR;
+	rv = call(h, OP_DEVICE_DNA, 0, 0, NULL, 0, out, 16, &n);
+	if (rv != SDR_OK)
+		return rv;
+	return (n == 16) ? SDR_OK : SDR_UNKNOWERR;
+}
+
 const char *SDFE_StrError(int rv)
 {
 	switch ((unsigned)rv) {

@@ -249,6 +249,18 @@ static int hw_rd(unsigned off, uint32_t *v)
 	return 0;
 }
 
+/* 绝对地址读。hw_rd 会加 PL_BASE，而设备 DNA 在 CSU 里（0xFFCA0050-5C），
+ * 不在 PL 段 —— 它由 EL3 白名单里一条**独立的只读窗口**放行。 */
+static int hw_rd_abs(uint32_t addr, uint32_t *v)
+{
+	struct secmmio_op op = { .addr = addr, .val = 0 };
+
+	if (ioctl(sec_fd, SECMMIO_RD, &op) < 0)
+		return -1;
+	*v = op.val;
+	return 0;
+}
+
 static int hw_wr(unsigned off, uint32_t v)
 {
 	struct secmmio_op op = { .addr = (uint32_t)(PL_BASE + off), .val = v };
@@ -785,6 +797,23 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 				 "pqchsm_fpgad on FPGA  mlkem=0x%08x sym=0x%08x mldsa=0x%08x",
 				 rd(MK_VER), rd(SY_VER), rd(MD_VER));
 		*out_len = (uint32_t)n;
+		return SDR_OK;
+	}
+
+	case OP_DEVICE_DNA: {
+		uint32_t a, w;
+		unsigned i = 0;
+
+		for (a = 0xFFCA0050u; a <= 0xFFCA005Cu; a += 4, i += 4) {
+			if (hw_rd_abs(a, &w))
+				return SDR_HARDFAIL;
+			out[i + 0] = (uint8_t)(w >> 24);
+			out[i + 1] = (uint8_t)(w >> 16);
+			out[i + 2] = (uint8_t)(w >> 8);
+			out[i + 3] = (uint8_t)(w);
+		}
+		*out_len = i;
+		logf_("DEVICE_DNA %u 字节（公开值，不是密钥）", i);
 		return SDR_OK;
 	}
 

@@ -252,9 +252,34 @@ static void test_kek_rotation(void)
 	unlink(path);
 }
 
+/* 设备 DNA provider 的**语义**测试。
+ *
+ * 这台机器上不可能有 /dev/secmmio（板子才有），所以这里能确定地断言的是
+ * "拿不到 DNA 时的行为"—— 而那恰恰是最容易写错、也最危险的一条路径：
+ * 悄悄回退到一个人人相同的根。板上那半（真的读到 DNA、真的绑定）见
+ * docs/SECURITY 里记的上板结果，不在这个单测里。 */
+static void test_device_dna_absent(void)
+{
+	uint8_t out[32];
+
+	TCASE("没有 /dev/secmmio 时，device-dna provider 不可用");
+	pqc_kdr_set_provider(NULL);
+	CHECK(pqc_kdr_provider_device_dna() == NULL);
+
+	TCASE("安装失败时**不改动**当前 provider，也不回退到任何常量根");
+	CHECK_EQ_INT(pqc_kdr_install_device_dna(), -1);
+	CHECK(pqc_kdr_get_provider() == pqc_kdr_provider_stub());
+	CHECK_EQ_INT(pqc_kdr_derive("x", NULL, 0, out, sizeof(out)), 0);
+
+	TCASE("桩明确不是设备绑定的 —— 换块板还是同一个根");
+	CHECK_EQ_INT(pqc_kdr_provider_stub()->device_bound, 0);
+	CHECK_EQ_INT(pqc_kdr_provider_stub()->hardware_backed, 0);
+}
+
 int main(void)
 {
 	test_provider();
+	test_device_dna_absent();
 	test_domain_separation();
 	test_kek_rotation();
 	return test_report("test_kdr");

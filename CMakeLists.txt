@@ -102,6 +102,7 @@ add_library(pqchsm
   src/crypto/oqs_rng.c
   src/crypto/kdf.c
   src/crypto/kdr.c
+  src/crypto/kdr_dna.c
   src/hal/accel_stub.c
   src/hal/accel_verilator.c
   src/hal/accel_axi.c
@@ -158,6 +159,12 @@ add_executable(pqchsm-admin cli/pqchsm_admin.c)
 target_link_libraries(pqchsm-admin PRIVATE pqchsm)
 add_executable(pqchsm-cli cli/pqchsm_cli.c)
 target_link_libraries(pqchsm-cli PRIVATE pqchsm)
+
+# 设备绑定：验"DNA 经线格取回 → 密钥派生根"这条**远端主机**的路真的通。
+# 本地那条（库跑在板上直读 /dev/secmmio）由 board/src/dna_probe 验。
+add_executable(dna-bind-check tools/dna_bind_check.c)
+target_link_libraries(dna-bind-check PRIVATE pqchsm)
+target_include_directories(dna-bind-check PRIVATE service)
 
 # ---- 性能基线与热点采样靶子-----------------------------------------
 add_executable(pqchsm-bench tools/bench.c)

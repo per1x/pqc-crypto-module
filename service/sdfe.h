@@ -181,6 +181,13 @@ int SDFE_DecryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
  * ⚠️ **不提供 Init/Update/Final 三段式。** sym_axi 里只有一份 SM3 上下文，
  *    两个会话交错 Update 会把状态搅在一起 —— 算出来的摘要合法但错，
  *    而那是最坏的一类失败。要流式得先在 RTL 里给上下文分槽。 */
+/* 取设备 DNA（16 字节）。
+ *
+ * ⚠️ **返回的不是密钥，是一个公开的芯片编号。** 它的用途只有一个：让上层把
+ *    keystore 之类的东西绑到这块板（换板打不开 = 防克隆）。任何"因为它来自
+ *    硬件所以它是安全的"的推理都是错的 —— 有 JTAG 就能读到同样的值。 */
+int SDFE_GetDeviceDNA(SDFE_HANDLE hSession, uint8_t out[16]);
+
 int SDFE_Hash_SM3(SDFE_HANDLE hSession, const uint8_t *in, uint32_t len,
                   uint8_t out[32]);
 

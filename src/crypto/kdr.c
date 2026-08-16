@@ -38,6 +38,7 @@ static const pqc_kdr_provider_t g_stub = {
 	.name            = "stub(software, NOT hardware-backed)",
 	.derive          = stub_derive,
 	.hardware_backed = 0,
+	.device_bound    = 0,   /* 编译进去的常量 —— 换块板还是同一个根 */
 };
 
 const pqc_kdr_provider_t *pqc_kdr_provider_stub(void)

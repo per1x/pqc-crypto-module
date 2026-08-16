@@ -39,6 +39,7 @@
 #include "pqchsm/keystore.h"
 #include "pqchsm/slot.h"
 #include "pqchsm/util.h"
+#include "pqchsm/kdr.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -546,6 +547,26 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 		if (be && !strcmp(be, "sdfe")) {
 			pqc_set_backend(pqc_backend_sdfe());
 			if (!pqc_backend_has_hw_keys_kind(PQC_KIND_KEM)) {
+				rv = CKR_DEVICE_ERROR;
+				goto out;
+			}
+		}
+	}
+
+	/* 密钥派生根：默认仍是桩。PQCHSM_KDR=device-dna 才切到设备 DNA。
+	 *
+	 * ⚠️ **不做自动检测。** "有 /dev/secmmio 就自动用 DNA" 看起来更聪明，
+	 *    实际上会在某次升级后突然让既有 keystore 全部打不开 —— 而且症状是
+	 *    完整性错误，与"库被篡改"一模一样，查起来极贵。换根必须是一个人
+	 *    明确做出的决定。
+	 *
+	 * ⚠️ 显式要了却拿不到，就**失败**，不静默回退到桩。要设备绑定却悄悄
+	 *    给了个人人相同的根，比不给更糟。 */
+	{
+		const char *kdr = getenv("PQCHSM_KDR");
+
+		if (kdr && !strcmp(kdr, "device-dna")) {
+			if (pqc_kdr_install_device_dna() != 0) {
 				rv = CKR_DEVICE_ERROR;
 				goto out;
 			}
