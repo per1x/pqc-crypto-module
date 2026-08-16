@@ -12,8 +12,8 @@
 ------------------------------------------------------------------------------
 md5                               板上                        板外对应（构建机）
 --------------------------------  --------------------------  ------------------------------------------------
-cbd6d44d31a78befa624a9b5d464429c  BOOT.BIN                    /home/build/wdt_patch/images/BOOT_SECMMIO.BIN
-                                  = BOOT0006.BIN              （当前 golden。含 DNA 只读窗口 + 保护单元只读窗口）
+c4c99e2e5516879e11b7c1364b21f2fa  BOOT.BIN                    /home/build/wdt_patch/images/BOOT_SECMMIO.BIN
+                                                              （当前 golden：DNA 只读窗口 + 保护单元只读窗口 + XMPU 配置）
 8d42d1a58b62c8ca95501bf486fbb45d  BOOT0002.BIN                /home/build/BOOT_FAN2.BIN
                                   = BOOT_GOLDEN.BIN           （**兜底 golden**，厂家形态 + 风扇静音）
 24a790dc51091d816c254c4d2f7e06a1  BOOT_PRE_DNA.BIN            /home/build/bbram_ws/BOOT_BBRAM_PLAIN.BIN
@@ -23,6 +23,11 @@ bb3402ea4efae7e1062a65632fe684b4  BOOT0001.BIN                /home/build/wdt_pa
                                   = BOOT_OPTEE_FIXQ.BIN       （已知 10/10 能启动的那一版）
 
 四份**全部与板外副本逐字节一致**。golden 完好。
+
+⚠️ **槽 6（`BOOT0006.BIN`）已删除、并且要一直保持删除状态。** 它一度放过起不来的
+   加密镜像。起不来的镜像不许留在任何启动槽里 —— 谁不小心把 `CSU_MULTI_BOOT`
+   指过去，就得靠 JTAG 或断电才能救。加密镜像现在放在**不是启动槽**的
+   `/media/sd-mmcblk1p2/hsm/BOOT_ENC2.BIN`。
 
 ------------------------------------------------------------------------------
 2026-08-17 的一次串口事故 —— 结论：没有写坏任何东西

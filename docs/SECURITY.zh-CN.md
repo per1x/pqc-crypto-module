@@ -185,54 +185,84 @@ DRAM 内容。`mlock` 是尽力而为，且未在内存压力下验证过。
 > 另有两条部署侧的代价必须一起写明：BBRAM 密钥本身成为新的密钥管理问题
 > （存哪、怎么备份），以及 **BBRAM 靠电池，电池失效 = 板子起不来**。
 
-> ### 2026-08-17 实际做到哪一步 —— 烧进去了，但**启不起来**
+> ### 2026-08-17 BBRAM 加密启动：根因已定位，**卡在需要一次断电**
 >
-> 做成了的部分：
+> **结论先写：镜像是对的、密钥是对的、白名单和 bif 都是对的。唯一没做到的，
+> 是 BBRAM 编程之后必须有一次 POR（物理断电），而这块板我按纪律不能自己断。**
 >
-> * `boot/persist/build_bbram_boot.sh` 能生成加密 BOOT.BIN，自带两道自检：
->   镜像前段读不出明文串；启动头的密钥来源位 = `0x3A5C3C5A`。
+> **做成的部分**
+>
+> * `boot/persist/build_bbram_boot.sh` 生成加密 BOOT.BIN，两道自检：镜像前段
+>   读不出明文串；启动头密钥来源位 = `0x3A5C3C5A`。
 >   （**这两个常数极易记反**：`0x3A5C3C5A` 是 BBRAM，`0xA5C3C5A3` 是 eFUSE。
 >   判据不是记忆，是对照编译出来的 —— 同一份 bif 只改 `[keysrc_encryption]`。）
-> * 密钥用 XilSKey 的 `xilskey_bbramps_zynqmp_example` 经 JTAG 烧进 BBRAM，
->   返回 `Status = 00000000`，**硬件 CRC 回验通过**。
-> * `bootgen -read ... bh` 解出来的启动头结构完全正常。
+> * 密钥经 XilSKey 的 `xilskey_bbramps_zynqmp_example` 用 JTAG 烧进 BBRAM，
+>   `Status = 00000000`，**硬件 CRC 回验通过**。
+> * bif 结构与 `bootgen -bif_help keysrc_encryption` 给的官方示例逐字一致。
+> * `.nky` 用 **bootgen 自己生成的那份**（`Device xczu3eg`，`Key 0/IV 0` +
+>   `Key 1/IV 1`），把手写格式的全部歧义消掉。
 >
-> **没做成的部分：加密镜像放进非 golden 槽、设 multiboot 启动，串口一个字节都
-> 不吐 —— 连 FSBL 的横幅都没有，说明挂在 BootROM 解密 FSBL 那一步。**
+> **密码学是对的 —— 这一条是线下证明的，不是推的**
 >
-> 归因是做实了的，不是猜的：
+> 把镜像拉下来离线解密，用 nky 的 `Key 0`（自然序）+ 启动头里的 IV，在
+> `fsbl_sourceoffset = 0x2800` 处，**48 字节安全头 + 16 字节 GCM tag 校验通过**。
+> 解出来的明文正是 ZynqMP 安全头该有的样子：
 >
-> | 实验 | 槽 | 重启路径 | 结果 |
-> |---|---|---|---|
-> | 明文孪生镜像（与 golden **逐字节相同**） | 6 | sysrq | **起来了** |
-> | 加密镜像，密钥自然序 | 6 | sysrq | 死 |
-> | 加密镜像，八个 32 位字倒序 | 6 | sysrq | 死 |
-> | 加密镜像，32 字节全反转 | 6 | sysrq | 死 |
-> | 加密镜像，字内字节交换 | 6 | sysrq | 死 |
+> ```
+> 00000000…00000000                (32 字节全 0 = 下一段不换钥，无 key rolling)
+> 7c301006c241950d34f84d95         (12 字节 = nky 里的 IV 1)
+> b87e0000                         (4 字节小端 = 0x7eb8 字 = 129760 字节 = pmufw 长度)
+> ```
 >
-> 由此排除掉的：
+> ⚠️ 这一步之前空跑了好几轮，原因是我把安全头当成 64 字节。
+> **XilSecure 的头文件写着 `XSECURE_SECURE_HDR_SIZE = 48`。**
+> 一旦改成 48+16，第一次就解开了。**别凭印象定结构，去读 Xilinx 自己解密的源码**
+> （`xilsecure_v4_0/src/zynqmp/xsecure_aes.h`）。
 >
-> * **不是"warm reboot 进非 0 槽"那条老毛病** —— 同槽同路径明文能起；而且加密那
->   次板子是死在槽 6，没有回落到 golden，说明槽 6 确实被读了。
-> * **不是"钥匙没留住"** —— 有一轮是烧完 BBRAM 之后在同一次 JTAG 会话里、中间
->   只隔一次系统复位就直接启动的，照样死。
-> * **不是密钥字节序** —— `ConvertStringToHexLE` 确实把 32 字节整个倒序填，
->   四种可能的排列**全试过，全失败**，这块搜索空间已经穷尽。
+> **卡在哪：`BBRAM_STS.PGM_MODE` 编程后一直是 1**
 >
-> 剩下的嫌疑在 bootgen 2020.1 的加密 bif 细节或这颗硅的 BootROM 行为上，
-> **本项目到此为止，不再往下追**。理由：它需要 JTAG、每验一轮要把板子停机一次，
-> 而**它对演示和送检都不是必需项** —— 送检形态的边界靠一次性闩锁和 SiP 白名单，
-> 不靠加密启动。
+> `0xFFCD0000` 的 bit0（`PGM_MODE`）在烧完之后**一直锁在 1**。下面这些都清不掉它：
 >
-> 现在板子上的状态（要接着做的人从这里开始）：
+> | 试过的 | 结果 |
+> |---|---|
+> | XilSKey 自己的 `PrgrmDisable()`（往 `0xFFCD0008` 写 0） | 执行了，`PGM_MODE` 仍是 1 |
+> | JTAG 直接往 `0xFFCD0008` 写 0 | 仍是 1 |
+> | JTAG `rst -system` | 仍是 1 |
+> | Linux 走 PMU 的 **system 域**复位（`shutdown_scope=system`） | 仍是 1 |
 >
-> * BBRAM 里**有一把钥匙**（`/home/build/bbram_ws/bbram_aes.key`，构建机上
->   chmod 600）。它现在**不起任何作用** —— golden 的启动头是明文的（`enc=0`），
->   `ENC_ONLY` 没烧，BootROM 根本不去看 BBRAM。留着无害，也没有加固任何东西。
-> * SD 上的 `BOOT0006.BIN` **已删除**。别把起不来的加密镜像留在任何槽里 ——
->   谁不小心把 multiboot 设过去，板子就得靠 JTAG 或断电救。
-> * 全过程 golden 槽没动过，**一次电都没断**：每次都是 JTAG 写 `CSU_MULTI_BOOT=0`
->   加系统复位救回来的，救了五次，五次都成。
+> 锁在编程模式时 **CSU 不会把 BBRAM 的密钥交给 BootROM**，于是加密的 FSBL 解不开
+> —— 串口零字节、连 FSBL 横幅都没有、APU 始终没被放出来。这与观测到的现象完全一致。
+>
+> **剩下唯一没试过的一步：POR（物理断电再上电）。** 这也正是 Xilinx 的标准流程
+> ——烧 BBRAM，断电，再启动加密镜像。XSDB 的 `rst -type ps-por` 只支持 Versal，
+> ZynqMP 没有软件 POR 通路；PMU 的 system 域复位试过了，不够。
+>
+> **要接着做的人：断一次电，然后**
+>
+> ```
+> # 板子上电起来后（golden，明文，一定能起）：
+> ssh root@<板子> "cp /media/sd-mmcblk1p2/hsm/BOOT_ENC2.BIN /media/sd-mmcblk1p1/BOOT0006.BIN; sync"
+> # JTAG 设 multiboot=6，然后从 Linux 重启
+> ```
+>
+> 两种结果都有信息量，都要如实记：
+>
+> * **能起** → `PGM_MODE` 由 POR 清掉，且 BBRAM 有电池撑着 → 加密启动成立。
+> * **起不来且 BBRAM 被清零** → 这块 AXU3EG 的 `VCC_BATT` 没接电池，
+>   意味着**每次断电都要重烧密钥**，加密启动在这块板上没有实用价值。
+>   （`VCC_BATT` 到底有没有接，本项目**从来没有验证过** —— 这一步顺带回答它。）
+>
+> **现在板子上的状态（安全）**
+>
+> * golden `BOOT.BIN` 是**明文**的、`ENC_ONLY` 没烧 —— BootROM 根本不看 BBRAM，
+>   **随时断电都能起来**。`CSU_MULTI_BOOT = 0`。
+> * 加密镜像放在 `/media/sd-mmcblk1p2/hsm/BOOT_ENC2.BIN`（**不在任何启动槽里**）。
+>   起不来的镜像不许留在槽位上 —— 谁不小心把 multiboot 指过去，就得靠 JTAG 或断电救。
+> * BBRAM 里那把钥匙（`/home/build/bbram_ws/bbram_aes.key` 已换成 bootgen 生成的
+>   `Key 0`）现在**不起任何作用**，留着无害，也没加固任何东西。
+> * 整个过程 golden 槽没动过、**一次电都没断**：每次都是 JTAG 写
+>   `CSU_MULTI_BOOT = 0` 加系统复位救回来的。
+
 | **没有模块完整性检查** | 使用之前没有任何东西校验模块镜像 |
 | **OP-TEE 的安全内存 root 仍读得到**（已部分收窄） | **2026-08-17 实测**：`devmem 0x60000000` 从 Linux 用户态读出 `0xAA0003F3` —— 一条 AArch64 指令，OP-TEE 的安全世界代码。原因是厂家启动链**一个 XMPU_DDR 区域都没配**。现在 BL31 会给 OP-TEE 的 core 段（`0x6000_0000+0x1000_0000`）在六个 XMPU_DDR 实例上各配一条安全区域（`cfg=0x17`，位定义抄自 Xilinx 的 `xddr_xmpu0_cfg.h`）。**它确实在挡**：`ERR_MASTER` 记到 `0xa0`/`0xac` 两个非安全 DMA 主控被拒并置了 ISR。**但它挡不住 APU 自己的非安全读** —— 同一地址前后对照，`devmem` 读出来的值与没有 XMPU 时逐字节相同。所以"密钥交给 OP-TEE 就受保护了"在这块板上**仍然不成立**，只是流氓外设 DMA 这条路被堵了。为什么 APU 的访问不受检查，需要 UG1085 里 DDR 通路的架构才能定。证据见 `board/logs/RESULT_protunit.txt` |
 | **没有物理安全** | 只有逻辑层面的强制。`tamper` 输入在 RTL 中存在并会清零密钥仓；没有任何东西接到它上面 |

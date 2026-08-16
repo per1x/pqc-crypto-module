@@ -218,62 +218,95 @@ so this document is not mistaken for a statement of readiness.
 > problem of its own, and **BBRAM is battery-backed — a dead battery means the
 > board will not boot.**
 
-> ### What actually got done, 2026-08-17: burned, but it will not boot
+> ### BBRAM encrypted boot, 2026-08-17: root cause found, **blocked on one power cycle**
 >
-> Working:
+> **Up front: the image is correct, the key is correct, the bif and the whitelist
+> are correct. The one thing not done is the POR (physical power cycle) that must
+> follow BBRAM programming — and house rules say I do not cut power to this board.**
+>
+> **What works**
 >
 > * `boot/persist/build_bbram_boot.sh` produces an encrypted BOOT.BIN with two
->   self-checks: no plaintext strings survive in the leading region, and the boot
->   header's key-source word is `0x3A5C3C5A`. (**These two constants are very easy
->   to swap**: `0x3A5C3C5A` is BBRAM, `0xA5C3C5A3` is eFUSE. The basis is not
->   memory but a controlled build — same bif, only `[keysrc_encryption]` changed.)
-> * The key was burned over JTAG with XilSKey's `xilskey_bbramps_zynqmp_example`;
->   it returned `Status = 00000000`, meaning the **hardware CRC check passed**.
-> * `bootgen -read ... bh` decodes a structurally correct boot header.
+>   self-checks: no plaintext strings in the leading region, and a boot-header
+>   key-source word of `0x3A5C3C5A`. (**These two constants are easy to swap**:
+>   `0x3A5C3C5A` is BBRAM, `0xA5C3C5A3` is eFUSE. The basis is a controlled build —
+>   same bif, only `[keysrc_encryption]` changed — not memory.)
+> * The key was burned over JTAG with XilSKey's `xilskey_bbramps_zynqmp_example`:
+>   `Status = 00000000`, i.e. the **hardware CRC check passed**.
+> * The bif matches the official example from `bootgen -bif_help keysrc_encryption`
+>   word for word.
+> * The `.nky` is **the one bootgen generated itself** (`Device xczu3eg`, `Key 0/IV 0`
+>   plus `Key 1/IV 1`), removing every hand-written-format ambiguity.
 >
-> **Not working: with the encrypted image in a non-golden slot and multiboot set,
-> the serial console emits zero bytes — not even the FSBL banner. The failure is
-> in the BootROM, decrypting the FSBL.**
+> **The cryptography is right — proved offline, not argued**
 >
-> The attribution is measured, not assumed:
+> Pulling the image off the board and decrypting it locally: with nky `Key 0` in
+> natural order and the boot-header IV, at `fsbl_sourceoffset = 0x2800`, a
+> **48-byte secure header plus 16-byte GCM tag verifies**. The recovered plaintext
+> is exactly a well-formed ZynqMP secure header:
 >
-> | Experiment | Slot | Reboot path | Result |
-> |---|---|---|---|
-> | Plaintext twin (**byte-identical to golden**) | 6 | sysrq | **boots** |
-> | Encrypted, key in natural order | 6 | sysrq | dead |
-> | Encrypted, eight 32-bit words reversed | 6 | sysrq | dead |
-> | Encrypted, all 32 bytes reversed | 6 | sysrq | dead |
-> | Encrypted, bytes swapped within each word | 6 | sysrq | dead |
+> ```
+> 00000000…00000000            32 zero bytes = no key rolling for the next partition
+> 7c301006c241950d34f84d95     12 bytes = IV 1 from the nky
+> b87e0000                     4 bytes LE = 0x7eb8 words = 129760 bytes = pmufw length
+> ```
 >
-> Ruled out by those runs:
+> ⚠️ Several rounds were wasted before this because the secure header was assumed
+> to be 64 bytes. **XilSecure's own header says `XSECURE_SECURE_HDR_SIZE = 48`.**
+> Switching to 48+16 verified on the first try. **Do not infer the format — read
+> the Xilinx source that does the decryption** (`xilsecure_v4_0/src/zynqmp/xsecure_aes.h`).
 >
-> * **Not the known flakiness of warm-rebooting into a non-zero slot** — the same
->   slot and path boot a plaintext image, and in the encrypted runs the board died
->   *at* slot 6 rather than falling back to golden, so slot 6 was genuinely read.
-> * **Not key retention** — one run burned BBRAM and booted the encrypted image in
->   the same JTAG session, one system reset apart. Same failure.
-> * **Not key byte order** — `ConvertStringToHexLE` does reverse the whole 32-byte
->   buffer, but **all four possible orderings were tried and all four failed**;
->   that search space is exhausted.
+> **Where it is stuck: `BBRAM_STS.PGM_MODE` stays 1 after programming**
 >
-> What remains suspect is a bootgen 2020.1 encrypted-bif detail or this silicon's
-> BootROM behaviour. **This project stops here.** Each attempt needs JTAG and takes
-> the board down, and **encrypted boot is required by neither the demo nor the
-> certification posture** — the delivery boundary rests on the one-way latches and
-> the SiP whitelist, not on boot encryption.
+> Bit 0 of `0xFFCD0000` (`PGM_MODE`) latches at 1 once the key is programmed.
+> None of these clear it:
 >
-> Board state for whoever picks this up:
+> | Tried | Result |
+> |---|---|
+> | XilSKey's own `PrgrmDisable()` (writes 0 to `0xFFCD0008`) | ran; `PGM_MODE` still 1 |
+> | JTAG write of 0 to `0xFFCD0008` | still 1 |
+> | JTAG `rst -system` | still 1 |
+> | Linux reset through the PMU **system** scope (`shutdown_scope=system`) | still 1 |
 >
-> * BBRAM **holds a key** (`/home/build/bbram_ws/bbram_aes.key` on the build
->   machine, chmod 600). It currently **does nothing**: golden's boot header is
->   plaintext (`enc=0`) and `ENC_ONLY` is unblown, so the BootROM never consults
->   BBRAM. Harmless to leave, but it hardens nothing.
-> * `BOOT0006.BIN` has been **deleted** from the SD card. Never leave an image that
->   cannot boot sitting in a slot — anyone who points multiboot at it needs JTAG or
->   a power cycle to get back.
+> While that latch is set the CSU will not hand the BBRAM key to the BootROM, so
+> the encrypted FSBL cannot be decrypted — which is exactly what is observed: zero
+> serial output, not even the FSBL banner, and the APU never released from reset.
+>
+> **The one untried step is a POR (physical power cycle)** — which is also Xilinx's
+> documented flow: program BBRAM, power-cycle, then boot the encrypted image. XSDB's
+> `rst -type ps-por` is Versal-only; ZynqMP has no software POR path, and the PMU's
+> system-scope reset was tried and is not enough.
+>
+> **For whoever picks this up: cut power once, then**
+>
+> ```
+> # after the board comes back (golden, plaintext, always boots):
+> ssh root@<board> "cp /media/sd-mmcblk1p2/hsm/BOOT_ENC2.BIN /media/sd-mmcblk1p1/BOOT0006.BIN; sync"
+> # set multiboot=6 over JTAG, then reboot from Linux
+> ```
+>
+> Both outcomes are informative and must be recorded honestly:
+>
+> * **It boots** → POR cleared `PGM_MODE` and BBRAM is battery-backed → encrypted
+>   boot works here.
+> * **It does not boot and BBRAM reads zeroized** → this AXU3EG has no cell on
+>   `VCC_BATT`, so **the key must be re-burned after every power cycle** and
+>   encrypted boot has no practical value on this board. (Whether `VCC_BATT` is
+>   populated has **never been verified** in this project; this step answers it.)
+>
+> **Board state right now (safe)**
+>
+> * Golden `BOOT.BIN` is **plaintext** and `ENC_ONLY` is unblown, so the BootROM
+>   never consults BBRAM — **the board can be power-cycled at any time and will come
+>   up**. `CSU_MULTI_BOOT = 0`.
+> * The encrypted image sits at `/media/sd-mmcblk1p2/hsm/BOOT_ENC2.BIN`, **not in any
+>   boot slot**. Never leave a non-booting image in a slot — anyone who points
+>   multiboot at it then needs JTAG or a power cycle.
+> * The key now in BBRAM (bootgen's `Key 0`) currently **does nothing**: harmless to
+>   leave, but it hardens nothing.
 > * The golden slot was never touched and **the board was never power-cycled**:
->   every recovery was a JTAG write of `CSU_MULTI_BOOT=0` plus a system reset,
->   five for five.
+>   every recovery was a JTAG write of `CSU_MULTI_BOOT = 0` plus a system reset.
+
 | **No module integrity check** | Nothing verifies the module image before use |
 | **root can still read OP-TEE's secure memory** (partially narrowed) | **Measured 2026-08-17**: `devmem 0x60000000` from Linux userspace returns `0xAA0003F3` — an AArch64 instruction, OP-TEE's secure-world code. The vendor boot chain configures **no XMPU_DDR regions at all**. BL31 now programs one secure region per XMPU_DDR instance (all six) covering OP-TEE's core carve-out `0x6000_0000+0x1000_0000`, `cfg=0x17`, with the bit layout taken from Xilinx's own `xddr_xmpu0_cfg.h`. **It does enforce**: `ERR_MASTER` latched `0xa0` and `0xac` — two non-secure DMA masters denied, with ISR set. **It does not stop the APU's own non-secure reads**: comparing the same addresses before and after, `devmem` returns byte-identical values. So "keys held by OP-TEE are protected" is **still false here**; what closed is the rogue-peripheral-DMA path. Why APU traffic is not checked needs UG1085's DDR-path architecture. Evidence in `board/logs/RESULT_protunit.txt` |
 | **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
