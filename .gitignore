@@ -15,6 +15,10 @@ __pycache__/
 hardware/tb/cocotb/sim_build*/
 # 并行跑多个用例时会用 SIM_BUILD=sb_xxx 各开一个构建目录（互不覆盖），一并忽略
 hardware/tb/cocotb/sb_*/
+# tools/mldsa_grid.sh 每格开一个 g_<仿真器>_<参数集>_<模块>/ 构建目录，
+# 跑完就删 —— 但并发提交会正好逮到在飞的那一个（本仓库已经被逮到过一次，
+# 12k 行的 sim.vvp 混进了提交）。所以这里也要挡。
+hardware/tb/cocotb/g_*/
 hardware/tb/cocotb/results.xml
 # 并行跑九格矩阵时每格各一份结果与日志（COCOTB_RESULTS_FILE=results_<格>.xml）
 hardware/tb/cocotb/results_*.xml
