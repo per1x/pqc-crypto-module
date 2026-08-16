@@ -213,7 +213,7 @@ static const char *cmp_bytes(const unsigned char *got, const unsigned char *want
  * reboot 不生效、只能断电。
  *
  * 于是有一条真实的路会撞上去：某一次运算超时（BUSY 一直不落）之后，测试循环
- * 若若无其事地去跑下一条，第一笔 `wr(MODE)` 就落在 state != S_IDLE 上 —— 一次
+ * 若无其事地去跑下一条，第一笔 `wr(MODE)` 就落在 state != S_IDLE 上 —— 一次
  * 失败的测试当场升级成一块下线的板子。
  *
  * 所以照 service/pqchsm_fpgad.c 里 hw_fault 那条纪律办：**失败要粘住，并且
