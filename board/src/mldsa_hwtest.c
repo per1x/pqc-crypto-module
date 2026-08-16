@@ -379,8 +379,28 @@ static void test_keygen(void)
         }
         want = v->pk_len + v->sk_len;
         if (n != want) {
-            res(0, v->pset, "KeyGen", v->tc,
-                "OUT_LEN=%u，应当是 pk+sk 的 %u", n, want);
+            /* ⚠️ 最常见的原因**不是**硬件坏了，而是 SK_LOCK 已经闩上了。
+             *
+             * SK_LOCK 是交付形态那道一次性闩锁：闩上之后 KeyGen 只吐 pk，
+             * sk 永远留在片内金库。而 ACVP 的 KeyGen 向量要逐字节比对私钥，
+             * 所以这几条**必然**过不去 —— 那是闩锁在正常工作，不是回归。
+             *
+             * daemon 一起来就会闩它。于是"跑过一次 daemon 之后再跑本程序"
+             * 就会看到一片 ❌，而 Sign/Verify 全绿 —— 这个组合看着极像
+             * "KeyGen 坏了"，实际什么都没坏。这里把话说破，省下一小时排查。
+             *
+             * 要拿 KeyGen 的 ACVP 证据，必须在**闩锁之前**跑：重新装一遍位流
+             * （SK_LOCK 随 PL 重配清掉），并且**别让 daemon 先起来**。
+             * 存档证据在 board/logs/RESULT_mldsa_after.txt（sk_lock=0，32/0）。 */
+            if (rd(MD_KEYSTAT) & KS_LOCK) {
+                res(0, v->pset, "KeyGen", v->tc,
+                    "OUT_LEN=%u（只有 pk）—— **SK_LOCK 已闩上，这是设计行为**："
+                    "sk 不再出片，ACVP 的 KeyGen 向量因此无法比对。"
+                    "要取证据请先重配 PL 再跑，且别先起 daemon", n);
+            } else {
+                res(0, v->pset, "KeyGen", v->tc,
+                    "OUT_LEN=%u，应当是 pk+sk 的 %u", n, want);
+            }
             continue;
         }
         d = cmp_bytes(outbuf, v->pk, v->pk_len, diff, sizeof diff);
