@@ -36,6 +36,10 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/mont_reduce.v" -match "*
 // Barrett 约减：乘积右移 26 位后只用低 16 位
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mlkem/butterfly.v" -match "*'shifted'*"
 
+// verify 清 h 的终点 k·256−1：在 12 位里算（k 是 4 位、乘 256 就是左移 8），
+// 结果 ≤ 2047，寻址只用低 11 位，第 11 位按构造恒为 0。
+lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/verify.v" -match "*'HCLR_N'*"
+
 // SampleInBall 的起点 N−τ：**必须在 9 位里算**，否则 256 在 8 位里就是 0。
 // τ ∈ [39,60] ⇒ 结果 ∈ [196,217]，取低 8 位即可，第 8 位按构造恒为 0。
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/sample_in_ball.v" -match "*'start_i9'*"

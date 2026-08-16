@@ -86,7 +86,7 @@ module mldsa_verify (
     reg  [1:0] pset_r;
     reg        busy_r;
     wire [1:0] pset_eff = busy_r ? pset_r : pset;
-    wire [3:0]  cfg_k, cfg_l, cfg_km1, cfg_lm1;
+    wire [3:0]  cfg_k, cfg_km1, cfg_lm1;   // verify 只用 km1/lm1，不需要 l
     wire [6:0]  cfg_tau, cfg_ctb;
     wire [7:0]  cfg_omega, cfg_w1b;
     wire        cfg_g2mode;
@@ -97,7 +97,7 @@ module mldsa_verify (
     wire [13:0] cfg_pklen;
     mldsa_params u_par (
         .pset(pset_eff),
-        .k(cfg_k), .l(cfg_l), .eta(), .tau(cfg_tau), .omega(cfg_omega),
+        .k(cfg_k), .l(), .eta(), .tau(cfg_tau), .omega(cfg_omega),
         .ctb(cfg_ctb), .g2mode(cfg_g2mode),
         .km1(cfg_km1), .lm1(cfg_lm1), .lkm1(),
         .ebits(), .peb(), .zbits(cfg_zbits), .zb(), .w1bits(cfg_w1bits), .w1b(cfg_w1b),
