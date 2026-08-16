@@ -29,7 +29,10 @@
 extern "C" {
 #endif
 
-#define HSM_KEYSTORE_VERSION 1
+/* 版本 2 起头部多了 8 字节 epoch（防回滚，见 src/store/keystore.c 里那段）。
+ * 版本号是**硬判据**：装载时不等就直接拒 —— 旧文件的头里没有 epoch，
+ * 按新布局去读会把槽位数据的头 8 字节当成 epoch，那是"安静地读错"。 */
+#define HSM_KEYSTORE_VERSION 2
 
 /* 把整个 token 落盘。 */
 hsm_status_t hsm_keystore_save(hsm_token_t *tok, const char *path);

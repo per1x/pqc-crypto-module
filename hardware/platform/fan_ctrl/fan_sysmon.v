@@ -39,6 +39,15 @@ module fan_sysmon #(
     output wire        temp_valid,
     output wire        sysmon_timeout,
 
+    // ---- SYSMONE4 的告警输出（原来是空接的）----
+    // ot  : 灾难性过温（默认门限 125 °C，出厂设定）。这是**芯片自己**判的，
+    //       不经我们的采样通路，也不受 DRP 采样超时影响。
+    // alm : 各路告警位（[0] 温度、[1] VCCINT、[2] VCCAUX、[3] VCCBRAM …）。
+    //       一并引出来给上层选，但**默认不接 tamper** —— 理由见
+    //       zu3eg_hsm_top.v 里 tamper 那段。
+    output wire        ot,
+    output wire [15:0] alm,
+
     // 软件调试读窗口（见 sysmon_drp.v 的文件头）
     input  wire        dbg_req,
     input  wire [7:0]  dbg_addr,
@@ -96,8 +105,8 @@ module fan_sysmon #(
         .SMBALERT_TS (),
         .I2C_SCLK_TS (),
         .I2C_SDA_TS  (),
-        .ALM       (),
-        .OT        (),
+        .ALM       (alm),
+        .OT        (ot),
         .MUXADDR   (),
         .CHANNEL   (),
         .EOC       (),

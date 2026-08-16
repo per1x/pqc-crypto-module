@@ -339,6 +339,98 @@ static void test_power_fail(void)
 	free(good);
 }
 
+/* ============================================================================
+ * 防回滚：把整份 keystore 换成一份**旧快照**必须被拒
+ * ============================================================================
+ * 这一条盯的是独立评审 H3。旧快照的全文件 MAC **是对的**（当初就是自己算的），
+ * 所以 MAC 拦不住它 —— 拦住它的只能是那个每次写盘 +1 的 epoch。
+ *
+ * 场景就是最朴素的那个：拿到 SD 卡，把 keystore 拷回一份先前的备份，
+ * 于是 PIN 锁定计数、已吊销的密钥、槽位状态全都回到从前。
+ *
+ * ⚠️ 这条用例证明的是"**换一个文件**会被发现"。它**不**证明防回滚成立 ——
+ *    攻击者若把 <keystore>.epoch 也一起换回旧值就照样能过。真正的防回滚
+ *    需要攻击者写不了的单调存储（eFUSE 计数器/RPMB），这块板没有。
+ *    口径见 src/store/keystore.c 里 epoch 那段。
+ */
+static void test_rollback(void)
+{
+	TCASE("防回滚：旧快照被拒（MAC 是对的也不行）");
+	char snap[320], epoch_path[320];
+
+	snprintf(snap, sizeof(snap), "%s.snap", g_path);
+	snprintf(epoch_path, sizeof(epoch_path), "%s.epoch", g_path);
+
+	uint8_t pk0[4096];
+	size_t pk0_len = 0;
+	hsm_token_t *tok = make_populated(pk0, &pk0_len);
+	CHECK(tok != NULL);
+
+	/* 第一次落盘 → epoch 1，留一份快照当作"攻击者手里的旧备份" */
+	CHECK_EQ_INT(hsm_keystore_save(tok, g_path), HSM_OK);
+	{
+		FILE *a = fopen(g_path, "rb"), *b = fopen(snap, "wb");
+		CHECK(a != NULL && b != NULL);
+		if (a && b) {
+			int c;
+			while ((c = fgetc(a)) != EOF) { fputc(c, b); }
+		}
+		if (a) fclose(a);
+		if (b) fclose(b);
+	}
+
+	/* 再写两次 → epoch 3。锚点跟着推到 3。 */
+	CHECK_EQ_INT(hsm_keystore_save(tok, g_path), HSM_OK);
+	CHECK_EQ_INT(hsm_keystore_save(tok, g_path), HSM_OK);
+	hsm_token_free(tok);
+
+	/* 当前文件当然装得上 */
+	{
+		hsm_token_t *t = hsm_token_new(N_SLOTS);
+		CHECK(t != NULL);
+		CHECK_EQ_INT(hsm_keystore_load(t, g_path), HSM_OK);
+		hsm_token_free(t);
+	}
+
+	/* ---- 攻击：把旧快照拷回去 ---- */
+	{
+		FILE *a = fopen(snap, "rb"), *b = fopen(g_path, "wb");
+		CHECK(a != NULL && b != NULL);
+		if (a && b) {
+			int c;
+			while ((c = fgetc(a)) != EOF) { fputc(c, b); }
+		}
+		if (a) fclose(a);
+		if (b) fclose(b);
+	}
+	{
+		hsm_token_t *t = hsm_token_new(N_SLOTS);
+		CHECK(t != NULL);
+		/* 旧快照的 MAC 是对的，但 epoch(1) < 锚点(3) → 必须拒 */
+		CHECK_EQ_INT(hsm_keystore_load(t, g_path), HSM_ERR_INTEGRITY);
+		hsm_token_free(t);
+	}
+
+	/* ---- 反面：把锚点也一起换回去，就挡不住了 ----
+	 * 这一步不是"漏洞"，是**如实把边界画出来**：本机制要求攻击者
+	 * 一致地换两个文件，而不是不可绕过。 */
+	{
+		FILE *f = fopen(epoch_path, "w");
+		CHECK(f != NULL);
+		if (f) { fprintf(f, "1\n"); fclose(f); }
+	}
+	{
+		hsm_token_t *t = hsm_token_new(N_SLOTS);
+		CHECK(t != NULL);
+		CHECK_EQ_INT(hsm_keystore_load(t, g_path), HSM_OK);
+		hsm_token_free(t);
+	}
+
+	unlink(snap);
+	unlink(epoch_path);
+	unlink(g_path);
+}
+
 int main(void)
 {
 	snprintf(g_path, sizeof(g_path), "/tmp/pqchsm_ks_%d.bin", (int)getpid());
@@ -346,10 +438,13 @@ int main(void)
 	test_roundtrip();
 	test_tamper();
 	test_power_fail();
+	test_rollback();
 
 	unlink(g_path);
-	char tmp[300];
+	char tmp[340];
 	snprintf(tmp, sizeof(tmp), "%s.tmp", g_path);
+	unlink(tmp);
+	snprintf(tmp, sizeof(tmp), "%s.epoch", g_path);
 	unlink(tmp);
 
 	TCASE("非法参数");

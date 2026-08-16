@@ -68,14 +68,28 @@ slave built with `SECURE_ONLY=1`.
   the boundary: plaintext key material exists in process memory there. Buffers
   are zeroed and `mlock`-ed where possible, and that is all.
 
-**Root can still drive the hardware.** The EL3 SiP currently exposes whitelisted
-MMIO reads and writes, with the operation sequence assembled by a normal-world
-daemon. So the normal world cannot *read* key material, but root can still load,
-erase and use key vault slots. Closing that requires an operation-granularity
-SiP ("decapsulate this ciphertext with handle H", not "write this word to this
-address"), which means a buffered state machine running in EL3 — where there is
-no exception handling, so one bad fetch is a core wedged on the spot. It needs
-its own verification approach and is not attempted here.
+### Root can still drive the hardware — a residual capability we knowingly keep
+
+The EL3 SiP exposes whitelisted MMIO reads and writes, with the operation
+sequence assembled by a **normal-world** daemon. The normal world cannot *read*
+key material (the vault has no read path in RTL), but root can still load, erase
+and use key-vault slots — it can **use** the keys, it just cannot **see** them.
+
+⚠️ **Narrowing the whitelist does not close this.** The root cause is not that
+the whitelist is too wide but that **the SiP does not authenticate its caller**
+(independent review, M4): EL3 cannot tell "the daemon is calling" from "another
+root process is calling". As long as root can issue an SMC, root can do anything
+the daemon can; narrowing the whitelist only locks the daemon out as well.
+
+| Approach | What it buys | Why not in this version |
+|---|---|---|
+| Operation-granularity SiP ("decapsulate this ciphertext with handle H" rather than "write this word to this address") | root can no longer assemble arbitrary register sequences | It moves the whole hardware sequence into EL3, **where there is no exception handling** — one refused bus access or one poll that never completes wedges a core, and the board can only be power-cycled. We measured exactly that with a single write on 2026-08-17. And it still does not authenticate the caller: root can invoke those operations too |
+| Move the driver into a secure-world TA (`tee/ta/` already has the skeleton), leaving the normal world to submit operation requests | This is the shape that actually keeps root out | An architectural change, out of scope for this round |
+
+**So the honest statement for this version is**: the cryptographic boundary stops
+you from **reading** private keys, not from **using** them. An attacker with root
+in the normal-world kernel can still command the hardware to compute. Closing
+that needs a secure-world TA, not a narrower whitelist.
 
 ## What has been demonstrated
 
@@ -171,7 +185,7 @@ so this document is not mistaken for a statement of readiness.
 
 | | |
 |---|---|
-| **ML-KEM private keys leave the hardware** | `KeyGen` returns `ek ‖ dk` over AXI, because ACVP checking requires it. The daemon holds `dk` and gives applications only a handle, so it does not cross the *interface* — but "the private key never leaves the hardware" is false and is not claimed. Fixing it means adding private-key storage and handle-based use inside `mlkem_axi` |
+| ~~**ML-KEM private keys leave the hardware**~~ **fixed** | `mlkem_axi` now has an on-chip private-key vault: `MODE.DK_TO_SLOT` sends `dk` straight into it, `OUT_LEN` stops at the length of `ek`, and `DK_FROM_SLOT` decapsulates by slot. ML-DSA's `sk` works the same way. **Verified on the board 2026-08-17**: seeking the read cursor into the sk region returns all zeros, while the signature produced from the slot is byte-identical to the one produced when software supplies sk. The non-vault path remains for factory verification (ACVP checks the private key) and is closed in the delivery posture by a one-way latch |
 | **No device binding** | The key derivation root (`src/crypto/kdr.c`) is a compiled-in constant whose literal text says so. A real device sources it from eFUSE, BBRAM or a PUF. eFUSE is irreversible and there is one board; BBRAM needs JTAG |
 | **No secure boot** | BBRAM key provisioning needs JTAG. The PL configuration is loaded at runtime, not from a signed golden image |
 
@@ -207,10 +221,11 @@ so this document is not mistaken for a statement of readiness.
 | **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
 | **Conditional self-tests missing** | No pairwise consistency test on generated key pairs, no continuous RNG test |
 | **No SM2** | SM4 and SM3 are implemented; the SM2 asymmetric algorithm is not |
-| **ML-DSA is operators only** | 13 modules verified against the reference model, not chained into KeyGen/Sign/Verify |
+| ~~**ML-DSA is operators only**~~ **fixed** | Chained into a full core and built into the bitstream (slot 6). All three parameter sets' KeyGen/Sign/Verify **matched ACVP byte for byte on the board on 2026-08-17**, in both bitstream forms; see `board/logs/` |
 | **No algorithm certificates** | ACVP vectors are run locally. That is evidence of correctness, not a certificate |
 | **Single-writer audit log** | The audit module does not lock the file |
 | **Unkeyed Shamir share checksums** | They detect corruption, not tampering |
+| **Keystore rollback protection only stops swapping one file** | The header carries an `epoch` incremented on every write (covered by the MAC), the highest epoch seen is kept in a sibling `<keystore>.epoch` file, and loading an older one is **refused**. That stops "take the SD card and copy an old keystore back" — the old snapshot's own MAC is valid, so the MAC cannot catch it. **But an attacker who rolls both files back consistently still gets through**: real anti-rollback needs monotonic storage the attacker cannot write (an eFUSE counter, RPMB, TPM NV), and this board has none |
 | **SO PIN lockout not enforced** | Failures are counted but the slot is not locked, because locking it would brick the device; recovery is by M-of-N |
 | **`CKM_HASH_ML_DSA_*` not implemented** | PKCS#11 multi-part signing buffers the whole message instead of streaming a digest |
 | **Host RNG is OpenSSL** | The PL entropy source is inside the boundary, but the host software still seeds from the operating system through OpenSSL |

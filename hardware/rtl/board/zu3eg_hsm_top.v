@@ -344,10 +344,54 @@ module zu3eg_hsm_top (
     wire rst_n = rst_n_sync & (porcnt == 8'hFF);
 
     // ================= 篡改输入 =================
-    // 板上还没有接真实的开盖/电压/温度检测，这里恒零。
     // **不要**把它接成"软件可写的寄存器" —— 那就等于给攻击者一个开关。
-    // 真接的时候是从 PL 管脚进来，接到这一根线上。
-    wire tamper = 1'b0;
+    //
+    // ============================================================================
+    // 【接的是 SYSMONE4 的 OT（灾难性过温），不是 ALM】
+    // ============================================================================
+    // 独立评审 M9：这根线原来恒接 0，于是 key_vault 的一拍全清、防火墙的
+    // fail-closed、TOCTOU 消窗 —— **一整套已经验证过的 RTL 全是死逻辑**，
+    // 综合时会被优化掉。接上一个真源，那套逻辑才真正在位流里。
+    //
+    // 选 OT 不选 ALM，是**为了不误伤演示**：
+    //   · OT 是芯片自己判的灾难性过温，出厂门限 125 °C。正常运行（实测 32~35 °C）
+    //     够不着，热风枪那种量级才够得着 —— 它指示的是真的物理滥用。
+    //   · ALM[0] 是**用户可设门限**的温度告警，而本设计的风扇控制正围着温度转；
+    //     把它接上等于让一次风扇迟滞就把金库擦了。ALM[1..3] 是电压告警
+    //     （VCCINT/VCCAUX/VCCBRAM），对"电压毛刺注入"这类攻击其实最相关，
+    //     但它们在这块板上会不会误报**没有实测过** —— 没实测过的东西不接进
+    //     一条"一触发就擦密钥"的路。
+    // 两组都从 fan_sysmon 引出来了，将来要换只改这一行。
+    //
+    // ⚠️ **如实说明验到哪一步**：接上之后"下游逻辑不再是死代码"是综合能证的；
+    //    而"OT 真拉起时金库被擦"需要把结温弄到 125 °C，**本项目没有做这个实验**，
+    //    别声称它验过。
+    wire sysmon_ot;
+
+    // ---- OT 去毛刺：连续拉高够久、而且 ADC 确实出过结果，才认它 ----
+    //
+    // ⚠️ 这一段不是保守，是**必须的**：下游的 tamper_latched 是**粘的**
+    //    （axi4lite_firewall / key_vault 都用 `tamper || tamper_latched`），
+    //    一个上电毛刺就会让防火墙永久 fail-closed —— 板子每次开机都是一块
+    //    "密码核全部拒绝访问"的砖，而且看不出为什么。
+    //
+    // 两道闸门：
+    //   ① **ADC 出过结果之后才开始信 OT**。SYSMONE4 复位后到第一次转换完成
+    //      之间，OT 的值没有意义。temp_valid 拉过一次就说明通路活了。
+    //   ② **连续 2^16 拍（75 MHz 下约 0.87 ms）都高才算数**。真的过温是持续
+    //      状态，不会只有几拍；而毛刺正相反。
+    // 代价是灾难性过温的响应慢了不到 1 毫秒，与"擦掉金库"这件事的量级相比
+    // 可以忽略。
+    reg        ot_armed;
+    reg [15:0] ot_cnt;
+    reg        ot_tamper;
+    /* ⚠️ 驱动它的 always 块在**下面**（fan_sysmon 例化之后）——因为它要用
+       fan_temp_valid，而那根线在那里才声明。
+       **顶层引用后面才声明的 wire 是这个项目栽过的坑**：Vivado 不报错，
+       会新建一条无驱动网络，症状是某个模块安静地收不到信号
+       （上一次是 PS 的 maxihpm0_lpd_aclk，代价是 AXI 主口没时钟）。
+       所以这里只放声明，赋值跟着它依赖的信号走。 */
+    wire tamper = ot_tamper;
 
     // ================= 地址译码 =================
     // 6 → 7：ML-DSA 挂在槽 6（0x8006_0000）。槽 0..5 的地址一个都没动 ——
@@ -501,9 +545,33 @@ module zu3eg_hsm_top (
         .clk(clk_sys), .rst_n(rst_n),
         .temp_code(fan_temp), .temp_valid(fan_temp_valid),
         .sysmon_timeout(fan_sysmon_to),
+        .ot(sysmon_ot),
+        /* ALM 有意不接：它是用户可设门限的告警，而本设计的风扇控制正围着
+           温度转，接上等于让一次风扇迟滞就把金库擦了。要换源就在这里接。 */
+        .alm(),
         .dbg_req(fan_dbg_req), .dbg_addr(fan_dbg_addr),
         .dbg_data(fan_dbg_data), .dbg_valid(fan_dbg_valid),
         .dbg_timeout(fan_dbg_to));
+
+    always @(posedge clk_sys or negedge rst_n) begin
+        if (!rst_n) begin
+            ot_armed  <= 1'b0;
+            ot_cnt    <= 16'd0;
+            ot_tamper <= 1'b0;
+        end else begin
+            if (fan_temp_valid)
+                ot_armed <= 1'b1;          // ADC 通路活过一次，之后一直认
+            if (!ot_armed || !sysmon_ot)
+                ot_cnt <= 16'd0;
+            else if (!(&ot_cnt))
+                ot_cnt <= ot_cnt + 16'd1;
+            // 计满就置起来，**不再落下** —— 过温是需要人来处理的事件，
+            // 让它自己恢复等于把一次真事件悄悄抹掉。
+            if (&ot_cnt)
+                ot_tamper <= 1'b1;
+        end
+    end
+
 
     fan_ctrl #(.PWM_PERIOD(3000),          // 75 MHz / 3000 = 25 kHz
                .STALE_LIMIT(64_000_000),   // 约 0.85 秒没温度就强制满速

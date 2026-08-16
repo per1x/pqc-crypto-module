@@ -186,6 +186,23 @@ if {$got_secure != $want_secure} {
 }
 puts "断言通过：位流形态 = [expr {$devopen ? {开发（SECURE_ONLY=0）} : {送检（SECURE_ONLY=1）}}]（网表实测 $got_secure），产物 $bitname.bit"
 
+# ---- 断言：tamper 那条路必须还活着 -------------------------------------------
+# 独立评审 M9：`tamper` 一度恒接 0，于是 key_vault 的一拍全清、防火墙的
+# fail-closed、TOCTOU 消窗 —— **一整套已验证过的 RTL 全被综合优化掉了**，
+# 而这件事在任何日志里都不会说一声。
+#
+# 现在它接到 SYSMONE4 的 OT。这条断言查的是**下游**：`tamper_latched` 那些
+# 触发器还在不在。它们是纯粹由 tamper 驱动的，源头一旦又变成常量，
+# 它们就会消失 —— 于是"死逻辑复发"变成一次构建失败，而不是一份看起来正常
+# 的 bitstream。
+set tamper_ff [get_cells -quiet -hier -filter {NAME =~ "*tamper_latched*"}]
+if {[llength $tamper_ff] == 0} {
+    puts "错误：网表里找不到 tamper_latched —— tamper 那条路又被优化掉了"
+    puts "      （多半是 zu3eg_hsm_top.v 里的 tamper 又变回常量）"
+    exit 1
+}
+puts "断言通过：tamper 链在网表里（tamper_latched [llength $tamper_ff] 个触发器）"
+
 # ---- 断言：风扇管脚必须真的落在 AA11 -----------------------------------------
 # 风扇错了不会崩，只会**安静地让芯片变热** —— 没有任何运行时症状会告诉你
 # 约束没读进来。所以在这里直接查器件上的落点。

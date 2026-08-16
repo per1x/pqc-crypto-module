@@ -56,16 +56,57 @@
 # 描述一堆不存在的东西" —— 那会让 probe 失败的日志刷屏，也会让任何看设备树
 # 的人对这块板上到底有什么产生错误印象。根治了崩溃，不等于该留着错误的描述。
 #
-# ⚠️ **后果要写在明处：J1 形态没有网络。** eth0（AXI Ethernet）在厂家 PL 里，
-#    密码 PL 里没有以太网，这不是可以补上的东西。J1/送检形态的验证只能走
-#    串口 + /dev/secmmio。这与"普通世界零可达"的送检口径是一致的，
-#    但它意味着**日常开发不要用 J1 镜像**，开发用 golden + 运行时装位流。
+# ⚠️ **"J1 形态没有网络"这句话是错的，已纠正（2026-08-17）。**
+#    eth0（AXI Ethernet）确实在厂家 PL 里、装了密码位流就没了 —— 这半句对。
+#    但板上还有 **eth1 = `ff0e0000.ethernet`，PS 里的 Cadence GEM 硬核**，
+#    **PL 怎么换都动不了它**。演示形态一直走的就是它（192.168.50.175）。
+#    所以 J1 形态**有网络**，hsm-boot.sh 照常把 eth1 配起来。
+#    写错这一条的代价是真的：它让 J1 被当成"验不了的形态"搁置了很久。
+#
+# ⚠️ 仍然成立的是：J1 形态里 PL 由**受控镜像**加载，root 换不掉密码边界 ——
+#    那才是 J1 的价值所在。而**日常开发仍然建议用 golden + 运行时装位流**，
+#    因为换 J1 镜像要重打整份 BOOT.BIN，改一次位流的成本高得多。
 set -e
 source /tools/Xilinx/Vitis/2020.1/settings64.sh
 BIF=/home/build/pqc-hsm-fpga/boot/persist/boot_j1_pl.bif
 OUT=/home/build/wdt_patch/images/BOOT_J1_PL.BIN
 
-echo "== 核对 bif 引用的文件都在 =="
+# ---- 先生成 j1_nopl.dtb（bif 引用它，而它不该手工维护）----
+# 做法：把整个 amba_pl@0 子树连同指向它的别名删掉。
+# ⚠️ 这个文件**一度不在仓库里**，于是 bif 引用了一个谁也造不出来的东西 ——
+#    与救砖那三个产物同一类缺口（脚本在、材料不在）。生成过程放进脚本，
+#    换一台机器才复现得出来。
+DTB_SRC=/home/build/petalinux/images/linux/system.dtb
+DTB_OUT=$(dirname "$BIF")/j1_nopl.dtb
+if [ ! -f "$DTB_OUT" ] || [ "$DTB_SRC" -nt "$DTB_OUT" ]; then
+    echo "== 生成 j1_nopl.dtb（删掉 amba_pl 子树）=="
+    dtc -I dtb -O dts -o /tmp/j1.dts "$DTB_SRC" 2>/dev/null
+    python3 - /tmp/j1.dts <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+s = open(path).read()
+# 删 amba_pl@0 整个子树
+m = re.search(r"\n\tamba_pl@0 \{\n.*?\n\t\};", s, re.S)
+if m:
+    s = s[:m.start()] + s[m.end():]
+    print("  已删 amba_pl@0 子树")
+else:
+    print("  没找到 amba_pl@0（可能这份设备树本来就没有）")
+# 删指向 PL 外设的别名（ethernet0 就是 AXI Ethernet 那条）
+n = 0
+def drop_alias(mm):
+    global n
+    n += 1
+    return ""
+s = re.sub(r"\n\t\t\w+ = "/amba_pl@0[^"]*";", drop_alias, s)
+print("  已删 %d 条指向 amba_pl 的别名" % n)
+open(path, "w").write(s)
+PYEOF
+    dtc -I dts -O dtb -o "$DTB_OUT" /tmp/j1.dts 2>/dev/null
+    ls -l "$DTB_OUT"
+fi
+
+echo "== 核对 bif 引用的文件都在 ==
 grep -oE "/home/[^ ]*\.(elf|bit|dtb)" $BIF | while read f; do
     [ -f "$f" ] && echo "  OK  $f" || { echo "  缺  $f"; exit 1; }
 done
