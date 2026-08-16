@@ -416,6 +416,19 @@ int SDFE_DecryptMode(SDFE_HANDLE h, uint32_t alg, uint32_t mode, uint32_t slot,
 	return sym_mode(h, alg, mode, slot, 1, iv, in, len, out);
 }
 
+int SDFE_Hash_SM3(SDFE_HANDLE h, const uint8_t *in, uint32_t len, uint8_t out[32])
+{
+	uint32_t n = 0;
+	int rv;
+
+	if (!in || !out || len == 0)
+		return SDR_INARGERR;
+	rv = call(h, OP_SM3, 0, 0, in, len, out, 32, &n);
+	if (rv != SDR_OK)
+		return rv;
+	return (n == 32) ? SDR_OK : SDR_UNKNOWERR;
+}
+
 const char *SDFE_StrError(int rv)
 {
 	switch ((unsigned)rv) {

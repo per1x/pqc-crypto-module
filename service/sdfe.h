@@ -175,6 +175,15 @@ int SDFE_DecryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
                      uint32_t slot, const uint8_t iv[16],
                      const uint8_t *in, uint32_t len, uint8_t *out);
 
+/* ---- 杂凑：SM3（硬件核，无密钥）----------------------------------------
+ * out 恒 32 字节。一次一段。
+ *
+ * ⚠️ **不提供 Init/Update/Final 三段式。** sym_axi 里只有一份 SM3 上下文，
+ *    两个会话交错 Update 会把状态搅在一起 —— 算出来的摘要合法但错，
+ *    而那是最坏的一类失败。要流式得先在 RTL 里给上下文分槽。 */
+int SDFE_Hash_SM3(SDFE_HANDLE hSession, const uint8_t *in, uint32_t len,
+                  uint8_t out[32]);
+
 int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
                  const uint8_t *in, uint8_t *out);
 int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,

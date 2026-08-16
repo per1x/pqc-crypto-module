@@ -181,8 +181,39 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 | `CKM_AES_GCM` | AEAD DEM over the KEM shared secret (`C_Encrypt`/`C_Decrypt`) | Software GCM; KEM half in hardware |
 | `CKM_AES_ECB` / `CKM_AES_CBC` | `sym_axi` AES-128/256 | **Hardware** |
 | `CKM_SHA3_256` | `sha3_core` (currently reached only through ML-KEM) | Needs a dedicated path |
-| `CKM_ML_DSA` (0x1D) | RTL KeyGen/Sign/Verify exist and pass ACVP **in simulation** (44/65/87), but are **not yet wired to AXI or built into the bitstream** | ❌ Software at runtime |
+| `CKM_ML_DSA` (0x1D) | The algorithm now has a full core, wired to AXI, in the bitstream, and verified byte-for-byte against ACVP **on the board** — but PKCS#11 still calls liboqs | ⚠️ See below |
 | SM4 / SM3 | No standard mechanism code exists | Vendor-defined codes |
+
+> **The `CKM_ML_DSA` row is easy to misread as "hardware". It is not.** Two
+> separate facts: `mldsa_axi` is a real core, verified against ACVP on the board
+> (see `board/logs/`), and it is reachable **through the SDF path**
+> (libsdfe → daemon → EL3 → core). But the **PKCS#11 module has no transport to
+> that hardware** — it calls liboqs. The independent review (H5) refuted the
+> assumption that this is "just a backend switch": `src/hal/` implements only the
+> NTT and Keccak primitives, not a whole-algorithm hardware transport. The correct
+> phrasing is "the algorithm is verified in hardware, while PKCS#11 runs in
+> software", not one or the other.
+
+### GM/T 0018 (SDF-style interface) coverage
+
+| Category | This project | Backed by |
+|---|---|---|
+| Device management | `SDFE_OpenDevice` / `OpenSession` / `GetDeviceInfo` | — |
+| Random | `SDFE_GenerateRandom` | **hardware** ring-oscillator source with SP 800-90B health tests |
+| Symmetric ECB/CBC/CFB/OFB | `SDFE_Encrypt(Mode)` / `Decrypt(Mode)` | **block transform in hardware** (AES-128/256, SM4); chaining and XOR in the daemon |
+| Symmetric CTR | same | same; CTR is beyond what GM/T 0018 lists |
+| Hash | `SDFE_Hash_SM3` (one-shot) | **hardware** SM3 core, matches GB/T 32905 A.1 |
+| Key management | `SDFE_ImportKey` | **hardware** `key_vault`, no read path in RTL |
+| Post-quantum asymmetric | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **hardware**, private keys stay in the on-chip vault |
+| Public-key encryption of arbitrary data | `SDFE_PKEncrypt` / `PKDecrypt` | KEM in hardware, AES-GCM DEM in software |
+
+Deliberate gaps, each with its reason: **SM2** (no core and no software
+implementation — the project's largest gap for GM/T certification; a software-only
+SM2 would turn "the Chinese algorithms are in hardware" into a false statement);
+**streaming SM3** (`sym_axi` holds one SM3 context, so two interleaved sessions
+would corrupt each other's state); **MAC** (the pieces exist, the interface and
+vectors do not, yet); **ZUC** (no core); **padding** (left to the caller's protocol
+on purpose — bad padding is worse than none).
 
 `C_GenerateKeyPair` → `CMD_GENERATE` → `mlkem_axi` KeyGen;
 `C_DecapsulateKey` → `CMD_DECAPS` → `mlkem_axi` Decaps.

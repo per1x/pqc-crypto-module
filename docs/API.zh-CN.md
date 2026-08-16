@@ -139,6 +139,33 @@ SDF 中*内部密钥*的概念天然对应 `key_vault`：`SDF_InternalSign` 接�
 `C_DecapsulateKey` 已实现——同时把 `SDFE_*` 这套名字保留为同一批线上命令之上的
 一层薄封装，这样等国标真正落地时，改动只局限在那一层。
 
+
+## GM/T 0018（SDF 风格接口）覆盖账
+
+`service/sdfe.h` 是 SDF 形状的接口。**逐条写清哪些有、哪些是软件、哪些故意没做** ——
+"接口在那儿"与"硬件在算"是两件事，混着说就是 overclaim。
+
+| GM/T 0018 分类 | 本项目 | 由什么支撑 |
+|---|---|---|
+| 设备管理（打开/关闭/会话/设备信息） | `SDFE_OpenDevice` / `OpenSession` / `GetDeviceInfo` | — |
+| 随机数 | `SDFE_GenerateRandom` | **硬件**：PL 里的环振噪声源 + SP 800-90B 连续健康检测 |
+| 对称加解密（ECB/CBC/CFB/OFB） | `SDFE_Encrypt(Mode)` / `Decrypt(Mode)` | **分组变换在硬件**（AES-128/256、SM4），链接与异或在 daemon |
+| 对称加解密（CTR） | 同上 | 同上。GM/T 0018 本身没列 CTR，这是超出部分 |
+| 杂凑 | `SDFE_Hash_SM3`（一次一段） | **硬件** SM3 核，对上 GB/T 32905 A.1 |
+| 密钥管理（对称密钥进片内、只按槽号使唤） | `SDFE_ImportKey` | **硬件** `key_vault`，RTL 上没有读出通路 |
+| 非对称（后量子） | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **硬件**，私钥在片内金库，只交出公钥与槽号 |
+| 公钥加密任意长度数据 | `SDFE_PKEncrypt` / `PKDecrypt` | KEM 走硬件；DEM 的 AES-GCM 走软件（口径见 `sdfe_pkenc.h`） |
+
+**故意没做的，逐条写明理由：**
+
+| 缺口 | 为什么 |
+|---|---|
+| **SM2**（签名/加密/密钥交换） | 没有 SM2 核，也没有软件实现。GM/T 0018 送检需要它，**这是本项目面向 GM/T 的头号缺口**，已单列。不做半个 SM2：一个只在软件里跑的 SM2 会让"国密算法在硬件里"变成假话 |
+| **SM3 的 Init/Update/Final 三段式** | `sym_axi` 里只有一份 SM3 上下文，两个会话交错 Update 会把状态搅在一起 —— 算出来的摘要合法但错。要流式得先在 RTL 里给上下文分槽 |
+| **MAC（SM4-MAC / CBC-MAC）** | 分组变换与链接都已具备，缺的只是接口与判据向量。属于可以低成本补上的一条，尚未做 |
+| **ZUC** | 没有核，也没有软件实现 |
+| **填充** | 有意不做：错误的填充比没有填充更危险（padding oracle），交给调用方的协议决定 |
+
 ## PKCS#11 v3.2
 
 `src/p11/p11_module.c` 实现了 44 个 `C_` 函数。用
@@ -153,9 +180,17 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 的机制在这里 */
 |---|---|---|
 | `CKM_ML_KEM`（0x17） | `mlkem_axi`，三个参数集全部支持 | **硬件** |
 | `CKM_AES_ECB` / `CKM_AES_CBC` | `sym_axi` 的 AES-128/256 | **硬件** |
+| `CKM_AES_GCM` | OpenSSL（DEM 用） | 软件，见下 |
 | `CKM_SHA3_256` | `sha3_core`（目前只能经 ML-KEM 到达） | 需要一条专用通路 |
-| `CKM_ML_DSA`（0x1D） | ML-DSA 算子，未串成核 | ❌ 仅软件 |
+| `CKM_ML_DSA`（0x1D） | 算法本身**已有整核并上板验过**，但 PKCS#11 这一侧仍走 liboqs | ⚠️ 见下 |
 | SM4 / SM3 | 不存在标准机制码 | 厂商自定义码 |
+
+⚠️ **`CKM_ML_DSA` 这一行容易被读成"硬件"，它不是。** 两件事要分开：
+`mldsa_axi` 是真核、已在板上逐字节对上 ACVP（board/logs/），**经 SDF 那条路
+（libsdfe → daemon → EL3 → 核）可达**；但 **PKCS#11 模块没有走到硬件的传输层**
+——它调的是 liboqs。独立评审 H5 推翻过"换个后端就行"这个前提：`src/hal/` 现有的
+accel 只实现了 NTT 与 Keccak 两个算子，整算法的硬件 transport 尚不存在。
+所以正确说法是"**算法在硬件上验过，PKCS#11 走的是软件**"，而不是二选一。
 
 `C_GenerateKeyPair` → `CMD_GENERATE` → `mlkem_axi` KeyGen；
 `C_DecapsulateKey` → `CMD_DECAPS` → `mlkem_axi` Decaps。

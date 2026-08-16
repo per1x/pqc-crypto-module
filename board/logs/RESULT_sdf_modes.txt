@@ -4,19 +4,19 @@
 [设备] pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000 mldsa=0x00010000
 
 [1] SDFE_GenerateRandom —— 取自 PL 里的环振噪声源
-  32 字节随机数     029d78a35d76c6f4a1539bf2662dd4f1…（共 32 字节）
+  32 字节随机数     4e7b6a1faa385e7d41d296e727727b23…（共 32 字节）
 
 [2] SDFE_GenerateKeyPair_MLKEM(ML-KEM-768)
   公钥 ek 1184 字节，私钥句柄 = 0
-  ek 开头              cdc14c4864a7997404ca3679b2064bb0…（共 1184 字节）
+  ek 开头              211554a7c113ac9b42807a276882cbf3…（共 1184 字节）
   ← 注意：本程序**从头到尾没有拿到过私钥 dk**，只有这个句柄
 
 [3] SDFE_Encapsulate_MLKEM（用公钥）
-  共享密钥 K         43fc829cfaeef334123943291d401719…（共 32 字节）
-  密文 c               fd9c9cbcc0b9b7ad266dad55d95c4301…（共 1088 字节）
+  共享密钥 K         55c02c2f753a6fdfcffd3e02833b55fb…（共 32 字节）
+  密文 c               d394f0237734a4ecfa82f774fc84d247…（共 1088 字节）
 
 [4] SDFE_Decapsulate_MLKEM（用句柄，不是私钥）
-  解出的 K            43fc829cfaeef334123943291d401719…（共 32 字节）
+  解出的 K            55c02c2f753a6fdfcffd3e02833b55fb…（共 32 字节）
   ✅ 两边的共享密钥一致 —— 一次完整的 KEM 在 FPGA 上跑通
 
 [5] SDFE_ImportKey + SDFE_Encrypt/Decrypt（SM4，密钥留在硬件）
@@ -40,7 +40,11 @@
   ✅ SM4-CFB      64 字节对上标准向量，解密回到原文
   ✅ SM4-OFB      64 字节对上标准向量，解密回到原文
 
-[8] 反证：断开重连之后，上一会话的句柄必须失效
+[8] SDFE_Hash_SM3（硬件 SM3 核，无密钥）
+  SM3("abc")             66c7f0f462eeedd9d1f2d46bdc10e4e2…（共 32 字节）
+  ✅ 与 GB/T 32905 A.1 逐字节一致
+
+[9] 反证：断开重连之后，上一会话的句柄必须失效
   ✅ 旧句柄 0 已失效（句柄不存在）
 
 === 全部完成。本程序没有碰过任何寄存器。 ===

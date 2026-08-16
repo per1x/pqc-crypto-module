@@ -110,6 +110,11 @@
 #define SY_CMD    (S_SYM + 0x14)
 #define SY_DIN0   (S_SYM + 0x20)
 #define SY_DOUT0  (S_SYM + 0x30)
+#define SY_HASHIN (S_SYM + 0x18)
+#define SY_DIG0   (S_SYM + 0x40)   /* DIGEST0..7，大端拼成 32 字节 */
+#define SYC_HSTART 4u              /* CMD[2] */
+#define SYC_HFINAL 8u              /* CMD[3] */
+#define SY_ALG_SM3 3u
 /* sym_axi 的 status_word（sym_axi.v:277）：{kv_valid[3], key_ready[2],
  * op_done[1], busy[0]}。⚠️ 别按"从 0 开始数"想当然 —— bit0 是 busy 不是 done。
  * 第一版三个位全错了一位，症状是 SDFE_Encrypt 报"硬件运算失败"。 */
@@ -730,6 +735,37 @@ static int sym_crypt(uint32_t alg, uint32_t slot, int dec, uint32_t mode,
 	return 0;
 }
 
+/* SM3：无密钥，字节一个一个写进 HASH_IN，FINAL 之后读 DIGEST0..7。
+ * 时序照 hardware/tb/cocotb/test_sym_vault.py 里那条对上 GB/T 32905 的用例。 */
+static int sym_sm3(const uint8_t *in, uint32_t len, uint8_t out[32])
+{
+	long spin;
+	uint32_t i;
+
+	wr(SY_ALG, SY_ALG_SM3);
+	wr(SY_CMD, SYC_HSTART);
+	for (i = 0; i < len; i++) {
+		wr(SY_HASHIN, in[i]);
+		if (hw_fault)
+			return -1;
+	}
+	wr(SY_CMD, SYC_HFINAL);
+	for (spin = 0; spin < 200000L && !hw_fault; spin++)
+		if (rd(SY_STATUS) & SYS_DONE)
+			break;
+	if (!(rd(SY_STATUS) & SYS_DONE))
+		return -2;
+	for (i = 0; i < 8; i++) {
+		uint32_t w = rd(SY_DIG0 + 4 * i);
+
+		out[4*i]   = (uint8_t)(w >> 24);
+		out[4*i+1] = (uint8_t)(w >> 16);
+		out[4*i+2] = (uint8_t)(w >> 8);
+		out[4*i+3] = (uint8_t)w;
+	}
+	return 0;
+}
+
 /* ---- 一条请求 ---- */
 static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 			  uint8_t *out, uint32_t *out_len)
@@ -1041,6 +1077,16 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		      dec ? "解密" : "加密");
 		return SDR_OK;
 	}
+	case OP_SM3: {
+		if (q->len == 0 || q->len > PQCS_MAXPAY)
+			return SDR_INARGERR;
+		if (sym_sm3(pay, q->len, out))
+			return SDR_HARDFAIL;
+		*out_len = 32;
+		logf_("SM3 %u 字节 → 32 字节摘要", q->len);
+		return SDR_OK;
+	}
+
 	/* ---- 工作模式：一次调用处理整段数据 ----------------------------------
 	 * 逐分组走一次 socket 也能实现，但那是每 16 字节一次往返；而且模式状态
 	 * （反馈寄存器/计数器）会落到调用方手里，调用方一旦复用就是密钥流复用。

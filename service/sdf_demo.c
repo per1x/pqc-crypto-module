@@ -293,12 +293,35 @@ int main(int argc, char **argv)
 		memset(back, 0, sizeof back);
 	}
 
-	/* ---- 8. 反证：句柄是**会话内**的，断开就作废 ----
+	/* ---- 8'. SM3：位流里一直有这个核，只是从来没接出来 ----
+	 * 判据是 GB/T 32905 附录 A.1 的官方向量 SM3("abc")。
+	 * 无密钥，不碰金库；一次一段（不是 GM/T 0018 的三段式，理由见 sdfe.h）。 */
+	{
+		static const unsigned char WANT[32] = {
+			0x66,0xc7,0xf0,0xf4,0x62,0xee,0xed,0xd9,
+			0xd1,0xf2,0xd4,0x6b,0xdc,0x10,0xe4,0xe2,
+			0x41,0x67,0xc4,0x87,0x5c,0xf2,0xf7,0xa2,
+			0x29,0x7d,0xa0,0x2b,0x8f,0x4b,0xa8,0xe0 };
+		unsigned char dig[32];
+
+		printf("\n[8] SDFE_Hash_SM3（硬件 SM3 核，无密钥）\n");
+		rv = SDFE_Hash_SM3(ses, (const unsigned char *)"abc", 3, dig);
+		if (rv != SDR_OK) {
+			printf("  失败：%s\n", SDFE_StrError(rv)); return 1;
+		}
+		hex("SM3(\"abc\")", dig, 32);
+		if (memcmp(dig, WANT, 32)) {
+			printf("  ❌ 与 GB/T 32905 A.1 不一致\n"); return 1;
+		}
+		printf("  ✅ 与 GB/T 32905 A.1 逐字节一致\n");
+	}
+
+	/* ---- 9. 反证：句柄是**会话内**的，断开就作废 ----
 	 * 上面第 [2] 步拿到的句柄 kh 在本连接内一直可用。现在断开重连，
 	 * 同一个句柄必须**不再可用** —— 否则任何人连上来都能使唤上一个人的私钥。
 	 * daemon 那边断连时清句柄表并给两个 PQC 金库各发一次 ZEROIZE，
 	 * 所以私钥既不在进程里、也不在硬件里。 */
-	printf("\n[8] 反证：断开重连之后，上一会话的句柄必须失效\n");
+	printf("\n[9] 反证：断开重连之后，上一会话的句柄必须失效\n");
 	SDFE_CloseSession(ses);
 	SDFE_CloseDevice(dev);
 	if (argc >= 3)
