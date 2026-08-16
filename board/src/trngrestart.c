@@ -109,7 +109,7 @@ static void wr(unsigned off, uint32_t v)
 
 int main(int argc, char **argv)
 {
-	int after_startup = 0;
+	int after_startup = 0, append = 0;
 	long rows = (argc > 1) ? atol(argv[1]) : 1000;
 	long cols = (argc > 2) ? atol(argv[2]) : 1000;
 	const char *out = (argc > 3) ? argv[3]
@@ -121,8 +121,12 @@ int main(int argc, char **argv)
 	char state[64] = {0};
 	int i;
 
-	for (i = 1; i < argc; i++)
+	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-a") == 0) after_startup = 1;
+		/* -A：**追加、不写文件头**。给"每重配一次 PL 采一行"那种驱动用 ——
+		 * 那时每一行都是一次独立的进程，文件头只能由驱动写一次。 */
+		if (strcmp(argv[i], "-A") == 0) append = 1;
+	}
 
 	/* 闸门：先确认 PL 已 programmed 再发第一笔 SMC（这一步不碰 PL 总线） */
 	st = fopen("/sys/class/fpga_manager/fpga0/state", "r");
@@ -142,24 +146,26 @@ int main(int argc, char **argv)
 	row = malloc((cols + 31) / 8 + 4);
 	if (!row) return 1;
 
-	f = fopen(out, "wb");
+	f = fopen(out, append ? "ab" : "wb");
 	if (!f) { perror(out); return 1; }
 
 	/* 文件头：把"这里的 restart 是什么"写进数据本身，
 	 * 免得日后有人拿它当真 POR 的重启测试用。 */
-	fprintf(f, "#SP800-90B-restart-matrix rows=%ld cols=%ld\n", rows, cols);
-	fprintf(f, "#restart=TRNG-ZEROIZE (noise source stopped+restarted, "
-		   "NOT a power-on reset; chip stayed powered, temperature "
-		   "unchanged)\n");
-	fprintf(f, "#tap=RAW (pre-conditioning, src_valid/src_bit)\n");
-	fprintf(f, "#sampling=%s\n", after_startup
-		? "AFTER startup_done AND draining 128 raw words (operational: "
-		  "these are samples produced after the startup health test passed)"
-		: "IMMEDIATELY after restart (includes the ring-oscillator "
-		  "startup transient; these samples are discarded in operation "
-		  "by the 1024-sample startup health test)");
-	fprintf(f, "#binary payload follows: rows x ceil(cols/8) bytes, "
-		   "MSB-first within each byte\n");
+	if (!append) {
+		fprintf(f, "#SP800-90B-restart-matrix rows=%ld cols=%ld\n", rows, cols);
+		fprintf(f, "#restart=TRNG-ZEROIZE (noise source stopped+restarted, "
+			   "NOT a power-on reset; chip stayed powered, temperature "
+			   "unchanged)\n");
+		fprintf(f, "#tap=RAW (pre-conditioning, src_valid/src_bit)\n");
+		fprintf(f, "#sampling=%s\n", after_startup
+			? "AFTER startup_done AND draining 128 raw words (operational: "
+			  "these are samples produced after the startup health test passed)"
+			: "IMMEDIATELY after restart (includes the ring-oscillator "
+			  "startup transient; these samples are discarded in operation "
+			  "by the 1024-sample startup health test)");
+		fprintf(f, "#binary payload follows: rows x ceil(cols/8) bytes, "
+			   "MSB-first within each byte\n");
+	}
 
 	wr(REG_CTRL, C_ENABLE);
 	drops0 = rd(REG_DROPS);

@@ -62,8 +62,16 @@ be executed by programmable logic instead of software. Four transports implement
 it identically — a software stub, a simulated RTL backend, the same RTL driven
 over AXI4-Lite and AXI4-Stream, and a memory-mapped transport for a real
 device — and the register contract they share is documented in
-[REGISTERS.md](../REGISTERS.md). Only the software path is exercised on the
-tested operational environments.
+[REGISTERS.md](../REGISTERS.md).
+
+> **Of these four transports, the host software stack (`src/`) uses the software
+> stub on the tested operational environments. Do not read that as "the project is
+> software only": the service path (`service/` → daemon → `/dev/secmmio` → EL3 →
+> PL) is real hardware**, and ML-KEM, ML-DSA, AES, SM4, SM3 and the TRNG have all
+> been checked against official vectors on the board (see the silicon results in
+> [TESTING.md](../TESTING.md) and the raw logs in `board/logs/`). "PKCS#11 runs in
+> software" and "the algorithms are verified in hardware" are both true at the
+> same time; see the coverage tables in [API.md](../API.md).
 
 ## 3. Cryptographic module interfaces
 
@@ -145,11 +153,20 @@ and no power or electromagnetic analysis has been performed.
 The key hierarchy, generation, storage, and zeroisation of every SSP are listed
 in [ARCHITECTURE.md](../ARCHITECTURE.md#cryptographic-cores).
 
-Entropy for keys and nonces comes from the OpenSSL DRBG seeded by the operating
-system. The module does not contain its own entropy source. A ring-oscillator
-noise source with SP 800-90B continuous health tests exists in RTL
-(`hardware/rtl/trng/trng_health.v`) and is verified in simulation, but is not
-wired into the software path.
+**Entropy (corrected 2026-08-17; the previous description was stale).** The
+boundary contains a ring-oscillator noise source with SP 800-90B continuous health
+tests (`hardware/rtl/trng/`), and it **is** wired into the software path:
+`pqc_random_bytes()` prefers the hardware source and **fails rather than silently
+falling back** (`src/util/util.c`). All seven pieces of key material — private-key
+seeds, PIN keys and salts, the backup RMK, Shamir coefficients, the KEK salt, the
+wrap nonce and the KEM-DEM IV — go through it.
+
+Only on a host with no transport installed (a pure-software build, or the unit
+tests) does it fall back to the OpenSSL DRBG seeded by the operating system; there
+the claim "entropy comes from hardware" does not apply in the first place, and the
+caller can see this via `hwrng_available()`. The measured min-entropy of the raw
+noise is 0.871234 bits per sample; the restart matrix is in
+`board/logs/RESULT_restart.txt`.
 
 Zeroisation is structural rather than incidental: `tools/check_zeroize.py`
 verifies that every key-material field is wiped by its destructor and that every
@@ -287,7 +304,12 @@ this document.
 
 Two differences matter for a GM/T 0028 submission specifically and are not
 addressed by this module: the standard's approved algorithm list is the Chinese
-commercial cryptography suite (SM2, SM3, SM4, ZUC), none of which the module
+commercial cryptography suite (SM2, SM3, SM4, ZUC). **This sentence used to say
+the module implements none of them, which was wrong**: SM4 and SM3 are both in the
+PL and have been checked on the board against GB/T 32907 A.1 and GB/T 32905 A.1.
+What is missing is **SM2 and ZUC**, neither of which has a core or a software
+implementation; SM2 is the largest gap for GM/T certification. The gap list lives
+in [API.md](../API.md). The module
 implements; and the randomness requirements reference GM/T 0005 rather than
 SP 800-90B, so the noise source health tests in `hardware/rtl/trng/` would need
 to be re-derived against that document's thresholds.
