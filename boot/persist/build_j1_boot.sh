@@ -96,40 +96,27 @@ case "$(basename "$BIT")" in
     *) echo "拒绝：$BIT 不是送检形态位流（必须叫 zu3eg_hsm.bit）"; exit 1 ;;
 esac
 
-# ---- 先生成 j1_nopl.dtb（bif 引用它，而它不该手工维护）----
-# 做法：把整个 amba_pl@0 子树连同指向它的别名删掉。
-# ⚠️ 这个文件**一度不在仓库里**，于是 bif 引用了一个谁也造不出来的东西 ——
-#    与救砖那三个产物同一类缺口（脚本在、材料不在）。生成过程放进脚本，
-#    换一台机器才复现得出来。
-DTB_SRC=/home/build/petalinux/images/linux/system.dtb
-DTB_OUT=${DTB_OUT:-$SRCTREE/boot/persist/j1_nopl.dtb}
-if [ ! -f "$DTB_OUT" ] || [ "$DTB_SRC" -nt "$DTB_OUT" ]; then
-    echo "== 生成 j1_nopl.dtb（删掉 amba_pl 子树）=="
-    dtc -I dtb -O dts -o /tmp/j1.dts "$DTB_SRC" 2>/dev/null
-    python3 - /tmp/j1.dts <<'PYEOF'
-import re, sys
-path = sys.argv[1]
-s = open(path).read()
-# 删 amba_pl@0 整个子树
-m = re.search(r"\n\tamba_pl@0 \{\n.*?\n\t\};", s, re.S)
-if m:
-    s = s[:m.start()] + s[m.end():]
-    print("  已删 amba_pl@0 子树")
-else:
-    print("  没找到 amba_pl@0（可能这份设备树本来就没有）")
-# 删指向 PL 外设的别名（ethernet0 就是 AXI Ethernet 那条）
-n = 0
-def drop_alias(mm):
-    global n
-    n += 1
-    return ""
-s = re.sub(r'\\n\\t\\t\\w+ = "/amba_pl@0[^"]*";', drop_alias, s)
-print("  已删 %d 条指向 amba_pl 的别名" % n)
-open(path, "w").write(s)
-PYEOF
-    dtc -I dts -O dtb -o "$DTB_OUT" /tmp/j1.dts 2>/dev/null
-    ls -l "$DTB_OUT"
-fi
+# ---- 设备树：**就用 petalinux 的 system.dtb，不要另做一份"删掉 PL"的** ----
+#
+# ⚠️ 这里原来生成一份 j1_nopl.dtb（把 amba_pl@0 子树删掉/禁用），理由是
+#    "别在设备树里描述一堆不存在的外设"。**那个做法从两个方向都错了，
+#    实测记下来免得有人再走一遍：**
+#
+#  ① **它够不着内核。** BOOT.BIN 里 load=0x00100000 那份 dtb 是 **U-Boot 自己的
+#     control DTB**；**内核的设备树来自 SD 上的 image.ub**（串口日志里那句
+#     `Booting using the fdt blob at 0x14000000` 就是证据）。所以改它对
+#     "内核别去探测不存在的 PL 外设"**一点作用都没有** —— 实测：用了 nopl 之后
+#     `xilinx-video amba_pl@0:vcap_mipi ...` 那串探测失败原样出现。
+#     要达到那个目的，得改 image.ub 里的设备树，那是另一件事。
+#
+#  ② **它还把热重启弄坏了。** 同一份镜像：
+#       system.dtb 版  —— sysrq 重启能起来、JTAG 复位也能起来
+#       nopl 版        —— JTAG 复位能起来，**sysrq 重启起不来**
+#                          （串口上连 FSBL 的 banner 都没有，两次复现）
+#     根因没有继续追 —— 因为按 ① 它本来就没有存在的理由。
+#
+# 结论：J1 用 system.dtb。**少一份自制产物，就少一处能坏的地方。**
+DTB_OUT=${DTB_OUT:-/home/build/petalinux/images/linux/system.dtb}
 
 cat > "$BIF" <<BIFEOF
 the_ROM_image:
