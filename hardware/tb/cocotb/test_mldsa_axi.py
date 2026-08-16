@@ -386,6 +386,62 @@ async def test_sign_matches_acvp_siggen(dut):
                   f"|msg|={len(msg)} |ctx|={len(ctx)}")
 
 
+def _kat_any_alg(path, alg, pred=None, key=None):
+    """按**指定** alg 挑记录 —— 与 _kat 的区别是不吃全局 ALG。
+
+    下面那条"不复位跨参数集"的用例必须在同一次仿真里用到三个参数集的向量，
+    而 _kat 只认环境变量选定的那一个。
+    """
+    recs = _load_records(path)
+    out = [r for r in recs if r.get("alg") == alg and (pred is None or pred(r))]
+    assert out, f"KAT 里没有符合条件的 {alg} 记录"
+    if key is not None:
+        out.sort(key=key)
+    return out
+
+
+@cocotb.test()
+async def test_verify_cross_pset_without_reset(dut):
+    """**只复位一次**，之后连续用不同参数集做 Verify —— 上板 100%/0% 的那个形状
+
+    ⚠️ 这一格是十二格矩阵漏掉的真空，而它恰好是**板上的常态**：
+        · cocotb 每条用例都从 reset() 开始，而复位把 pset 与全部派生配置清零；
+        · 板上 PL 装载之后**再也不复位**，配置一直是上一笔运算留下的。
+    于是"参数集 A 的运算 → 不复位 → 参数集 B 的 Verify"这个序列在仿真里
+    从来没跑过，而它在板上是每一次调用的常态。
+
+    上板实测（开发形态位流，直连 /dev/mem，每套 300 次）：
+        纯 Verify、前面不夹同参数集的 Sign/KeyGen
+            ML-DSA-44  失败 300/300（100%）
+            ML-DSA-65  失败 300/300（100%）
+            ML-DSA-87  失败   0/300（0%）
+        而每次 Verify 前都有同参数集 KeyGen+Sign 时，三套全过。
+    温度无关（失败与成功都在 32.6°C），失败率是 100%/0% 的**确定性**，
+    所以不是边缘时序。疑为 pset 派生配置（k/ℓ/γ₂/λ/ω）的锁存时机。
+
+    顺序故意从 87 起步再切 44：板上的形状说明"从大参数集切到小的"是出事方向。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)                      # ← 全用例只此一次
+
+    order = [2, 0, 1, 0, 2, 1]
+    names = {0: "ML-DSA-44", 1: "ML-DSA-65", 2: "ML-DSA-87"}
+    for step, ps in enumerate(order, 1):
+        alg = names[ps]
+        r = _kat_any_alg(SIGVER_KAT, alg,
+                         lambda x: x.get("result") == "pass", _short)[0]
+        pk = bytes.fromhex(r["pk"]);  sig = bytes.fromhex(r["sig"])
+        msg = bytes.fromhex(r["msg"]); ctx = bytes.fromhex(r.get("context", ""))
+        assert len(pk) == PK[ps] and len(sig) == SIG[ps]
+        await run_op(dut, OP_VERIFY, pk + sig + ctx + msg, pset=ps,
+                     msg_len=len(msg), ctx_len=len(ctx))
+        st, _ = await rd(dut, STATUS)
+        assert st & ST_VOK, (
+            f"第 {step} 步 {alg}（tcId={r.get('tcid')}）应当验得过却没有"
+            f"（STATUS={st:#010x}）—— 不复位跨参数集时 pset 派生配置没跟上")
+        dut._log.info(f"  第 {step} 步 {alg}：通过（不复位）")
+
+
 @cocotb.test()
 async def test_verify_matches_acvp_sigver(dut):
     """Verify：pass 与 fail **两种判定**都对上 ACVP sigver
