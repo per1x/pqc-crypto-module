@@ -719,13 +719,46 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		if (q->a1 != 0)
 			return SDR_INARGERR;   /* 非空 ctx：见上面那段 */
 		mldsa_len(dsa_keys[h].pset, &pklen, &sklen, &siglen);
-		/* **只送消息**。sk 由 PL 从金库里取，一个字节都不经过总线，
-		 * 也不经过本进程 —— 这里连一个能放 sk 的缓冲区都不存在。 */
-		if (mldsa_run(MDO_SIGN, dsa_keys[h].pset,
-			      MDM_SK_FROM_SLOT | MDM_SLOT(h),
-			      pay, q->len, q->len, 0,
-			      out, PQCS_MAXPAY, &n, NULL))
-			return SDR_HARDFAIL;
+		/* 送的是 **rnd(32) ‖ msg**，不是只送 msg。
+		 *
+		 * ⚠️ 这里原来只送 msg，注释还写着"只送消息" —— 那是 RTL 加进
+		 *    rnd/ctx **之前**的旧约定。RTL 现在的输入排布是
+		 *        [sk，仅当不走金库] ‖ rnd(32) ‖ ctx ‖ msg
+		 *    走金库时 START 的长度门槛是 32+ctx_len+msg_len。只送 msg 的话
+		 *    IN_PTR 差 32 字节，**START 必被 LEN_ERR 拒、根本不启动**——
+		 *    也就是说签名在真硬件上一次都成功不了。
+		 *    仿真侧发现不了它：cocotb 的用例是照 RTL 的排布喂的，
+		 *    而 daemon 这条路当时没有硬件可跑。
+		 *
+		 * rnd 取自 **PL 的环振噪声源**（FIPS 204 的 hedged 模式）。
+		 * 不用全零：全零是确定性签名，它把签名变成消息的纯函数，
+		 * 少了一层对故障注入与侧信道的防护。确定性只在对 ACVP 的
+		 * 确定性向量时才需要，那条路走的是 mldsa_hwtest，不是这里。
+		 *
+		 * sk 仍然一个字节都不经过总线、也不经过本进程 —— 这里连一个能放
+		 * sk 的缓冲区都不存在，rnd 是另一回事。 */
+		if (32u + q->len > PQCS_MAXPAY)
+			return SDR_INARGERR;
+		{
+			uint8_t *sbuf = malloc(32u + q->len);
+			int rv;
+			if (!sbuf)
+				return SDR_UNKNOWERR;
+			if (trng_bytes(sbuf, 32)) {
+				free(sbuf);
+				logf_("ML-DSA SIGN 取 rnd 失败（TRNG）");
+				return SDR_HARDFAIL;
+			}
+			memcpy(sbuf + 32, pay, q->len);
+			rv = mldsa_run(MDO_SIGN, dsa_keys[h].pset,
+				       MDM_SK_FROM_SLOT | MDM_SLOT(h),
+				       sbuf, 32u + q->len, q->len, 0,
+				       out, PQCS_MAXPAY, &n, NULL);
+			memset(sbuf, 0, 32u + q->len);
+			free(sbuf);
+			if (rv)
+				return SDR_HARDFAIL;
+		}
 		if (n != siglen) {
 			logf_("ML-DSA SIGN 返回 %u 字节，应为 %u", n, siglen);
 			return SDR_HARDFAIL;
