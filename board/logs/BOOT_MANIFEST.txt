@@ -1,0 +1,55 @@
+=== SD 卡 FAT 分区上启动镜像的 md5 清单 + 板外对应物（2026-08-17 核对）===
+
+为什么要有这份清单：板子上的 golden 是最后一道安全网，而"它有没有被写坏"
+这个问题必须能**离线回答**，不能只靠"我记得没动过它"。所以每一份要紧的镜像
+都记下 md5，并指明它在构建机上的哪一份是同一个字节流。
+
+⚠️ 核对方法：板上读之前先 `echo 3 > /proc/sys/vm/drop_caches`，否则 md5sum
+   读到的是页缓存，而不是 SD 卡上真实的字节。
+
+------------------------------------------------------------------------------
+要紧的四份
+------------------------------------------------------------------------------
+md5                               板上                        板外对应（构建机）
+--------------------------------  --------------------------  ------------------------------------------------
+cbd6d44d31a78befa624a9b5d464429c  BOOT.BIN                    /home/build/wdt_patch/images/BOOT_SECMMIO.BIN
+                                  = BOOT0006.BIN              （当前 golden。含 DNA 只读窗口 + 保护单元只读窗口）
+8d42d1a58b62c8ca95501bf486fbb45d  BOOT0002.BIN                /home/build/BOOT_FAN2.BIN
+                                  = BOOT_GOLDEN.BIN           （**兜底 golden**，厂家形态 + 风扇静音）
+24a790dc51091d816c254c4d2f7e06a1  BOOT_PRE_DNA.BIN            /home/build/bbram_ws/BOOT_BBRAM_PLAIN.BIN
+                                  （2026-08-17 改动之前的 golden，可由 `ENC=0 sh boot/persist/build_bbram_boot.sh` 复现）
+bb3402ea4efae7e1062a65632fe684b4  BOOT0001.BIN                /home/build/wdt_patch/images/BOOT_OPTEE_FIXQ.BIN
+                                  = BOOT0001_fixq_backup.BIN
+                                  = BOOT_OPTEE_FIXQ.BIN       （已知 10/10 能启动的那一版）
+
+四份**全部与板外副本逐字节一致**。golden 完好。
+
+------------------------------------------------------------------------------
+2026-08-17 的一次串口事故 —— 结论：没有写坏任何东西
+------------------------------------------------------------------------------
+事故：用串口下了一条**会覆盖 BOOT.BIN** 的命令，而串口把发出去的字符弄重复了。
+板子实际收到的是：
+
+    md5sum /media/sd-mmcblk1p1/BOOT.BIN /media/sd-mmcblk1p1/BOOT_GOOLDEN.BIN;
+    cp /media/sd-mmcblk1p1/BOOT.BIN /media/sd-mmcblk1p1/BOOT_PRE_DNA.BIN;
+    cp /media/sd-mmcblk1p1/BOOT0006.BIN /media/sd-mmcblk1p1/BOOT.BIN;
+    sync; md5sum //media/sd-mmcblk1p1/BOOT.BIN
+                 ^^                    ^^^^^^^^
+                 两处被弄坏的地方
+
+事后用**网络通道**逐条查清落点：
+
+  · `BOOT_GOOLDEN.BIN` 只出现在 **md5sum 的参数**里 —— 只读命令，报了
+    "No such file" 就完了。目录里**不存在**任何叫 GOOLDEN 的文件（已确认 0 个）。
+  · `//media/...` 在 POSIX 路径里等价于 `/media/...`，读的是同一个文件。
+  · 两条 `cp` 在回显里是完整的，事后 md5 也证明它们做的正是预期的事：
+    旧 golden 完整备份成 BOOT_PRE_DNA.BIN，新镜像落到 BOOT.BIN。
+
+**所以这次没有写坏东西 —— 但这纯属侥幸：坏字符恰好落在只读参数上。**
+换一个位置（比如落在 `cp` 的目标路径里）就会凭空写出一个垃圾文件，
+或者更糟，落在源路径里让 golden 被一份错的东西覆盖掉。
+
+→ 纪律因此改成硬规则：**串口只用于只读观察（看启动日志、读状态）。
+   任何会写、会刷、会改文件的命令一律走网络（eth1 ssh）。**
+   板子掉网时，串口的作用是"看清楚它为什么掉网"和"救回网络"，
+   不是"在没有网络的情况下继续干活"。
