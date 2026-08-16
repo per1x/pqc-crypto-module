@@ -218,7 +218,7 @@ so this document is not mistaken for a statement of readiness.
 > problem of its own, and **BBRAM is battery-backed — a dead battery means the
 > board will not boot.**
 
-> ### BBRAM encrypted boot, 2026-08-17: root cause found, **blocked on one power cycle**
+> ### BBRAM encrypted boot, 2026-08-17: **blocked by board hardware (no `VCC_BATT` cell)**
 >
 > **Up front: the image is correct, the key is correct, the bif and the whitelist
 > are correct. The one thing not done is the POR (physical power cycle) that must
