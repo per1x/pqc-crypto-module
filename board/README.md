@@ -50,6 +50,7 @@ real runs and should stay that way — the numbers quoted in
 | `RESULT_restart.txt` | SP 800-90B restart test |
 | `RESULT_service.txt` | End-to-end through the SDF interface, with the direct-access counter-proof |
 | `RESULT_harness.log` | Harness log from the corresponding run |
+| `RESULT_ctbprobe_before.txt`, `RESULT_ctbprobe_after.txt` | The c̃-comparison defect on silicon: 61 ordered Verify steps before and after the `verify.v` fix |
 
 ## Programs
 
@@ -63,6 +64,8 @@ real runs and should stay that way — the numbers quoted in
 | `src/trngrestart.c`, `src/restart_mcv.c` | SP 800-90B restart-test collection and on-board MCV computation |
 | `src/xmpu_probe.c` | Probe the PS-side protection units from the normal world |
 | `src/plprobe.c`, `src/rdreg.c` | Minimal PL and register probes |
+| `src/mldsa_hwtest.c` | ML-DSA on silicon: KeyGen/Sign/Verify against ACVP for all three parameter sets, the on-chip key vault, and runtime parameter-set switching |
+| `src/mldsa_ctb_probe.c` | Attribution experiment for the isolated-Verify rejection: an ordered sequence that separates "runtime parameter set not applied" from "c̃ comparison reads bytes left by the previous run" |
 | `src/gen_kat_mlkem_all.py` | Generates `kat_mlkem_all.h` from the ACVP vectors |
 
 Build them for the board with an aarch64 cross compiler and copy them across;

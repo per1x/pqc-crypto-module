@@ -443,6 +443,56 @@ async def test_verify_cross_pset_without_reset(dut):
 
 
 @cocotb.test()
+async def test_verify_after_a_rejected_bigger_pset(dut):
+    """**先判否一条大参数集的签名，再验一条本该通过的小参数集签名**（不复位）
+
+    ⚠️ 上面那条 `test_verify_cross_pset_without_reset` 挑记录时写着
+    `result == "pass"` —— 六步全是**通过**的签名。这一条补上它漏掉的那半：
+    序列里夹一次**判否**。板上跑的是完整的 sigver 向量集（45 条里 36 条是
+    `fail`），所以"上一次 Verify 判了否"才是板上的常态，而仿真里从来没有过。
+
+    为什么这半边关键：verify.v 的判定是 `ctilde_p == ctilde` 的**整 512 位**
+    比较，而两个寄存器**每次只写低 ctb 字节**（44/65/87 → 32/48/64）。于是
+    高位字节是**上一次运算**留下的：
+
+        · 上一次是 87 且判**通过** ⇒ 两边高位相等 ⇒ 下一条 44/65 照样对；
+        · 上一次是 87 且判**否**   ⇒ 两边高位不等 ⇒ 之后每一条 44/65 的
+          Verify 都被判否，**直到又来一条 87 把 64 字节整个覆盖掉**。
+        · 87 自己永远对：ctb=64，64 字节全写，没有"高位"。
+
+    这正是板上那个 100%/0%：44/65 全红、87 全绿，与温度和时序都无关。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)                      # ← 全用例只此一次
+
+    async def verify(ps, want, note):
+        alg = {0: "ML-DSA-44", 1: "ML-DSA-65", 2: "ML-DSA-87"}[ps]
+        r = _kat_any_alg(SIGVER_KAT, alg,
+                         lambda x: x.get("result") == want, _short)[0]
+        pk = bytes.fromhex(r["pk"]);  sig = bytes.fromhex(r["sig"])
+        msg = bytes.fromhex(r["msg"]); ctx = bytes.fromhex(r.get("context", ""))
+        assert len(pk) == PK[ps] and len(sig) == SIG[ps]
+        n = await run_op(dut, OP_VERIFY, pk + sig + ctx + msg, pset=ps,
+                         msg_len=len(msg), ctx_len=len(ctx))
+        assert n == 0, f"Verify 不该有输出字节，OUT_LEN={n}"
+        st, _ = await rd(dut, STATUS)
+        got = bool(st & ST_VOK)
+        assert got == (want == "pass"), (
+            f"{note}：{alg}（tcId={r.get('tcid')}）判定错了 —— 期望 {want}，"
+            f"verify_ok={got}（STATUS={st:#010x}）")
+        dut._log.info(f"  {note}：{alg} 判 {want}，对")
+
+    # ① 大参数集判否 —— 这一步本身是对的，它只是把状态弄脏
+    await verify(2, "fail", "第 1 步（把高位字节弄脏）")
+    # ② 小参数集的**合法**签名：不该受上一步影响
+    await verify(0, "pass", "第 2 步（44，上一步判否之后）")
+    await verify(1, "pass", "第 3 步（65，上一步判否之后）")
+    # ③ 反过来也要成立：判否之后再判否，仍然是否（不能因为脏字节"碰巧"相等）
+    await verify(0, "fail", "第 4 步（44 判否）")
+    await verify(2, "pass", "第 5 步（87，任何时候都不受影响）")
+
+
+@cocotb.test()
 async def test_verify_matches_acvp_sigver(dut):
     """Verify：pass 与 fail **两种判定**都对上 ACVP sigver
 

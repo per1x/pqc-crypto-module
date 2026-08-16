@@ -63,19 +63,19 @@
 
 ## RTL 验证
 
-跨 26 个顶层的 249 个 cocotb 测试，在 Icarus Verilog 下运行（`tools/rtl_sim.sh`）：
+跨 26 个顶层的 251 个 cocotb 测试，在 Icarus Verilog 下运行（`tools/rtl_sim.sh`）：
 
 | 组 | 测试 |
 |---|---|
 | ML-KEM 算子与数据通路 | `mont_reduce`、`butterfly`、`basemul`、`ntt_core`、`compress`/`decompress`（5 种位宽）、`sample`、`bitpack`，以及完整的 KeyGen/Encaps/Decaps |
 | ML-DSA 算子 | `tb_mldsa_units`（8）、`mldsa_ntt_core`（5）、`tb_mldsa_keygen`（8） |
 | Keccak | `keccak_f1600`（5）、`sha3_core`（9） |
-| 总线 | `axi4lite_xbar`（8，另按板级 NS=7 再跑 8）、`axi4lite_firewall`（6）、`pqc_accel_axi`（16）、`key_vault`（4）、`key_vault_axi`（6）、`mlkem_axi`（13）、`mldsa_axi`（22） |
+| 总线 | `axi4lite_xbar`（8，另按板级 NS=7 再跑 8）、`axi4lite_firewall`（6）、`pqc_accel_axi`（16）、`key_vault`（4）、`key_vault_axi`（6）、`mlkem_axi`（13）、`mldsa_axi`（24） |
 | 对称与商密 | `aes_core`（5）、`sm4_core`（6）、`sm3_core`（6）、`sym_vault_top`（5） |
 | 风扇 | `fan_ctrl`（7）、`sysmon_drp`（3） |
 | TRNG | `trng_health`（8）、`trng_source`（3）、`trng_cond`（4）、`trng_top`（4 + 2 不丢弃 + 1 丢弃）、`trng_axi`（6）、告警路径（4）、原始抽头（3） |
 
-⚠️ **`mldsa_axi` 那 22 条是整条链路的端到端对拍，不是"总线层"而已。**
+⚠️ **`mldsa_axi` 那 24 条是整条链路的端到端对拍，不是"总线层"而已。**
 它接的是真 `mldsa_engine`（行为级替身已删），判据是 **ACVP 官方向量**
 （KeyGen 的 pk/sk、Sign 的 σ 逐字节；Verify 的 pass 与 fail 两种判定）加
 `hardware/model/mldsa_oracle.py`（用在官方向量给不出期望值的地方，主要是
@@ -85,7 +85,7 @@
 
 上面这一轮只覆盖 **ML-DSA-44**（不带参数就是它）。三个参数集的全量矩阵是
 `tools/mldsa_grid.sh` 的**十二格**（KeyGen / Sign / Verify / **AXI** × 44 / 65 / 87，
-共 132 条）：Verilator 约 15 分钟做开发内环，Icarus 做合并前的收尾关卡。
+共 134 条）：Verilator 约 15 分钟做开发内环，Icarus 做合并前的收尾关卡。
 ⚠️ Verilator 是二值仿真、**不传播 X**，而本项目坑表第 1 条正是"空敏感列表 →
 输出 X"那一类 —— 所以**不要只跑 Verilator**。
 
@@ -241,7 +241,7 @@ samples/s 下意味着每 0.11 s 一次误报——**α 必须按采样率来选
 本节中没有任何一项需要板子。
 
 ```bash
-./tools/rtl_sim.sh                     # 249 个 cocotb 测试
+./tools/rtl_sim.sh                     # 251 个 cocotb 测试
 sh tools/mldsa_grid.sh                 # ML-DSA 十二格矩阵（Verilator，约 15 分钟）
 sh tools/mldsa_grid.sh icarus          # 同一套矩阵走 Icarus —— 合并前的收尾关卡
 ./tools/rtl_lint.sh                    # Verilator -Wall + Icarus
