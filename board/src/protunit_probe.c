@@ -75,6 +75,25 @@ int main(void)
 
 	/* XMPU_DDR0..5：每个实例 16 个区域，区域寄存器从 +0x100 起，每区 0x10。
 	 * 只把**使能了的**区域打出来 —— 16×6 = 96 个区域全打会淹掉真正的信息。 */
+	/* 每个实例的状态四件套。⚠️ 偏移别记错（我记错过一次，把 +0x04 当成
+	 * POISON 打了出来，其实那是 ERR_STATUS1 —— 越权访问的地址）：
+	 *   +0x00 CTRL   +0x04 ERR_STATUS1(addr)   +0x08 ERR_STATUS2(master)
+	 *   +0x0C POISON +0x10 LOCK */
+	printf("\n[XMPU_DDR0..5 状态]\n");
+	for (i = 0; i < 6; i++) {
+		uint32_t base = 0xFD000000u + (uint32_t)i * 0x10000u;
+		uint32_t c, e1, e2, po, lk;
+
+		if (rd(base + 0x00, &c) || rd(base + 0x04, &e1) ||
+		    rd(base + 0x08, &e2) || rd(base + 0x0C, &po) ||
+		    rd(base + 0x10, &lk)) {
+			printf("  DDR%d：被 EL3 拒绝\n", i);
+			continue;
+		}
+		printf("  DDR%d  CTRL=%08x  ERR_ADDR=%08x  ERR_MASTER=%08x  POISON=%08x  LOCK=%08x\n",
+		       i, c, e1, e2, po, lk);
+	}
+
 	printf("\n[XMPU_DDR0..5 —— 只列使能的区域]\n");
 	n = 0;
 	for (i = 0; i < 6; i++) {
@@ -86,7 +105,7 @@ int main(void)
 			printf("  XMPU_DDR%d：CTRL 被 EL3 拒绝\n", i);
 			continue;
 		}
-		(void)rd(base + 0x04, &poison);
+		(void)rd(base + 0x0C, &poison);
 		printf("  XMPU_DDR%d CTRL=0x%08x POISON=0x%08x\n", i, ctrl, poison);
 		for (r = 0; r < 16; r++) {
 			uint32_t ro = base + 0x100u + (uint32_t)r * 0x10u;
@@ -99,17 +118,19 @@ int main(void)
 				continue;
 			n++;
 			/* 地址寄存器存的是物理地址 >> 12。
-			 * cf: bit0 EN, bit1 RdAllowed, bit2 WrAllowed, bit3 NSCheckType,
-			 *     bit4 RegionNS */
+			 * cf 的位定义**抄自 Xilinx 的 xddr_xmpu0_cfg.h，不是凭印象**
+			 * （凭印象写错过两轮，每轮都白跑一次上板）：
+			 *   [0] EN  [1] RDALWD  [2] WRALWD  [3] REGNNS  [4] NSCHKTYPE */
 			printf("    R%02d  0x%09llx..0x%09llx  master=0x%08x  cfg=0x%08x"
-			       "  [%s%s%s]\n",
+			       "  [%s%s%s%s]\n",
 			       r,
 			       (unsigned long long)st << 12,
 			       (((unsigned long long)en << 12) | 0xFFFULL),
 			       ms, cf,
 			       (cf & 2u) ? "R" : "-",
 			       (cf & 4u) ? "W" : "-",
-			       (cf & 16u) ? " NS" : " S");
+			       (cf & 8u) ? " NS" : " S",
+			       (cf & 16u) ? " 严格" : " 宽松");
 		}
 	}
 	if (n == 0)

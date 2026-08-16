@@ -333,11 +333,9 @@ def main():
     print('bl_regions：已加 XMPU_DDR 映射 0xFD000000+0x100000（%d 处）'
           % s.count('0xFD000000U, 0x100000U'))
 
-    # ---- XMPU_DDR 配置：**试过了，不生效，所以这里故意什么都不做** --------
+    # ---- XMPU_DDR：把 OP-TEE 的 core 段圈成"只有安全世界能碰" ---------------
     #
-    # 别再往这里加"配一下 XMPU 保护 OP-TEE"的代码，除非先解决下面这个问题。
-    #
-    # 已经查实的现状（board/src/protunit_probe，经 EL3 只读窗口读出来的实配）：
+    # 【为什么必须做】板上实测（board/src/protunit_probe，经 EL3 只读窗口读实配）：
     #   · XPPU_CTRL = 0            —— XPPU 整个是关的
     #   · XMPU_DDR0..5 CTRL = 0xb  —— 默认放行读写
     #   · 六个实例里**一个使能的区域都没有**
@@ -346,22 +344,50 @@ def main():
     #   0xAA0003F3                     ← 一条 AArch64 指令
     # 那是 **OP-TEE 的安全世界代码，被非安全的 Linux 用户态直接读出来了**。
     #
-    # 试过的修法（每一轮都真的上板启动过，不是编译过就算）：
-    #   ① 六个实例 × R15，范围 0x6000_0000-0x6FFF_FFFF，cfg=0x0F
-    #      → 六个实例都读回 0x0000000F，**区域确实在表里**；devmem 照样读得到。
-    #   ② 一轮下三种位法，各占一个不重叠的 1 MB 窗口（都在 OP-TEE core 段内，
-    #      Linux 不用这段）：R13 cfg=0x37、R14 cfg=0x33、R15 cfg=0x0F
-    #      → **三个地址全部照常读得到**。
+    # 【R*_CONFIG 的位定义 —— 别再猜，这是从 Xilinx 自己的头文件抄的】
+    #   /tools/Xilinx/Vitis/2020.1/data/embeddedsw/lib/bsp/standalone_v6_4/
+    #     src/arm/cortexa53/includes_ps/xddr_xmpu0_cfg.h
+    #       [0] EN   [1] RDALWD   [2] WRALWD   [3] REGNNS   [4] NSCHKTYPE
+    #   CTRL 同一份头：[0] DEFRDALWD [1] DEFWRALWD [2] POISONCFG [3] ALIGNCFG
     #
-    # 所以排掉的是"R*_CONFIG 位定义猜错了"这条 —— 三种位法一起失败，而且区域
-    # 明明写进去也读得回。剩下的嫌疑在"APU 的非安全访问到底经不经 XMPU_DDR"，
-    # 以及 R*_MASTER 全 0 是不是被硬件当成"不匹配任何主控"（Xilinx 自己的
-    # 例子里从不写 0）。这两条都需要 UG1085 里 XMPU_DDR 的确切寄存器语义，
-    # 手上没有可核对的依据，而每猜一轮要把板子停一次。
+    # ⚠️ 我在拿到这份头之前猜错过两轮，两次都上板验过、两次都不生效，值得记：
+    #      cfg=0x0F → bit3 是 **REGNNS**，等于把这块标成**非安全区域**，
+    #                 当然放行非安全访问。看着像"EN|RD|WR|NSCheck"，其实不是。
+    #      cfg=0x37 → REGNNS=0、NSCHK=1 都对了，但**多设了 bit5（保留位）**。
+    #   正确值是 0x17 = EN | RDALWD | WRALWD | NSCHKTYPE，REGNNS 留 0。
     #
-    # ⚠️ **不留一份不生效的配置在这里。** 它读起来像"DDR 已经被保护了"，
-    #    而实际什么都没挡住 —— 那正是独立评审点名的那类夸大，比空着更糟。
-    #    docs/SECURITY 里按"未解决的真实缺口"记这一条。
+    # 【为什么六个实例都要写】DDR 地址在六个 XMPU_DDR 之间交织。只配一个等于
+    # 只挡了不确定的六分之一 —— 要么六个一起配，要么等于没配。
+    #
+    # 【圈哪一段】设备树的 reserved-memory 给边界，不是猜的：
+    #   optee_core@60000000  0x6000_0000 + 0x1000_0000   ← 圈这段
+    #   optee_shm @70000000  0x7000_0000 + 0x1000_0000   ← **不能圈**，共享内存
+    #                                                       本来就要非安全侧读写
+    # START/END 字段是 addr[39:12]（28 位）。CTRL 的 ALIGNCFG=1 要求 1 MB 对齐，
+    # 0x60000/0x6FFFF 的低 8 位正好是 0x00/0xFF，满足。
+    xmpu = ('\t' + BEG + '\n'
+            '\t{\n'
+            '\t\tunsigned int i;\n'
+            '\t\tfor (i = 0U; i < 6U; i++) {\n'
+            '\t\t\tuintptr_t b = 0xFD000000U + (i * 0x10000U) + 0x100U + (15U * 0x10U);\n'
+            '\t\t\tmmio_write_32(b + 0x0U, 0x00060000U); /* STRT  = 0x60000000 >> 12 */\n'
+            '\t\t\tmmio_write_32(b + 0x4U, 0x0006FFFFU); /* END   = 0x6FFFFFFF >> 12 */\n'
+            '\t\t\tmmio_write_32(b + 0x8U, 0x00000000U); /* MSTR: 掩码 0 = 匹配所有主控 */\n'
+            '\t\t\tmmio_write_32(b + 0xCU, 0x00000017U); /* EN|RDALWD|WRALWD|NSCHKTYPE，REGNNS=0 */\n'
+            '\t\t}\n'
+            '\t}\n'
+            '\t' + END + '\n')
+    s2 = open(SETUP, encoding='utf-8').read()
+    xanchor = '\tsetup_page_tables(bl_regions, plat_arm_get_mmap());\n\tenable_mmu_el3(0);\n'
+    if xanchor not in s2:
+        print('错误：找不到 enable_mmu_el3，没法在它后面配 XMPU')
+        return 1
+    s2 = s2.replace(xanchor, xanchor + '\n' + xmpu, 1)
+    if '#include <lib/mmio.h>' not in s2:
+        s2 = s2.replace('#include <plat/common/platform.h>',
+                        '#include <plat/common/platform.h>\n#include <lib/mmio.h>', 1)
+    open(SETUP, 'w', encoding='utf-8').write(s2)
+    print('XMPU_DDR：已配 OP-TEE core 段（六实例 × R15，cfg=0x17）')
 
     # ---- SiP ----
     s = open(SIP, encoding='utf-8').read()
