@@ -200,6 +200,49 @@ static const char *cmp_bytes(const unsigned char *got, const unsigned char *want
     return buf;
 }
 
+/* ============================================================================
+ * 【⚠️ 写之前必须先确认从机是 IDLE —— 这一条是丢板子/不丢板子的分界】
+ * ============================================================================
+ * mldsa_axi 对下面这几种写**明确回 SLVERR**（见 mldsa_axi.v 的 wr_busy_reject
+ * 与 f_bresp 那段）：
+ *   · 运行途中写 MODE / MSG_LEN / CTX_LEN / IN_DATA；
+ *   · 擦除期间（WIPING）写**任何**寄存器，CTRL 也不例外；
+ *   · 往 IN_PTR 写非零、输入缓冲写满之后再写 IN_DATA。
+ * RTL 那么设计是对的 —— 静默丢弃比报错危险得多。但在**这一侧**要付代价：
+ * 写的错误响应在 aarch64 上是 SError，接不住，内核只能 panic，而这块板
+ * reboot 不生效、只能断电。
+ *
+ * 于是有一条真实的路会撞上去：某一次运算超时（BUSY 一直不落）之后，测试循环
+ * 若若无其事地去跑下一条，第一笔 `wr(MODE)` 就落在 state != S_IDLE 上 —— 一次
+ * 失败的测试当场升级成一块下线的板子。
+ *
+ * 所以照 service/pqchsm_fpgad.c 里 hw_fault 那条纪律办：**失败要粘住，并且
+ * 立刻停下。** 卡住一次之后，后面每一次调用都直接返回，一个字节都不再写。
+ */
+static int hw_stuck;
+
+static int wait_idle(long ms)
+{
+    long deadline = now_ms() + ms;
+    uint32_t st;
+
+    for (;;) {
+        st = rd(MD_STATUS);
+        if (!(st & (ST_BUSY | ST_WIPING)))
+            return 0;
+        if (now_ms() > deadline) {
+            hw_stuck = 1;
+            fprintf(rep, "\n*** 从机在 %ld ms 之后仍然 BUSY/WIPING"
+                    "（STATUS=0x%08x）——**停止一切写操作**。\n"
+                    "    这时候写 MODE 会拿到 SLVERR，而写的错误在 aarch64 上是"
+                    " SError，接不住、内核 panic、只能断电。\n"
+                    "    宁可不测，不可丢板子。\n", ms, st);
+            fflush(rep);
+            return -1;
+        }
+    }
+}
+
 /* ---- 等 done 等多久 ----
  * 照抄 service/pqchsm_fpgad.c 的 mldsa_timeout_ms()：那是一组**上限**，不是
  * 耗时估计，唯一的作用是硬件不吭声时我们会停下来。这里不敢收紧 —— Sign 有
@@ -240,6 +283,17 @@ static int md_run(unsigned op, unsigned pset, unsigned mode_extra,
         *verify_ok = 0;
     if (out_len)
         *out_len = 0;
+
+    /* ⚠️ 第一笔写之前先确认 IDLE，理由见 wait_idle 上面那段。粘住之后
+     *    直接返回，连 STATUS 都不再读。 */
+    if (hw_stuck) {
+        snprintf(why, whysz, "从机已经卡住，本条跳过（不再碰总线）");
+        return -5;
+    }
+    if (wait_idle(2000)) {
+        snprintf(why, whysz, "启动前从机不是 IDLE —— 后面全部跳过");
+        return -5;
+    }
 
     wr(MD_MODE, op | (pset << 2) | mode_extra);
     wr(MD_CTRL, C_CLEAR);
@@ -703,6 +757,15 @@ static void probe(int readonly)
     if (readonly)
         return;               /* -n：到此为止，一个字节都不写 */
 
+    /* 本程序的**第一笔写**在下面。上一次运行崩在半路、或者从机正在擦除的话，
+     * 这一笔就会落在 state != S_IDLE / WIPING 上 → SLVERR → SError → panic。
+     * 所以先等它回到 IDLE；等不到就干脆不写。 */
+    if (wait_idle(3000)) {
+        fprintf(stderr, "从机不是 IDLE，拒绝写任何寄存器。"
+                "先把上一次的运算等完，或者重装位流。\n");
+        exit(3);
+    }
+
     /* VERSION 是所有核共用的同一个常量（0x00010000），单靠它分不出槽里是
      * 哪个核。MSG_LEN(0x24) 是 mldsa_axi 独有的 RW 寄存器 —— mlkem_axi 在这个
      * 偏移上没有东西（它的 KEYSTAT 在 0x30），读回是 0。写一个值再读回来，
@@ -782,10 +845,12 @@ int main(int argc, char **argv)
     test_vault();
     test_pset_hop();
 
-    if (do_zero) {
+    if (do_zero && !hw_stuck && !wait_idle(3000)) {
         long t0 = now_ms();
         uint32_t ks;
 
+        /* 擦除期间**任何**写都回 SLVERR（CTRL 也不例外），所以这一笔要在
+         * IDLE 时发出，发完就只读。 */
         wr(MD_CTRL, C_ZEROIZE);
         while ((rd(MD_STATUS) & ST_WIPING) && now_ms() - t0 < 5000)
             ;
