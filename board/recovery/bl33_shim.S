@@ -66,6 +66,39 @@ _start:
      * "写坏 golden 不等于砖"——已经拿到，这就是做 J1/J2 的安全网。
      */
 
+    /* ========================================================================
+     * GIC：把全部中断放进 Group 1（非安全），否则非安全 EL1 的内核收不到
+     * ========================================================================
+     * ⚠️ 这一段当初**被放弃过**，理由是"GICD_IGROUPR 的 bit 25（arch timer
+     *    的 PPI）清不掉，硬件把它钉死在 Group 0"。那个理由现在**不成立了**：
+     *    救砖设备树已经把 arch timer 整个禁掉、内核改用 TTC（见
+     *    build_rescue.sh 里那段），所以 bit 25 是什么状态都无所谓。
+     *
+     *    症状是这么找到的：JTAG 从 DDR 里读内核的 log ring buffer，日志停在
+     *    rcu_init() 之后 —— 下一步正是 init_IRQ()，也就是 GIC 初始化。
+     *
+     * GIC-400 @ ZynqMP：GICD 0xF9010000，192 个 SPI ⇒ IGROUPR0..5 六个寄存器。
+     * 这一步只能在 EL3 做（JTAG 的内存访问是非安全的，写这组寄存器会
+     * "Memory write error ... DAP status 0x30000021"，那也是实测过的）。
+     */
+    mov     x5, #0xF9010000
+    movk    x5, #0xF901, lsl #16
+    add     x5, x5, #0x80               /* GICD_IGROUPR0 */
+    mov     w6, #-1                     /* 0xFFFFFFFF：全部归 Group 1 */
+    mov     w7, #6                      /* IGROUPR0..5 覆盖 192 个中断 */
+1:  str     w6, [x5], #4
+    subs    w7, w7, #1
+    b.ne    1b
+
+    /* GICD_CTLR：把 Group0/Group1 都使能（bit0 EnableGrp0、bit1 EnableGrp1） */
+    mov     x5, #0xF9010000
+    movk    x5, #0xF901, lsl #16
+    ldr     w6, [x5]
+    orr     w6, w6, #3
+    str     w6, [x5]
+    dsb     sy
+    isb
+
     /* 内核入口 → ELR_EL3；x0 = 设备树，x1..x3 = 0（arm64 启动约定） */
     ldr     x4, .Lkernel
     msr     elr_el3, x4

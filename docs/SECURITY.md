@@ -187,7 +187,7 @@ so this document is not mistaken for a statement of readiness.
 |---|---|
 | ~~**ML-KEM private keys leave the hardware**~~ **fixed** | `mlkem_axi` now has an on-chip private-key vault: `MODE.DK_TO_SLOT` sends `dk` straight into it, `OUT_LEN` stops at the length of `ek`, and `DK_FROM_SLOT` decapsulates by slot. ML-DSA's `sk` works the same way. **Verified on the board 2026-08-17**: seeking the read cursor into the sk region returns all zeros, while the signature produced from the slot is byte-identical to the one produced when software supplies sk. The non-vault path remains for factory verification (ACVP checks the private key) and is closed in the delivery posture by a one-way latch |
 | **No device binding** | The key derivation root (`src/crypto/kdr.c`) is a compiled-in constant whose literal text says so. A real device sources it from eFUSE, BBRAM or a PUF. eFUSE is irreversible and there is one board; BBRAM needs JTAG |
-| **No secure boot** | BBRAM key provisioning needs JTAG. The PL configuration is loaded at runtime, not from a signed golden image |
+| **No secure boot** | **The BBRAM key is now burned (2026-08-17, hardware CRC verified), but a BOOT.BIN encrypted with it does not boot on this board — see the section below.** The PL configuration is still loaded at runtime, not from a signed golden image |
 
 > ### ⚠️ BBRAM is **not** a trust root — say this before building it
 >
@@ -217,6 +217,63 @@ so this document is not mistaken for a statement of readiness.
 > Two deployment costs come with it: the BBRAM key becomes a new key-management
 > problem of its own, and **BBRAM is battery-backed — a dead battery means the
 > board will not boot.**
+
+> ### What actually got done, 2026-08-17: burned, but it will not boot
+>
+> Working:
+>
+> * `boot/persist/build_bbram_boot.sh` produces an encrypted BOOT.BIN with two
+>   self-checks: no plaintext strings survive in the leading region, and the boot
+>   header's key-source word is `0x3A5C3C5A`. (**These two constants are very easy
+>   to swap**: `0x3A5C3C5A` is BBRAM, `0xA5C3C5A3` is eFUSE. The basis is not
+>   memory but a controlled build — same bif, only `[keysrc_encryption]` changed.)
+> * The key was burned over JTAG with XilSKey's `xilskey_bbramps_zynqmp_example`;
+>   it returned `Status = 00000000`, meaning the **hardware CRC check passed**.
+> * `bootgen -read ... bh` decodes a structurally correct boot header.
+>
+> **Not working: with the encrypted image in a non-golden slot and multiboot set,
+> the serial console emits zero bytes — not even the FSBL banner. The failure is
+> in the BootROM, decrypting the FSBL.**
+>
+> The attribution is measured, not assumed:
+>
+> | Experiment | Slot | Reboot path | Result |
+> |---|---|---|---|
+> | Plaintext twin (**byte-identical to golden**) | 6 | sysrq | **boots** |
+> | Encrypted, key in natural order | 6 | sysrq | dead |
+> | Encrypted, eight 32-bit words reversed | 6 | sysrq | dead |
+> | Encrypted, all 32 bytes reversed | 6 | sysrq | dead |
+> | Encrypted, bytes swapped within each word | 6 | sysrq | dead |
+>
+> Ruled out by those runs:
+>
+> * **Not the known flakiness of warm-rebooting into a non-zero slot** — the same
+>   slot and path boot a plaintext image, and in the encrypted runs the board died
+>   *at* slot 6 rather than falling back to golden, so slot 6 was genuinely read.
+> * **Not key retention** — one run burned BBRAM and booted the encrypted image in
+>   the same JTAG session, one system reset apart. Same failure.
+> * **Not key byte order** — `ConvertStringToHexLE` does reverse the whole 32-byte
+>   buffer, but **all four possible orderings were tried and all four failed**;
+>   that search space is exhausted.
+>
+> What remains suspect is a bootgen 2020.1 encrypted-bif detail or this silicon's
+> BootROM behaviour. **This project stops here.** Each attempt needs JTAG and takes
+> the board down, and **encrypted boot is required by neither the demo nor the
+> certification posture** — the delivery boundary rests on the one-way latches and
+> the SiP whitelist, not on boot encryption.
+>
+> Board state for whoever picks this up:
+>
+> * BBRAM **holds a key** (`/home/build/bbram_ws/bbram_aes.key` on the build
+>   machine, chmod 600). It currently **does nothing**: golden's boot header is
+>   plaintext (`enc=0`) and `ENC_ONLY` is unblown, so the BootROM never consults
+>   BBRAM. Harmless to leave, but it hardens nothing.
+> * `BOOT0006.BIN` has been **deleted** from the SD card. Never leave an image that
+>   cannot boot sitting in a slot — anyone who points multiboot at it needs JTAG or
+>   a power cycle to get back.
+> * The golden slot was never touched and **the board was never power-cycled**:
+>   every recovery was a JTAG write of `CSU_MULTI_BOOT=0` plus a system reset,
+>   five for five.
 | **No module integrity check** | Nothing verifies the module image before use |
 | **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
 | **Conditional self-tests missing** | No pairwise consistency test on generated key pairs, no continuous RNG test |

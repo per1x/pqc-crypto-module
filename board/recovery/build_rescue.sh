@@ -136,8 +136,14 @@ chosen = re.search(r"\tchosen \{(.*?)\n\t\};", s, re.S)
 assert chosen, "设备树里没有 chosen 节点"
 body = chosen.group(1)
 body = re.sub(r'\n\t\tbootargs = .*?;', '', body, flags=re.S)
-body += ('\n\t\tbootargs = "earlycon console=ttyPS0,115200 clk_ignore_unused '
-         '";'
+# ⚠️ **救砖内核不要 console。** 内核日志停在一条长消息的**中间**
+# （"Memory: ... 704K" 之后戛然而止），那是 console 驱动卡在 UART 里自旋的
+# 典型样子：earlycon 逐字节轮询 TX，FIFO 排不空就永远转，printk 不返回，
+# 整个启动就停在那儿。而这块板的串口本来就是坏的（USB 层就坏，见
+# board-axu3egb-access 那条）。
+# 救砖不需要 console —— 日志是用 JTAG 从 DDR 里读的（dumplog.tcl）。
+# 少一个依赖就少一处能挂住的地方，与"不经 BL31"、"不经 U-Boot"同一个道理。
+body += ('\n\t\tbootargs = "clk_ignore_unused";'
          '\n\t\tlinux,initrd-start = <0x%x>;'
          '\n\t\tlinux,initrd-end = <0x%x>;' % (start, end))
 s = s[:chosen.start(1)] + body + s[chosen.end(1):]
@@ -154,8 +160,30 @@ def disable(compat):
     return n
 
 assert disable('"arm,armv8-timer"'), "没找到 arch timer 节点"
+
+# ③ **psci 节点整个删掉** —— 这一条是用内核 log ring buffer 查出来的
+#
+# 症状：内核起得来（PC 在内核空间、CPSR=EL1h、IRQ 使能），但 userspace 永远
+# 不跑。用 JTAG 从 DDR 里把 __log_buf 读出来之后一眼看到：日志停在
+#     cma: Reserved 256 MiB at 0x0000000050000000
+# 之后一条都没有。arm64 的 setup_arch() 里 bootmem_init()（打这条 CMA 日志）
+# **紧接着就是 psci_dt_init()**。
+#
+# 而救砖垫片把 BL31 整个拿掉了，并且 SCR_EL3.SMD=1 **屏蔽了 SMC**（那是有意的：
+# 没有 BL31 接管，不能让 SMC 陷进空处理）。于是设备树里 psci 的 method="smc"
+# 一发出去就是未定义指令 —— 早期就死，连下一条日志都来不及打。
+#
+# bl33_shim.S 文件头写的"内核会为从核报几行错，然后照常起来"是**乐观了**：
+# 报错的前提是 PSCI 调用能返回一个错误码，而这里它根本回不来。
+#
+# 删掉 psci 节点，内核就不会去发那个 SMC。代价是起不了从核 —— 救砖只需要
+# 一个能跑的单核 Linux 去把 BOOT.BIN 放回去，本来就不需要 SMP。
+m = re.search(r"\n\tpsci \{\n.*?\n\t\};", s, re.S)
+assert m, "设备树里没有 psci 节点"
+s = s[:m.start()] + s[m.end():]
+
 open(path, "w").write(s)
-print("  chosen 与 arch timer 都改好了")
+print("  chosen / arch timer / psci 三处都改好了")
 PY
 dtc -I dts -O dtb -o "$OUT/rescue.dtb" "$OUT/rescue.dts" 2>/dev/null
 ls -l "$OUT/rescue.dtb"
