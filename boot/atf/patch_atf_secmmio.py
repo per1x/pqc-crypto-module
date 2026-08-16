@@ -131,6 +131,36 @@ DEFS = BEG + '''
 #define CSU_DNA_LO\t\t\t0xFFCA0050ULL
 #define CSU_DNA_HI\t\t\t0xFFCA005CULL
 
+/*
+ * ---- 保护单元（XMPU / XPPU）只读窗口 ----------------------------------------
+ * 这几段放开**只读**，理由只有一个：不放开就**无法观测**这块板此刻实际生效的
+ * 内存保护是什么样。板上实测（board/src/xmpu_probe）：从 EL1-NS 读 XPPU 与
+ * 六个 XMPU_DDR 的每一个寄存器，**无一例外都是总线错误** —— 保护单元自己的
+ * 配置寄存器也被 XPPU 保护着。
+ *
+ * 于是"XMPU/XPPU 配了没有、配成什么样"这个问题在此之前只能靠读厂家的
+ * psu_init 猜。而本项目吃过太多次"照文档抄一份会漂移"的亏（白名单表漏槽 6、
+ * sym_axi 窗口抄成 0x30），所以宁可开一个只读口去读硬件。
+ *
+ * ⚠️ **只读，写一律拒绝。** 能写 XMPU/XPPU 等于能关掉全部内存保护 ——
+ *    那比这个 SiP 已有的 PL 写口危险一个量级。这里绝不放写。
+ *
+ * ⚠️ 这确实是**攻击面的净增加**：普通世界从此能读出保护配置，等于给攻击者
+ *    省了侦察。判断是"值得"：配置本身不是秘密（它由启动链写死，任何拿到同款
+ *    板子的人都能在自己板上读出来），而看不见它的代价是一直在猜。
+ *    docs/SECURITY 的"残余能力"表里要写上这一条。
+ *
+ * 覆盖：XPPU 控制块 + 许可表、XMPU_DDR0..5、XMPU_FPD、XMPU_OCM。
+ */
+#define XPPU_LO\t\t\t\t0xFF980000ULL
+#define XPPU_HI\t\t\t\t0xFF981FFFULL
+#define XMPU_DDR_LO\t\t\t0xFD000000ULL
+#define XMPU_DDR_HI\t\t\t0xFD05FFFFULL
+#define XMPU_FPD_LO\t\t\t0xFD5D0000ULL
+#define XMPU_FPD_HI\t\t\t0xFD5D0FFFULL
+#define XMPU_OCM_LO\t\t\t0xFFA70000ULL
+#define XMPU_OCM_HI\t\t\t0xFFA70FFFULL
+
 #define PL_BASE\t\t\t\t0x80000000ULL
 #define PL_SLOT_SHIFT\t\t\t16
 #define PL_NSLOT\t\t\t7
@@ -174,6 +204,14 @@ static int pl_permit(uint64_t a, int is_write)
 \t * 落到下面的 rel 计算里会被当成越界槽直接拒掉。 */
 \tif (a >= CSU_DNA_LO && a <= CSU_DNA_HI)
 \t\treturn is_write ? 0 : 1;
+\t/* 保护单元：只读。写一律拒绝 —— 能写它就能关掉全部内存保护。 */
+\tif (is_write == 0) {
+\t\tif ((a >= XPPU_LO && a <= XPPU_HI) ||
+\t\t    (a >= XMPU_DDR_LO && a <= XMPU_DDR_HI) ||
+\t\t    (a >= XMPU_FPD_LO && a <= XMPU_FPD_HI) ||
+\t\t    (a >= XMPU_OCM_LO && a <= XMPU_OCM_HI))
+\t\t\treturn 1;
+\t}
 \tif (a < PL_BASE)
 \t\treturn 0;
 \trel = a - PL_BASE;
@@ -250,12 +288,80 @@ def main():
     # ---- 页表：只保留 PL 窗口那一段，去掉 protread 的 FPD 段 ----
     s = open(SETUP, encoding='utf-8').read()
     s = strip_marked(s, 'protread')
-    open(SETUP, 'w', encoding='utf-8').write(s)
+    s = strip_marked(s, 'secmmio')
     keep = s.count('0x80000000U, 0x200000U')
-    print('bl_regions：FPD 段已去；PL 窗口映射保留 %d 处（必须为 1）' % keep)
+    print('bl_regions：PL 窗口映射保留 %d 处（必须为 1）' % keep)
     if keep != 1:
         print('错误：PL 窗口映射不见了 —— 先跑 patch_atf_plmap.py')
         return 1
+
+    # ---- 页表：FPD 里的保护单元 ----------------------------------------------
+    # ⚠️ **这一段和 SiP 白名单是死死绑在一起的**：白名单放行了 0xFD00_0000 段
+    #    的只读，而 EL3 的页表里默认**没有**这一段（平台的 DEVICE0 只覆盖
+    #    0xFF00_0000-0xFFDF_FFFF）。少了它，那笔读会在 EL3 翻译错误 ——
+    #    发 SMC 的核卡死在异常处理里再也不返回。上面 PL 窗口那段注释记着
+    #    这块板上真栽过一次的表现："其余核照常跑 Linux，板子半死不活"。
+    #
+    #    所以：**改白名单里的地址段，就必须同时改这里。** 两处对不上不会报错，
+    #    只会在第一次读到那个地址时把板子挂掉。
+    #
+    # 只读语义由白名单保证，页表这边仍标 MT_RW —— MT_RO 在 EL3 device 映射上
+    # 不是所有 ATF 版本都受支持，而多一处"看着更安全实则没验过"的差异不值得。
+    # ⚠️ **只映 1 MB，不是 6 MB。** 第一版写了 0x600000，BL31 直接死在
+    #    xlat_tables_common.c:135 的 `separated_va && separated_pa` 断言上 ——
+    #    平台自己的 plat_arm_mmap 里已经有一条
+    #        CRF_APB  0xFD1A0000 + 0x600000   （到 0xFD79FFFF）
+    #    我那 6 MB 压在它上面了。xlat 表不允许区域重叠，哪怕属性完全一样。
+    #
+    #    症状值得记：串口能看到 FSBL 横幅、能看到 BL31 的 VERBOSE 把每个
+    #    region 逐条打出来（最后一条正是 0xfd000000-0xfd600000），然后
+    #    ASSERT + BACKTRACE，**永远走不到 Starting kernel**。靠槽 6 + JTAG
+    #    清 multiboot 救回来，没断电。
+    #
+    #    1 MB（0xFD000000-0xFD0FFFFF）已经覆盖 XMPU_DDR0..5（到 0xFD05FFFF）。
+    #    XMPU_FPD 在 0xFD5D0000，**本来就落在 CRF_APB 那条里**，不用另外映。
+    fpd = ('\t\t' + BEG + '\n'
+           '\t\tMAP_REGION_FLAT(0xFD000000U, 0x100000U,\n'
+           '\t\t\t\tMT_DEVICE | MT_RW | MT_SECURE),\n'
+           '\t\t' + END + '\n')
+    manchor = '\t\tMAP_REGION_FLAT(0x80000000U, 0x200000U,\n\t\t\t\tMT_DEVICE | MT_RW | MT_SECURE),\n'
+    if manchor not in s:
+        print('错误：找不到 PL 窗口那段映射，没法在它后面插 FPD 段')
+        return 1
+    s = s.replace(manchor, manchor + fpd, 1)
+    open(SETUP, 'w', encoding='utf-8').write(s)
+    print('bl_regions：已加 XMPU_DDR 映射 0xFD000000+0x100000（%d 处）'
+          % s.count('0xFD000000U, 0x100000U'))
+
+    # ---- XMPU_DDR 配置：**试过了，不生效，所以这里故意什么都不做** --------
+    #
+    # 别再往这里加"配一下 XMPU 保护 OP-TEE"的代码，除非先解决下面这个问题。
+    #
+    # 已经查实的现状（board/src/protunit_probe，经 EL3 只读窗口读出来的实配）：
+    #   · XPPU_CTRL = 0            —— XPPU 整个是关的
+    #   · XMPU_DDR0..5 CTRL = 0xb  —— 默认放行读写
+    #   · 六个实例里**一个使能的区域都没有**
+    # 反证不是推论，是读出来的：
+    #   root@petalinux:~# devmem 0x60000000 32
+    #   0xAA0003F3                     ← 一条 AArch64 指令
+    # 那是 **OP-TEE 的安全世界代码，被非安全的 Linux 用户态直接读出来了**。
+    #
+    # 试过的修法（每一轮都真的上板启动过，不是编译过就算）：
+    #   ① 六个实例 × R15，范围 0x6000_0000-0x6FFF_FFFF，cfg=0x0F
+    #      → 六个实例都读回 0x0000000F，**区域确实在表里**；devmem 照样读得到。
+    #   ② 一轮下三种位法，各占一个不重叠的 1 MB 窗口（都在 OP-TEE core 段内，
+    #      Linux 不用这段）：R13 cfg=0x37、R14 cfg=0x33、R15 cfg=0x0F
+    #      → **三个地址全部照常读得到**。
+    #
+    # 所以排掉的是"R*_CONFIG 位定义猜错了"这条 —— 三种位法一起失败，而且区域
+    # 明明写进去也读得回。剩下的嫌疑在"APU 的非安全访问到底经不经 XMPU_DDR"，
+    # 以及 R*_MASTER 全 0 是不是被硬件当成"不匹配任何主控"（Xilinx 自己的
+    # 例子里从不写 0）。这两条都需要 UG1085 里 XMPU_DDR 的确切寄存器语义，
+    # 手上没有可核对的依据，而每猜一轮要把板子停一次。
+    #
+    # ⚠️ **不留一份不生效的配置在这里。** 它读起来像"DDR 已经被保护了"，
+    #    而实际什么都没挡住 —— 那正是独立评审点名的那类夸大，比空着更糟。
+    #    docs/SECURITY 里按"未解决的真实缺口"记这一条。
 
     # ---- SiP ----
     s = open(SIP, encoding='utf-8').read()
@@ -285,10 +391,18 @@ def main():
     open(SIP, 'w', encoding='utf-8').write(s)
     print('SiP：已装 PL_RD/PL_WR；PROT_READ 与 PL_SECREAD 已删除')
 
-    # ---- 上限还原：不加映射就不该放宽 ----
+    # ---- 页表容量 ----
+    # ⚠️ 这一步在**最后**做，因为它会覆盖前面对 platform_def.h 的任何改动 ——
+    #    改容量只认这一处，别在别处再写一遍（写了也会被这里冲掉，而且不报错）。
+    #
+    # bl_regions 现在 6 段（BL31 / CODE / RO_DATA / COHERENT / PL 窗口 /
+    # FPD 保护单元），加上 plat_arm_get_mmap() 的平台段，9 已经贴着上限。
+    # 越界的表现是 setup_page_tables 的断言在启动早期把 BL31 打死 ——
+    # **串口上什么都看不到**（那时 console 还没起），只能靠"起不来"来推断。
+    # 所以宁可留富余。
     s = open(PLATDEF, encoding='utf-8').read()
-    s = re.sub(r'(#define\s+MAX_MMAP_REGIONS\s+)\d+', r'\g<1>9', s)
-    s = re.sub(r'(#define\s+MAX_XLAT_TABLES\s+)\d+', r'\g<1>7', s)
+    s = re.sub(r'(#define\s+MAX_MMAP_REGIONS\s+)\d+', r'\g<1>12', s)
+    s = re.sub(r'(#define\s+MAX_XLAT_TABLES\s+)\d+', r'\g<1>9', s)
     open(PLATDEF, 'w', encoding='utf-8').write(s)
     for nm in ('MAX_MMAP_REGIONS', 'MAX_XLAT_TABLES'):
         for line in s.splitlines():

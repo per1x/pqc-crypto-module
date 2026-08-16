@@ -186,7 +186,7 @@ so this document is not mistaken for a statement of readiness.
 | | |
 |---|---|
 | ~~**ML-KEM private keys leave the hardware**~~ **fixed** | `mlkem_axi` now has an on-chip private-key vault: `MODE.DK_TO_SLOT` sends `dk` straight into it, `OUT_LEN` stops at the length of `ek`, and `DK_FROM_SLOT` decapsulates by slot. ML-DSA's `sk` works the same way. **Verified on the board 2026-08-17**: seeking the read cursor into the sk region returns all zeros, while the signature produced from the slot is byte-identical to the one produced when software supplies sk. The non-vault path remains for factory verification (ACVP checks the private key) and is closed in the delivery posture by a one-way latch |
-| **No device binding** | The key derivation root (`src/crypto/kdr.c`) is a compiled-in constant whose literal text says so. A real device sources it from eFUSE, BBRAM or a PUF. eFUSE is irreversible and there is one board; BBRAM needs JTAG |
+| ~~**No device binding**~~ **built, off by default** | The derivation root can be bound to this chip's Device DNA (`src/crypto/kdr_dna.c`). DNA is exposed through a **read-only** window in the BL31 whitelist (`0xFFCA0050-5C`) — reading it directly from EL1 is a bus error. Both retrieval paths run on real hardware: `/dev/secmmio` when the library runs on the board (`board/src/dna_probe`), and `OP_DEVICE_DNA` over the wire when it runs on a remote host (`tools/dna-bind-check`, exercised from macOS against the board). ⚠️ **DNA is not a secret** — anyone with JTAG can read it — so the provider sets `device_bound=1` and `hardware_backed=0`: this buys anti-cloning, not confidentiality. The stub remains the default; `PQCHSM_KDR=device-dna` switches, because changing the root makes an existing keystore unopenable with symptoms identical to tampering. See `board/logs/RESULT_dna_bind.txt` |
 | **No secure boot** | **The BBRAM key is now burned (2026-08-17, hardware CRC verified), but a BOOT.BIN encrypted with it does not boot on this board — see the section below.** The PL configuration is still loaded at runtime, not from a signed golden image |
 
 > ### ⚠️ BBRAM is **not** a trust root — say this before building it
@@ -275,6 +275,7 @@ so this document is not mistaken for a statement of readiness.
 >   every recovery was a JTAG write of `CSU_MULTI_BOOT=0` plus a system reset,
 >   five for five.
 | **No module integrity check** | Nothing verifies the module image before use |
+| **OP-TEE's secure memory is open to the normal world** | **Measured 2026-08-17**: `devmem 0x60000000` from Linux userspace returns `0xAA0003F3` — an AArch64 instruction, i.e. OP-TEE's secure-world code. The boot chain on this board configures **no XMPU_DDR regions at all** (all six instances read CTRL=0xb, default-allow, zero enabled regions) and XPPU is off (CTRL=0). "Keys held by OP-TEE are protected" is therefore **false on this board**. Two attempts to fix it are recorded in `board/logs/RESULT_protunit.txt`; neither took effect, and the work is stopped |
 | **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
 | **Conditional self-tests missing** | No pairwise consistency test on generated key pairs, no continuous RNG test |
 | **No SM2** | SM4 and SM3 are implemented; the SM2 asymmetric algorithm is not |
