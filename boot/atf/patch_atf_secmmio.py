@@ -36,9 +36,19 @@ axi4lite_xbar 文件头里写的那个坑 —— 改一处忘另一处，而且�
     槽 3  0x8003_0000  mlkem_axi       0x00-0x3C   读 写
     槽 4  0x8004_0000  金丝雀           0x00-0x3C   读 ——   （对照，写它没有用途）
     槽 5  0x8005_0000  fan_ctrl_axi    ——   ——     整核排除
+    槽 6  0x8006_0000  mldsa_axi       0x00-0x3C   读 写
 
 风扇整核排除：KAT 用不着它，而它的 DRP 窗口被写坏会扰动 SYSMON 的温度采样。
 最小权限不是姿态，是少一个能出事的地方。
+
+⚠️ **槽 6（ML-DSA）是后加的，加它的理由值得记。** 这张表原来只到槽 5，
+而 ML-DSA 落在槽 6 —— 于是送检形态（SECURE_ONLY=1）下 daemon 经 /dev/secmmio
+去读 0x8006_0000 必然被 EL3 拒掉，**与位流对不对无关**。表现极具误导性：
+位流明明装好了、核也在，但任何以"读 mldsa VERSION"为判据的自检都必然失败，
+于是 try_mldsa.sh 的自检判据被迫改成读风扇占空比（见那个脚本里的长注释），
+而"ML-DSA 在送检形态下不可达"被当成了一条既成事实写进了好几处文档。
+根因只是这张表少一行。**加从机就要同时加这一行**，否则新核在送检形态下
+等于不存在。
 
 ============================================================================
 【这个口**不能**变成"EL3 读写任意物理地址"】
@@ -93,7 +103,7 @@ DEFS = BEG + '''
 
 #define PL_BASE\t\t\t\t0x80000000ULL
 #define PL_SLOT_SHIFT\t\t\t16
-#define PL_NSLOT\t\t\t6
+#define PL_NSLOT\t\t\t7
 
 /*
  * 每槽的合法偏移上界（含）= **该核自己的窗口**。
@@ -118,9 +128,10 @@ static const uint32_t pl_off_max[PL_NSLOT] = {
 \t0x3C,\t/* 3 mlkem_axi      ADDR_MASK 0xC0     */
 \t0x3C,\t/* 4 金丝雀（只读，对照用）            */
 \t0x00,\t/* 5 fan_ctrl_axi   整核排除           */
+\t0x3C,\t/* 6 mldsa_axi      ADDR_MASK 0xC0     */
 };
-static const uint8_t pl_rd_ok[PL_NSLOT] = { 1, 1, 1, 1, 1, 0 };
-static const uint8_t pl_wr_ok[PL_NSLOT] = { 1, 1, 1, 1, 0, 0 };
+static const uint8_t pl_rd_ok[PL_NSLOT] = { 1, 1, 1, 1, 1, 0, 1 };
+static const uint8_t pl_wr_ok[PL_NSLOT] = { 1, 1, 1, 1, 0, 0, 1 };
 
 static int pl_permit(uint64_t a, int is_write)
 {

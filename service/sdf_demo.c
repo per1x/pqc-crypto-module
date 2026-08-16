@@ -127,6 +127,74 @@ int main(int argc, char **argv)
 	}
 	printf("  %s 解密回到原文\n", memcmp(dec, pt, 16) ? "❌" : "✅");
 
+	/* ---- 6. ML-DSA：三个参数集各走一遍 KeyGen → Sign → Verify ----
+	 *
+	 * 与 ML-KEM 那段同一个口径：**应用从头到尾没有见过 sk**，KeyGen 只回
+	 * pk 和一个槽号，签名按槽号使唤。
+	 *
+	 * ⚠️ 这一段以前不在 demo 里，而"不在 demo 里"曾经掩盖了两个真 bug：
+	 *    daemon 把 mldsa 的 MODE/STATUS 写反（每次等 done 超时），以及
+	 *    BL31 白名单没有槽 6（送检形态下这条路根本不可达）。两个都只有
+	 *    **端到端真跑一次**才现形 —— 单元测试、KAT 程序都绕开了这条路。
+	 *
+	 * 判据取"验得过 + 改一个字节就验不过"两条：只验前一半的话，
+	 * 一个恒返回 OK 的实现照样能过。 */
+	{
+		static const unsigned int PKL[3] = { 1312, 1952, 2592 };
+		static const unsigned int SGL[3] = { 2420, 3309, 4627 };
+		static const char *const NAME[3] = {
+			"ML-DSA-44", "ML-DSA-65", "ML-DSA-87" };
+		static unsigned char pk[2592], sig[4627];
+		const unsigned char msg[] = "pqc-hsm end-to-end signature";
+		unsigned int pset;
+
+		printf("\n[6] SDFE_GenerateKeyPair/Sign/Verify_MLDSA"
+		       "（三个参数集，sk 全程在片内）\n");
+		for (pset = 0; pset < 3; pset++) {
+			unsigned int pk_len = sizeof pk, sig_len = sizeof sig;
+			unsigned int kh2 = 0;
+
+			rv = SDFE_GenerateKeyPair_MLDSA(ses, pset, pk, &pk_len, &kh2);
+			if (rv != SDR_OK) {
+				printf("  %s KeyGen 失败：%s\n", NAME[pset],
+				       SDFE_StrError(rv)); return 1;
+			}
+			if (pk_len != PKL[pset]) {
+				printf("  ❌ %s pk 长度 %u，应当是 %u\n", NAME[pset],
+				       pk_len, PKL[pset]); return 1;
+			}
+			rv = SDFE_Sign_MLDSA(ses, kh2, msg, (unsigned int)sizeof msg - 1,
+			                     NULL, 0, sig, &sig_len);
+			if (rv != SDR_OK) {
+				printf("  %s Sign 失败：%s\n", NAME[pset],
+				       SDFE_StrError(rv)); return 1;
+			}
+			if (sig_len != SGL[pset]) {
+				printf("  ❌ %s σ 长度 %u，应当是 %u\n", NAME[pset],
+				       sig_len, SGL[pset]); return 1;
+			}
+			rv = SDFE_Verify_MLDSA(ses, pset, pk, pk_len, msg,
+			                       (unsigned int)sizeof msg - 1,
+			                       NULL, 0, sig, sig_len);
+			if (rv != SDR_OK) {
+				printf("  ❌ %s 自己签的验不过：%s\n", NAME[pset],
+				       SDFE_StrError(rv)); return 1;
+			}
+			/* 反证：动一个字节就必须验不过 */
+			sig[sig_len / 2] ^= 0x01;
+			rv = SDFE_Verify_MLDSA(ses, pset, pk, pk_len, msg,
+			                       (unsigned int)sizeof msg - 1,
+			                       NULL, 0, sig, sig_len);
+			if (rv == SDR_OK) {
+				printf("  ❌ %s 改了一个字节仍然验得过 —— 验签是假的\n",
+				       NAME[pset]); return 1;
+			}
+			sig[sig_len / 2] ^= 0x01;
+			printf("  ✅ %-10s 槽 %u：pk %u 字节、σ %u 字节，验得过；"
+			       "改一字节即验不过\n", NAME[pset], kh2, pk_len, sig_len);
+		}
+	}
+
 	SDFE_CloseSession(ses);
 	SDFE_CloseDevice(dev);
 	printf("\n=== 全部完成。本程序没有碰过任何寄存器。 ===\n");

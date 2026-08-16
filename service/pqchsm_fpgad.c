@@ -79,7 +79,7 @@
 #define S_VAULT   0x10000
 #define S_SYM     0x20000
 #define S_MLKEM   0x30000
-#define S_MLDSA   0x60000   /* 0x8006_0000 —— mldsa_axi（尚未落地，按约定预留） */
+#define S_MLDSA   0x60000   /* 0x8006_0000 —— mldsa_axi（已落地，槽 6） */
 
 /* ---- 寄存器（与各核的 localparam A_* 一致）---- */
 #define TR_CTRL   (S_TRNG + 0x00)
@@ -148,8 +148,15 @@
  */
 #define MD_VER     (S_MLDSA + 0x00)
 #define MD_CTRL    (S_MLDSA + 0x04)
-#define MD_STATUS  (S_MLDSA + 0x08)
-#define MD_MODE    (S_MLDSA + 0x0C)
+/* ⚠️ MODE 是 0x08、STATUS 是 0x0C —— 这两个**曾经写反过**，而且症状极具
+ *    误导性：VERSION(0x00)、IN_DATA(0x10)、IN_PTR(0x14) 都在错位区之外，
+ *    所以"读得到版本号、灌数据后 IN_PTR 也对得上"全都成立，看起来这条路
+ *    是通的。实际是 MODE 被写进了只读的 STATUS（写掉进空处，核从没收到过
+ *    op/pset），而轮询读的"STATUS"其实是 MODE，永远不会出现 DONE。
+ *    表现是"每次都等 done 超时"，与"核算不出来"分不开。
+ *    改这里要对着 mldsa_axi.v 的寄存器映射逐行核，别照记忆写。 */
+#define MD_MODE    (S_MLDSA + 0x08)
+#define MD_STATUS  (S_MLDSA + 0x0C)
 #define MD_INDATA  (S_MLDSA + 0x10)
 #define MD_INPTR   (S_MLDSA + 0x14)
 #define MD_OUTDAT  (S_MLDSA + 0x18)
@@ -656,11 +663,15 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 	}
 
 	/* ========================================================================
-	 * 【ML-DSA：驱动已就位，从机尚未落地】
+	 * 【ML-DSA：从机在槽 6，这条路已在真硬件上跑通】
 	 * ========================================================================
-	 * 下面三条按已定的寄存器约定写全了，但 0x8006_0000 上现在**没有东西**。
-	 * 在真硬件出现之前，它们在板上会以"读 VERSION 得 0 / 等不到 done"的形式
-	 * 失败，那是正确行为 —— 不是回落到软件。本进程一行密码运算都不做。
+	 * 2026-08-17：0x8006_0000 上是 mldsa_axi，下面三条在两种位流形态下都端到端
+	 * 跑通了（三个参数集各一遍 KeyGen/Sign/Verify，见 board/logs/）。
+	 * 硬件不可达时它们仍然如实失败 —— 不是回落到软件。本进程一行密码运算都不做。
+	 *
+	 * ⚠️ 这条路能通，前提是 **BL31 的 SiP 白名单里有槽 6**。少了那一行，
+	 * 送检形态下每一笔访问都被 EL3 拒，而症状是"位流装好了却什么都读不出来"，
+	 * 极易误判成位流或 RTL 的问题。见 boot/atf/patch_atf_secmmio.py 的槽表。
 	 *
 	 * 关于 ctx（FIPS 204 的 M' = [0,|ctx|]‖ctx‖msg）：
 	 * 已定的寄存器约定里，输入字节流是 "sk‖msg"（Sign）和 "pk‖sig‖msg"
@@ -956,7 +967,7 @@ int main(int argc, char **argv)
 
 		/* ML-DSA 那把闩锁同理，但**只在从机确实存在时才置**。
 		 *
-		 * 0x8006_0000 现在多半是空的（mldsa_axi 尚未落地）。对着空地址写
+		 * 0x8006_0000 在旧位流/旧白名单下可能是读不到的。对着读不到的地址写
 		 * 会在 EL3 上被拒，而这个启动分支把任何一笔失败都判成"拒绝启动" ——
 		 * 于是加这几行的直接后果会是**板子起不来**，跟 ML-DSA 有没有毫无关系。
 		 *

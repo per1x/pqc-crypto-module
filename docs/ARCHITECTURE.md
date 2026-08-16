@@ -67,6 +67,7 @@ Base `0x8000_0000`, slot selected by `addr[18:16]`, 64 KB per slot.
 | `0x8003_0000` | `mlkem_axi` | 0 | ML-KEM 512/768/1024, parameter set from `MODE[3:2]` |
 | `0x8004_0000` | canary (`key_vault_axi`) | **1** | Same module as slot 1, differing only in this parameter |
 | `0x8005_0000` | `fan_ctrl_axi` | 0 | Fan temperature/duty observation |
+| `0x8006_0000` | `mldsa_axi` | per form | ML-DSA-44/65/87, parameter set from `MODE[3:2]`; 8-slot on-chip signing vault |
 
 **The decode is one-to-one: a register has exactly one address that reaches
 it.** `axi4lite_xbar` checks the aperture high bits, the slot number, the high

@@ -71,6 +71,7 @@ discarded** (RAZ/WI) — no side effect, and no bus error.
 - [`key_vault_axi`](#key_vault_axi--slot-1)
 - [`sym_axi`](#sym_axi--slot-2)
 - [`mlkem_axi`](#mlkem_axi--slot-3)
+- [`mldsa_axi`](#mldsa_axi--slot-6)
 - [`pqc_accel_axi`](#pqc_accel_axi--simulation-and-host-path)
 - [Shared conventions](#shared-conventions)
 
@@ -87,6 +88,7 @@ Base `0x8000_0000`, slot from `addr[18:16]`, 64 KB each. See
 | 3 | `0x8003_0000` | `mlkem_axi` | 0 |
 | 4 | `0x8004_0000` | canary (`key_vault_axi`) | **1** |
 | 5 | `0x8005_0000` | `fan_ctrl_axi` | 0 |
+| 6 | `0x8006_0000` | `mldsa_axi` | per form |
 
 ## `trng_axi` — slot 0
 
@@ -287,6 +289,74 @@ single tamper wire takes down all three cores and both buffers. Software gets
 exactly the bytes the algorithm definition says it should get. (Whether `dk`
 *should* be returned at all is discussed in
 [SECURITY.md](SECURITY.md#limitations).)
+
+## `mldsa_axi` — slot 6
+
+RTL in `hardware/rtl/bus/mldsa_axi.v`, tests in
+`hardware/tb/cocotb/test_mldsa_axi.py` (24 of them, judged against the official
+ACVP vectors and `hardware/model/mldsa_oracle.py`).
+
+| Offset | Name | Access | Notes |
+|---|---|---|---|
+| `0x00` | `VERSION` | R | Constant `0x0001_0000` |
+| `0x04` | `CTRL` | W | `[0]` START, `[1]` CLEAR, `[2]` ZEROIZE, `[4]` SK_LOCK (one-way latch) |
+| `0x08` | `MODE` | RW | `[1:0]` op (0 KeyGen, 1 Sign, 2 Verify), `[3:2]` parameter set (0 = 44, 1 = 65, 2 = 87), `[4]` SK_TO_SLOT, `[5]` SK_FROM_SLOT, `[9:6]` slot |
+| `0x0C` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` VERIFY_OK, `[3]` PARAM_ERR, `[4]` LEN_ERR, `[5]` TAMPER, `[6]` WIPING |
+| `0x10` | `IN_DATA` | W | Input byte stream; the write pointer advances |
+| `0x14` | `IN_PTR` | RW | Input write pointer. **Only zero may be written** — an arbitrary setting would be a path around the "enough bytes fed" check |
+| `0x18` | `OUT_DATA` | R | Output byte stream; bytes are handed over only while `OUT_PTR < OUT_LEN`, otherwise zero |
+| `0x1C` | `OUT_PTR` | RW | Output read cursor, freely writable (reads are still bounded by `OUT_LEN`) |
+| `0x20` | `OUT_LEN` | R | Output length, written by hardware |
+| `0x24` | `MSG_LEN` | RW | Message bytes, at most 8192 (the core's `u_msg` is AW=13) |
+| `0x28` | `CTX_LEN` | RW | FIPS 204 context string length, at most 255 |
+| `0x2C` | `KEYSTAT` | R | `[7:0]` which signing-vault slots are loaded, `[8]` private-key export latch, `[31:16]` two bits of parameter set per slot |
+| `0x30` | `VIOL` | R | `[15:0]` write violations, `[31:16]` read violations |
+
+**⚠️ `MODE` is at `0x08` and `STATUS` at `0x0C` — the opposite of `mlkem_axi`.**
+The two were once swapped in the daemon, and the symptom was deceptive:
+`VERSION`, `IN_DATA` and `IN_PTR` all sit outside the swapped pair, so "the
+version reads back and `IN_PTR` matches after feeding" both held and the path
+looked healthy. In reality `MODE` was written into the read-only `STATUS` (the
+core never received op/pset), and the polled "`STATUS`" was `MODE`, which never
+shows `DONE`. It presents as "every run times out waiting for done", which is
+indistinguishable from "the core cannot compute it". **Write against this table,
+not from memory.**
+
+**Input layout** (same reasoning as ML-KEM: one byte port, order defined by the
+standard):
+
+```
+KeyGen : xi(32)
+Sign   : [sk(skLen), only when not using the vault] || rnd(32) || ctx(ctx_len) || msg(msg_len)
+Verify : pk(pkLen) || sig(sigLen) || ctx(ctx_len) || msg(msg_len)
+```
+
+`rnd` is the FIPS 204 hedged-mode randomness. **All zeros means deterministic
+signing**, which makes the signature a pure function of the message and removes
+a layer of fault-injection and side-channel defence; determinism is only needed
+when matching ACVP's deterministic vectors.
+
+**On-chip signing vault (8 slots).** With `SK_TO_SLOT`, KeyGen's sk goes straight
+into the on-chip vault: `OUT_LEN` stops exactly at the public key's length, and
+seeking the read cursor into the sk region yields nothing. With `SK_FROM_SLOT`
+you can sign without supplying sk, and **the parameter set recorded for the slot
+must match this run's `MODE`** or START is refused — otherwise you would get a
+signature that is well-formed but made with the wrong private key. Once `SK_LOCK`
+is set, KeyGen never hands out sk again, and there is **no clearing path**:
+ZEROIZE does not clear it; only reloading the bitstream does.
+
+**Checks before START** (on failure `PARAM_ERR`/`LEN_ERR` are set and the engine
+**does not start at all**): `op` and `pset` are only meaningful as 0/1/2; slot
+< 8; `ctx_len <= 255`; `msg_len <= 8192`; software fed enough bytes; the total
+fits the input buffer. **Whether or not the START is accepted, the previous
+`DONE`/`OUT_LEN`/`VERIFY_OK` are invalidated on the spot** — without that,
+software polls a stale `DONE` and reads the previous run's output as this run's
+result, which looks like success.
+
+**In the secure form this slot must be in the BL31 SiP whitelist.** With
+`SECURE_ONLY=1` the normal world cannot touch a single register; the daemon goes
+through `/dev/secmmio` to EL3. Without the `0x8006_0000` row the whole core is
+effectively absent in that form (see `boot/atf/patch_atf_secmmio.py`).
 
 ## `pqc_accel_axi` — simulation and host path
 

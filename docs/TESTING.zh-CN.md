@@ -124,6 +124,27 @@ set_clock_uncertainty -hold 0.100 [get_clocks -of_objects [get_pins u_div/O]]
 
 ## 真硅结果
 
+**ML-DSA（2026-08-17，两种位流形态各验一遍）。** 三个参数集的
+KeyGen/Sign/Verify 逐字节对上 ACVP，加上片内签名金库与运行时切参数集：
+
+| 判据 | 演示形态 `SECURE_ONLY=0` | 送检形态 `SECURE_ONLY=1` |
+|---|---|---|
+| 普通世界 `/dev/mem` 直连 | ACVP 自检 **32/32**（`RESULT_mldsa_demoform.txt`） | 五个槽全读回 0，直连 KAT 程序自己停下、一个字节都不写，板子不崩（`RESULT_secform_mldsa.txt`） |
+| daemon 经 `/dev/secmmio` → EL3 白名单 | 三参数集端到端通 | 三参数集端到端通（同上日志 ④ 段） |
+| 孤立单验（跨参数集、跨判定）| 61/61 与 ACVP 一致（`RESULT_ctbprobe_demoform.txt`） | — |
+
+金库那三条同时钉住"私钥不出硬件"：`OUT_LEN` 恰好只到 pk 的长度，把读游标
+seek 到 sk 那一段读回全 0，而按槽签出来的 σ 与自送 sk 逐字节相同。
+
+> **送检形态下 ML-DSA 可达，前提是 BL31 的 SiP 白名单里有槽 6**
+> （`0x8006_0000`）。那张表一度只到槽 5，于是"位流装好了、核也在，却什么都
+> 读不出来"，而排查方向会被引向位流与 RTL。补一行、重建 BL31、重打 BOOT.BIN
+> 之后才第一次可达。**加从机就要同时加白名单那一行。**
+
+> ⚠️ 上板同时抓到一个**仿真看不见**的 Verify 缺陷：c̃ 的判定是整 512 位比较，
+> 而寄存器每次只写低 ctb 字节，高位是上一次运算的残留。仿真里复位把高位清成
+> 0，而板上装载之后再也不复位。已修，回归见 `mldsa_axi` 那 24 条与坑表 V8。
+
 **算法。** ML-KEM 512/768/1024 的 KeyGen/Encaps/Decaps 对照 NIST ACVP 的
 prompt/expectedResults 配对：20/20 逐字节一致。长度由 RTL 从 `pset` 字段推导，
 所以软件报不出一个错的长度。AES-128/256 对照 FIPS 197 C.1/C.3，SM4 对照

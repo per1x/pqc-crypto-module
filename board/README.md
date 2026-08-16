@@ -51,6 +51,9 @@ real runs and should stay that way — the numbers quoted in
 | `RESULT_service.txt` | End-to-end through the SDF interface, with the direct-access counter-proof |
 | `RESULT_harness.log` | Harness log from the corresponding run |
 | `RESULT_ctbprobe_before.txt`, `RESULT_ctbprobe_after.txt` | The c̃-comparison defect on silicon: 61 ordered Verify steps before and after the `verify.v` fix |
+| `RESULT_mldsa_after.txt`, `RESULT_mldsa_demoform.txt` | ML-DSA board self-test, 32/32: three parameter sets against ACVP, the on-chip vault, runtime parameter-set switching |
+| `RESULT_ctbprobe_demoform.txt` | The same 61-step probe re-run from the promoted default boot |
+| `RESULT_secform_mldsa.txt` | Secure form (`SECURE_ONLY=1`): normal world reads all zero and the direct KAT program refuses to write, while the daemon reaches ML-DSA through the EL3 whitelist and signs end to end |
 
 ## Programs
 

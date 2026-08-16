@@ -38,10 +38,11 @@ enum {
 	OP_AUTH          = 8,   /* 载荷=口令 → 空。**只有 TCP 连接需要** */
 
 	/* ---- ML-DSA（mldsa_axi @ 0x8006_0000）--------------------------------
-	 * ⚠️ 从机本身尚未落地。这三条按已定的寄存器约定写好，先在 stub / 软件路径
-	 *    上验行为，硬件到位后才谈得上"在硬件上跑过"。
-	 *    寄存器映射写在 pqchsm_fpgad.c 的 MD_* 那段（今天那里是唯一的口径；
-	 *    等从机进了位流，再把它挪进 docs/REGISTERS.md 与 RTL 对齐）。 */
+	 * 从机已落地（槽 6），这三条 2026-08-17 在真硬件上端到端跑通：两种位流形态
+	 * 下三个参数集各走一遍 KeyGen → Sign → Verify，见 board/logs/。
+	 * 寄存器映射以 hardware/rtl/bus/mldsa_axi.v 的 A_* 为准，
+	 * pqchsm_fpgad.c 的 MD_* 必须逐行对着它核 —— MODE/STATUS 曾经在那里写反过，
+	 * 而症状是"每次等 done 超时"，与"核算不出来"分不开。 */
 	OP_MLDSA_KEYGEN  = 9,   /* a0=pset → [4 字节句柄][pk]（sk 进片内金库，不出总线） */
 	OP_MLDSA_SIGN    = 10,  /* a0=句柄, a1=ctx_len, 载荷=msg → sig */
 	OP_MLDSA_VERIFY  = 11,  /* a0=pset, a1=ctx_len, 载荷=pk‖sig‖msg → 空 */

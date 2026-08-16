@@ -1,0 +1,40 @@
+ML-DSA 上板验证 —— 逐字节对 NIST ACVP（FIPS 204）
+经 /dev/mem 直连 mldsa_axi（开发形态位流，不经 daemon、不经 BL31）
+基址 0x80060000  VERSION=0x00010000  STATUS=0x00000000（busy=0 wiping=0 tamper=0）
+KEYSTAT=0x00000000（槽有效位=0x00 sk_lock=0）  VIOL=0x00000000（写违规=0 读违规=0）
+
+✅ ML-DSA-44  KeyGen  tcId=1    pk(1312)+sk(2560) 逐字节对上 ACVP，0 ms
+✅ ML-DSA-44  KeyGen  tcId=2    pk(1312)+sk(2560) 逐字节对上 ACVP，1 ms
+✅ ML-DSA-65  KeyGen  tcId=26   pk(1952)+sk(4032) 逐字节对上 ACVP，1 ms
+✅ ML-DSA-65  KeyGen  tcId=27   pk(1952)+sk(4032) 逐字节对上 ACVP，1 ms
+✅ ML-DSA-87  KeyGen  tcId=51   pk(2592)+sk(4896) 逐字节对上 ACVP，2 ms
+✅ ML-DSA-87  KeyGen  tcId=52   pk(2592)+sk(4896) 逐字节对上 ACVP，2 ms
+✅ ML-DSA-44  Sign    tcId=7    σ(2420) 逐字节对上 ACVP（|msg|=1 |ctx|=180），14 ms
+✅ ML-DSA-44  Sign    tcId=2    σ(2420) 逐字节对上 ACVP（|msg|=420 |ctx|=24），3 ms
+✅ ML-DSA-65  Sign    tcId=41   σ(3309) 逐字节对上 ACVP（|msg|=1 |ctx|=11），3 ms
+✅ ML-DSA-65  Sign    tcId=35   σ(3309) 逐字节对上 ACVP（|msg|=171 |ctx|=209），5 ms
+✅ ML-DSA-87  Sign    tcId=71   σ(4627) 逐字节对上 ACVP（|msg|=138 |ctx|=80），3 ms
+✅ ML-DSA-87  Sign    tcId=72   σ(4627) 逐字节对上 ACVP（|msg|=1 |ctx|=245），6 ms
+✅ ML-DSA-44  Verify  tcId=12   判定"通过"与 ACVP 一致（|msg|=1 |ctx|=168），1 ms
+✅ ML-DSA-44  Verify  tcId=4    判定"通过"与 ACVP 一致（|msg|=4741 |ctx|=86），2 ms
+✅ ML-DSA-44  Verify  tcId=7    判定"不通过"与 ACVP 一致（|msg|=275 |ctx|=136），1 ms
+✅ ML-DSA-44  Verify  tcId=5    判定"不通过"与 ACVP 一致（|msg|=734 |ctx|=0），1 ms
+✅ ML-DSA-65  Verify  tcId=42   判定"通过"与 ACVP 一致（|msg|=1 |ctx|=46），2 ms
+✅ ML-DSA-65  Verify  tcId=34   判定"通过"与 ACVP 一致（|msg|=4819 |ctx|=116），2 ms
+✅ ML-DSA-65  Verify  tcId=38   判定"不通过"与 ACVP 一致（|msg|=300 |ctx|=195），1 ms
+✅ ML-DSA-65  Verify  tcId=45   判定"不通过"与 ACVP 一致（|msg|=397 |ctx|=207），2 ms
+✅ ML-DSA-87  Verify  tcId=70   判定"通过"与 ACVP 一致（|msg|=1 |ctx|=180），3 ms
+✅ ML-DSA-87  Verify  tcId=68   判定"通过"与 ACVP 一致（|msg|=665 |ctx|=250），3 ms
+✅ ML-DSA-87  Verify  tcId=67   判定"不通过"与 ACVP 一致（|msg|=1313 |ctx|=147），3 ms
+✅ ML-DSA-87  Verify  tcId=63   判定"不通过"与 ACVP 一致（|msg|=3429 |ctx|=0），2 ms
+✅ ML-DSA-44  Vault   tcId=1    sk 全程在片内（OUT_LEN=1312 正好 pk，seek 到 sk 段读回全 0）；槽 0 按槽签的 σ 与自送 sk 逐字节相同，且用 ACVP 的 pk 验得过
+✅ ML-DSA-65  Vault   tcId=26   sk 全程在片内（OUT_LEN=1952 正好 pk，seek 到 sk 段读回全 0）；槽 1 按槽签的 σ 与自送 sk 逐字节相同，且用 ACVP 的 pk 验得过
+✅ ML-DSA-87  Vault   tcId=51   sk 全程在片内（OUT_LEN=2592 正好 pk，seek 到 sk 段读回全 0）；槽 2 按槽签的 σ 与自送 sk 逐字节相同，且用 ACVP 的 pk 验得过
+✅ ML-DSA-44  PsetSw  tcId=1    第 1 跳：pk 对上 ACVP，1 ms
+✅ ML-DSA-65  PsetSw  tcId=26   第 2 跳：pk 对上 ACVP，1 ms
+✅ ML-DSA-87  PsetSw  tcId=51   第 3 跳：pk 对上 ACVP，1 ms
+✅ ML-DSA-65  PsetSw  tcId=26   第 4 跳：pk 对上 ACVP，2 ms
+✅ ML-DSA-44  PsetSw  tcId=1    第 5 跳：pk 对上 ACVP，1 ms
+   —— 同一份位流里切了 4 次参数集（44→65→87→65→44），没有重装位流
+
+总计：32 通过 / 0 失败

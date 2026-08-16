@@ -144,6 +144,31 @@ shipped silently.
 
 ## On-silicon results
 
+**ML-DSA (2026-08-17, verified in both bitstream forms).** All three parameter
+sets' KeyGen/Sign/Verify match ACVP byte for byte, plus the on-chip signing
+vault and runtime parameter-set switching:
+
+| Check | Demo form `SECURE_ONLY=0` | Secure form `SECURE_ONLY=1` |
+|---|---|---|
+| Normal world via `/dev/mem` | ACVP self-test **32/32** (`RESULT_mldsa_demoform.txt`) | All five slots read zero; the direct KAT program stops on its own without writing a byte; the board does not crash (`RESULT_secform_mldsa.txt`) |
+| Daemon via `/dev/secmmio` → EL3 whitelist | End to end for all three sets | End to end for all three sets (same log, section ④) |
+| Isolated verify, across sets and verdicts | 61/61 agreeing with ACVP (`RESULT_ctbprobe_demoform.txt`) | — |
+
+Those vault checks pin "the private key never leaves the hardware": `OUT_LEN`
+stops exactly at the public key's length, seeking the read cursor into the sk
+region returns all zeros, and the signature produced from the slot is byte-identical
+to the one produced when software supplies sk itself.
+
+> ML-DSA is only reachable in the secure form because the BL31 SiP whitelist now
+> covers slot 6 (`0x8006_0000`). That table used to stop at slot 5, so the core
+> looked present but unreadable — which points debugging at the bitstream and the
+> RTL instead of at one missing table row. **Adding a slave means adding that row.**
+
+> A Verify defect that simulation could not see was caught here: the c̃ verdict
+> compared all 512 bits while each run writes only the low `ctb` bytes, so the
+> high bytes were whatever the previous run left. Reset clears them in simulation;
+> on the board the PL is never reset after loading. Fixed; see pitfall V8.
+
 **Algorithms.** ML-KEM 512/768/1024 KeyGen/Encaps/Decaps against NIST ACVP
 prompt/expectedResults pairs: 20/20 byte-exact. Lengths are derived in RTL from
 the `pset` field, so software cannot report a wrong one. AES-128/256 against

@@ -29,7 +29,28 @@
 set -u
 
 D=/media/sd-mmcblk1p2/hsm
-BIT=$D/zu3eg_hsm.bit
+# ============================================================================
+# 【默认起演示形态，送检形态留在旁边随时可切】
+# ============================================================================
+# SD 上并排放着两份位流，**只差防火墙的 SECURE_ONLY 一个参数**：
+#
+#   zu3eg_hsm_dev.bit   演示形态  SECURE_ONLY=0  普通世界经 /dev/mem 直连核
+#   zu3eg_hsm.bit       送检形态  SECURE_ONLY=1  普通世界一个寄存器都摸不到，
+#                                               每一笔访问经 /dev/secmmio → EL3 白名单
+#
+# 默认起**演示形态**：上电即可演示（网络在、核直连得到、daemon 起、端到端能跑），
+# 而且 KAT 与现场排查不需要先换镜像。切送检形态不用改这个脚本 ——
+#     sh pl_deadman.sh /media/sd-mmcblk1p2/hsm/zu3eg_hsm.bit 300
+# 运行时载入即可（死人开关兜底，网络不丢、不用断电）。
+#
+# ⚠️ **daemon 两种形态下走的是同一条路**：/dev/secmmio → EL3 SiP 白名单。
+#    演示形态下普通世界也摸得到，但 daemon 不走那条 —— 少一条路径就少一处
+#    "只在某个形态下才验过"的缺口。所以换形态不影响服务层。
+#
+# ⚠️ 白名单必须包含 ML-DSA 的槽 6（0x8006_0000），否则送检形态下 daemon 读不到
+#    它，而且症状是"位流明明装好了却什么都读不出来"。见
+#    boot/atf/patch_atf_secmmio.py 里槽表那段。
+BIT=$D/zu3eg_hsm_dev.bit
 LOG=$D/hsm-boot.log
 STATUS=$D/HSM_STATUS
 ETH1_IP=192.168.50.175

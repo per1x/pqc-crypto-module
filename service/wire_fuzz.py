@@ -167,9 +167,9 @@ def main():
         ("IMPORT_KEY 33 字节",      lambda s: call(s, OP_IMPORT, 3, 0, b"\0" * 33)),
         ("未知操作码 op=99",        lambda s: call(s, 99)),
         ("未知操作码 op=0",         lambda s: call(s, 0)),
-        # ML-DSA：从机（mldsa_axi）尚未落地，所以这几条今天要么是参数被挡下、
-        # 要么是硬件失败 —— 两种都算"拒绝"。它们真正盯的是**参数校验不会被
-        # 跳过**：等从机上来之后，这批用例一个字都不用改就继续有效。
+        # ML-DSA：从机已在槽 6 落地并上板跑通，所以这几条现在盯的是**参数校验
+        # 在真硬件面前也不被跳过** —— 非法 pset / 不存在的句柄必须在进硬件之前
+        # 就被挡下，而不是靠硬件报错兜底。用例一个字都没改，判据变严了。
         ("ML-DSA KEYGEN pset=3（只有 0/1/2）",
          lambda s: call(s, OP_MLDSA_KEYGEN, 3)),
         ("ML-DSA KEYGEN pset=0xFFFFFFFF",

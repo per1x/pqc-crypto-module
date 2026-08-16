@@ -39,9 +39,10 @@
  *     （8 个槽），对外只交出 pk 和槽号；SDFE_Sign_MLDSA 按槽号使唤它，
  *     sk 不经过 AXI 总线、不经过 daemon 的内存，交付形态同样有一道一次性闩锁。
  *
- *     ⚠️ **但这一条今天还没有硬件。** mldsa_axi 尚未落地，本库这三个函数
- *     是照已定的寄存器约定写好的驱动：接口与线格式已就位，运算还没有地方跑。
- *     在从机出现之前它们会如实失败（连不上/等不到 done），**不会**偷偷
+ *     2026-08-17 起这一条**有硬件了**：mldsa_axi 在槽 6，三个参数集的
+ *     KeyGen/Sign/Verify 经 daemon → /dev/secmmio → EL3 白名单 → 核端到端跑通，
+ *     演示形态（SECURE_ONLY=0）与送检形态（SECURE_ONLY=1）各验过一遍。
+ *     本库仍然一行密码运算都不做：硬件不可达时它如实失败，**不会**偷偷
  *     回落到软件算一个签名回来 —— 那种回落正是本库文件头第一段拒绝的事。
  */
 #ifndef PQCHSM_SDFE_H
@@ -118,7 +119,7 @@ int SDFE_Decapsulate_MLKEM(SDFE_HANDLE hSession, uint32_t key_handle,
 
 /* ---- ML-DSA ----
  * 私钥 sk 留在 PL 片内的签名金库里，只回公钥 pk 和一个槽号（句柄）。
- * 与 ML-KEM 那组的口径逐字一致，见文件头第三条 —— 包括"硬件尚未落地"那句。
+ * 与 ML-KEM 那组的口径逐字一致，见文件头第三条。
  *
  * ctx（FIPS 204 的 domain separation 上下文串）：**当前只支持空 ctx**。
  * 已定的寄存器约定里输入字节流没有给 ctx 字节留位置，只有一个 CTX_LEN；

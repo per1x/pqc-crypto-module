@@ -58,6 +58,7 @@ cocotb testbench 单独验证。
 - [`key_vault_axi`](#key_vault_axi--槽位-1)
 - [`sym_axi`](#sym_axi--槽位-2)
 - [`mlkem_axi`](#mlkem_axi--槽位-3)
+- [`mldsa_axi`](#mldsa_axi--槽位-6)
 - [`pqc_accel_axi`](#pqc_accel_axi--仿真与主机路径)
 - [通用约定](#通用约定)
 
@@ -74,6 +75,7 @@ cocotb testbench 单独验证。
 | 3 | `0x8003_0000` | `mlkem_axi` | 0 |
 | 4 | `0x8004_0000` | 哨兵（`key_vault_axi`） | **1** |
 | 5 | `0x8005_0000` | `fan_ctrl_axi` | 0 |
+| 6 | `0x8006_0000` | `mldsa_axi` | 随形态 |
 
 ## `trng_axi` — 槽位 0
 
@@ -253,6 +255,65 @@ BRAM 并行地逐地址写零，8192 个周期，全程 `WIPING = 1` 且拒绝�
 为 0，多项式存储的读端口根本没有引出来，而一根防拆线就能把三个核与两个缓冲区
 一起放倒。软件拿到的恰好是算法定义说它该拿到的那些字节。（`dk` 究竟*该不该*
 返回，见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。）
+
+## `mldsa_axi` — 槽位 6
+
+RTL 见 `hardware/rtl/bus/mldsa_axi.v`，测试见
+`hardware/tb/cocotb/test_mldsa_axi.py`（24 条，判据是 ACVP 官方向量与
+`hardware/model/mldsa_oracle.py`）。
+
+| 偏移 | 名称 | 访问 | 说明 |
+|---|---|---|---|
+| `0x00` | `VERSION` | R | 常量 `0x0001_0000` |
+| `0x04` | `CTRL` | W | `[0]` START，`[1]` CLEAR，`[2]` ZEROIZE，`[4]` SK_LOCK（一次性闩锁） |
+| `0x08` | `MODE` | RW | `[1:0]` 操作（0 KeyGen，1 Sign，2 Verify），`[3:2]` 参数集（0 = 44，1 = 65，2 = 87），`[4]` SK_TO_SLOT，`[5]` SK_FROM_SLOT，`[9:6]` 槽号 |
+| `0x0C` | `STATUS` | R | `[0]` BUSY，`[1]` DONE，`[2]` VERIFY_OK，`[3]` PARAM_ERR，`[4]` LEN_ERR，`[5]` TAMPER，`[6]` WIPING |
+| `0x10` | `IN_DATA` | W | 输入字节流；写指针自动前进 |
+| `0x14` | `IN_PTR` | RW | 输入写指针。**只接受写 0** —— 能任意设置它就等于给了一条绕过"喂够"校验的路 |
+| `0x18` | `OUT_DATA` | R | 输出字节流。只在 `OUT_PTR < OUT_LEN` 时交出字节，其余一律回 0 |
+| `0x1C` | `OUT_PTR` | RW | 输出读游标，可任意写（读时仍受 `OUT_LEN` 约束） |
+| `0x20` | `OUT_LEN` | R | 输出长度，由硬件写入 |
+| `0x24` | `MSG_LEN` | RW | 消息字节数，上限 8192（核内 `u_msg` 是 AW=13） |
+| `0x28` | `CTX_LEN` | RW | FIPS 204 的上下文串长度，上限 255 |
+| `0x2C` | `KEYSTAT` | R | `[7:0]` 签名金库里哪些槽装了东西，`[8]` 私钥外泄闩锁，`[31:16]` 每槽 2 位的参数集 |
+| `0x30` | `VIOL` | R | `[15:0]` 写违规，`[31:16]` 读违规 |
+
+**⚠️ `MODE` 是 `0x08`、`STATUS` 是 `0x0C` —— 与 `mlkem_axi` 正好相反。**
+这两个曾经在 daemon 里被写反过，而症状极具误导性：`VERSION`/`IN_DATA`/`IN_PTR`
+都在错位区之外，所以"读得到版本号、灌完数据 `IN_PTR` 也对得上"全都成立，看起来
+这条路是通的。实际是 `MODE` 被写进了只读的 `STATUS`（核从没收到过 op/pset），
+而轮询读的"`STATUS`"其实是 `MODE`，永远不会出现 `DONE`。表现是"每次都等 done
+超时"，与"核算不出来"分不开。**照着这张表写，别照记忆写。**
+
+**输入排布**（与 ML-KEM 同一条理由：一个字节口，顺序按标准定义）：
+
+```
+KeyGen : ξ(32)
+Sign   : [sk(skLen)，仅当不走金库] ‖ rnd(32) ‖ ctx(ctx_len) ‖ msg(msg_len)
+Verify : pk(pkLen) ‖ sig(sigLen) ‖ ctx(ctx_len) ‖ msg(msg_len)
+```
+
+`rnd` 是 FIPS 204 的 hedged 模式随机数。**全零就是确定性签名**，它把签名变成
+消息的纯函数，少一层对故障注入与侧信道的防护 —— 确定性只在对 ACVP 的确定性
+向量时才需要。
+
+**片内签名金库（8 槽）。** `SK_TO_SLOT` 时 KeyGen 的 sk 直接进片内金库，
+`OUT_LEN` 恰好只到 pk 的长度，把读游标 seek 到 sk 那一段也一个字节都拿不到；
+`SK_FROM_SLOT` 时不送 sk 也能签，且**槽里记的参数集必须与本次的 `MODE` 相符**，
+否则 START 被拒 —— 不然会签出一个"格式全对、但用的私钥不对"的安静错误。
+`SK_LOCK` 一旦置上，KeyGen 再也不把 sk 交出来，而且**没有清零路径**：
+ZEROIZE 不清它，只有重新装载位流能解开。
+
+**START 前的校验**（不满足就置 `PARAM_ERR`／`LEN_ERR` 并且**根本不启动**）：
+`op`/`pset` 只有 0/1/2 有意义；槽号 < 8；`ctx_len ≤ 255`；`msg_len ≤ 8192`；
+软件喂够了字节；总量装得下输入缓冲。**无论这次 START 是否被接受，上一次的
+`DONE`/`OUT_LEN`/`VERIFY_OK` 都当场作废** —— 少了这一条，软件会轮询到残留的
+`DONE`、把上一次的输出当成这一次的结果，而那看起来是成功的。
+
+**送检形态下这个槽要在 BL31 的 SiP 白名单里。** `SECURE_ONLY=1` 时普通世界一个
+寄存器都摸不到，daemon 经 `/dev/secmmio` → EL3 访问；白名单少了
+`0x8006_0000` 这一行，整个核在送检形态下等于不存在（见
+`boot/atf/patch_atf_secmmio.py`）。
 
 ## `pqc_accel_axi` — 仿真与主机路径
 
