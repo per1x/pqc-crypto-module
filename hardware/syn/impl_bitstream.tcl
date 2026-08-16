@@ -152,39 +152,28 @@ if {$characterize} {
                  $gen_args
 }
 
-# ---- 断言：位流形态与文件名必须一致 ------------------------------------------
-# 这条挡的是"照着错的那份文档写驱动"：开发位流与送检位流只差一个参数，
-# 名字一样就必然有人拿错。所以直接查网表里防火墙的 SECURE_ONLY 究竟是几，
-# 与 bitname 对不上就中止 —— 独立评审的 H1 正是这类错误的后果。
+# ---- 位流形态：说清楚它是怎么被保证的 ----------------------------------------
+# 这里挡的是"照着错的那份文档写驱动"：开发位流与送检位流只差一个 verilog
+# define，名字一样就必然有人拿错（独立评审的 H1 正是这类错误的后果）。
 #
-# ⚠️ **这条断言一度是空的**：它 `get_cells` 取了 `fw_ns` 之后**从不使用**，
-#    后面只有一句 puts —— 没有比较、没有 exit。也就是说这段注释宣称的护栏
-#    从来没有生效过，而一条"自称会拦住你"的检查比没有检查更危险：
-#    看见它的人会以为形态搞错了会被挡下来。（独立评审复核时抓到的。）
+# ⚠️ **两次都写错过，把过程记下来免得有第三次：**
+#   ① 第一版 `get_cells` 取了 `fw_ns` 之后**从不使用**，后面只有一句 puts ——
+#      一条自称会拦住你的检查，从来没有生效过。比没有检查更危险。
+#   ② 第二版想"从网表里读防火墙的 SECURE_ONLY 再比对"。**做不到**：
+#      综合之后**参数不是可查属性**（`get_property SECURE_ONLY` 返回空，
+#      实测：REF_NAME=axi4lite_firewall_34 找得到，属性表里根本没有这一项）。
+#      于是它每次都走"查不到 → 中止"，把一次正常的送检构建judged 成失败。
 #
-# 现在真的查：把功能从机的 SECURE_ONLY **从综合参数里读出来**，与 bitname
-# 蕴含的形态比对，对不上就中止，不出 bitstream。
-set want_secure [expr {$devopen ? 0 : 1}]
-set sec_cells [get_cells -quiet -hier -filter \
-                   {REF_NAME =~ "axi4lite_firewall*" && NAME =~ "*u_mlkem*"}]
-set got_secure -1
-foreach c $sec_cells {
-    set v [get_property -quiet SECURE_ONLY $c]
-    if {$v ne ""} { set got_secure $v ; break }
-}
-if {$got_secure == -1} {
-    # 查不到就**不放行**：让"检查没跑成"和"检查没通过"一样吵，
-    # 而不是安静地变成"检查通过"。
-    puts "错误：网表里找不到 mlkem 的防火墙实例，无法核对 SECURE_ONLY —— 中止"
-    puts "      （查到的候选：[llength $sec_cells] 个）"
-    exit 1
-}
-if {$got_secure != $want_secure} {
-    puts "错误：位流形态与产物名不符 —— SECURE_ONLY=$got_secure，而 $bitname 应当是 $want_secure"
-    puts "      开发位流(SECURE_ONLY=0)必须叫 zu3eg_hsm_dev，送检位流(=1)叫 zu3eg_hsm"
-    exit 1
-}
-puts "断言通过：位流形态 = [expr {$devopen ? {开发（SECURE_ONLY=0）} : {送检（SECURE_ONLY=1）}}]（网表实测 $got_secure），产物 $bitname.bit"
+# 结论：**这一层查不了，就不要假装查得了。** 形态的保证分两处，各自说清：
+#   · **构建期**：形态完全由下面这个 define 决定，而 bitname 由同一个变量推出
+#     —— 两者不可能不一致，因为它们是同一个 $devopen。这一条是构造性的，
+#     不需要断言，需要的是**不要给第二条路去设置形态**（别加命令行参数、
+#     别在 xdc 里改），所以这里只把实际取值打进日志与 timing 文件。
+#   · **运行期（真正的判据）**：上板读寄存器。送检形态下普通世界读五个槽
+#     全部回 0，开发形态下读回 0x00010000。这一条**已经实测并归档**，
+#     见 board/logs/RESULT_secform_mldsa.txt。
+puts "位流形态 = [expr {$devopen ? {开发（SECURE_ONLY=0）} : {送检（SECURE_ONLY=1）}}]，产物 $bitname.bit"
+puts "  形态的运行期判据在板上：送检形态普通世界读回 0，开发形态读回 0x00010000"
 
 # ---- 断言：tamper 那条路必须还活着 -------------------------------------------
 # 独立评审 M9：`tamper` 一度恒接 0，于是 key_vault 的一拍全清、防火墙的

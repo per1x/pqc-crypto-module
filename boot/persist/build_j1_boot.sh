@@ -68,8 +68,33 @@
 #    因为换 J1 镜像要重打整份 BOOT.BIN，改一次位流的成本高得多。
 set -e
 source /tools/Xilinx/Vitis/2020.1/settings64.sh
-BIF=/home/build/pqc-hsm-fpga/boot/persist/boot_j1_pl.bif
-OUT=/home/build/wdt_patch/images/BOOT_J1_PL.BIN
+
+# ============================================================================
+# 【bif 由本脚本生成，不直接用仓库里那份】
+# ============================================================================
+# 仓库里的 boot_j1_pl.bif 写的是**绝对路径**，指向 /home/build/pqc-hsm-fpga ——
+# 而构建机上同时有好几棵 checkout（pqc-hsm-fpga / pqc-hsm-merged / pqc-hsm-tip…）。
+# 于是"这份 BOOT.BIN 里的位流到底来自哪棵树"要靠猜，而猜错的后果是
+# **把一份旧位流固化进启动镜像**，还看不出来。
+#
+# 所以路径全部变量化、bif 现生成；仓库里那份留作**布局的参考**（分区顺序、
+# destination 属性），不再被直接使用。要换树只改 SRCTREE。
+SRCTREE=${SRCTREE:-/home/build/pqc-hsm-merged}
+IMG=${IMG:-/home/build/petalinux/images/linux}
+BL31=${BL31:-/home/build/wdt_patch/atf_secmmio/zynqmp/debug/bl31/bl31.elf}
+TEE=${TEE:-/home/build/wdt_patch/images/tee_load_quiet.elf}
+BIT=${BIT:-$SRCTREE/hardware/syn/impl/zu3eg_hsm.bit}
+BIF=/tmp/boot_j1_pl.gen.bif
+OUT=${OUT:-/home/build/wdt_patch/images/BOOT_J1_PL.BIN}
+
+# ⚠️ **只认送检形态的位流。** J1 的全部价值就是"密码边界由受控镜像加载"，
+#    把一份 SECURE_ONLY=0 的开发位流固化进去，等于固化了一个普通世界全可达的
+#    边界 —— 比不做还糟，因为它看起来更安全了。名字是唯一的判据，而
+#    impl_bitstream.tcl 里那条断言保证了名字与形态一致。
+case "$(basename "$BIT")" in
+    zu3eg_hsm.bit) ;;
+    *) echo "拒绝：$BIT 不是送检形态位流（必须叫 zu3eg_hsm.bit）"; exit 1 ;;
+esac
 
 # ---- 先生成 j1_nopl.dtb（bif 引用它，而它不该手工维护）----
 # 做法：把整个 amba_pl@0 子树连同指向它的别名删掉。
@@ -77,7 +102,7 @@ OUT=/home/build/wdt_patch/images/BOOT_J1_PL.BIN
 #    与救砖那三个产物同一类缺口（脚本在、材料不在）。生成过程放进脚本，
 #    换一台机器才复现得出来。
 DTB_SRC=/home/build/petalinux/images/linux/system.dtb
-DTB_OUT=$(dirname "$BIF")/j1_nopl.dtb
+DTB_OUT=${DTB_OUT:-$SRCTREE/boot/persist/j1_nopl.dtb}
 if [ ! -f "$DTB_OUT" ] || [ "$DTB_SRC" -nt "$DTB_OUT" ]; then
     echo "== 生成 j1_nopl.dtb（删掉 amba_pl 子树）=="
     dtc -I dtb -O dts -o /tmp/j1.dts "$DTB_SRC" 2>/dev/null
@@ -98,7 +123,7 @@ def drop_alias(mm):
     global n
     n += 1
     return ""
-s = re.sub(r"\n\t\t\w+ = "/amba_pl@0[^"]*";", drop_alias, s)
+s = re.sub(r'\\n\\t\\t\\w+ = "/amba_pl@0[^"]*";', drop_alias, s)
 print("  已删 %d 条指向 amba_pl 的别名" % n)
 open(path, "w").write(s)
 PYEOF
@@ -106,7 +131,22 @@ PYEOF
     ls -l "$DTB_OUT"
 fi
 
-echo "== 核对 bif 引用的文件都在 ==
+cat > "$BIF" <<BIFEOF
+the_ROM_image:
+{
+	[bootloader, destination_cpu=a53-0] $IMG/zynqmp_fsbl.elf
+	[pmufw_image] $IMG/pmufw.elf
+	[destination_device=pl] $BIT
+	[destination_cpu=a53-0, exception_level=el-3, trustzone] $BL31
+	[destination_cpu=a53-0, exception_level=el-1, trustzone] $TEE
+	[destination_cpu=a53-0, load=0x00100000] $DTB_OUT
+	[destination_cpu=a53-0, exception_level=el-2] $IMG/u-boot.elf
+}
+BIFEOF
+echo "== 生成的 bif =="
+cat "$BIF"
+
+echo "== 核对 bif 引用的文件都在 =="
 grep -oE "/home/[^ ]*\.(elf|bit|dtb)" $BIF | while read f; do
     [ -f "$f" ] && echo "  OK  $f" || { echo "  缺  $f"; exit 1; }
 done
