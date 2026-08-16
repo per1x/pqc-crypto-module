@@ -86,6 +86,18 @@ int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
 int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
                  const uint8_t *in, uint8_t *out);
 
+/* 工作模式（CBC / CTR / CFB / OFB）：一次一段数据，iv 恒 16 字节。
+ * ⚠️ **分组变换在硬件里，链接与异或在 daemon 里** —— RTL 里没有模式状态机，
+ *    别把它说成"硬件 CBC"。密钥仍然只按槽号使唤，一个字节都不出金库。
+ * ⚠️ 不做填充：ECB/CBC 要求长度是 16 的非零整数倍，CTR/CFB/OFB 任意长度。
+ * ⚠️ IV 由调用方给。CTR/OFB/CFB 的 (密钥, IV) **绝不能重复**（密钥流复用）。 */
+int SDFE_EncryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
+                     uint32_t slot, const uint8_t iv[16],
+                     const uint8_t *in, uint32_t len, uint8_t *out);
+int SDFE_DecryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
+                     uint32_t slot, const uint8_t iv[16],
+                     const uint8_t *in, uint32_t len, uint8_t *out);
+
 const char *SDFE_StrError(int rv);
 ```
 

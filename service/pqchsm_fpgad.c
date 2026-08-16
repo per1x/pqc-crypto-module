@@ -22,11 +22,17 @@
 //   · **对称密钥**进 PL 的 key_vault。RTL 上没有通往总线的读路径 ——
 //     装进去之后连本 daemon 也读不回来，只能按槽号使唤。
 //
-//   · **ML-KEM 的 dk** 当前会随 KeyGen 一起从硬件出来（ACVP 核对的需要）。
-//     本 daemon 把它留在自己的进程内存里，只给应用一个句柄。
-//     所以从**应用**视角看私钥不出接口；但它确实出了**硬件**。
-//     这两句话不一样，文档里分开写（docs/API.md §4）。
-//     进程退出前把 dk 表抹掉，减少驻留时间。
+//   · **ML-KEM 的 dk 与 ML-DSA 的 sk** 现在也进 PL 的片内金库（各自一套槽），
+//     KeyGen 只交出公钥与槽号。**本进程的内存里没有任何私钥** ——
+//     句柄表里只有"哪个槽、什么参数集"两个字段。
+//
+//     ⚠️ 这一段以前写的是"dk 留在本进程内存里"，那是 dk_to_slot 之前的旧稿。
+//     注释与代码倒挂在安全叙事上是**最贵**的一种：读注释的人会以为私钥出了
+//     硬件而其实没有，或者反过来。改代码时这段必须跟着改。
+//
+//   · **句柄是会话内的。** 连接一断，两张句柄表清零，并且给两个 PQC 金库各发
+//     一次 ZEROIZE —— 私钥不跨会话存活，既不在进程里、也不在硬件里。
+//     少了这一条，A 连接生成的句柄 0，B 连接重连之后照样能拿来解封装/签名。
 //
 // ============================================================================
 // 【为什么不直接复用 cli/pqchsmd.c】
@@ -123,6 +129,7 @@
 #define MKC_START 1u
 #define MKC_INRST 4u
 #define MKC_DKLOCK 0x10u                 /* CTRL[4]：一次性闩锁 */
+#define MKC_ZEROIZE 2u                   /* CTRL[1]：擦金库（见 mlkem_axi.v A_CTRL） */
 #define MK_KEYSTAT (S_MLKEM + 0x30)
 #define MK_KEYPSET (S_MLKEM + 0x34)
 /* MODE 里控制片内私钥金库的三个字段 */
@@ -132,12 +139,11 @@
 #define PL_KEY_SLOTS     16              /* 金库有 16 个槽（64 KB / 4096） */
 #define MKS_DONE  (1u << 1)
 #define MKS_PARER (1u << 5)
+#define MKS_WIPING (1u << 4)   /* r_status 位序见 mlkem_axi.v:411 */
 
 /* ---- ML-DSA（mldsa_axi @ 0x8006_0000）--------------------------------------
  *
- * ⚠️ **这个从机还没有落地。** 下面整块是照已经定下来的寄存器约定写的驱动，
- *    今天只能在 stub / 软件路径上验行为。硬件到位之前，任何"ML-DSA 在硬件上
- *    跑过"的说法都不成立 —— 这里成立的只是"驱动与接口已就位"。
+ * 从机在槽 6，2026-08-17 起两种位流形态下都端到端跑通（board/logs/）。
  *
  * 与 mlkem_axi 的三处不同，都会咬人，写在这里免得照着 MK_* 抄错：
  *   ① 复位输入指针的办法不一样：ML-KEM 是 CTRL[2]（MKC_INRST），
@@ -169,12 +175,14 @@
 #define MDC_START  0x01u              /* CTRL[0] */
 #define MDC_CLEAR  0x02u              /* CTRL[1] */
 #define MDC_SKLOCK 0x10u              /* CTRL[4]：一次性闩锁 */
+#define MDC_ZEROIZE 0x04u             /* CTRL[2]：擦金库（见 mldsa_axi.v A_CTRL） */
 
 #define MDS_BUSY   (1u << 0)
 #define MDS_DONE   (1u << 1)
 #define MDS_VEROK  (1u << 2)
 #define MDS_PARER  (1u << 3)
 #define MDS_LENER  (1u << 4)
+#define MDS_WIPING (1u << 6)   /* r_status 位序见 mldsa_axi.v:462 */
 
 /* MODE：[1:0]=OP [3:2]=PSET [4]=SK_TO_SLOT [5]=SK_FROM_SLOT [9:6]=SLOT */
 #define MDO_KEYGEN 0u
@@ -506,6 +514,73 @@ static void keys_wipe(void)
 	memset(dsa_keys, 0, sizeof dsa_keys);
 }
 
+/* ============================================================================
+ * 【会话结束：句柄失效，硬件里的私钥也擦掉】
+ * ============================================================================
+ * daemon **一次只服务一个连接**（硬件序列必须串行化，见文件头），所以"会话"
+ * 与"连接"是一回事，隔离用不着 owner 字段：连接一断把两张表清零就够了。
+ *
+ * ⚠️ 但只清表是不够的 —— 表清了，**私钥还在 PL 的金库槽里**。下一个连接
+ * 拿不到句柄（`used == 0` 就被拒），可它只要自己做一次 KeyGen 就会拿到同一个
+ * 槽号，而"上一个人的私钥还在那儿"这件事本身就不该成立。所以这里同时给两个
+ * PQC 金库各发一次 ZEROIZE。
+ *
+ * ⚠️ **一次性闩锁不受影响**：mldsa_axi / mlkem_axi 的 SK_LOCK 都明确写着
+ * "ZEROIZE 不清它" —— 擦秘密不等于撤防线。交付形态开机置上的那道闩锁，
+ * 会一直在。
+ *
+ * 对称密钥的 key_vault **不在这里擦**：它是应用显式 ImportKey 装进去的，
+ * 生命周期由调用方决定（PKCS#11 那侧有对象销毁语义），而 PQC 私钥是本
+ * daemon 自己生成的、只在会话内有意义。两者的归属不同，处理也就不同。
+ */
+/* ============================================================================
+ * 【⚠️ 擦除没落地就写下一笔 = 丢板子。等它落下来，而且只能用读来等】
+ * ============================================================================
+ * 两个从机在 WIPING 期间对**写**一律回 SLVERR（那是对的：静默丢弃更危险）。
+ * 但这条路上的写是从 **EL3** 发出的，而 BL31 里没有任何东西接得住总线错误 ——
+ * SLVERR 以 SError 回来，发 SMC 的那个核**当场卡死**，板子只能断电。
+ *
+ * 实测栽过一次（2026-08-17）：session_end 发完 ZEROIZE 立刻返回，客户端断开
+ * 之后**马上重连**，新连接的第一笔写正落在还在擦的 ML-KEM 上 —— 板子硬挂，
+ * ping 不通，只能断电。
+ *
+ * 所以这里必须等到 WIPING 落下来再返回。**等的方式只能是读**：读被拒是同步
+ * 外部中止，接得住；写被拒是 posted 的，接不住。这条不是风格，是这块板上
+ * "能不能远程恢复"的分界线。
+ *
+ * 擦一遍 64 KB 金库约 8192 拍 @ ~150 MHz ≈ 55 µs，ML-DSA 那边 16 KB 更短；
+ * 自旋上限给到远大于它的数，超时就如实记一笔并放弃（不再写任何东西）。
+ */
+static int wait_not_wiping(unsigned reg, uint32_t bit, const char *who)
+{
+	long spin;
+
+	for (spin = 0; spin < 200000L; spin++) {
+		uint32_t st = rd(reg);
+
+		if (hw_fault)
+			return -1;          /* 读都失败了，更不能去写 */
+		if (!(st & bit))
+			return 0;
+	}
+	logf_("%s 的 WIPING 一直不落 —— **不再写任何寄存器**（写被拒会 SError）", who);
+	return -1;
+}
+
+static void session_end(void)
+{
+	keys_wipe();
+	/* 发擦除之前也要确认它没在擦：上一次的擦除还没完就再写一次 CTRL，
+	 * 同样是往 WIPING 里写。 */
+	if (wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM") == 0)
+		wr(MK_CTRL, MKC_ZEROIZE);
+	if (wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA") == 0)
+		wr(MD_CTRL, MDC_ZEROIZE);
+	/* ⚠️ 关键的一步：**等擦完再返回**。下一个连接的第一笔写不能落在 WIPING 上。 */
+	wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM");
+	wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA");
+}
+
 /* ---- 对称 ---- */
 static int sym_block(uint32_t alg, uint32_t slot, int dec,
 		     const uint8_t *in, uint8_t *out)
@@ -541,6 +616,117 @@ static int sym_block(uint32_t alg, uint32_t slot, int dec,
 		out[4*i+2] = (uint8_t)(w >> 8);
 		out[4*i+3] = (uint8_t)w;
 	}
+	return 0;
+}
+
+/* ============================================================================
+ * 【工作模式：链接在这里，分组变换在硬件里】
+ * ============================================================================
+ * sym_axi 只做单分组变换（16 字节进、16 字节出，密钥按槽号使唤）。CBC/CTR/
+ * CFB/OFB 的链接、计数、异或都在本函数里，每个分组仍然各走一次硬件。
+ *
+ * 于是"密钥不出金库"这条性质在模式下**原样成立** —— 本进程从头到尾没有密钥
+ * 字节，只有 IV 与数据。而"硬件做的是什么"必须说准：**是分组变换，不是模式**。
+ *
+ * ⚠️ CTR / OFB / CFB 三种只用**加密方向**的分组变换，解密也一样 ——
+ *    把 dec 传给硬件会算出完全错误的密钥流。这是最容易抄错的一处：
+ *    "解密就把 dec 置上"对 ECB/CBC 成立，对这三种是错的。
+ *
+ * 返回 0 成功；<0 硬件失败。
+ */
+static void ctr_inc(uint8_t ctr[16])
+{
+	int i;
+
+	/* 整 128 位大端自增（SP 800-38A 的 standard incrementing function，
+	 * 全宽版本）。回绕在 2^128 个分组之后，够不着。 */
+	for (i = 15; i >= 0; i--)
+		if (++ctr[i])
+			break;
+}
+
+static int sym_crypt(uint32_t alg, uint32_t slot, int dec, uint32_t mode,
+		     const uint8_t iv[16], const uint8_t *in, uint8_t *out,
+		     uint32_t len)
+{
+	uint8_t fb[16], ks[16];
+	uint32_t off;
+
+	memcpy(fb, iv, 16);
+	for (off = 0; off < len; off += 16) {
+		uint32_t n = (len - off >= 16) ? 16u : (len - off);
+		uint32_t i;
+
+		switch (mode) {
+		case PQCS_MODE_ECB:
+			if (sym_block(alg, slot, dec, in + off, out + off))
+				return -1;
+			break;
+
+		case PQCS_MODE_CBC:
+			if (!dec) {
+				uint8_t blk[16];
+
+				for (i = 0; i < 16; i++)
+					blk[i] = in[off + i] ^ fb[i];
+				if (sym_block(alg, slot, 0, blk, out + off))
+					return -1;
+				memcpy(fb, out + off, 16);
+			} else {
+				uint8_t prev[16], blk[16];
+
+				/* 先把密文分组存下来：out 可能与 in 同一块内存，
+				 * 解出来的明文会把它盖掉，而它正是下一轮的反馈。 */
+				memcpy(prev, in + off, 16);
+				if (sym_block(alg, slot, 1, prev, blk))
+					return -1;
+				for (i = 0; i < 16; i++)
+					out[off + i] = blk[i] ^ fb[i];
+				memcpy(fb, prev, 16);
+			}
+			break;
+
+		case PQCS_MODE_CTR:
+			/* 密钥流 = E(counter)，加解密同一条路 */
+			if (sym_block(alg, slot, 0, fb, ks))
+				return -1;
+			for (i = 0; i < n; i++)
+				out[off + i] = in[off + i] ^ ks[i];
+			ctr_inc(fb);
+			break;
+
+		case PQCS_MODE_OFB:
+			if (sym_block(alg, slot, 0, fb, ks))
+				return -1;
+			memcpy(fb, ks, 16);         /* 反馈的是密钥流本身 */
+			for (i = 0; i < n; i++)
+				out[off + i] = in[off + i] ^ ks[i];
+			break;
+
+		case PQCS_MODE_CFB: {
+			uint8_t ct[16];
+
+			if (sym_block(alg, slot, 0, fb, ks))
+				return -1;
+			/* 反馈的是**密文**：加密时是刚算出来的，解密时是输入。
+			 * 同样先存一份，防 in/out 同址。 */
+			for (i = 0; i < n; i++)
+				ct[i] = (dec ? in[off + i]
+					     : (uint8_t)(in[off + i] ^ ks[i]));
+			for (i = 0; i < n; i++)
+				out[off + i] = (uint8_t)(dec ? (in[off + i] ^ ks[i])
+							     : ct[i]);
+			if (n == 16)
+				memcpy(fb, ct, 16);
+			break;
+		}
+		default:
+			return -1;
+		}
+	}
+	/* 反馈寄存器与密钥流是**密钥相关**的中间量，用完就抹。 */
+	memset(fb, 0, sizeof fb);
+	memset(ks, 0, sizeof ks);
 	return 0;
 }
 
@@ -855,6 +1041,39 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		      dec ? "解密" : "加密");
 		return SDR_OK;
 	}
+	/* ---- 工作模式：一次调用处理整段数据 ----------------------------------
+	 * 逐分组走一次 socket 也能实现，但那是每 16 字节一次往返；而且模式状态
+	 * （反馈寄存器/计数器）会落到调用方手里，调用方一旦复用就是密钥流复用。
+	 * 放在这里，状态出不了本进程，用完就抹。 */
+	case OP_SYM_CRYPT: {
+		uint32_t alg  = q->a0 & 0xFFu;
+		uint32_t dec  = (q->a0 >> 8) & 1u;
+		uint32_t mode = (q->a0 >> 16) & 0xFFu;
+		uint32_t slot = q->a1 & 0xFFu;
+		uint32_t dlen;
+
+		/* 同 OP_SYM_BLOCK：alg/slot 必须在这里挡住，RTL 是静默截断的。 */
+		if (alg > 2 || slot > 7 || mode > PQCS_MODE_OFB)
+			return SDR_INARGERR;
+		if (q->len < 16)                 /* 至少要有 IV */
+			return SDR_INARGERR;
+		dlen = q->len - 16u;
+		if (dlen == 0)
+			return SDR_INARGERR;
+		/* ECB/CBC 不做填充，长度必须对齐；其余三种任意长度。 */
+		if ((mode == PQCS_MODE_ECB || mode == PQCS_MODE_CBC) && (dlen % 16u))
+			return SDR_INARGERR;
+		if (dlen > PQCS_MAXPAY)
+			return SDR_INARGERR;
+
+		if (sym_crypt(alg, slot, (int)dec, mode, pay, pay + 16, out, dlen))
+			return SDR_HARDFAIL;
+		*out_len = dlen;
+		logf_("SYM_CRYPT alg=%u 模式=%u %s 槽 %u，%u 字节（密钥没出金库）",
+		      alg, mode, dec ? "解密" : "加密", slot, dlen);
+		return SDR_OK;
+	}
+
 
 	default:
 		return SDR_INARGERR;
@@ -957,6 +1176,14 @@ int main(int argc, char **argv)
 		uint32_t ks = 0;
 
 		hw_fault = 0;
+		/* 上一个 daemon 可能刚发过 ZEROIZE 就退出了 —— 那时金库还在擦，
+		 * 而擦除期间写会被拒，被拒的写从 EL3 回来是 SError（丢板子）。
+		 * 先用读等它落下来，等不到就干脆不置闩锁、如实拒绝启动。 */
+		if (wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM") ||
+		    wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA")) {
+			logf_("金库还在擦，拒绝启动 —— 这时候写 CTRL 会 SError");
+			return 2;
+		}
 		wr(MK_CTRL, MKC_DKLOCK);
 		if (hw_rd(MK_KEYSTAT, &ks) || !(ks & (1u << 16))) {
 			logf_("置私钥闩锁失败（KEYSTAT=0x%08x）—— 拒绝启动，"
@@ -1137,6 +1364,19 @@ int main(int argc, char **argv)
 			 * 不这么做的话，一次失败会永久污染后面所有请求；
 			 * 而硬件确实可能恢复（比如运行时重新装载了位流）。 */
 			hw_fault = 0;
+			/* ⚠️ 处理任何请求之前先确认两个 PQC 从机都不在 WIPING。
+			 * handle_op 里第一笔就可能是写，而**写被拒 = SError = 丢板子**
+			 * （见 wait_not_wiping 上面那段）。这两笔是读，代价可以忽略，
+			 * 换来的是"不会因为上一个人刚断开就把板子写死"。 */
+			if (wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM") ||
+			    wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA")) {
+				rp.status = SDR_HARDFAIL;
+				rp.len = 0;
+				if (write_all(c, &rp, sizeof rp))
+					break;
+				continue;
+			}
+			hw_fault = 0;
 			rp.status = handle_op(&q, pay, out, &rp.len);
 			if (hw_fault && rp.status == SDR_OK) {
 				/* handle_op 里那些 rd() 返回的 0 是假数据，
@@ -1151,8 +1391,14 @@ int main(int argc, char **argv)
 				break;
 		}
 		close(c);
-		logf_("客户端断开");
+		/* ⚠️ 会话结束的清理必须在**这里**，不能放在 for(;;) 之后。
+		 * 那个位置以前有一句 keys_wipe()，而外层循环没有任何 break /
+		 * return / exit —— 它是**不可达代码**，一次都没执行过。
+		 * 死代码写在安全清理这种地方，比没写更糟：审的人会以为清了。 */
+		hw_fault = 0;
+		session_end();
+		hw_fault = 0;
+		logf_("客户端断开（句柄表已清，两个 PQC 金库已擦）");
 	}
-	keys_wipe();
 	return 0;
 }

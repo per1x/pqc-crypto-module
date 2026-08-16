@@ -145,6 +145,36 @@ int SDFE_Verify_MLDSA(SDFE_HANDLE hSession, uint32_t pset,
 /* ---- 对称：密钥进 key_vault，之后只按槽号使唤 ---- */
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
                    const uint8_t *key, uint32_t key_len);
+/* ---- 工作模式（CBC / CTR / CFB / OFB）--------------------------------------
+ * 与上面两个单分组函数的关系：**分组变换是同一个硬件核**，模式的链接与异或在
+ * daemon 里做。所以"密钥不出金库"这条性质在模式下原样成立，而**不能**把它说成
+ * "硬件 CBC" —— RTL 里没有模式状态机。
+ *
+ * `iv` 恒为 16 字节：CBC 是初始向量，CTR 是初始计数块，CFB/OFB 是初始反馈。
+ *
+ * ⚠️ **IV 由调用方给，本库不替你生成。**
+ *    · CBC 的 IV 要不可预测（否则有选择明文攻击）；
+ *    · **CTR/OFB/CFB 的 (密钥, IV) 绝不能重复** —— 重复即密钥流复用，
+ *      两条密文异或就把两条明文的异或暴露出来。
+ *    要一串好随机数就用 SDFE_GenerateRandom：它取自 PL 里的环振噪声源。
+ *
+ * ⚠️ **不做填充。** ECB/CBC 要求 `len` 是 16 的非零整数倍；CTR/CFB/OFB 任意
+ *    长度。填充放在这一层会引来 padding oracle，那是调用方的协议该决定的事。
+ *
+ * 长度上限见 wire.h 的 PQCS_MAXPAY（当前 16384，减去 16 字节 IV）。 */
+#define SDFE_MODE_ECB    0
+#define SDFE_MODE_CBC    1
+#define SDFE_MODE_CTR    2
+#define SDFE_MODE_CFB    3
+#define SDFE_MODE_OFB    4
+
+int SDFE_EncryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
+                     uint32_t slot, const uint8_t iv[16],
+                     const uint8_t *in, uint32_t len, uint8_t *out);
+int SDFE_DecryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
+                     uint32_t slot, const uint8_t iv[16],
+                     const uint8_t *in, uint32_t len, uint8_t *out);
+
 int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
                  const uint8_t *in, uint8_t *out);
 int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,

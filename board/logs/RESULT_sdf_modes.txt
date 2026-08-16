@@ -1,0 +1,46 @@
+=== 应用程序：通过 SDF 风格接口使用密码机 ===
+
+[连接] 本机
+[设备] pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000 mldsa=0x00010000
+
+[1] SDFE_GenerateRandom —— 取自 PL 里的环振噪声源
+  32 字节随机数     029d78a35d76c6f4a1539bf2662dd4f1…（共 32 字节）
+
+[2] SDFE_GenerateKeyPair_MLKEM(ML-KEM-768)
+  公钥 ek 1184 字节，私钥句柄 = 0
+  ek 开头              cdc14c4864a7997404ca3679b2064bb0…（共 1184 字节）
+  ← 注意：本程序**从头到尾没有拿到过私钥 dk**，只有这个句柄
+
+[3] SDFE_Encapsulate_MLKEM（用公钥）
+  共享密钥 K         43fc829cfaeef334123943291d401719…（共 32 字节）
+  密文 c               fd9c9cbcc0b9b7ad266dad55d95c4301…（共 1088 字节）
+
+[4] SDFE_Decapsulate_MLKEM（用句柄，不是私钥）
+  解出的 K            43fc829cfaeef334123943291d401719…（共 32 字节）
+  ✅ 两边的共享密钥一致 —— 一次完整的 KEM 在 FPGA 上跑通
+
+[5] SDFE_ImportKey + SDFE_Encrypt/Decrypt（SM4，密钥留在硬件）
+  密钥已进 key_vault 槽 3，应用侧已抹除
+  SM4 密文             681edf34d206965e86b3e94f536e4246
+  ✅ 与 GB/T 32907 A.1 逐字节一致
+  ✅ 解密回到原文
+
+[6] SDFE_GenerateKeyPair/Sign/Verify_MLDSA（三个参数集，sk 全程在片内）
+  ✅ ML-DSA-44  槽 0：pk 1312 字节、σ 2420 字节，验得过；改一字节即验不过
+  ✅ ML-DSA-65  槽 1：pk 1952 字节、σ 3309 字节，验得过；改一字节即验不过
+  ✅ ML-DSA-87  槽 2：pk 2592 字节、σ 4627 字节，验得过；改一字节即验不过
+
+[7] SDFE_EncryptMode/DecryptMode（CBC/CTR/CFB/OFB，密钥留在硬件）
+  ✅ AES-128-CBC  64 字节对上标准向量，解密回到原文
+  ✅ AES-128-CTR  64 字节对上标准向量，解密回到原文
+  ✅ AES-128-CFB  64 字节对上标准向量，解密回到原文
+  ✅ AES-128-OFB  64 字节对上标准向量，解密回到原文
+  ✅ SM4-CBC      64 字节对上标准向量，解密回到原文
+  ✅ SM4-CTR      64 字节对上标准向量，解密回到原文
+  ✅ SM4-CFB      64 字节对上标准向量，解密回到原文
+  ✅ SM4-OFB      64 字节对上标准向量，解密回到原文
+
+[8] 反证：断开重连之后，上一会话的句柄必须失效
+  ✅ 旧句柄 0 已失效（句柄不存在）
+
+=== 全部完成。本程序没有碰过任何寄存器。 ===

@@ -91,6 +91,21 @@ int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
 int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
                  const uint8_t *in, uint8_t *out);
 
+/* Cipher modes (CBC / CTR / CFB / OFB): one call per buffer, iv is always 16 bytes.
+ * NOTE: **the block transform is in hardware, the chaining and XOR are in the
+ *       daemon** — there is no mode state machine in RTL, so do not call this
+ *       "hardware CBC". The key is still only ever used by slot and never leaves
+ *       the vault.
+ * NOTE: no padding. ECB/CBC require a non-zero multiple of 16; CTR/CFB/OFB take
+ *       any length. The IV comes from the caller, and for CTR/OFB/CFB the
+ *       (key, IV) pair must never repeat — that is key-stream reuse. */
+int SDFE_EncryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
+                     uint32_t slot, const uint8_t iv[16],
+                     const uint8_t *in, uint32_t len, uint8_t *out);
+int SDFE_DecryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
+                     uint32_t slot, const uint8_t iv[16],
+                     const uint8_t *in, uint32_t len, uint8_t *out);
+
 /* public-key encryption of arbitrary data (KEM-DEM): ML-KEM.Encaps (hardware,
  * dk on-chip) wraps a shared secret; AES-256-GCM (software) is the authenticated
  * DEM. blob = ct ‖ iv ‖ tag ‖ ciphertext. See service/sdfe_pkenc.h. */

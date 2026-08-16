@@ -364,6 +364,58 @@ int SDFE_Decrypt(SDFE_HANDLE h, uint32_t alg, uint32_t slot,
 	return sym(h, alg, slot, 1, in, out);
 }
 
+/* ---- 工作模式 ----
+ * 一次调用一段数据：IV 与数据拼成一个载荷发过去，模式状态留在 daemon 里。
+ * 逐分组往返也能实现，但那会把反馈寄存器/计数器交到调用方手里 ——
+ * 而调用方一旦复用它，CTR 那三种就是密钥流复用。 */
+static int sym_mode(SDFE_HANDLE h, uint32_t alg, uint32_t mode, uint32_t slot,
+                    int dec, const uint8_t *iv, const uint8_t *in,
+                    uint32_t len, uint8_t *out)
+{
+	uint8_t req[PQCS_MAXPAY];
+	uint32_t n = 0;
+	int rv;
+
+	if (!iv || !in || !out || len == 0)
+		return SDR_INARGERR;
+	if ((uint32_t)len + 16u > (uint32_t)sizeof req)
+		return SDR_INARGERR;
+	memcpy(req, iv, 16);
+	memcpy(req + 16, in, len);
+	rv = call(h, OP_SYM_CRYPT,
+	          alg | ((uint32_t)(dec ? 1 : 0) << 8) | (mode << 16),
+	          slot, req, len + 16u, out, len, &n);
+	/* 载荷里有明文（或密文），用完抹掉本地这份。
+	 * volatile 指针写，防 -O2 把"写完就不再读"的 memset 优化掉 ——
+	 * tests/unit/test_zeroize.c 证过裸 memset 会被消除。 */
+	{
+		volatile uint8_t *z = req;
+		size_t i;
+
+		for (i = 0; i < sizeof req; i++)
+			z[i] = 0;
+	}
+	if (rv != SDR_OK)
+		return rv;
+	if (n != len)
+		return SDR_UNKNOWERR;
+	return SDR_OK;
+}
+
+int SDFE_EncryptMode(SDFE_HANDLE h, uint32_t alg, uint32_t mode, uint32_t slot,
+                     const uint8_t iv[16], const uint8_t *in, uint32_t len,
+                     uint8_t *out)
+{
+	return sym_mode(h, alg, mode, slot, 0, iv, in, len, out);
+}
+
+int SDFE_DecryptMode(SDFE_HANDLE h, uint32_t alg, uint32_t mode, uint32_t slot,
+                     const uint8_t iv[16], const uint8_t *in, uint32_t len,
+                     uint8_t *out)
+{
+	return sym_mode(h, alg, mode, slot, 1, iv, in, len, out);
+}
+
 const char *SDFE_StrError(int rv)
 {
 	switch ((unsigned)rv) {

@@ -53,6 +53,7 @@ real runs and should stay that way — the numbers quoted in
 | `RESULT_ctbprobe_before.txt`, `RESULT_ctbprobe_after.txt` | The c̃-comparison defect on silicon: 61 ordered Verify steps before and after the `verify.v` fix |
 | `RESULT_mldsa_after.txt`, `RESULT_mldsa_demoform.txt` | ML-DSA board self-test, 32/32: three parameter sets against ACVP, the on-chip vault, runtime parameter-set switching |
 | `RESULT_ctbprobe_demoform.txt` | The same 61-step probe re-run from the promoted default boot |
+| `RESULT_sdf_modes.txt` | Full SDF-style session: hardware RNG, ML-KEM, SM4 block, ML-DSA (three sets), the four cipher modes against SP 800-38A, and the counter-proof that a handle dies with its session |
 | `RESULT_secform_mldsa.txt` | Secure form (`SECURE_ONLY=1`): normal world reads all zero and the direct KAT program refuses to write, while the daemon reaches ML-DSA through the EL3 whitelist and signs end to end |
 
 ## Programs
