@@ -307,8 +307,103 @@ so this document is not mistaken for a statement of readiness.
 > * The golden slot was never touched and **the board was never power-cycled**:
 >   every recovery was a JTAG write of `CSU_MULTI_BOOT = 0` plus a system reset.
 
+> ### 2026-08-17 (second session), PUF black-key boot: **root cause narrowed to one word; corrected image built, board test pending a power cycle**
+>
+> First, a correction to this document: it previously said PUF black keys "depend on"
+> eFUSE burning and were permanently excluded. **That was wrong.**
+> `bootgen -bif_help fsbl_config` defines `bh_auth_enable` as "RSA authentication of
+> the bootimage will be done **excluding the verification of PPK hash and SPK ID**",
+> and AMD's Embedded Design Tutorial states that PUF boot-header mode
+> "**does not require programming of eFUSEs**". This path is viable under our rules.
+>
+> **Three defects explain the earlier BootROM rejection; each has an authoritative source:**
+>
+> | # | Defect | Authority | Measured in the old image |
+> |---|---|---|---|
+> | ① | bif missing `puf4kmode` — bootgen **defaults to 12K**, registration was 4K | `bootgen -bif_help fsbl_config`: "(Default is 12k bit)"; `xilskey_puf_registration.h:148` = `XSK_PUF_MODE4K` | boot header `0x44` bits `[17:16]` = **0** (should be 3) |
+> | ② | bif missing `shutter=0x0100005E` | `xilskey_eps_zynqmp_puf.h:72` `XSK_ZYNQMP_PUF_SHUTTER_VALUE = 0x0100005e` | boot header `0x6c` = **`0x01000020`** (bootgen default) |
+> | ③ | **The last helper-data word was corrupted by the previous round's "fix"** | `xilskey_eps_zynqmp_puf.c`: `Aux = (PufStatus & AUX_MASK) >> 4` but `SyndromeData[385] = (PufStatus & AUX_MASK) << 4` — **eight bits apart** | wrote `0x00864FE2`; correct value is **`0x864FE200`** |
+>
+> ③ is a regression caused by a "fix", and is worth recording in full. The first
+> round wrote the 386 words of `PufInstance.SyndromeData[]` **verbatim** — which was
+> correct; the library itself places CHASH at `[384]` and `AUX<<4` at `[385]`. The
+> author then searched the image for `0x00864FE2`, did not find it, concluded "AUX is
+> missing", and rewrote the file as "384 words + CHASH + AUX". **The search was bound
+> to fail** — the value that belongs there is `0x864FE200`. A false negative damaged
+> correct data. Corroboration: `word[383]` and `word[384]` are *both* CHASH, which is
+> exactly what the library does (the 4K read loop stops at `Index=383`, so the last
+> word read *is* CHASH, then it is copied to `[384]`) — proving the file is not
+> misaligned and only the final word was wrong.
+>
+> **Two board runs this session (both in non-golden slots; golden untouched throughout):**
+>
+> | Variant | Config | BootROM behaviour | Cost |
+> |---|---|---|---|
+> | A | `pufhd_bh, puf4kmode, shutter=…`, helper data still bad | `MULTI_BOOT` 6 → **7**, kept searching | None — slot 7 was pre-loaded with a copy of `BOOT.BIN` as a safety net |
+> | B | A + `bh_auth_enable` + RSA-4096 on all partitions | **Halted**, `MULTI_BOOT` stuck at 6, APU held in reset | **Board needs a POR** |
+> | C | A + **corrected helper data** | **Not yet tested** | — |
+>
+> Variant C is built and passes every offline self-check
+> (`boot/persist/build_puf_boot.sh`, md5 `7142f40e26d4b0088374783b2c7e12d9`),
+> including a word-by-word comparison of all 386 helper-data words in the image.
+>
+> ⚠️ **Wording**: this is "root cause supported by authoritative sources, corrected
+> image built and self-checked" — **not** "secure boot works". C has never booted.
+>
+> ⚠️ Even if C succeeds the ceiling is unchanged: without eFUSE there is no
+> `ENC_ONLY` / `RSA_EN`, so the BootROM enforces neither encryption nor
+> authentication. PUF buys **confidentiality plus device binding**, not a
+> replacement-resistant trust root.
+
+> ### 2026-08-17 (second session), why the XMPU does not stop the APU: **gating is not its job**
+>
+> The previous round recorded this as "needs UG1085's DDR-path architecture".
+> It is settled, and the answer has nothing to do with the DDR path.
+>
+> **Authority**: XAPP1320, *Isolation Methods in Zynq UltraScale+ MPSoCs*, v3.0
+> (2020-04-30), page 10:
+>
+> > "If an illegal transaction is attempted, the XMPU asserts AxUser[10] but the
+> > transaction **is passed to the memory controller**. This mechanism is referred to
+> > as poison by attribute. **The transaction is gated by the end point, not the XMPU
+> > itself.**"
+>
+> The XMPU only *detects and marks*; the endpoint (the DDR controller) is what drops
+> the transaction. In our configuration poisoning was never enabled:
+>
+> ```
+> DDR0..5  CTRL   = 0x0000000b   → bit2 POISONCFG = 0
+> DDR0..5  POISON = 0x00000000   → ATTRIB(bit20) = 0, BASE = 0
+> ```
+>
+> That makes the observations self-consistent: the regions are right, detection is
+> live (DMA-master violations latched), but nothing gates, so data still returns.
+>
+> **Three hypotheses ruled out against Xilinx's own definitions:**
+>
+> * **Bit layout is correct.** `xddr_xmpu0_cfg.h`: `[0]EN [1]RDALWD [2]WRALWD
+>   [3]REGNNS [4]NSCHKTYPE`. Xilinx's QEMU model `hw/misc/xlnx-xmpu.c:205-228` gives
+>   the strict-mode test `sec_access_check = (sec != regionns)` — a non-secure access
+>   to a `REGNNS=0` region is a security violation, exactly what we want.
+> * **Address granularity is correct.** `ALIGNCFG=1` does not change the field scale:
+>   `hw/misc/xlnx-zynqmp-xmpu.c:283-292` always does `xr->start <<= 12`; lines 327-328
+>   merely *align* the region to 1 MB. Confirmed on hardware: `ERR_ADDR = 0x0006002a`
+>   → `0x6002a000`, inside the region.
+> * **`MASTER = 0` is correct.** Same file, line 330:
+>   `(mask & id) == (mask & master_id)` — a zero mask matches every master.
+>
+> **Next step (not done — needs a BL31 change and a board):** enable poison-by-attribute
+> (`CTRL.POISONCFG` + `POISON.ATTRIB`) so the DDR controller gates.
+>
+> **A zero-risk read-only experiment to run first** (`board/scripts/verify_after_por.sh`):
+> `DDR0/3/4/5` error registers are still zero (only DDR1/DDR2 latched, from the DMA
+> test). Read a span of APU addresses crossing every interleave stripe, then dump all
+> six instances. If some stay zero, APU traffic never reaches XMPU_DDR (a path limit);
+> if all latch the APU master ID, it reaches and is detected and only gating is missing.
+> ⚠️ `ERR_ADDR`/ISR are **sticky** and only a POR clears them — one shot per power cycle.
+
 | **No module integrity check** | Nothing verifies the module image before use |
-| **root can still read OP-TEE's secure memory** (partially narrowed) | **Measured 2026-08-17**: `devmem 0x60000000` from Linux userspace returns `0xAA0003F3` — an AArch64 instruction, OP-TEE's secure-world code. The vendor boot chain configures **no XMPU_DDR regions at all**. BL31 now programs one secure region per XMPU_DDR instance (all six) covering OP-TEE's core carve-out `0x6000_0000+0x1000_0000`, `cfg=0x17`, with the bit layout taken from Xilinx's own `xddr_xmpu0_cfg.h`. **It does enforce**: `ERR_MASTER` latched `0xa0` and `0xac` — two non-secure DMA masters denied, with ISR set. **It does not stop the APU's own non-secure reads**: comparing the same addresses before and after, `devmem` returns byte-identical values. So "keys held by OP-TEE are protected" is **still false here**; what closed is the rogue-peripheral-DMA path. Why APU traffic is not checked needs UG1085's DDR-path architecture. Evidence in `board/logs/RESULT_protunit.txt` |
+| **root can still read OP-TEE's secure memory** (partially narrowed) | **Measured 2026-08-17**: `devmem 0x60000000` from Linux userspace returns `0xAA0003F3` — an AArch64 instruction, OP-TEE's secure-world code. The vendor boot chain configures **no XMPU_DDR regions at all**. BL31 now programs one secure region per XMPU_DDR instance (all six) covering OP-TEE's core carve-out `0x6000_0000+0x1000_0000`, `cfg=0x17`, with the bit layout taken from Xilinx's own `xddr_xmpu0_cfg.h`. **It does detect**: `ERR_MASTER` latched `0xa0` and `0xac` — two non-secure DMA masters, with ISR set. **It does not stop the APU's own non-secure reads**: comparing the same addresses before and after, `devmem` returns byte-identical values. So "keys held by OP-TEE are protected" is **still false here**; what closed is *detection* on the rogue-peripheral-DMA path. **Root cause established 2026-08-17 (second session) — see the section below: the XMPU does not gate transactions at all.** Evidence in `board/logs/RESULT_protunit.txt` |
 | **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
 | **Conditional self-tests missing** | No pairwise consistency test on generated key pairs, no continuous RNG test |
 | **No SM2** | SM4 and SM3 are implemented; the SM2 asymmetric algorithm is not |
@@ -323,9 +418,12 @@ so this document is not mistaken for a statement of readiness.
 | **Hold-timing margin is thin** | Effective hold margin is 0.110 ns after explicit management. A hold violation cannot be fixed by slowing the clock, so this number must be re-checked whenever the RTL changes; the implementation flow aborts below a 0.050 ns floor |
 
 Two items are blocked on JTAG hardware rather than on design work: persisting
-the PL configuration into the golden `BOOT.BIN`, and BBRAM-backed secure boot.
-Two items are permanently excluded on this board: eFUSE burning (irreversible,
-single board) and PUF black keys (which depend on it).
+the PL configuration into the golden `BOOT.BIN`. BBRAM-backed secure boot is blocked
+by board hardware (no `VCC_BATT` cell). **Only one item is permanently excluded on
+this board: eFUSE burning** (irreversible, single board) — which is why a
+replacement-resistant trust root (`ENC_ONLY` / `RSA_EN`) is out of reach for good.
+**PUF black keys do *not* depend on eFUSE** (this document previously said they did;
+corrected above), and their root cause is now identified.
 
 A FIPS 140-3 / GM/T 0028 style security policy draft, with its own gap list, is
 in [reference/security-policy.md](reference/security-policy.md).
