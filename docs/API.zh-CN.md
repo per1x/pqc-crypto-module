@@ -152,6 +152,7 @@ SDF 中*内部密钥*的概念天然对应 `key_vault`：`SDF_InternalSign` 接�
 | 对称加解密（ECB/CBC/CFB/OFB） | `SDFE_Encrypt(Mode)` / `Decrypt(Mode)` | **分组变换在硬件**（AES-128/256、SM4），链接与异或在 daemon |
 | 对称加解密（CTR） | 同上 | 同上。GM/T 0018 本身没列 CTR，这是超出部分 |
 | 杂凑 | `SDFE_Hash_SM3`（一次一段） | **硬件** SM3 核，对上 GB/T 32905 A.1 |
+| 设备标识 | `SDFE_GetDeviceDNA`（16 字节） | ⚠️ **返回的不是密钥，是一个公开的芯片编号**。用途只有一个：让上层把 keystore 之类的东西绑到这块板（换板打不开 = 防克隆）。有 JTAG 的人能读到同样的值，所以任何"它来自硬件所以安全"的推理都是错的。经 BL31 白名单的只读窗口 `0xFFCA0050-5C` 取，EL1 直读是总线错误 |
 | 密钥管理（对称密钥进片内、只按槽号使唤） | `SDFE_ImportKey` | **硬件** `key_vault`，RTL 上没有读出通路 |
 | 非对称（后量子） | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **硬件**，私钥在片内金库，只交出公钥与槽号 |
 | 公钥加密任意长度数据 | `SDFE_PKEncrypt` / `PKDecrypt` | KEM 走硬件；DEM 的 AES-GCM 走软件（口径见 `sdfe_pkenc.h`） |

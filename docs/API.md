@@ -203,6 +203,7 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 | Symmetric ECB/CBC/CFB/OFB | `SDFE_Encrypt(Mode)` / `Decrypt(Mode)` | **block transform in hardware** (AES-128/256, SM4); chaining and XOR in the daemon |
 | Symmetric CTR | same | same; CTR is beyond what GM/T 0018 lists |
 | Hash | `SDFE_Hash_SM3` (one-shot) | **hardware** SM3 core, matches GB/T 32905 A.1 |
+| Device identity | `SDFE_GetDeviceDNA` (16 bytes) | ⚠️ **This is not a key — it is a public chip serial.** Its one use is letting a caller bind something (a keystore, say) to this board, so a copy taken to another board will not open. Anyone with JTAG reads the same value, so "it came from hardware, therefore it is secret" is wrong. Fetched through the read-only BL31 window at `0xFFCA0050-5C`; reading it directly from EL1 is a bus error |
 | Key management | `SDFE_ImportKey` | **hardware** `key_vault`, no read path in RTL |
 | Post-quantum asymmetric | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **hardware**, private keys stay in the on-chip vault |
 | Public-key encryption of arbitrary data | `SDFE_PKEncrypt` / `PKDecrypt` | KEM in hardware, AES-GCM DEM in software |
