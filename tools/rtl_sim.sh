@@ -17,8 +17,27 @@ command -v iverilog >/dev/null 2>&1 || { echo "SKIP: 没装 iverilog（brew inst
 
 export PATH="$VENV/bin:$PATH"
 cd "$ROOT/hardware/tb/cocotb"
+
+# ---- 每次运行用**自己的**编译目录 --------------------------------------------
+# 原来固定用 ./sim_build，而且每个用例前 `rm -rf sim_build`。单跑没问题，
+# **两个进程同时跑就会互相删对方的产物** —— 表现是随机几个用例报"make 失败"，
+# 而同一个用例单独跑又是过的（2026-08-17 实测：并发起了两个 ctest，
+# test_decompress D=1 挂而 D=4 过、xbar 挂而 xbar NS=7 过，就是这个）。
+#
+# 这种失败最坏的地方是**它看起来像 RTL 回归**，会让人去查根本没坏的 RTL。
+# 所以给每次运行一个带 PID 的目录，顺便把 results.xml 也隔开。
+# ⚠️ **SIM_BUILD 必须用命令行传给 make，不能靠 export。**
+#    Makefile.trng 里写的是 `SIM_BUILD = sim_build_$(TOPLEVEL)$(if $(PARAMS),_p)`
+#    —— make 的规矩是"makefile 里的赋值压过环境变量"，所以 export 会被无视，
+#    而脚本这边又以为自己知道目录在哪，`rm -rf` 删的是别的地方。
+#    结果：上一轮的参数化产物留着，下一个用例编译时报 "Can not find root handle"，
+#    表现为随机几个 TRNG 用例"make 失败"（2026-08-17 我自己制造过这个 bug）。
+#    命令行赋值（make SIM_BUILD=...）才压得过 makefile 里的赋值。
+RUNDIR="$ROOT/build/rtl_sim.$$"
+export COCOTB_RESULTS_FILE="$RUNDIR/results.xml"
+mkdir -p "$RUNDIR"
+trap 'rm -f "$LOG"; rm -rf "$RUNDIR"' EXIT
 LOG="$(mktemp)"
-trap 'rm -f "$LOG"' EXIT
 fail=0
 total=0
 
@@ -27,8 +46,9 @@ run() { # run <MODULE> <TOPLEVEL> [PARAM_D] [标签]
   [ -n "${3:-}" ] && label="$2 D=$3"
   # 必须清干净：残留的 sim_build 会让 make 认为没变化而跳过重新编译，
   # 于是新的 TOPLEVEL 用上一次的编译产物，报"找不到根句柄"
-  rm -rf sim_build results.xml
-  if ! make -s MODULE="$1" TOPLEVEL="$2" PARAM_D="${3:-}" >"$LOG" 2>&1; then
+  local sb="$RUNDIR/sb_$1_$2_${3:-x}"
+  rm -rf "$sb" "$COCOTB_RESULTS_FILE"
+  if ! make -s SIM_BUILD="$sb" MODULE="$1" TOPLEVEL="$2" PARAM_D="${3:-}" >"$LOG" 2>&1; then
     printf '  ✗ %-18s %-24s （make 失败）\n' "$1" "$label"; fail=1; return
   fi
   local line
@@ -48,8 +68,9 @@ run() { # run <MODULE> <TOPLEVEL> [PARAM_D] [标签]
 # 不过滤的话每个顶层都会去跑另外两个的用例，全都报失败。
 run_one() { # run_one <MODULE> <TOPLEVEL> <TESTCASE> [标签]
   local label="${4:-$3}"
-  rm -rf sim_build results.xml
-  if ! COCOTB_TEST_FILTER="$3" make -s MODULE="$1" TOPLEVEL="$2" >"$LOG" 2>&1; then
+  local sb="$RUNDIR/sb_$1_$2_f"
+  rm -rf "$sb" "$COCOTB_RESULTS_FILE"
+  if ! COCOTB_TEST_FILTER="$3" make -s SIM_BUILD="$sb" MODULE="$1" TOPLEVEL="$2" >"$LOG" 2>&1; then
     printf '  ✗ %-18s %-24s （make 失败）\n' "$1" "$label"; fail=1; return
   fi
   local line
@@ -139,8 +160,13 @@ run test_trng_health tb_trng_health
 run_trng() { # run_trng <MODULE> <TOPLEVEL> [PARAMS]
   local label="$2"
   [ -n "${3:-}" ] && label="$2 ${3#-P}"
-  rm -rf "sim_build_$2" "sim_build_$2_p" results.xml
-  if ! make -s -f Makefile.trng MODULE="$1" TOPLEVEL="$2" PARAMS="${3:-}" >"$LOG" 2>&1; then
+  # 与上面同理：编译目录必须是**本次运行独有**的，否则两个并发的
+  # rtl_sim.sh 会互删产物，随机报"make 失败"。
+  # 目录名里必须带上 PARAMS 的指纹：同一个 TOPLEVEL 会被不同参数编好几次，
+  # 共用一个目录就会拿上一次的产物（Makefile.trng 文件头写着这个坑）。
+  local sb="$RUNDIR/sb_trng_$2_$(printf '%s' "${3:-x}" | tr -c 'A-Za-z0-9' '_')"
+  rm -rf "$sb" "$COCOTB_RESULTS_FILE"
+  if ! make -s -f Makefile.trng SIM_BUILD="$sb" MODULE="$1" TOPLEVEL="$2" PARAMS="${3:-}" >"$LOG" 2>&1; then
     printf '  ✗ %-18s %-24s （make 失败）\n' "$1" "$label"; fail=1; return
   fi
   local line
@@ -173,9 +199,6 @@ run_trng test_trng_top_alarm trng_top -Ptrng_top.RCT_CUTOFF=2
 # 打开的构建只用于跑 SP 800-90B 取数 —— 把噪声源的原始比特摆在总线上
 # 等于把熵源内部状态给了读它的人，不是产品形态。
 run_trng test_trng_raw       trng_top -Ptrng_top.RAW_TAP=1
-rm -rf sim_build_trng_*
-
-rm -rf sim_build results.xml
 echo
 if [ "$fail" -eq 0 ]; then
   echo "全部通过（$total 个测试）"
