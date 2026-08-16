@@ -6,6 +6,7 @@
 #include <openssl/rand.h>
 
 #include "sdfe_pkenc.h"
+#include "pqchsm/util.h"
 
 /* ML-KEM 密文长度（与 pset 一一对应，用来切分 blob 与预留缓冲）*/
 static uint32_t ct_len_of(uint32_t pset)
@@ -75,6 +76,14 @@ out:
 	return ok ? 0 : -1;
 }
 
+/* ⚠️ 清零一律走仓库统一的 pqc_secure_zero，不要用裸 memset：写完就不再读的
+ * 缓冲，编译器有权认为那次写没有可观察效果而整个消掉（tests/unit/test_zeroize.c
+ * 专门证过）。共享密钥 ss 正是这种"写完就出作用域"的东西。
+ *
+ * 这个文件此前**从来没被 check_zeroize.py 扫过** —— service/ 不在它的目标表里，
+ * 而这个文件早已被编译进 libpqchsm。漏扫的直接后果就是下面这些早退路径带着
+ * 32 字节共享密钥直接 return。目标表已经补上 service。 */
+
 int SDFE_PKEncrypt(SDFE_HANDLE hSession, uint32_t pset,
                    const uint8_t *ek, uint32_t ek_len,
                    const uint8_t *data, uint32_t data_len,
@@ -86,19 +95,25 @@ int SDFE_PKEncrypt(SDFE_HANDLE hSession, uint32_t pset,
 	int rv;
 
 	if (!ek || !data || !out || !out_len || ctl == 0)
-		return SDR_INARGERR;
+		return SDR_INARGERR;   /* 无需清零：ss 尚未写入（在 encaps 之前） */
 
 	/* KEM：只用公钥，走硬件 */
 	rv = SDFE_Encapsulate_MLKEM(hSession, pset, ek, ek_len,
 	                            ss, &ss_len, ct, &real_ct);
-	if (rv != SDR_OK)
+	if (rv != SDR_OK) {
+		pqc_secure_zero(ss, sizeof ss);   /* 失败也可能写过一部分 */
 		return rv;
-	if (ss_len != 32 || real_ct != ctl)
+	}
+	if (ss_len != 32 || real_ct != ctl) {
+		pqc_secure_zero(ss, sizeof ss);        /* 早退也要清：ss 已经被写进去了 */
 		return SDR_UNKNOWERR;
+	}
 
 	/* DEM：随机 iv + AES-256-GCM（软件），见头文件的诚实口径 */
-	if (RAND_bytes(iv, sizeof iv) != 1)
+	if (pqc_random_bytes(iv, sizeof iv) != 0) {
+		pqc_secure_zero(ss, sizeof ss);
 		return SDR_UNKNOWERR;
+	}
 
 	{
 		uint8_t *p = out;
@@ -106,11 +121,13 @@ int SDFE_PKEncrypt(SDFE_HANDLE hSession, uint32_t pset,
 		wr32(p, ctl);              p += 4;
 		memcpy(p, ct, ctl);        p += ctl;
 		memcpy(p, iv, SDFE_PKENC_IVLEN); p += SDFE_PKENC_IVLEN;
-		if (gcm_seal(ss, iv, data, (int)data_len, p + SDFE_PKENC_TAGLEN, p) != 0)
+		if (gcm_seal(ss, iv, data, (int)data_len, p + SDFE_PKENC_TAGLEN, p) != 0) {
+			pqc_secure_zero(ss, sizeof ss);
 			return SDR_UNKNOWERR;      /* tag 写在 ciphertext 之前 */
+		}
 		*out_len = (uint32_t)(p - out) + SDFE_PKENC_TAGLEN + data_len;
 	}
-	memset(ss, 0, sizeof ss);
+	pqc_secure_zero(ss, sizeof ss);
 	return SDR_OK;
 }
 
@@ -124,13 +141,15 @@ int SDFE_PKDecrypt(SDFE_HANDLE hSession, uint32_t key_handle,
 	uint32_t ciph_len;
 	int rv;
 
+	/* 无需清零：这三条都在 ss 被写入之前 —— 参数校验发生在 decaps 之前，
+	 * 此时 ss 里没有任何密钥材料（它只是一块未初始化的栈）。 */
 	if (!blob || !data || !data_len || blob_len < 8)
-		return SDR_INARGERR;
+		return SDR_INARGERR;   /* 无需清零：ss 尚未写入（在 decaps 之前） */
 	if (rd32(blob) != SDFE_PKENC_MAGIC)
-		return SDR_INARGERR;
+		return SDR_INARGERR;   /* 无需清零：ss 尚未写入（在 decaps 之前） */
 	ctl = rd32(blob + 4);
 	if (blob_len < 8 + ctl + SDFE_PKENC_IVLEN + SDFE_PKENC_TAGLEN)
-		return SDR_INARGERR;
+		return SDR_INARGERR;   /* 无需清零：ss 尚未写入（在 decaps 之前） */
 
 	ct   = blob + 8;
 	iv   = ct + ctl;
@@ -140,17 +159,22 @@ int SDFE_PKDecrypt(SDFE_HANDLE hSession, uint32_t key_handle,
 
 	/* KEM：私钥在硬件片内金库，按句柄 decaps */
 	rv = SDFE_Decapsulate_MLKEM(hSession, key_handle, ct, ctl, ss, &ss_len);
-	if (rv != SDR_OK)
+	if (rv != SDR_OK) {
+		/* 失败也可能已经往 ss 里写过一部分 —— 按"写过就清"处理 */
+		pqc_secure_zero(ss, sizeof ss);
 		return rv;
-	if (ss_len != 32)
+	}
+	if (ss_len != 32) {
+		pqc_secure_zero(ss, sizeof ss);
 		return SDR_UNKNOWERR;
+	}
 
 	/* DEM：GCM 解密 + 认证。tag 不对 → 拒绝，不给明文 */
 	if (gcm_open(ss, iv, ciph, (int)ciph_len, tag, data) != 0) {
-		memset(ss, 0, sizeof ss);
+		pqc_secure_zero(ss, sizeof ss);
 		return SDR_HARDFAIL;   /* 认证失败 */
 	}
 	*data_len = ciph_len;
-	memset(ss, 0, sizeof ss);
+	pqc_secure_zero(ss, sizeof ss);
 	return SDR_OK;
 }

@@ -45,7 +45,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ct_audit import blank_out, is_secret, match_paren  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TARGETS = ["src", "include"]
+# ⚠️ service/ 一度不在扫描范围里，而它**已经被编译进 libpqchsm**
+# （CMakeLists 里的 libsdfe.c 与 sdfe_pkenc.c）。漏扫的直接后果是
+# sdfe_pkenc.c 里四条早退路径带着 32 字节共享密钥直接 return，
+# 而且清零用的是会被 -O2 消掉的裸 memset —— 独立评审点的就是这个盲区。
+# **凡是进了产物的目录都要在这张表里。**
+# ⚠️ service/ 里**进了产物的那两个文件**必须在扫描范围里：libsdfe.c 与
+# sdfe_pkenc.c 都被编译进 libpqchsm（见 CMakeLists）。漏扫的直接后果已经
+# 出现过 —— sdfe_pkenc.c 有四条早退路径带着 32 字节共享密钥直接 return，
+# 清零用的还是会被 -O2 消掉的裸 memset。**凡是进了产物的就要在这张表里。**
+#
+# ⚠️ **两个独立二进制暂未纳入，这是一处已知缺口，不是漏了：**
+#   · service/pqchsm_fpgad.c —— 板上 daemon，89 处待判（多为请求载荷缓冲
+#     pay/out，它们确实过密钥材料，但要一条条判"这条路径上有没有秘密"，
+#     属于单独一轮）；
+#   · service/sdf_demo.c —— 示例程序，只链接 libsdfe，拿不到 pqc_secure_zero。
+# 纳入它们之前，**不要**声称 service 层已被清零审计全覆盖。
+DEFAULT_TARGETS = ["src", "include",
+                   "service/libsdfe.c", "service/sdfe_pkenc.c"]
 
 ANNOTATION_RE = re.compile(r"无需清零\s*[:：]\s*(\S.*?)\s*(?:\*/)?$")
 

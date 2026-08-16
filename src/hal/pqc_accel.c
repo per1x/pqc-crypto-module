@@ -11,6 +11,7 @@
 #include "pqchsm/accel.h"
 #include "pqchsm/util.h"
 
+#include <pthread.h>
 #include <string.h>
 
 static const accel_transport_t *g_tr;
@@ -87,6 +88,24 @@ static void put_u32le(uint8_t *p, uint32_t v)
 
 /* ---- vtable ---- */
 
+/* ============================================================================
+ * 【后端锁：这一层与它下面的 transport 都有共享状态】
+ * ============================================================================
+ * 独立评审 M7：这里原来用**进程级 static 缓冲**装私钥，而且没有锁。两个线程
+ * 同时调进来，一个的 sk 会盖掉另一个的 —— 不报错，只是算错，而且错的那份
+ * 里带着别人的私钥。
+ *
+ * 两件事一起改：
+ *   · 本层的暂存缓冲改成**栈上**（16 KB，进程里不再有常驻的私钥副本）；
+ *   · 加一把后端锁 —— 因为 accel_axi.c 的 g_in/g_out 仍然是共享的 static
+ *     （那是"一套硬件"的固有属性，不是这一层能消掉的）。缓冲改栈上而不加锁
+ *     只解决一半，两个线程照样会在 transport 里交错。
+ *
+ * ⚠️ 锁的粒度是"一次完整的算子调用"（灌数据 → run → 读结果）。粒度再细就会
+ *    在 run 与 read_data 之间放行另一个线程，而那正是要挡的交错。
+ */
+static pthread_mutex_t g_accel_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static pqc_status_t ac_keypair_from_seed(pqc_alg_t alg, const uint8_t *seed, size_t seed_len,
                                          uint8_t *pk, uint8_t *sk)
 {
@@ -135,17 +154,26 @@ static pqc_status_t ac_encaps_derand(pqc_alg_t alg, const uint8_t *pk,
 	if (!info || info->kind != PQC_KIND_KEM || m_len != 32) {
 		return PQC_ERR_BAD_ARG;
 	}
-	static uint8_t buf[ACCEL_BUF_MAX];
+	if (info->pk_len + 32 > ACCEL_BUF_MAX) {
+		return PQC_ERR_BAD_ARG;
+	}
+	uint8_t buf[ACCEL_BUF_MAX];
+	pthread_mutex_lock(&g_accel_lock);
 	memcpy(buf, pk, info->pk_len);
 	memcpy(buf + info->pk_len, m, 32);
 	uint32_t out = 0;
 	pqc_status_t st = run(ACCEL_MODE_KEM_ENCAPS, alg, buf, info->pk_len + 32, &out);
+	/* ⚠️ m（封装随机数）是秘密，它在 buf 里。原来这条路**成功时直接 return**，
+	 * 一次都没清过 —— 失败路径清了、成功路径没清，是最容易漏的那种。 */
+	pqc_secure_zero(buf, sizeof(buf));
 	if (st != PQC_OK) {
+		pthread_mutex_unlock(&g_accel_lock);
 		return st;
 	}
 	const accel_transport_t *t = accel_get_transport();
 	t->read_data(0, ct, info->ct_len);
 	t->read_data((uint32_t)info->ct_len, ss, info->ss_len);
+	pthread_mutex_unlock(&g_accel_lock);
 	return PQC_OK;
 }
 
@@ -166,16 +194,22 @@ static pqc_status_t ac_decaps(pqc_alg_t alg, const uint8_t *sk, const uint8_t *c
 	if (!info || info->kind != PQC_KIND_KEM) {
 		return PQC_ERR_BAD_ARG;
 	}
-	static uint8_t buf[ACCEL_BUF_MAX];
+	if (info->sk_len + info->ct_len > ACCEL_BUF_MAX) {
+		return PQC_ERR_BAD_ARG;
+	}
+	uint8_t buf[ACCEL_BUF_MAX];
+	pthread_mutex_lock(&g_accel_lock);
 	memcpy(buf, sk, info->sk_len);
 	memcpy(buf + info->sk_len, ct, info->ct_len);
 	uint32_t out = 0;
 	pqc_status_t st = run(ACCEL_MODE_KEM_DECAPS, alg, buf, info->sk_len + info->ct_len, &out);
-	pqc_secure_zero(buf, info->sk_len);
+	pqc_secure_zero(buf, sizeof(buf));
 	if (st != PQC_OK) {
+		pthread_mutex_unlock(&g_accel_lock);
 		return st;
 	}
 	accel_get_transport()->read_data(0, ss, info->ss_len);
+	pthread_mutex_unlock(&g_accel_lock);
 	return PQC_OK;
 }
 
@@ -192,7 +226,8 @@ static pqc_status_t ac_sign(pqc_alg_t alg, const uint8_t *sk,
 	if (need > ACCEL_BUF_MAX) {
 		return PQC_ERR_BAD_ARG;
 	}
-	static uint8_t buf[ACCEL_BUF_MAX];
+	uint8_t buf[ACCEL_BUF_MAX];
+	pthread_mutex_lock(&g_accel_lock);
 	uint8_t *p = buf;
 	memcpy(p, sk, info->sk_len);
 	p += info->sk_len;
@@ -214,15 +249,18 @@ static pqc_status_t ac_sign(pqc_alg_t alg, const uint8_t *sk,
 	}
 	uint32_t out = 0;
 	pqc_status_t st = run(ACCEL_MODE_SIG_SIGN, alg, buf, need, &out);
-	pqc_secure_zero(buf, info->sk_len);
+	pqc_secure_zero(buf, sizeof(buf));
 	if (st != PQC_OK) {
+		pthread_mutex_unlock(&g_accel_lock);
 		return st;
 	}
 	if (!sig_len || out > *sig_len) {
+		pthread_mutex_unlock(&g_accel_lock);
 		return PQC_ERR_BAD_ARG;
 	}
 	accel_get_transport()->read_data(0, sig, out);
 	*sig_len = out;
+	pthread_mutex_unlock(&g_accel_lock);
 	return PQC_OK;
 }
 
@@ -239,7 +277,8 @@ static pqc_status_t ac_verify(pqc_alg_t alg, const uint8_t *pk,
 	if (need > ACCEL_BUF_MAX) {
 		return PQC_ERR_BAD_ARG;
 	}
-	static uint8_t buf[ACCEL_BUF_MAX];
+	uint8_t buf[ACCEL_BUF_MAX];
+	pthread_mutex_lock(&g_accel_lock);
 	uint8_t *p = buf;
 	memcpy(p, pk, info->pk_len);
 	p += info->pk_len;
@@ -258,6 +297,10 @@ static pqc_status_t ac_verify(pqc_alg_t alg, const uint8_t *pk,
 	}
 	uint32_t out = 0;
 	pqc_status_t st = run(ACCEL_MODE_SIG_VERIFY, alg, buf, need, &out);
+	/* 验签的输入里没有私钥，但仍然清一遍：这块栈会被下一次调用复用，
+	 * 而下一次可能是 sign（那里有 sk）。清零成本可以忽略。 */
+	pqc_secure_zero(buf, sizeof(buf));
+	pthread_mutex_unlock(&g_accel_lock);
 	if (st != PQC_OK) {
 		return st;
 	}

@@ -125,7 +125,7 @@ int pqc_wrap(const uint8_t *kek, size_t kek_len,
 {
 	uint8_t nonce[PQC_WRAP_NONCE_LEN];
 	/* SP 800-38D RBG 构造：每次现取，无状态 */
-	if (RAND_bytes(nonce, PQC_WRAP_NONCE_LEN) != 1) {
+	if (pqc_random_bytes(nonce, PQC_WRAP_NONCE_LEN) != 0) {
 		return -1;
 	}
 	int rc = pqc_wrap_with_nonce(kek, kek_len, aad, aad_len, pt, pt_len, nonce,

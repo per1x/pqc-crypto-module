@@ -111,7 +111,7 @@ int shamir_split(const uint8_t *secret, size_t secret_len,
 	}
 	/* 1..m-1 次系数取随机；随机数拿不到就整体失败，绝不退化成弱多项式 */
 	for (uint8_t d = 1; d < m; d++) {
-		if (RAND_bytes(coef[d], (int)secret_len) != 1) {
+		if (pqc_random_bytes(coef[d], secret_len) != 0) {
 			goto fail;
 		}
 	}

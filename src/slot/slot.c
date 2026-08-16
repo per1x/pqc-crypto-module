@@ -428,8 +428,8 @@ hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t id,
 		goto out;
 	}
 	/* init_token 时给这个槽位生成一把全新的 PIN 密钥 */
-	if (RAND_bytes(s->pin_key, sizeof(s->pin_key)) != 1 ||
-	    RAND_bytes(s->so_salt, PIN_SALT_LEN) != 1 ||
+	if (pqc_random_bytes(s->pin_key, sizeof(s->pin_key)) != 0 ||
+	    pqc_random_bytes(s->so_salt, PIN_SALT_LEN) != 0 ||
 	    pin_verifier(s->pin_key, s->meta.slot_id, HSM_ROLE_SO, s->so_salt,
 	                 so_pin, s->so_verifier) != 0) {
 		st = HSM_ERR_CRYPTO;
@@ -472,7 +472,7 @@ hsm_status_t hsm_slot_set_user_pin(hsm_token_t *tok, hsm_session_t sess, const c
 		st = HSM_ERR_BAD_STATE;
 		goto out;
 	}
-	if (RAND_bytes(s->user_salt, PIN_SALT_LEN) != 1 ||
+	if (pqc_random_bytes(s->user_salt, PIN_SALT_LEN) != 0 ||
 	    pin_verifier(s->pin_key, s->meta.slot_id, HSM_ROLE_USER, s->user_salt, user_pin,
 	                 s->user_verifier) != 0) {
 		st = HSM_ERR_CRYPTO;
@@ -720,7 +720,7 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 			return HSM_ERR_BAD_ARG;
 		}
 		memcpy(local_seed, seed, seed_len);
-	} else if (RAND_bytes(local_seed, (int)local_seed_len) != 1) {
+	} else if (pqc_random_bytes(local_seed, local_seed_len) != 0) {
 		pqc_secure_zero(local_seed, sizeof(local_seed));
 		pqc_secure_free(pk, info->pk_len);
 		pqc_secure_free(sk, info->sk_len);

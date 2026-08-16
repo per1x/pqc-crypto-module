@@ -156,8 +156,35 @@ if {$characterize} {
 # 这条挡的是"照着错的那份文档写驱动"：开发位流与送检位流只差一个参数，
 # 名字一样就必然有人拿错。所以直接查网表里防火墙的 SECURE_ONLY 究竟是几，
 # 与 bitname 对不上就中止 —— 独立评审的 H1 正是这类错误的后果。
-set fw_ns [get_cells -quiet -hier -filter {NAME =~ "*u_mlkem*u_fw*"}]
-puts "断言：位流形态 = [expr {$devopen ? {开发（SECURE_ONLY=0）} : {送检（SECURE_ONLY=1）}}]，产物 $bitname.bit"
+#
+# ⚠️ **这条断言一度是空的**：它 `get_cells` 取了 `fw_ns` 之后**从不使用**，
+#    后面只有一句 puts —— 没有比较、没有 exit。也就是说这段注释宣称的护栏
+#    从来没有生效过，而一条"自称会拦住你"的检查比没有检查更危险：
+#    看见它的人会以为形态搞错了会被挡下来。（独立评审复核时抓到的。）
+#
+# 现在真的查：把功能从机的 SECURE_ONLY **从综合参数里读出来**，与 bitname
+# 蕴含的形态比对，对不上就中止，不出 bitstream。
+set want_secure [expr {$devopen ? 0 : 1}]
+set sec_cells [get_cells -quiet -hier -filter \
+                   {REF_NAME =~ "axi4lite_firewall*" && NAME =~ "*u_mlkem*"}]
+set got_secure -1
+foreach c $sec_cells {
+    set v [get_property -quiet SECURE_ONLY $c]
+    if {$v ne ""} { set got_secure $v ; break }
+}
+if {$got_secure == -1} {
+    # 查不到就**不放行**：让"检查没跑成"和"检查没通过"一样吵，
+    # 而不是安静地变成"检查通过"。
+    puts "错误：网表里找不到 mlkem 的防火墙实例，无法核对 SECURE_ONLY —— 中止"
+    puts "      （查到的候选：[llength $sec_cells] 个）"
+    exit 1
+}
+if {$got_secure != $want_secure} {
+    puts "错误：位流形态与产物名不符 —— SECURE_ONLY=$got_secure，而 $bitname 应当是 $want_secure"
+    puts "      开发位流(SECURE_ONLY=0)必须叫 zu3eg_hsm_dev，送检位流(=1)叫 zu3eg_hsm"
+    exit 1
+}
+puts "断言通过：位流形态 = [expr {$devopen ? {开发（SECURE_ONLY=0）} : {送检（SECURE_ONLY=1）}}]（网表实测 $got_secure），产物 $bitname.bit"
 
 # ---- 断言：风扇管脚必须真的落在 AA11 -----------------------------------------
 # 风扇错了不会崩，只会**安静地让芯片变热** —— 没有任何运行时症状会告诉你

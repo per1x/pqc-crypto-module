@@ -83,7 +83,8 @@ hsm_status_t hsm_backup_export(hsm_token_t *tok, hsm_session_t sess, const char 
 		goto out;
 	}
 	st = HSM_ERR_CRYPTO;
-	if (RAND_bytes(rmk, sizeof(rmk)) != 1 || RAND_bytes(salt, sizeof(salt)) != 1) {
+	if (pqc_random_bytes(rmk, sizeof(rmk)) != 0 ||
+	    pqc_random_bytes(salt, sizeof(salt)) != 0) {
 		goto out;
 	}
 	if (derive_from_rmk(rmk, salt, "pqc-hsm/backup-bek", bek, sizeof(bek)) != 0 ||

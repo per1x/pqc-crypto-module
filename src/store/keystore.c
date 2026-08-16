@@ -107,7 +107,7 @@ static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
 	size_t blob_cap = hsm_slot_blob_max();
 
 	uint8_t salt[KS_SALT_LEN], kek[PQC_KEK_LEN], fkey[32];
-	if (RAND_bytes(salt, sizeof(salt)) != 1) {
+	if (pqc_random_bytes(salt, sizeof(salt)) != 0) {
 		return HSM_ERR_CRYPTO;
 	}
 	/* 每次落盘换一把新 KEK，等价于一次 KEK 轮换 */
