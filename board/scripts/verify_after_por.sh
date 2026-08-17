@@ -36,7 +36,7 @@ echo "--- 2. 用 APU 读一串跨越交织条带的地址 ---"
 i=0
 while [ $i -lt 24 ]; do
     a=$((0x60000000 + i * 0x100000))
-    printf "  0x%08x = %s\n" "$a" "$(devmem $a 32 2>&1)"
+    printf "  0x%08x = %s\n" "$a" "$(/sbin/devmem $a 32 2>&1)"
     i=$((i + 1))
 done
 echo

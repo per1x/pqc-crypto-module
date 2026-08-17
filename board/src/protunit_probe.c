@@ -38,6 +38,21 @@ static int rd(uint32_t a, uint32_t *v)
 	return 0;
 }
 
+/* ZynqMP 主控 ID → 名字。表抄自 PMUFW 自己的 LUT：
+ * Vitis 2020.1 `lib/sw_apps/zynqmp_pmufw/src/xpfw_xpu.c`。
+ * ⚠️ **`0x80-0xBF` 全是 APU。** 上一轮把 `ERR_MASTER=0xa0/0xac` 读成
+ * "非安全 DMA 主控"，因此得出"XMPU 挡住了流氓 DMA"这个错误结论 ——
+ * 那两个值其实就是 APU 自己。有了这张表就不会再读错。 */
+static const char *mid_name(uint32_t mid)
+{
+	mid &= 0x3FFu;
+	if (mid <= 0x0Fu)                 return "RPU0";
+	if (mid >= 0x10u && mid <= 0x1Fu) return "RPU1";
+	if (mid == 0x62u)                 return "DAP";
+	if (mid >= 0x80u && mid <= 0xBFu) return "APU";
+	return "?";
+}
+
 static void show(const char *nm, uint32_t a)
 {
 	uint32_t v;
@@ -75,23 +90,32 @@ int main(void)
 
 	/* XMPU_DDR0..5：每个实例 16 个区域，区域寄存器从 +0x100 起，每区 0x10。
 	 * 只把**使能了的**区域打出来 —— 16×6 = 96 个区域全打会淹掉真正的信息。 */
-	/* 每个实例的状态四件套。⚠️ 偏移别记错（我记错过一次，把 +0x04 当成
-	 * POISON 打了出来，其实那是 ERR_STATUS1 —— 越权访问的地址）：
-	 *   +0x00 CTRL   +0x04 ERR_STATUS1(addr)   +0x08 ERR_STATUS2(master)
-	 *   +0x0C POISON +0x10 LOCK */
+	/* 每个实例的状态。⚠️ 偏移**两次**记错过，第二次错得更要命，所以这里把
+	 * 权威出处写死：`xddr_xmpu0_cfg.h`（Vitis 2020.1 standalone BSP）
+	 *   +0x00 CTRL   +0x04 ERR_STS1(addr)  +0x08 ERR_STS2(master)
+	 *   +0x0C POISON +0x10 **ISR**         +0x14 IMR  +0x18 IEN  +0x1C IDS
+	 *   +0x20 **LOCK**
+	 * 第一次：把 +0x04 当成 POISON（其实是越权地址）。
+	 * 第二次（2026-08-17 第二会话查出）：把 **+0x10 当成 LOCK 打了出来，
+	 * 其实那是 ISR** —— 于是历史日志里那一列 "LOCK=0x00000008" 根本不是锁，
+	 * 而是 **ISR.SECURTYVIO（bit3）**，也就是"发生过安全违规"。
+	 * 这个标签错误直接导致上一轮把结论读反了，务必别再改回去。
+	 *
+	 * ISR 位：[0] INV_APB  [1] RDPERMVIO  [2] WRPERMVIO  [3] SECURTYVIO */
 	printf("\n[XMPU_DDR0..5 状态]\n");
 	for (i = 0; i < 6; i++) {
 		uint32_t base = 0xFD000000u + (uint32_t)i * 0x10000u;
-		uint32_t c, e1, e2, po, lk;
+		uint32_t c, e1, e2, po, isr, lk;
 
 		if (rd(base + 0x00, &c) || rd(base + 0x04, &e1) ||
 		    rd(base + 0x08, &e2) || rd(base + 0x0C, &po) ||
-		    rd(base + 0x10, &lk)) {
+		    rd(base + 0x10, &isr) || rd(base + 0x20, &lk)) {
 			printf("  DDR%d：被 EL3 拒绝\n", i);
 			continue;
 		}
-		printf("  DDR%d  CTRL=%08x  ERR_ADDR=%08x  ERR_MASTER=%08x  POISON=%08x  LOCK=%08x\n",
-		       i, c, e1, e2, po, lk);
+		printf("  DDR%d  CTRL=%08x  ERR_ADDR=%08x  ERR_MASTER=%08x(%s)  POISON=%08x  ISR=%08x%s  LOCK=%08x\n",
+		       i, c, e1, e2, mid_name(e2), po, isr,
+		       (isr & 0x8u) ? "[SECURTYVIO]" : "", lk);
 	}
 
 	printf("\n[XMPU_DDR0..5 —— 只列使能的区域]\n");
