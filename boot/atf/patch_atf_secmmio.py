@@ -365,15 +365,44 @@ def main():
     #                                                       本来就要非安全侧读写
     # START/END 字段是 addr[39:12]（28 位）。CTRL 的 ALIGNCFG=1 要求 1 MB 对齐，
     # 0x60000/0x6FFFF 的低 8 位正好是 0x00/0xFF，满足。
+    #
+    # 【2026-08-17 第二会话追加：开毒化。没有这一步，前面全部配置只是"检测"】
+    #
+    # XAPP1320 v3.0 第 10 页原文：
+    #   "the XMPU asserts AxUser[10] but the transaction **is passed to the memory
+    #    controller** … **The transaction is gated by the end point, not the XMPU
+    #    itself.**"
+    # 也就是说 XMPU 从不拦事务，它只打毒标记，掐掉动作由终点（DDR 控制器）做。
+    # 在开毒化之前，上面那份区域配置**一个访问都没挡住** —— 板上实测：
+    # DDR1/DDR2（XAPP1320 图 3 里的两个 CCI AXI 端口，也就是 APU 到 DDR 的路）
+    # 确实锁存了 APU 的 SECURTYVIO，而 `devmem 0x60000000` 照样读回 OP-TEE 的代码。
+    #
+    # POISON 寄存器（同一份 xddr_xmpu0_cfg.h）：[19:0] BASE，[31:20] ATTRIB。
+    # CTRL 的 bit2 是 POISONCFG。两者的分工在公开资料里没有逐位写死，
+    # 所以这里**只动 ATTRIB，不动 CTRL**，理由有二：
+    #   ① CTRL 现在是 0xb（DEFRDALWD|DEFWRALWD|ALIGNCFG）。DEFRD/DEFWR 必须保留 ——
+    #      它们管的是"不匹配任何区域的访问"，清掉等于把整个 DDR 都拒了，板子起不来。
+    #   ② Xilinx QEMU 模型里 POISONCFG=1 走的是**按地址**重定向（把违规访问打到
+    #      POISON.BASE）。而 BASE 现在是 0 —— 一次违规的**写**就会打到物理地址 0，
+    #      那是往低端内存里乱写。在没把 BASE 指到安全去处之前，绝不能置 POISONCFG。
+    # 于是这一版走"按属性"（XAPP1320 明确推荐的那种）：CTRL 保持 POISONCFG=0，
+    # 只把 ATTRIB 置上。
+    #
+    # ⚠️ 这一版是**上板实验**，不是已验证的加固。判据只有一个：改完之后
+    #    `devmem 0x60000000 32` 还能不能读回 OP-TEE 的那条指令（0xAA0003F3）。
+    #    读不回来才算成，读得回来就说明按属性这条也不 gate，如实记录、别当成已加固。
     xmpu = ('\t' + BEG + '\n'
             '\t{\n'
             '\t\tunsigned int i;\n'
             '\t\tfor (i = 0U; i < 6U; i++) {\n'
-            '\t\t\tuintptr_t b = 0xFD000000U + (i * 0x10000U) + 0x100U + (15U * 0x10U);\n'
+            '\t\t\tuintptr_t inst = 0xFD000000U + (i * 0x10000U);\n'
+            '\t\t\tuintptr_t b = inst + 0x100U + (15U * 0x10U);\n'
             '\t\t\tmmio_write_32(b + 0x0U, 0x00060000U); /* STRT  = 0x60000000 >> 12 */\n'
             '\t\t\tmmio_write_32(b + 0x4U, 0x0006FFFFU); /* END   = 0x6FFFFFFF >> 12 */\n'
             '\t\t\tmmio_write_32(b + 0x8U, 0x00000000U); /* MSTR: 掩码 0 = 匹配所有主控 */\n'
             '\t\t\tmmio_write_32(b + 0xCU, 0x00000017U); /* EN|RDALWD|WRALWD|NSCHKTYPE，REGNNS=0 */\n'
+            '\t\t\t/* POISON: ATTRIB(bit20)=1 → 按属性毒化；BASE 保持 0（不做地址重定向）*/\n'
+            '\t\t\tmmio_write_32(inst + 0x0CU, 0x00100000U);\n'
             '\t\t}\n'
             '\t}\n'
             '\t' + END + '\n')
