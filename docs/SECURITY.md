@@ -2,6 +2,10 @@
 
 # Security model
 
+> **For the delivered conclusions see [FINAL-REPORT-2026-08-17.zh-CN.md](FINAL-REPORT-2026-08-17.zh-CN.md).**
+> Where this document conflicts with it, the final report wins — especially the
+> encrypted-boot and XMPU sections.
+
 What the boundary is, what has been demonstrated on the device, and — at equal
 length — what has not. To report a vulnerability, see [../SECURITY.md](../SECURITY.md).
 

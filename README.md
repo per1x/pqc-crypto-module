@@ -172,10 +172,13 @@ Accurate statements about what this does **not** do.
   reads and writes, with the operation sequence assembled in the normal world.
   The normal world cannot *read* key material; it can still load and use key
   vault slots. Closing that needs an operation-granularity SiP.
-- **The key derivation root is a stub.** `src/crypto/kdr.c` holds a fixed
-  constant. A real device takes it from eFUSE, BBRAM or a PUF; on this board
-  eFUSE is irreversible with a single board available, and BBRAM needs JTAG.
-  Device binding is therefore not real.
+- **The key derivation root defaults to a stub, but device binding now exists.**
+  `src/crypto/kdr.c` holds a fixed constant by default; `PQCHSM_KDR=device-dna`
+  switches to a root bound to this chip's Device DNA, exercised on real hardware
+  both on-board and from a remote host. It is off by default because changing the
+  root makes existing keystores unopenable, with symptoms identical to tampering.
+  ⚠️ **DNA is not a secret** (JTAG can read it) — it buys anti-cloning, not
+  confidentiality.
 - **No SM2 core.** SM4 and SM3 are present; the SM2 asymmetric algorithm is not.
 - **This is a security prototype, not a fast one.** Throughput figures include
   per-byte software AXI traffic and are published for the 1 : 1.5 : 2.1 ratio
@@ -183,14 +186,28 @@ Accurate statements about what this does **not** do.
 - **Power and EM side channels are out of scope, deliberately.** Constant-time
   work covers timing only. Masking cannot be validated without a side-channel
   bench, and shipping unvalidated masking is worse than shipping none.
-- **ML-DSA is operators only.** Thirteen modules verified against the reference
-  model, not chained into whole KeyGen/Sign/Verify cores.
-- **Two items need JTAG**: persisting the PL configuration into the golden
-  `BOOT.BIN`, and BBRAM-backed secure boot.
-- **PS-side XMPU/XPPU does not apply.** UG1085 settles it: no PS protection unit
-  covers the `0x8000_0000` PL window. The firewall in the PL is the only
+- ~~**ML-DSA is operators only.**~~ **Now chained into whole cores.** ML-DSA
+  44/65/87 KeyGen/Sign/Verify are in the bitstream (slot 6) and match ACVP vectors
+  byte-for-byte on real silicon.
+- **There is no encrypted boot, and the conclusion is definitive.** See the
+  [final status report](docs/FINAL-REPORT-2026-08-17.zh-CN.md): BBRAM is blocked by
+  board hardware (no cell on `VCC_BATT`); the PUF black key was tested the *valid*
+  way (cold boot after POR) and the BootROM rejects it **before ever touching the
+  PUF** — JTAG reads of the CSU show `PUF_CMD=0`, `KEY_RDY=0`, and OCM never
+  loaded. **RSA authenticated boot does work** (zero eFUSE, verified on board), but
+  it is not a trust root: `bh_auth_enable` is defined as skipping the eFUSE PPK
+  hash check. **A replacement-resistant trust root requires burning eFUSE, which is
+  this project's permanent red line.**
+- **PS-side XMPU/XPPU cannot reach the PL window.** UG1085 settles it: no PS
+  protection unit covers `0x8000_0000`. The firewall in the PL is the only
   enforcement point on this path — which is why the address decode is one-to-one
   with no mirrors.
+- **DDR-side XMPU has a separate, now-understood boundary.** The XMPU **does not
+  gate transactions**; it poisons them and the endpoint gates (XAPP1320 v3.0 p.10).
+  With `POISON.ATTRIB` enabled, a normal-world read of OP-TEE secure memory **does
+  become a bus error** (verified on board, zero functional impact) — but **making
+  that survive a reboot did not work**: BL31, the PMU and the EL3 SiP are all closed
+  as write paths. Today it is a **manual JTAG step**, not the default form.
 
 ## Repository layout
 
