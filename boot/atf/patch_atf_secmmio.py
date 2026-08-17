@@ -85,6 +85,7 @@ axi4lite_xbar 文件头里写的那个坑 —— 改一处忘另一处，而且�
 （见 board/kmod/secmmio.c）。兜底是 plharness 的 480 秒看门狗，
 以及 multiboot 由 POR 清零 —— 断一次电就回黄金镜像。
 """
+import os
 import re
 import sys
 
@@ -404,7 +405,21 @@ def main():
             '\t\t\t/* POISON: ATTRIB(bit20)=1 → 按属性毒化；BASE 保持 0（不做地址重定向）*/\n'
             '\t\t\tmmio_write_32(inst + 0x0CU, 0x00100000U);\n'
             '\t\t}\n'
-            '\t}\n'
+            + (
+            '\t\t/* ---- 临时诊断（PQCHSM_XMPU_TRACE=1 时才编入）----------------\n'
+            '\t\t * 板上现象：区域寄存器写得进（SECURTYVIO 会锁存），但 POISON\n'
+            '\t\t * 回读恒 0。这里在 EL3 里紧挨着写完就回读，把两种可能切开：\n'
+            '\t\t *   打印出 0x00100000 → EL3 写成功了，是**后面**有人清掉的\n'
+            '\t\t *   打印出 0x00000000 → 写在 EL3 就没进去\n'
+            '\t\t * 输出走 BL31 的控制台（串口）。诊断完就把这段去掉。 */\n'
+            '\t\tfor (i = 0U; i < 6U; i++) {\n'
+            '\t\t\tuintptr_t inst = 0xFD000000U + (i * 0x10000U);\n'
+            '\t\t\tNOTICE("pqchsm XMPU DDR%u: POISON=0x%08x CFG=0x%08x CTRL=0x%08x\\n",\n'
+            '\t\t\t       i, mmio_read_32(inst + 0x0CU),\n'
+            '\t\t\t       mmio_read_32(inst + 0x100U + (15U * 0x10U) + 0x0CU),\n'
+            '\t\t\t       mmio_read_32(inst));\n'
+            '\t\t}\n' if os.environ.get('PQCHSM_XMPU_TRACE') == '1' else '')
+            + '\t}\n'
             '\t' + END + '\n')
     s2 = open(SETUP, encoding='utf-8').read()
     xanchor = '\tsetup_page_tables(bl_regions, plat_arm_get_mmap());\n\tenable_mmu_el3(0);\n'
