@@ -143,15 +143,23 @@ The daemon needs `/dev/secmmio`, which is provided by the kernel module in
 ### One-shot script (**start here**)
 
 ```bash
-./tools/demo_remote.sh            # full nine-section demo
-./tools/demo_remote.sh --smoke    # minimal smoke, key lines only
-./tools/demo_remote.sh --status   # board status only, no demo
+./tools/demo_remote.sh --fetch-token   # once: cache the token locally
+./tools/demo_remote.sh                 # then purely local: build + TCP call, no SSH
+./tools/demo_remote.sh --smoke         # minimal smoke, key lines only
+./tools/demo_remote.sh --status        # just check the device answers
 ```
 
-It does everything below: reachability and `READY=yes` checks, builds the client on
-demand, fetches the one-time token, and makes the remote call. **Every failure prints
-an actionable next step** rather than just a non-zero exit code. Override with
-`BOARD=… PORT=… SSH_KEY=… ./tools/demo_remote.sh`.
+**No cryptographic operation goes through SSH.** The client is a native local binary
+that opens TCP to port 9797 on the board. `--fetch-token` is the only action that uses
+SSH, and only to `cat` a text file; once the token is cached in
+`~/.config/pqchsm/token` (0600) a board shell is never needed again. If you already
+have the token, skip even that: `HSM_TOKEN=<token> ./tools/demo_remote.sh`.
+
+⚠️ In a real deployment the token should be distributed out of band, not fetched over
+SSH each time. `--fetch-token` is a convenience for people who already have a board shell.
+
+Overrides: `BOARD=… PORT=… HSM_TOKEN=… HSM_TOKEN_FILE=… SSH_KEY=…`. **Every failure
+prints an actionable next step** rather than just a non-zero exit code.
 
 ### Doing the same by hand (read this to see what each step does)
 

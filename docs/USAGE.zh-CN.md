@@ -136,14 +136,22 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 ### 一键脚本（**最省事，先用这个**）
 
 ```bash
-./tools/demo_remote.sh            # 完整九节演示
-./tools/demo_remote.sh --smoke    # 最小冒烟，只打关键结论
-./tools/demo_remote.sh --status   # 只看板子状态，不跑演示
+./tools/demo_remote.sh --fetch-token   # 只需做一次：把口令存到本地
+./tools/demo_remote.sh                 # 之后纯本地：编译 + TCP 调用，零 SSH
+./tools/demo_remote.sh --smoke         # 最小冒烟，只打关键结论
+./tools/demo_remote.sh --status        # 只连一下看设备在不在
 ```
 
-它把下面手工那套全包了：检查可达性与 `READY=yes`、按需编译客户端、取一次性口令、
-远程调用。**每一步失败都会给出可执行的下一步**，而不是只回一个非零退出码。
-地址等可用环境变量覆盖：`BOARD=… PORT=… SSH_KEY=… ./tools/demo_remote.sh`。
+**密码运算一步都不经过 SSH。** 客户端是本机原生二进制，自己开 TCP 到板子的
+9797 口。`--fetch-token` 是唯一会用 SSH 的动作，且只用来 `cat` 一个文本文件；
+口令存到 `~/.config/pqchsm/token`（0600）之后就不再需要板子的 shell。
+手上已经有口令的话连这一步都免了：`HSM_TOKEN=<口令> ./tools/demo_remote.sh`。
+
+⚠️ 真实部署里口令应当**带外分发**，而不是每次 ssh 去 cat。`--fetch-token`
+只是给手上就有板子 shell 的人省事。
+
+覆盖用环境变量：`BOARD=… PORT=… HSM_TOKEN=… HSM_TOKEN_FILE=… SSH_KEY=…`。
+**每一步失败都会给出可执行的下一步**，而不是只回一个非零退出码。
 
 ### 手工做同样的事（想知道每一步在干什么就看这里）
 
