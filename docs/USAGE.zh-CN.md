@@ -133,7 +133,19 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 ./service/sdf_demo
 ```
 
-### 从 Mac / 任意主机远程（**推荐,不用登板子**）
+### 一键脚本（**最省事，先用这个**）
+
+```bash
+./tools/demo_remote.sh            # 完整九节演示
+./tools/demo_remote.sh --smoke    # 最小冒烟，只打关键结论
+./tools/demo_remote.sh --status   # 只看板子状态，不跑演示
+```
+
+它把下面手工那套全包了：检查可达性与 `READY=yes`、按需编译客户端、取一次性口令、
+远程调用。**每一步失败都会给出可执行的下一步**，而不是只回一个非零退出码。
+地址等可用环境变量覆盖：`BOARD=… PORT=… SSH_KEY=… ./tools/demo_remote.sh`。
+
+### 手工做同样的事（想知道每一步在干什么就看这里）
 
 `sdf_demo` 的本机版和远程版是**同一个程序**，只有开设备那一行不同。
 它只链接 `libsdfe`（纯 socket，**不依赖 OpenSSL / liboqs**），所以两个文件就能编：

@@ -140,7 +140,20 @@ The daemon needs `/dev/secmmio`, which is provided by the kernel module in
 ./service/sdf_demo
 ```
 
-### Remotely, from a Mac or any host (**recommended — no need to log into the board**)
+### One-shot script (**start here**)
+
+```bash
+./tools/demo_remote.sh            # full nine-section demo
+./tools/demo_remote.sh --smoke    # minimal smoke, key lines only
+./tools/demo_remote.sh --status   # board status only, no demo
+```
+
+It does everything below: reachability and `READY=yes` checks, builds the client on
+demand, fetches the one-time token, and makes the remote call. **Every failure prints
+an actionable next step** rather than just a non-zero exit code. Override with
+`BOARD=… PORT=… SSH_KEY=… ./tools/demo_remote.sh`.
+
+### Doing the same by hand (read this to see what each step does)
 
 The local and remote forms are the **same program**; only the device-open line
 differs. It links `libsdfe` only (pure sockets, **no OpenSSL, no liboqs**), so two
