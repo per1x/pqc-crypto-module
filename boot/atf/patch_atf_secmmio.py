@@ -96,6 +96,10 @@ PLATDEF = ATF + '/plat/xilinx/zynqmp/include/platform_def.h'
 
 BEG = '/* >>> pqchsm secmmio BEGIN */'
 END = '/* <<< pqchsm secmmio END */'
+# 交接前那次 POISON 写用**另一个**标记：它落在别的函数里，与上面那段不连续，
+# 用同一个标记的话 strip_marked 会把两段之间的整块代码一起删掉。
+BEG2 = '/* >>> pqchsm xmpulate BEGIN */'
+END2 = '/* <<< pqchsm xmpulate END */'
 
 DEFS = BEG + '''
 /*
@@ -290,6 +294,7 @@ def main():
     s = open(SETUP, encoding='utf-8').read()
     s = strip_marked(s, 'protread')
     s = strip_marked(s, 'secmmio')
+    s = strip_marked(s, 'xmpulate')
     keep = s.count('0x80000000U, 0x200000U')
     print('bl_regions：PL 窗口映射保留 %d 处（必须为 1）' % keep)
     if keep != 1:
@@ -392,6 +397,21 @@ def main():
     # ⚠️ 这一版是**上板实验**，不是已验证的加固。判据只有一个：改完之后
     #    `devmem 0x60000000 32` 还能不能读回 OP-TEE 的那条指令（0xAA0003F3）。
     #    读不回来才算成，读得回来就说明按属性这条也不 gate，如实记录、别当成已加固。
+    # ⚠️ **诊断不要走串口。** 上一版这里是一串 NOTICE()，指望在串口上看到回读值。
+    #    那次一行都没看到 —— 不是因为没写，而是因为 (a) 串口 CP2102N 又进了那个
+    #    "枚举正常但 tcsetattr 一律 EINVAL" 的坏状态，(b) 更要命的是**打串口本身
+    #    就是这条路失败的原因**（见 build-bl31-secmmio.sh 里 LOG_LEVEL 的长注释：
+    #    FSBL 武装了 100 秒看门狗，VERBOSE 日志把启动拖过了那条线）。
+    #    用串口去诊断一个"因为串口太慢而失败"的启动，是自指的。
+    #
+    #    所以改成把回读值写进**被禁用区域 R14 的寄存器**当草稿纸：
+    #      R14_START(+0x1E0) / R14_END(+0x1E4) / R14_MASTER(+0x1E8)
+    #    R14_CONFIG 保持 0（EN=0），所以这三个字**不参与任何判定**，纯粹是
+    #    六个实例各三个 32 位的非易失草稿（跨热重启不变，POR 才清）。
+    #    而它们落在 0xFD00_0000 段里 —— 那一段本来就在 SiP 的**只读**白名单上，
+    #    于是普通世界的 protunit_probe / devmem 经 /dev/secmmio 就能读出来，
+    #    **既不用串口，也不用 JTAG**。
+    trace = os.environ.get('PQCHSM_XMPU_TRACE') == '1'
     xmpu = ('\t' + BEG + '\n'
             '\t{\n'
             '\t\tunsigned int i;\n'
@@ -404,22 +424,12 @@ def main():
             '\t\t\tmmio_write_32(b + 0xCU, 0x00000017U); /* EN|RDALWD|WRALWD|NSCHKTYPE，REGNNS=0 */\n'
             '\t\t\t/* POISON: ATTRIB(bit20)=1 → 按属性毒化；BASE 保持 0（不做地址重定向）*/\n'
             '\t\t\tmmio_write_32(inst + 0x0CU, 0x00100000U);\n'
-            '\t\t}\n'
-            + (
-            '\t\t/* ---- 临时诊断（PQCHSM_XMPU_TRACE=1 时才编入）----------------\n'
-            '\t\t * 板上现象：区域寄存器写得进（SECURTYVIO 会锁存），但 POISON\n'
-            '\t\t * 回读恒 0。这里在 EL3 里紧挨着写完就回读，把两种可能切开：\n'
-            '\t\t *   打印出 0x00100000 → EL3 写成功了，是**后面**有人清掉的\n'
-            '\t\t *   打印出 0x00000000 → 写在 EL3 就没进去\n'
-            '\t\t * 输出走 BL31 的控制台（串口）。诊断完就把这段去掉。 */\n'
-            '\t\tfor (i = 0U; i < 6U; i++) {\n'
-            '\t\t\tuintptr_t inst = 0xFD000000U + (i * 0x10000U);\n'
-            '\t\t\tNOTICE("pqchsm XMPU DDR%u: POISON=0x%08x CFG=0x%08x CTRL=0x%08x\\n",\n'
-            '\t\t\t       i, mmio_read_32(inst + 0x0CU),\n'
-            '\t\t\t       mmio_read_32(inst + 0x100U + (15U * 0x10U) + 0x0CU),\n'
-            '\t\t\t       mmio_read_32(inst));\n'
-            '\t\t}\n' if os.environ.get('PQCHSM_XMPU_TRACE') == '1' else '')
-            + '\t}\n'
+            + ('\t\t\t/* 采样①：紧挨着写完就回读 → R14_START。\n'
+               '\t\t\t * 0x00100000 = EL3 这一笔写进去了；0 = 在 EL3 就没进去。 */\n'
+               '\t\t\tmmio_write_32(inst + 0x1E0U, mmio_read_32(inst + 0x0CU));\n'
+               if trace else '')
+            + '\t\t}\n'
+            '\t}\n'
             '\t' + END + '\n')
     s2 = open(SETUP, encoding='utf-8').read()
     xanchor = '\tsetup_page_tables(bl_regions, plat_arm_get_mmap());\n\tenable_mmu_el3(0);\n'
@@ -427,11 +437,79 @@ def main():
         print('错误：找不到 enable_mmu_el3，没法在它后面配 XMPU')
         return 1
     s2 = s2.replace(xanchor, xanchor + '\n' + xmpu, 1)
+
+    # ---- 交接前再写一次 POISON --------------------------------------------
+    #
+    # 【为什么要有第二次写】上面那次写在 bl31_plat_arch_setup() 里，是 BL31 里
+    # **最早**能写的地方（MMU 刚开）。而板上观测到的事实是：区域寄存器（R15）
+    # 那四个字留住了，POISON 却回读成 0。同一个实例、同一段映射、紧挨着的几笔写，
+    # 一部分留住一部分没留住 —— 这只有两种解释，而**这两种要用不同的办法修**：
+    #
+    #   ① EL3 那一笔根本没写进去（这个寄存器在那个时刻不可写）
+    #      → 再写多少次也没用，得换通路（PMU / CSU / 别的时刻）
+    #   ② 写进去了，之后被谁清掉了
+    #      → 那就要找出"谁"，或者干脆**在它之后再写一次**
+    #
+    # bl31_plat_runtime_setup() 是 BL31 交接给下一级之前的最后一个平台钩子。
+    # 在这里再写一次，等于把 ② 里"BL31 内部有人清"这种情况直接盖掉。
+    # 它治不了"BL31 之后（OP-TEE / U-Boot / Linux / PMU）才清"的情况 ——
+    # 但配合下面三个采样点，能一次把范围夹死。
+    #
+    # 【三个采样点怎么读】六个实例各自的 R14（EN=0，不参与判定，纯草稿）：
+    #     R14_START (+0x1E0)  早期那次写完，立刻回读
+    #     R14_MASTER(+0x1E8)  交接前、**再写之前**读 —— 早期那次还在不在
+    #     R14_END   (+0x1E4)  交接前那次写完，立刻回读
+    #   再加上 Linux 起来之后经 /dev/secmmio 读到的 POISON 现值，一共四个点：
+    #
+    #     START  MASTER  END    Linux   结论
+    #     0      –       0      0       EL3 写不进去，换通路
+    #     有     0       有      0       BL31 内部被清 + 交接后又被清
+    #     有     有      有      0       BL31 之后才被清（OP-TEE/U-Boot/Linux/PMU）
+    #     有     有      有      有      成了，持久化做通
+    # ⚠️ **默认关。2026-08-17 板上实测证明它是多余的。**
+    #    两份镜像只差这一段，都从槽 6 起来、都读到 POISON=0x00100000、
+    #    `devmem 0x60000000` 都是 Bus error：
+    #      带这段（3771d140…）  采样①=②=③=0x00100000
+    #      去掉这段（8a290f42…）采样①=②=③=0x00100000  ← 早期那次写单独就够
+    #    留着代码是因为**采样点本身**（trace）以后还可能有用；写这一笔没用。
+    #    PQCHSM_XMPU_LATE=1 可以把它加回来。
+    want_late = os.environ.get('PQCHSM_XMPU_LATE', '0') != '0'
+    late = ('\t' + BEG2 + '\n'
+            '\t{\n'
+            '\t\tunsigned int i;\n'
+            '\t\tfor (i = 0U; i < 6U; i++) {\n'
+            '\t\t\tuintptr_t inst = 0xFD000000U + (i * 0x10000U);\n'
+            + ('\t\t\t/* 采样②：**先读后写** —— 早期那次写还在不在 → R14_MASTER */\n'
+               '\t\t\tmmio_write_32(inst + 0x1E8U, mmio_read_32(inst + 0x0CU));\n'
+               if trace else '')
+            + ('\t\t\t/* 交接前再写一次，盖掉"BL31 内部有人清掉它"这种可能 */\n'
+               '\t\t\tmmio_write_32(inst + 0x0CU, 0x00100000U);\n'
+               if want_late else '')
+            + ('\t\t\t/* 采样③：交接前这一刻的 POISON → R14_END */\n'
+               '\t\t\tmmio_write_32(inst + 0x1E4U, mmio_read_32(inst + 0x0CU));\n'
+               if trace else '')
+            + '\t\t}\n'
+            '\t}\n'
+            '\t' + END2 + '\n')
+    if want_late or trace:
+        lanchor = 'void bl31_plat_runtime_setup(void)\n{\n'
+        if lanchor not in s2:
+            print('错误：找不到 bl31_plat_runtime_setup，没法插交接前的第二次写')
+            return 1
+        # 插在函数体**末尾**（那个 #endif 之后），避免落进 #if 分支里
+        j = s2.index(lanchor) + len(lanchor)
+        k = s2.index('\n}\n', j) + 1
+        s2 = s2[:k] + late + s2[k:]
+
     if '#include <lib/mmio.h>' not in s2:
         s2 = s2.replace('#include <plat/common/platform.h>',
                         '#include <plat/common/platform.h>\n#include <lib/mmio.h>', 1)
     open(SETUP, 'w', encoding='utf-8').write(s2)
     print('XMPU_DDR：已配 OP-TEE core 段（六实例 × R15，cfg=0x17）')
+    print('XMPU_DDR：交接前的第二次 POISON 写 —— %s'
+          % ('已加入' if want_late else '**已去掉**（PQCHSM_XMPU_LATE=0）'))
+    if trace:
+        print('XMPU_DDR：诊断采样已编入（R14_START/END/MASTER，经 /dev/secmmio 只读窗口可见）')
 
     # ---- SiP ----
     s = open(SIP, encoding='utf-8').read()

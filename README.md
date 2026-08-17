@@ -205,9 +205,13 @@ Accurate statements about what this does **not** do.
 - **DDR-side XMPU has a separate, now-understood boundary.** The XMPU **does not
   gate transactions**; it poisons them and the endpoint gates (XAPP1320 v3.0 p.10).
   With `POISON.ATTRIB` enabled, a normal-world read of OP-TEE secure memory **does
-  become a bus error** (verified on board, zero functional impact) — but **making
-  that survive a reboot did not work**: BL31, the PMU and the EL3 SiP are all closed
-  as write paths. Today it is a **manual JTAG step**, not the default form.
+  become a bus error** (verified on board, zero functional impact).
+  **This is now applied automatically at boot**: BL31 configures all six XMPU_DDR
+  instances from EL3, so `devmem 0x60000000` is a bus error ~35 s after power-on with
+  **no manual step**, in the default demo form. What it blocks is **only "normal world
+  reads OP-TEE's core segment"** — root can still ask the hardware to compute (the SiP
+  does not check the caller), and the shared-memory segment is meant to be readable
+  from both sides. See the final status report for details.
 
 ## Repository layout
 

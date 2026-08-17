@@ -396,18 +396,39 @@ so this document is not mistaken for a statement of readiness.
 > * **`MASTER = 0` is correct.** Same file, line 330:
 >   `(mask & id) == (mask & master_id)` — a zero mask matches every master.
 >
-> **Next step (not done — needs a BL31 change and a board):** enable poison-by-attribute
-> (`CTRL.POISONCFG` + `POISON.ATTRIB`) so the DDR controller gates.
+> ### ✅ 2026-08-17 (wrap-up session) — **done: poison-by-attribute, applied at boot**
 >
-> **A zero-risk read-only experiment to run first** (`board/scripts/verify_after_por.sh`):
-> `DDR0/3/4/5` error registers are still zero (only DDR1/DDR2 latched, from the DMA
-> test). Read a span of APU addresses crossing every interleave stripe, then dump all
-> six instances. If some stay zero, APU traffic never reaches XMPU_DDR (a path limit);
-> if all latch the APU master ID, it reaches and is detected and only gating is missing.
-> ⚠️ `ERR_ADDR`/ISR are **sticky** and only a POR clears them — one shot per power cycle.
+> The "next step (not done)" above has been done, and it is now part of the default form.
+>
+> BL31 writes `POISON.ATTRIB` (bit 20) on all six XMPU_DDR instances from EL3.
+> **Only `POISON` is touched, never `CTRL`** — `CTRL` stays `0x0b`, for two reasons that
+> both matter: (1) `DEFRDALWD`/`DEFWRALWD` govern accesses matching *no* region, so
+> clearing them denies all of DDR; (2) `CTRL.POISONCFG` selects poison-*by-address*
+> redirection to `POISON.BASE`, and `BASE = 0` — one illegal **write** would land at
+> physical address 0. So this uses the mode XAPP1320 explicitly recommends: by attribute.
+>
+> **Measured on the board (default image, active at power-on, no manual step):**
+> ```
+> devmem 0x60000000 → Bus error      OP-TEE core carve-out, fenced
+> devmem 0x10000000 → 0xEDFE0DD0     outside the region, unaffected
+> devmem 0x70000000 → unaffected     OP-TEE shared memory, deliberately not fenced
+> ```
+> Clearing poison and re-reading the same address returns `0xAA0003F3` — an OP-TEE
+> AArch64 instruction. That same-address comparison is the disproof showing root
+> really could read secure memory before. `ERR_MASTER = 0xa0` (APU) and
+> `ISR = 0x8[SECURTYVIO]`: detection *and* gating now both hold.
+>
+> **The read-only experiment above is no longer needed** — poisoning itself answered it:
+> the access does reach XMPU_DDR and is detected; only gating was missing.
+> `DDR0/3/4/5` error registers stay zero simply because those four ports (LPD, HP0-3,
+> FPD_DMA) carry no traffic to this address range — not because nothing arrives.
+>
+> Evidence: `board/logs/RESULT_xmpu_persist.txt`.
+> ⚠️ What this blocks is **only "normal world reads OP-TEE's core segment"**. The
+> residual-capability entry "root can still drive the hardware" below is **unchanged**.
 
 | **No module integrity check** | Nothing verifies the module image before use |
-| **root can still read OP-TEE's secure memory** (partially narrowed) | **Measured 2026-08-17**: `devmem 0x60000000` from Linux userspace returns `0xAA0003F3` — an AArch64 instruction, OP-TEE's secure-world code. The vendor boot chain configures **no XMPU_DDR regions at all**. BL31 now programs one secure region per XMPU_DDR instance (all six) covering OP-TEE's core carve-out `0x6000_0000+0x1000_0000`, `cfg=0x17`, with the bit layout taken from Xilinx's own `xddr_xmpu0_cfg.h`. **It does detect**: `ERR_MASTER` latched `0xa0` and `0xac` — two non-secure DMA masters, with ISR set. **It does not stop the APU's own non-secure reads**: comparing the same addresses before and after, `devmem` returns byte-identical values. So "keys held by OP-TEE are protected" is **still false here**; what closed is *detection* on the rogue-peripheral-DMA path. **Root cause established 2026-08-17 (second session) — see the section below: the XMPU does not gate transactions at all.** Evidence in `board/logs/RESULT_protunit.txt` |
+| ~~**root can still read OP-TEE's secure memory**~~ — **closed 2026-08-17 (wrap-up session)** by poison-by-attribute applied at boot; see the ✅ section below. The original record is kept here to show how large the hole was | **Measured 2026-08-17**: `devmem 0x60000000` from Linux userspace returns `0xAA0003F3` — an AArch64 instruction, OP-TEE's secure-world code. The vendor boot chain configures **no XMPU_DDR regions at all**. BL31 now programs one secure region per XMPU_DDR instance (all six) covering OP-TEE's core carve-out `0x6000_0000+0x1000_0000`, `cfg=0x17`, with the bit layout taken from Xilinx's own `xddr_xmpu0_cfg.h`. **It does detect**: `ERR_MASTER` latched `0xa0` and `0xac` — two non-secure DMA masters, with ISR set. **It does not stop the APU's own non-secure reads**: comparing the same addresses before and after, `devmem` returns byte-identical values. So "keys held by OP-TEE are protected" is **still false here**; what closed is *detection* on the rogue-peripheral-DMA path. **Root cause established 2026-08-17 (second session) — see the section below: the XMPU does not gate transactions at all.** Evidence in `board/logs/RESULT_protunit.txt` |
 | **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
 | **Conditional self-tests missing** | No pairwise consistency test on generated key pairs, no continuous RNG test |
 | **No SM2** | SM4 and SM3 are implemented; the SM2 asymmetric algorithm is not |

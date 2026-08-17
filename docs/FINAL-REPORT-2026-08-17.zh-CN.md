@@ -5,7 +5,14 @@
 **日期**：2026-08-17　**器件**：`xazu3eg-sfvc784-1-i`　**分支**：`zu3eg-fpga-crypto`
 
 一句话现状：**密码功能全部在真硅上跑通并对上标准向量；加密启动做不成，
-原因已定位到确定的一环并有权威引用；OP-TEE 内存隔离能做到但只在运行时。**
+原因已定位到确定的一环并有权威引用；OP-TEE 内存隔离已做成开机自动生效。**
+
+> **2026-08-17 收尾会话补了两件，都做完了**：
+> ① XMPU 毒化从"手动 JTAG 步骤"变成**开机自动生效**，现在在默认演示形态里；
+> ② 查清了非 golden 槽"时灵时不灵"的根因 —— FSBL 的 **100 秒启动看门狗**
+>    加上 WDT 复位后 `multiboot++`。这一条同时把 ① 里那个
+>    「`POISON` 回读恒 0」的旧观测证伪了（那份镜像根本没跑起来）。
+> 两件的明细在第四节。
 
 口径原则：**每一条"做到了"后面都跟着它没有做到什么。** 没有验证过的一律标成
 未验证，不写成"应该可以"。
@@ -21,7 +28,7 @@
 
 | # | 事项 | 为什么必须是人 | 不做的后果 |
 |---|---|---|---|
-| ~~1~~ | ~~拔插串口线~~ | **已由用户完成** | —— |
+| 1 | **（又）拔插一次串口线** | `/dev/cu.usbserial-110` 再次回到那个已知的坏状态（`stty` 与 pyserial 都是 `tcsetattr: Invalid argument`，`cu.` / `tty.` 两个节点都是）。拔插那根 Mini-USB（**不是** JTAG 那根）即恢复 | **不紧急**。本轮收尾**全程没有用串口**也把两件事都做完了 —— 诊断改走"写进 XMPU 的草稿寄存器、从普通世界读"，比串口更可靠（见第四节）。JTAG 也一直可用 |
 | 2 | **`VCC_BATT` 接一颗纽扣电池** | 板级硬件改动 | BBRAM 加密启动永远不成立（见第四节）。⚠️ **但即使装了也不建议启用**，理由见下 |
 | 3 | **决定要不要烧 eFUSE** | 不可逆，且只有一块板；这是产品决策不是技术决策 | 不烧 = **永远拿不到防替换的信任根**。本项目当前的红线是「永不烧」 |
 
@@ -59,7 +66,8 @@ ACVP 的 KeyGen 向量比对不了私钥 —— 那 6 条**必然**失败，**�
 * **没有加密启动**（第四节，结论是确定性的）
 * **没有防替换的信任根** —— 需要烧 eFUSE，永久排除
 * **root 仍然能"用"密钥**（读不到私钥，但能命令硬件做运算 —— SiP 不校验调用来源）
-* **OP-TEE 安全内存的隔离只在运行时**（第四节 XMPU 那条）
+* ~~OP-TEE 安全内存的隔离只在运行时~~ —— **本轮已解决**，现在开机自动生效（第四节）。
+  但它挡住的**只是"普通世界读 OP-TEE 的 core 段"这一条**，上面那条"root 仍然能用密钥"不变
 * **没有 SM2**
 * **没有算法证书**（ACVP 向量是本地跑的，那是正确性证据，不是证书）
 * **没有功耗/电磁侧信道对策**（刻意排除，理由见 [SECURITY](SECURITY.zh-CN.md)）
@@ -75,7 +83,7 @@ ACVP 的 KeyGen 向量比对不了私钥 —— 那 6 条**必然**失败，**�
 | 普通世界能否直接读密码核 | 能（`/dev/mem`） | **不能**（防火墙 RAZ/WI），只能经 `/dev/secmmio` → EL3 白名单 |
 | 网络 | eth0 随 PL 消失；**eth1（PS GEM）不受影响** | 同左 |
 | 上电到就绪 | 约 35 秒，全自动 | 同左 |
-| XMPU 毒化 | **默认关**（要手动开，见第四节） | 同左 |
+| XMPU 毒化 | **默认开，开机自动生效**（BL31 在 EL3 里写，无手工步骤） | 同左 |
 
 **默认就是演示形态**：上电 35 秒后 daemon 起好、`fpga_manager` 报 `operating`，
 不需要任何人工操作。
@@ -118,7 +126,8 @@ ACVP 的 KeyGen 向量比对不了私钥 —— 那 6 条**必然**失败，**�
 | rtl_sim 回归 | 主机 47/47；rtl_sim 全量 251 用例全过 |
 | golden 完整性 | 四份镜像与板外副本逐字节一致，`board/logs/BOOT_MANIFEST.txt` |
 | **RSA 认证启动（零 eFUSE）** | 变体 G 从槽 6 正常启动、网络通 |
-| **XMPU 毒化（运行时）** | `board/logs/RESULT_xmpu_poison.txt`，关/开同址对照 |
+| **XMPU 毒化：开机自动生效** | `board/logs/RESULT_xmpu_persist.txt`：上电即 Bus error；关掉后重启它自己回来；十二个采样点全 `0x00100000` |
+| **槽启动"时灵时不灵"的根因** | `board/logs/RESULT_slot_boot_wdt.txt`：FSBL 100 秒看门狗 + WDT 复位 `multiboot++`；`LOG_LEVEL=20` 后三份镜像零失败 |
 | keystore 回滚防护、tamper 网表断言、全 cipher 模式、SDF/PKCS#11 覆盖表 | 见 STATUS 第三节 ⑤ |
 
 ### ⛔ blocked：加密启动 —— **根因已定位到具体一环**
@@ -180,7 +189,12 @@ OCM 0xFFFC0000              = DEADBEEF…    OCM 初始化填充，FSBL 压根�
 **留下的可复用资产**：`boot/persist/build_puf_boot.sh`（生成并自检加密镜像）、
 `/home/build/pufboot/`（各变体镜像、bif、psk/ssk、辅助数据）。
 
-### ⛔ blocked：XMPU 隔离 —— **能做到，但只在运行时**
+### ✅ done（本轮补齐）：XMPU 隔离 —— **开机自动生效，不再需要任何手工步骤**
+
+> **本轮改动**：上一版这里写的是"能做到，但只在运行时"。**那条已经不成立了。**
+> 现在 BL31 在 EL3 里开机就把六个 XMPU_DDR 的 POISON 写好，
+> `devmem 0x60000000` 从上电起就是 Bus error，**没有 JTAG 步骤、没有手工动作**。
+> 证据：[`board/logs/RESULT_xmpu_persist.txt`](../board/logs/RESULT_xmpu_persist.txt)。
 
 **先更正两条旧结论**（旧文档里都是错的）：
 
@@ -194,7 +208,9 @@ OCM 0xFFFC0000              = DEADBEEF…    OCM 初始化填充，FSBL 压根�
 > "the XMPU asserts AxUser[10] but the transaction **is passed to the memory
 > controller** … **The transaction is gated by the end point, not the XMPU itself.**"
 
-**XMPU 只检测、只打毒标记，掐掉动作由终点做。** 我们的 `POISON = 0`，所以只有检测。
+**XMPU 只检测、只打毒标记，掐掉动作由终点做。**
+本项目原先 `POISON = 0`，所以那时**只有检测**——这正是"配了 XMPU 却一个访问都没挡住"的原因。
+（现在 `POISON.ATTRIB = 1`，见下。）
 
 **开了毒化之后，板上实测有效**：
 
@@ -206,42 +222,117 @@ OCM 0xFFFC0000              = DEADBEEF…    OCM 初始化填充，FSBL 压根�
 功能     sdf_demo 九节全绿；网络 / PL / daemon 均不受影响
 ```
 
-**但"开机自动生效"没做成 —— 三条写入路全试过，全不通**：
+#### 「开机自动生效」——本轮做成了，而且根因和之前想的完全不是一回事
+
+上一版这里列了三条写入路"全不通"，其中第一条是：
+
+> ~~BL31 在启动时写 → 区域寄存器写得进去，但同一循环里的 `POISON` 写不生效，回读恒 0~~
+
+**这条观测本身是假的。那份带 `POISON` 写的镜像根本没跑起来。**
+它被 FSBL 的 100 秒启动看门狗打掉、`multiboot` 自增到 7，
+实际在跑的是槽 7 里另一份**不含这段代码**的 BL31 —— 读到 0 理所当然。
+详见下面「查清槽启动不稳定性」一节。
+
+把 `LOG_LEVEL` 从 50 降到 20 之后镜像真的跑起来了，于是用**三个采样点**
+（写进被禁用区域 R14 的三个寄存器当草稿纸，经 SiP 只读窗口从普通世界读，
+**不用串口也不用 JTAG**）一次夹死：
+
+| 采样点 | 位置 | 读到 |
+|---|---|---|
+| ① `R14_START` | 早期那次写完，紧接着回读 | `0x00100000` |
+| ② `R14_MASTER` | BL31 交接前（早期那次还在不在） | `0x00100000` |
+| ③ `R14_END` | 交接前再读一次 | `0x00100000` |
+| ④ POISON 现值 | Linux 起来之后 | `0x00100000` |
+
+两个诊断版镜像 × 六个实例 × 三个采样点，**十二个点全是 `0x00100000`**。
+
+> **所以：EL3 那一笔写从来就是成功的，也从来没有被谁清掉。**
+> 「EL3 写没进去」和「写进去又被清掉」**两个都不是** —— 是那份镜像压根没跑。
+
+顺带证明了"交接前再写一次"是多余的：去掉它的对照版（`8a290f42…`）
+四个采样点一模一样。所以生产版**不带**任何重写、也不带任何诊断写
+（`patch_atf_secmmio.py` 里 `PQCHSM_XMPU_LATE` 默认 0）。
+
+**现在的状态 —— 开机即生效，零手工步骤**：
+
+```
+上电 → 等 35 秒 → devmem 0x60000000 → Bus error      ← 什么都不用做
+                   devmem 0x10000000 → 0xEDFE0DD0     ← 区域外，照常
+                   devmem 0x70000000 → 照常           ← 共享内存，故意不圈
+```
+
+同一次启动内的关/开对照（判据只认同址前后对照）：
+
+```
+JTAG 把 POISON 清零   devmem 0x60000000 → 0xAA0003F3   ← OP-TEE 的一条 AArch64 指令
+直接重启，什么都不做   devmem 0x60000000 → Bus error    ← BL31 自己又写回去了
+```
+
+`protunit_probe` 同时显示 DDR1/DDR2（APU 到 DDR 的两个 CCI 端口）
+`ERR_MASTER=0xa0(APU)`、`ISR=0x8[SECURTYVIO]` —— **检测和拦截现在都成立**。
+
+**功能影响：零。** `sdf_demo` 九节全绿、`dna_probe -w` 正常、eth1 通、PL `operating`、
+上电到就绪仍是约 35 秒。
+
+其余两条路的结论不变，仍然记在这里：
 
 | 路径 | 结果 |
 |---|---|
-| BL31 在启动时写 | 区域寄存器写得进去（`SECURTYVIO` 会锁存），**但同一循环里的 `POISON` 写不生效**，回读恒 0 |
 | PMU 的 `PM_MMIO_WRITE`（EEMI #19，与 `pmsec.ko` 写 multiboot 同一条路） | **PMU 拒绝，返回 `2002 = XST_PM_NO_ACCESS`**（六个实例全拒） |
 | EL3 SiP 写口 | 白名单只放行 PL 段；放开它等于让普通世界能改内存保护配置，**不做** |
 
-**代价与现状**：目前它是一条**手动 JTAG 步骤**（`board/scripts/xmpu_poison_on.tcl`，
-幂等），**不在默认演示形态里**。
+⚠️ **仍然要写清的边界**：
+* 挡住的只是**普通世界读 OP-TEE 的 core 段**这一条。**root 仍然能"用"密钥**
+  （SiP 不校验调用来源），共享内存段本来就该双向可读，也没有防替换的信任根。
+* **没做真 POR 复验**：`jtag_por.tcl` 要求 PMU 的 CSU_ROM 错误位置着才能触发，
+  而本轮 `ERROR_STATUS_1/2` 都是 0。为凑触发源去故意搞坏一次启动，风险大于收益。
+  已验证的是**等价冷路径**（`MULTI_BOOT=0`、从 `BOOT.BIN` 起，整条链与上电相同）；
+  XMPU 配置由 BL31 每次启动重写，不依赖任何 POR-only 状态。
+* 万一新 `BOOT.BIN` 某次上电起不来：FSBL 会 `multiboot++` 落到 `BOOT0001.BIN`
+  （`bb3402ea`，已知 10/10 能启动）—— 板子仍起得来，但**那一份不带开机毒化**。
 
-#### 串口修好之后又查了一轮（2026-08-17 收尾），结论不变但多了两条事实
+证据：[`RESULT_xmpu_persist.txt`](../board/logs/RESULT_xmpu_persist.txt)（本轮，以这份为准）、
+`RESULT_protunit_v2.txt`（实配）、`RESULT_xmpu_poison.txt`（旧的运行时对照）。
 
-串口恢复后，本想用 BL31 在 EL3 里回读 POISON 并打到串口，一刀切开
-「EL3 写没进去」与「写进去又被清掉」。诊断代码写好了（`patch_atf_secmmio.py` 里，
-由环境变量 `PQCHSM_XMPU_TRACE=1` 控制，默认不编入），但**那份镜像没能从槽 6 启动**
-（`MULTI_BOOT` 落到 7），所以诊断行一次都没打出来。查明的两条事实：
+### ✅ done（本轮补齐）：查清槽启动不稳定性 —— **一条 100 秒的死线**
 
-* **BL31 的尺寸不是原因。** 调试版 BL31 跑在 DDR、预算 `0x1000..0x7FFFF`（≈508 KB），
-  而镜像只有 ~132 KB。串口那句 `NOTICE: ATF running on XCZU3EG/silicon v4/RTL5.1
-  at 0x1000` 印证了基址。
-* **"重建的 BL31 起不来网络"这个说法要修正。** 真相多半是**启动被 VERBOSE 日志
-  拖慢了**：`LOG_LEVEL=50` 会把整张页表逐条打到串口，加上补丁新增的
-  `MAP_REGION_FLAT(0xFD000000, 0x100000)`，实测刷了 **2888 行** `VA:0xfd7xxxxx …`。
-  115200 波特下这要很久，而我当时轮询 150 秒就判定"起不来"。
-  **之前那几次"时灵时不灵"很可能全是这个**，不是 BL31 代码的问题。
+问题原话：「上次重建镜像能从槽 6 启动、这次却落到 `MULTI_BOOT=7`，原因没查清。」
 
-⚠️ 但重建镜像**这一次确实没从槽 6 启动**（落到了槽 7），与上一次能启动的行为不一致。
-这个不稳定性本身没有查清，**不要**据此认为"重建就能用"。
+**根因**：本项目自己的 FSBL 补丁（`make_wdt_patch.py`）第 4 行写着
+*"fall back (**multiboot++**) on any WDT-induced reset"*。链条是：
 
-**要继续查的人，第一步应该是**：把 `LOG_LEVEL` 降到 20（NOTICE），去掉页表转储，
-再看重建镜像能不能稳定从槽 6 启动 —— 把"慢"和"坏"这两件事先分开。
+1. FSBL 交接给 ATF **之前**武装 PS SWDT0，`XFSBL_WDT_EXPIRE_TIME = **100** 秒`；
+2. 而且**故意不在 handoff 时停掉它**（原文：*"the WDT is intentionally NOT stopped
+   at handoff … It keeps guarding the ATF/OP-TEE/U-Boot phase"*）；
+3. 停狗的动作在 **U-Boot 的 `boot.scr`** 里；
+4. 于是「FSBL 交接」到「U-Boot 跑到 `boot.scr`」之间有一条**硬的 100 秒线**；
+5. 超了就整机复位，下一次 FSBL 一看是 WDT 引起的复位就 **`multiboot++`**。
 
-⚠️ **口径**：BL31 里那份区域配置**留着**（它是可观测的检测），但文档里必须同时写明
-**默认情况下它一个访问都没挡住**，否则就是夸大。
-证据：`board/logs/RESULT_protunit_v2.txt`（实配）、`board/logs/RESULT_xmpu_poison.txt`（对照）。
+而 `LOG_LEVEL=50` 让 BL31 把整张页表（2888 行）打到 115200 的串口，
+**把 ATF 那一段推到了 100 秒线附近** —— 赶上了就起来，没赶上就 6→7。
+**"时灵时不灵"是在跟一条 100 秒的死线赛跑，不是 BL31 代码的问题。**
+
+板上量到的数：
+
+| 镜像 | 槽 6 | 网络回来 | `CSU_MULTI_BOOT` |
+|---|---|---|---|
+| `c4c99e2e`（已知能启动，对照） | 成功 | 20 秒 | 6 |
+| `12c3fc8e`（`LOG_LEVEL=50`，复现旧失败） | **失败** | **138 秒** | **7** |
+| `3771d140` / `8a290f42` / `0ea6e443`（`LOG_LEVEL=20`） | 全部成功 | 23 / 41 / 35 秒 | 全部 6 |
+
+138 ≈ 100（看门狗）+ 38（落到槽 7 的一次正常启动），对得上。
+
+**排除 BootROM 的两条硬证据**：
+* `CSU_BR_ERROR = 0x00000000` —— **BootROM 根本没报错**；
+* 两份镜像的**启动头 14 个字段、六个分区头逐字节相同**，
+  46845 字节差异**全部**落在 BL31 那个分区内部（0x47256c..0x484ca9）。
+  而 BootROM 只校验启动头 + 装载 FSBL，这两样两份完全一样。
+  分区头里 checksum word offset = 0，**FSBL 也不校验分区内容**。
+
+⚠️ **别再把 `LOG_LEVEL` 调回 50。** 真要看 VERBOSE，得先放宽 FSBL 的 100 秒
+或让 U-Boot 更早停狗，否则就是在自找 `multiboot++`。
+
+证据：[`RESULT_slot_boot_wdt.txt`](../board/logs/RESULT_slot_boot_wdt.txt)。
 
 ### 其他 blocked / 不做
 
@@ -267,6 +358,11 @@ OCM 0xFFFC0000              = DEADBEEF…    OCM 初始化填充，FSBL 压根�
 | "XMPU 挡住了非安全 DMA 主控" | **错**。那些主控号是 APU；XMPU 当时什么都没挡住 |
 | "BootROM 那步没有公开资料" | **错**。UG1085 第 11 章有完整错误码表，且错误码可读：`PMU_GLOBAL.CSU_BR_ERROR` = `0xFFD80528` |
 | "非 golden 槽 + 热重启"可以测加密启动 | **错**。安全态由 POR 后第一个镜像锁定（错误码 `0x53`），热重启永远测不了加密启动 |
+| "BL31 在 EL3 里写 XMPU 的 `POISON` 写不进去，回读恒 0" | **错，而且是假观测**。那份镜像根本没跑起来（被 FSBL 的 100 秒看门狗打掉、`multiboot++` 落到槽 7），读的是另一份 BL31 的 `POISON`。真跑起来之后，十二个采样点全是 `0x00100000` |
+| "重建的 BL31 起不来网络" | **错**。它起得来，只是**慢**：`LOG_LEVEL=50` 把启动推过 FSBL 的 100 秒看门狗线。降到 20 之后三份镜像零失败 |
+| "槽 6 时灵时不灵，原因不明" | **查清了**。不是玄学，是在跟一条 100 秒的死线赛跑（FSBL 武装 SWDT0、故意不在 handoff 停、U-Boot 才停狗） |
+| "XMPU 隔离只能在运行时靠 JTAG 打开" | **错**。已做成开机自动生效，且**不需要**交接前重写、不需要 PMU、不需要放开 SiP 写口 |
+| "`/home/build/wdt_patch/images/BOOT_SECMMIO.BIN` 是在跑的 `BOOT.BIN` 的离板副本" | **已失效**。它在上一轮又被重建覆盖了（现为 `12c3fc8e`）。真正的副本是 `/home/build/BOOT_WORKING_REF.BIN`；当前 `BOOT.BIN` 的副本在 `/home/build/keep/` |
 
 ---
 
@@ -294,12 +390,25 @@ TOK=$(ssh root@192.168.50.175 cat /media/sd-mmcblk1p2/hsm/hsm_token)
 | `mldsa_hwtest` | ML-DSA 对 ACVP（注意 SK_LOCK，见第一节 ⚠️） |
 | `dna-bind-check`（主机侧） | 远端主机把 keystore 绑到这块板 |
 
-**想演示 OP-TEE 内存隔离**（可选，手动一步）：
+**想演示 OP-TEE 内存隔离** —— **不用做任何准备，开机就是生效的**：
 
 ```bash
-sudo -H -u build bash -lc "source /tools/Xilinx/Vitis/2020.1/settings64.sh; xsct xmpu_poison_on.tcl"
-# 然后在板上：devmem 0x60000000 32 → Bus error；devmem 0x10000000 32 → 照常
+# 板上，root 身份。第一条应当 Bus error，后两条应当照常返回。
+devmem 0x60000000 32     # OP-TEE 的安全内存 → Bus error
+devmem 0x10000000 32     # 区域外           → 0xEDFE0DD0
+devmem 0x70000000 32     # OP-TEE 共享内存   → 照常（故意不圈）
 ```
+
+演示时值得指出的一句：**这三条是同一个 root 用户跑的**。
+读不到 `0x60000000` 不是因为权限不够，是因为 XMPU 把那笔访问毒化了。
+
+想把对照做全（可选）：用 JTAG 把六个实例的 `POISON` 清零，
+`devmem 0x60000000` 就会读回 `0xAA0003F3`（OP-TEE 的一条 AArch64 指令）——
+**这正是"没有 XMPU 时 root 能读到安全内存"的反证**。
+清零之后直接重启就恢复，BL31 会自己写回去。
+
+⚠️ `board/scripts/xmpu_poison_on.tcl` 现在**只是个应急/演示工具**，
+不再是必需步骤 —— 默认镜像已经把它做的事在启动时做完了。
 
 ### 掉网了怎么办
 
@@ -326,16 +435,30 @@ catch {con}                    ;# 会停在 Reset Catch，必须 con
 
 | 文件 | md5 | 说明 |
 |---|---|---|
-| `p1/BOOT.BIN` | `c4c99e2e5516879e11b7c1364b21f2fa` | 当前 golden（含 DNA 只读窗口、保护单元只读窗口、XMPU 区域） |
-| `p1/BOOT0002.BIN` = `BOOT_GOLDEN.BIN` | `8d42d1a58b62c8ca95501bf486fbb45d` | **兜底 golden**，与板外副本一致 |
-| `p1/BOOT0001.BIN` | `bb3402ea4efae7e1062a65632fe684b4` | 已知 10/10 能启动 |
-| `p1/BOOT0007.BIN` | `2d7799a32bbf3a01a6e61664b6241198` | J1 镜像（能起但掉网） |
+| `p1/BOOT.BIN` | `0ea6e4437698abc7b44b3a235b49ce78` | **当前默认镜像（本轮更新）**。= 旧的那份 + `LOG_LEVEL=20` + XMPU 毒化开机生效 |
+| `p1/BOOT_PRE_XMPU.BIN` | `c4c99e2e5516879e11b7c1364b21f2fa` | **换上去之前的 `BOOT.BIN`**，留在卡上当回退；离板副本 `/home/build/BOOT_WORKING_REF.BIN` |
+| `p1/BOOT0002.BIN` = `BOOT_GOLDEN.BIN` | `8d42d1a58b62c8ca95501bf486fbb45d` | **兜底 golden，本轮一个字节没动**，与板外副本一致 |
+| `p1/BOOT0001.BIN` | `bb3402ea4efae7e1062a65632fe684b4` | 已知 10/10 能启动 —— 也是 `BOOT.BIN` 失败时 FSBL 自增会落到的那一个 |
+| `p1/BOOT0007.BIN` | `2d7799a32bbf3a01a6e61664b6241198` | J1 镜像（能起但掉网）。本轮实验期间临时借用过，**已还原** |
 | `p1/BOOT0006.BIN` | —— | **已删除，保持删除** |
 
-`CSU_MULTI_BOOT = 0`，`READY=yes`，PL `operating`。
-离板副本：`/home/build/wdt_patch/images/BOOT_SECMMIO.BIN`（= `BOOT.BIN`）、
-`/home/build/BOOT_WORKING_REF.BIN`（同一份的保护副本）。
+`CSU_MULTI_BOOT = 0`，PL `operating`，eth1 `192.168.50.175`，`sdf_demo` 九节全绿。
 
-⚠️ 本轮曾覆盖过 `atf_secmmio/.../bl31.elf`（当前 `BOOT.BIN` 所用的那份 BL31 的 ELF），
-**没有备份、已丢失**。`BOOT.BIN` 本身完好且有离板副本，所以不影响运行与演示，
-但**要改 BL31 就得先解决"重建出来的镜像与在跑的这份不一致"这个问题**。
+**离板副本**（都在构建机上）：
+
+| 路径 | md5 | 是什么 |
+|---|---|---|
+| `/home/build/keep/BOOT_SECMMIO_XMPU.BIN` | `0ea6e443…` | 当前 `BOOT.BIN` 的副本，**已置只读** |
+| `/home/build/keep/bl31_secmmio_xmpu.elf` | `312a8c09…` | **当前 `BOOT.BIN` 所用的那份 BL31 的 ELF**，已置只读 |
+| `/home/build/BOOT_WORKING_REF.BIN` | `c4c99e2e…` | 上一版 `BOOT.BIN` |
+
+> ⚠️ 上一轮丢过一次 `bl31.elf`（就地重建覆盖、没有备份）。本轮的对策写进了
+> `build-bl31-secmmio.sh`：**每次换 `BUILD_BASE` 和输出名，不覆盖上一版**，
+> 并且成品另存一份到 `/home/build/keep/` 且置只读。
+> 「要改 BL31 就得先解决重建镜像与在跑的这份不一致」这个遗留问题**已经消失** ——
+> 现在在跑的这份就是从当前 ATF 树重建出来的，脚本、源码、产物三者对得上。
+
+⚠️ 卡上还有一个**与本轮无关的既有状态**，记一笔免得以后当成新问题：
+`p1/use_backup` 这个标记文件存在，于是 `boot.scr` 一直走
+`image_backup.ub` 而不是 `image.ub`（两者同尺寸同日期）。演示不受影响，
+但**要换内核就得同时换 `image_backup.ub`，或者先删掉 `use_backup`**。
