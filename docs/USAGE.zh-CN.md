@@ -126,10 +126,40 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 
 ## 运行 SDF 演示
 
+### 在板子上（本机）
+
 ```bash
 ./service/pqchsm_fpgad &
 ./service/sdf_demo
 ```
+
+### 从 Mac / 任意主机远程（**推荐,不用登板子**）
+
+`sdf_demo` 的本机版和远程版是**同一个程序**，只有开设备那一行不同。
+它只链接 `libsdfe`（纯 socket，**不依赖 OpenSSL / liboqs**），所以两个文件就能编：
+
+```bash
+cc -O2 -Iservice -o sdf_demo service/sdf_demo.c service/libsdfe.c
+```
+
+⚠️ 仓库里**没有** `sdf_demo` 的 CMake 目标（上面那行就是它唯一的编译方式）。
+本节以前写的 `./service/sdf_demo` 是手工编出来的产物，容易让人以为 `cmake --build`
+会生成它。
+
+```bash
+# 取一次性口令（板子的 dropbear 是 2019.78，需要这两个 -o；见下）
+TOK=$(ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+         root@192.168.50.175 'cat /media/sd-mmcblk1p2/hsm/hsm_token')
+
+./sdf_demo 192.168.50.175 "$TOK"        # 端口默认 9797，可加第三个参数改
+```
+
+⚠️ **现代 OpenSSH 连这块板要两个 `-o`**：`HostKeyAlgorithms=+ssh-rsa` 让它接受板子的
+RSA 主机密钥，`PubkeyAcceptedAlgorithms=+ssh-rsa` 让它愿意用 RSA(SHA-1) 签名认证。
+少了后者会得到 `Permission denied (publickey,password)` —— **不是公钥没装**，
+而是本机 OpenSSH 默认不再发这种签名。
+
+⚠️ **没有 `hsm_token` 文件 daemon 就不监听**（fail-closed）。远程口是 TCP **9797**。
 
 `sdf_demo` **只**链接 `libsdfe`——完全不链接任何密码库——所以它自己算不出任何
 东西。它打印出的每一个正确数值都出自 FPGA。

@@ -140,6 +140,34 @@ The daemon needs `/dev/secmmio`, which is provided by the kernel module in
 ./service/sdf_demo
 ```
 
+### Remotely, from a Mac or any host (**recommended — no need to log into the board**)
+
+The local and remote forms are the **same program**; only the device-open line
+differs. It links `libsdfe` only (pure sockets, **no OpenSSL, no liboqs**), so two
+files are all it takes:
+
+```bash
+cc -O2 -Iservice -o sdf_demo service/sdf_demo.c service/libsdfe.c
+```
+
+⚠️ There is **no CMake target** for `sdf_demo`; the line above is the only way to
+build it. The `./service/sdf_demo` referenced above is a hand-built artifact.
+
+```bash
+TOK=$(ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+         root@192.168.50.175 'cat /media/sd-mmcblk1p2/hsm/hsm_token')
+
+./sdf_demo 192.168.50.175 "$TOK"        # port defaults to 9797
+```
+
+⚠️ Modern OpenSSH needs **both** `-o` flags for this board (dropbear 2019.78):
+without `PubkeyAcceptedAlgorithms=+ssh-rsa` you get
+`Permission denied (publickey,password)` — the key *is* installed; your client
+simply refuses to offer an RSA/SHA-1 signature.
+
+⚠️ The daemon does not listen without an `hsm_token` file (fail-closed). The remote
+port is TCP **9797**.
+
 `sdf_demo` links **only** `libsdfe` — no crypto library at all — so it cannot
 compute anything itself. Every correct value it prints came out of the FPGA.
 
