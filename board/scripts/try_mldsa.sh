@@ -37,8 +37,8 @@ say() { echo "$(cut -d' ' -f1 /proc/uptime) $*" >> $LOG; sync; }
 rm -f $OKFILE
 say "=== 试装开始 ==="
 
-[ -f "$NEWBIT" ] || { say "没有 $NEWBIT，什么都不做"; exit 0; }
-[ -f "$NEWD" ]   || { say "没有 $NEWD，什么都不做"; exit 0; }
+[ -f "$NEWBIT" ] || { say "没有 ${NEWBIT}，什么都不做"; exit 0; }
+[ -f "$NEWD" ]   || { say "没有 ${NEWD}，什么都不做"; exit 0; }
 
 # 备份现役 daemon，回滚要用
 cp -f $D/pqchsm_fpgad $D/pqchsm_fpgad.bak 2>/dev/null
@@ -106,7 +106,7 @@ ip=$(busybox ip -o addr show eth1 2>/dev/null | grep -o '192\.168\.50\.[0-9]*' |
 #    起来了，却被**自检本身的 bug** 判成失败回滚掉。
 #    教训：自检里每一条命令都要先确认板上真有，否则"检查"变成了"必然失败"。
 ps | grep -q "[p]qchsm_fpgad" || { say "daemon 没起来"; rollback; exit 1; }
-say "自检：eth1=$ip，daemon 在跑"
+say "自检：eth1=${ip}，daemon 在跑"
 
 # ---- 自检第二层：**真读到 ML-DSA 核**才算装对 ----
 # 只看"进程在跑"是不够的：旧 bitstream 上这个 daemon 一样能起来（它的启动

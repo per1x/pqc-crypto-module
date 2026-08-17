@@ -95,6 +95,6 @@ while [ "$i" -lt "$ROWS" ]; do
     [ $((i % 20)) -eq 0 ] && say "  已采 $i / $ROWS 行"
 done
 
-say "=== 结束：实际采到 $i 行（失败标志 $fail）==="
+say "=== 结束：实际采到 $i 行（失败标志 ${fail}）==="
 sync
 exit $fail

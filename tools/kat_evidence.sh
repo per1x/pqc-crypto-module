@@ -12,11 +12,11 @@ RUNNER="$ROOT/build/kat_runner"
 VEC="$ROOT/vectors"
 
 if [ ! -x "$RUNNER" ]; then
-  echo "SKIP: 找不到 $RUNNER，先 cmake --build build" >&2
+  echo "SKIP: 找不到 ${RUNNER}，先 cmake --build build" >&2
   exit 0
 fi
 if [ ! -d "$VEC" ]; then
-  echo "SKIP: 找不到 $VEC，先跑 ./tools/fetch_vectors.sh" >&2
+  echo "SKIP: 找不到 ${VEC}，先跑 ./tools/fetch_vectors.sh" >&2
   exit 0
 fi
 

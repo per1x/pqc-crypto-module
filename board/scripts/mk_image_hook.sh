@@ -148,7 +148,7 @@ N1=$(find chk | wc -l)
 for f in usr/bin/fpgautil sbin/insmod usr/sbin/tee-supplicant; do
     [ -e "chk/$f" ] || { echo "错误：关键运行时 $f 丢了"; exit 1; }
 done
-echo "条目 $N0 → $N1，钩子在，关键运行时在"
+echo "条目 $N0 → ${N1}，钩子在，关键运行时在"
 echo "钥匙串："
 while read -r l; do
     [ -n "$l" ] || continue

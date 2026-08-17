@@ -27,7 +27,7 @@ if command -v otool >/dev/null 2>&1 && otool -L "$MODULE" 2>/dev/null | grep -q 
   exit 0
 fi
 
-[ -x "$ADMIN" ]  || { echo "SKIP: 没有 $ADMIN（cmake --build build --target pqchsm-admin）"; exit 0; }
+[ -x "$ADMIN" ]  || { echo "SKIP: 没有 ${ADMIN}（cmake --build build --target pqchsm-admin）"; exit 0; }
 if ! { [ -x "$PY" ] && "$PY" -c "import PyKCS11" 2>/dev/null; }; then
   echo "SKIP: 没有 PyKCS11 环境"; exit 0
 fi
@@ -138,5 +138,5 @@ PYEOF
              || ck err "★ 恢复后签名验证"
 
 echo
-echo "通过 $pass，失败 $fail"
+echo "通过 ${pass}，失败 $fail"
 [ "$fail" -eq 0 ]

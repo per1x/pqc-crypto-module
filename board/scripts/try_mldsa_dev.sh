@@ -40,7 +40,7 @@ say() { echo "$(cut -d' ' -f1 /proc/uptime) $*" >> $LOG; sync; }
 : > $LOG
 rm -f $OKFILE
 say "=== 开发形态位流试装开始 ==="
-[ -f "$NEWBIT" ] || { say "没有 $NEWBIT，什么都不做"; exit 0; }
+[ -f "$NEWBIT" ] || { say "没有 ${NEWBIT}，什么都不做"; exit 0; }
 
 load_bit() {
     B="$1"

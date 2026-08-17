@@ -74,7 +74,7 @@ if [ "$MODE" = fetch ]; then
 	TOK=$(ssh $SO "root@$BOARD" 'cat /media/sd-mmcblk1p2/hsm/hsm_token' 2>/dev/null || true)
 	[ -n "$TOK" ] || die "没取到口令" \
 		"· 若报 Permission denied (publickey,password)：这**不是**公钥没装，" \
-		"  是本机 OpenSSH 拒绝发 RSA(SHA-1) 签名。脚本已自动加 $PK；" \
+		"  是本机 OpenSSH 拒绝发 RSA(SHA-1) 签名。脚本已自动加 ${PK}；" \
 		"  仍失败就换钥匙： SSH_KEY=~/.ssh/别的私钥 $0 --fetch-token" \
 		"· 板上没有 hsm_token 文件时 daemon 是不监听的（fail-closed）" \
 		"· 也可以手抄： HSM_TOKEN=<口令> $0"
@@ -83,7 +83,7 @@ if [ "$MODE" = fetch ]; then
 	umask 077
 	printf '%s\n' "$TOK" > "$TOKEN_FILE"
 	chmod 600 "$TOKEN_FILE"
-	ok "已存到 $TOKEN_FILE（0600，${#TOK} 字符）"
+	ok "已存到 ${TOKEN_FILE}（0600，${#TOK} 字符）"
 	printf '\n以后直接跑 %s —— 不再需要 SSH。\n' "$0"
 	exit 0
 fi
@@ -105,7 +105,7 @@ fi
 # ---- 2. 客户端：仓库里没有 CMake 目标，两个文件直接编 ----------------------
 SRC1=$ROOT/service/sdf_demo.c
 SRC2=$ROOT/service/libsdfe.c
-[ -f "$SRC1" ] || die "找不到 $SRC1（这个脚本要在仓库里跑）"
+[ -f "$SRC1" ] || die "找不到 ${SRC1}（这个脚本要在仓库里跑）"
 
 if [ ! -x "$CLIENT" ] || [ "$SRC1" -nt "$CLIENT" ] || [ "$SRC2" -nt "$CLIENT" ]; then
 	command -v cc >/dev/null 2>&1 || die "没有 cc" "· macOS： xcode-select --install"
@@ -118,7 +118,7 @@ fi
 
 # ---- 3. 跑（纯 TCP，无 SSH）------------------------------------------------
 step "本机调用密码机　$BOARD:$PORT"
-ok "客户端　$BUILT（$CLIENT）"
+ok "客户端　${BUILT}（${CLIENT}）"
 ok "口令来自　$TOKSRC"
 printf '\n'
 

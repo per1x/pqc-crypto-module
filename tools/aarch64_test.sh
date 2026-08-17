@@ -99,6 +99,6 @@ echo
 if [ $rc -eq 0 ]; then
   echo "aarch64 Linux 回归通过"
 else
-  echo "⚠️ aarch64 Linux 回归失败（退出码 $rc）"
+  echo "⚠️ aarch64 Linux 回归失败（退出码 ${rc}）"
 fi
 exit $rc

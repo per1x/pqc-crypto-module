@@ -78,9 +78,9 @@ sleep 2
 fpgautil -b "$BIT" -f Full >> $L 2>&1
 sleep 2
 ST=$(cat /sys/class/fpga_manager/fpga0/state 2>/dev/null)
-say "装载后 state=$ST（退出码不看，见上）"
+say "装载后 state=${ST}（退出码不看，见上）"
 if [ "$ST" != "operating" ]; then
-    say "!!! 装载失败（state=$ST），不等宽限期，立刻回滚"
+    say "!!! 装载失败（state=${ST}），不等宽限期，立刻回滚"
     GRACE=0
 fi
 say "eth1 载入后: carrier=$(cat /sys/class/net/eth1/carrier 2>/dev/null) $(busybox ifconfig eth1 2>/dev/null | grep 'inet addr' | head -1)"

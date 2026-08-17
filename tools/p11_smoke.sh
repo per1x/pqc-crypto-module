@@ -108,5 +108,5 @@ else
 fi
 
 echo
-echo "通过 $pass，失败 $fail"
+echo "通过 ${pass}，失败 $fail"
 [ "$fail" -eq 0 ]

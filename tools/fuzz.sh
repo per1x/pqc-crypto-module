@@ -30,7 +30,7 @@ echo "编译 libFuzzer 靶子…"
   -o "$OUT/fuzz" || { echo "编译失败"; exit 1; }
 
 mkdir -p "$CORPUS"
-echo "跑 ${SECS}s（语料目录 $CORPUS，会累积）…"
+echo "跑 ${SECS}s（语料目录 ${CORPUS}，会累积）…"
 "$OUT/fuzz" "$CORPUS" -max_total_time="$SECS" -print_final_stats=1 -rss_limit_mb=4096 2>&1 \
   | grep -E "^#|NEW|cov:|stat::|ERROR|SUMMARY|Done" | tail -25
 rc=${PIPESTATUS[0]}

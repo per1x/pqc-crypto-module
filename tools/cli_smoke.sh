@@ -49,7 +49,7 @@ done
 
 CLI() { "$C" -p "$PORT" "$@"; }
 
-echo "== 命令接口端到端（TCP:$PORT）=="
+echo "== 命令接口端到端（TCP:${PORT}）=="
 ck "ping"                      ok  CLI ping
 ck "slots"                     ok  CLI slots
 [ "$(CLI slots)" = "3" ] && { echo "  ✓ 槽位数 = 3"; pass=$((pass+1)); } \
@@ -105,5 +105,5 @@ ck "关会话"                    ok  CLI session-close "$S"
 ck "已关闭的会话不可用"          err CLI logout "$S"
 
 echo
-echo "通过 $pass，失败 $fail"
+echo "通过 ${pass}，失败 $fail"
 [ "$fail" -eq 0 ]

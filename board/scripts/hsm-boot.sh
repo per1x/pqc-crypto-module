@@ -83,7 +83,7 @@ while [ $i -lt 20 ]; do
 done
 
 if [ "$(cat /sys/class/net/eth1/carrier 2>/dev/null)" = "1" ]; then
-    say "eth1 就绪：$ETH1_IP（等了 ${i}s）"
+    say "eth1 就绪：${ETH1_IP}（等了 ${i}s）"
     st "NET=ok eth1=$ETH1_IP"
 else
     # 不 return —— 网线可能只是没插。此时 eth0 还在（PL 没动），
@@ -100,7 +100,7 @@ fi
 # ============================================================================
 if [ ! -f "$BIT" ]; then
     # 没有位流文件就什么都不做 —— 删掉它就是回退手段，不用改脚本。
-    say "没有 $BIT，保持厂家位流"
+    say "没有 ${BIT}，保持厂家位流"
     st "PL=factory READY=no"
     exit 0
 fi
@@ -126,7 +126,7 @@ sleep 2
 PLST=$(cat /sys/class/fpga_manager/fpga0/state 2>/dev/null)
 
 if [ "$PLST" != "operating" ]; then
-    say "!!! 位流装载失败（state=$PLST），回退厂家位流"
+    say "!!! 位流装载失败（state=${PLST}），回退厂家位流"
     fpgautil -b $D/factory.bit -f Full >> $LOG 2>&1
     sleep 2
     sort -u $D/drvmap.boot | while read d drv; do

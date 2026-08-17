@@ -83,7 +83,7 @@ Key 0        $K;
 IV  0        $IV;
 NKY
     chmod 600 "$KEY"
-    echo "生成 $KEY（IV=$IV）"
+    echo "生成 ${KEY}（IV=${IV}）"
 fi
 
 # PMUFW 不写 encryption：bootgen 明确拒绝这个属性组合（"pmufw will be encrypted
@@ -132,7 +132,7 @@ ls -l "$OUT"
 # 明文 FSBL 的头几百 KB 里必有 ELF 段里的可打印串（"Xilinx"、"zynqmp_fsbl"）；
 # 加密之后一个都不该有。
 if [ "$ENC" = "0" ]; then
-    echo "ENC=0：明文孪生镜像 $OUT（对照组，不做加密自检）"
+    echo "ENC=0：明文孪生镜像 ${OUT}（对照组，不做加密自检）"
     exit 0
 fi
 if strings -n 6 "$OUT" | head -4000 | grep -qiE "zynqmp_fsbl|xilinx"; then
@@ -148,7 +148,7 @@ echo "自检通过：镜像前段读不到明文串"
 # bbram_red_key 出 0x3A5C3C5A，efuse_red_key 出 0xA5C3C5A3。
 KS=$(python3 -c "import struct,sys;print('%08x'%struct.unpack('<I',open(sys.argv[1],'rb').read(0x2c)[0x28:0x2c])[0])" "$OUT")
 if [ "$KS" != "3a5c3c5a" ]; then
-    echo "!!! 启动头密钥来源位是 0x$KS，不是 BBRAM 的 0x3a5c3c5a —— 不要用这份镜像"
+    echo "!!! 启动头密钥来源位是 0x${KS}，不是 BBRAM 的 0x3a5c3c5a —— 不要用这份镜像"
     exit 1
 fi
 echo "自检通过：启动头密钥来源位 = 0x3a5c3c5a（BBRAM 红钥）"
