@@ -13,6 +13,18 @@ Every number in this repository comes from **the real device**, not simulation.
 > production. See [Status and limitations](#status-and-limitations) — the gaps
 > are listed, not hidden.
 
+> ### ⛔ Before you touch the board: irreversible-operation red lines
+>
+> **No one-time, irreversible programming is permitted on this board** — not
+> eFUSEs, not the eMMC RPMB authentication key, not BBRAM latch bits, not any
+> OTP or `*_LOCK` / `*_DISABLE` / `*_EN` fuse. Any such action needs the board
+> owner's explicit consent first; **the default is "no"**, and evaluating
+> something is never permission to execute it.
+>
+> The full rule, the fuse list, the reversible alternatives and the 2026-08-18
+> incident that produced it:
+> **[docs/SECURITY.md — Irreversible-operation red lines](docs/SECURITY.md#-irreversible-operation-red-lines)**
+
 ---
 
 ## What it does

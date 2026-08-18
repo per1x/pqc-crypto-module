@@ -12,11 +12,133 @@ length — what has not. To report a vulnerability, see [../SECURITY.md](../SECU
 This is a research prototype. Nothing here is certified, and it should not be
 used to protect anything real.
 
+- [⛔ Irreversible-operation red lines](#-irreversible-operation-red-lines)
 - [The boundary](#the-boundary)
 - [Threat model](#threat-model)
 - [What has been demonstrated](#what-has-been-demonstrated)
 - [What is not defended](#what-is-not-defended)
 - [Limitations](#limitations)
+
+## ⛔ Irreversible-operation red lines
+
+**This section takes precedence over everything else in this document.** Where
+anything else conflicts with it, this section wins.
+
+### The rule
+
+On this AXU3EGB / ZU3EG board, **any one-time, irreversible programming is
+forbidden**.
+
+- It is **not only eFUSEs**. It is **every irreversible write** — fuses, OTP,
+  one-time latch bits, permanent write-protect bits, on whatever device.
+- Any irreversible action **requires the explicit consent of the board's owner
+  (the user) first. The default answer is always "no".**
+- **A session or contributor must not turn "evaluate" into "execute" on its own.**
+  "Check whether this is possible" stops there; "then do it" is a separate
+  decision that needs its own permission. Prior authorisation — including
+  phrasings like "do it for real if you can" — **does not cover** this class of
+  action.
+- Unsure whether some bit belongs to this class? **Treat it as if it does, and
+  ask.**
+
+### Why the rule is closed by category, not by list
+
+Because a list will always miss something, and the missing entry does not show
+up as "the list was incomplete" — it shows up as a board that cannot be brought
+back. So the criterion is the **category**: if a write cannot be undone, it is
+inside the red line. The list below is **illustrative, not exhaustive**.
+
+### The sharper point: an irreversible action plus a state read that can lie is unacceptable
+
+There was an incident on this board on 2026-08-18 (see "Current state" below).
+The tool, the criteria and the warnings had **all been written** — and it
+happened anyway. The cause was not insufficient care: RPMB reads on this eMMC
+**alternate with stale frames**, which means "the device says it is not
+programmed" **is not a trustworthy statement**.
+
+**On a device that cannot be read reliably, the risk of an irreversible act is
+not a function of how careful the operator is.**
+
+Two requirements follow:
+
+- **Any irreversible decision resting on a device-state reading must first
+  establish that the reading is sound.** RPMB responses are always validated on
+  `req_resp` (read `0x0200` / write `0x0300` / program-key `0x0100`) and on the
+  nonce echo, and **never on `result`** (precisely the field a stale frame
+  corrupts); I/O failure and "wrong key" must return **distinct codes**.
+- **Never delete the only copy of anything before the state is confirmed.** That
+  step, not the programming itself, is what nearly made the incident permanent.
+
+### One-time programming list (any hit is a red line; illustrative, not exhaustive)
+
+**ZU3EG / ZynqMP eFUSEs** (authoritative enumeration: UG1085 ch. 12 and Xilinx
+XilSKey):
+
+| Class | Bits |
+|---|---|
+| Authentication root | `PPK0_HASH`, `PPK1_HASH`, `RSA_EN` |
+| Encryption | AES device key, `ENC_ONLY`, `AES_RD_LOCK`, `AES_WR_LOCK` |
+| Revocation | `SPK_ID` / SPK revocation bits, PPK invalidation (`PPK0_INVLD`, `PPK1_INVLD`) |
+| Debug lockout | `JTAG_DISABLE`, `DFT_DISABLE` |
+| Locking | `SEC_LOCK`, `PROG_GATE` |
+| User area | `USER_0` … `USER_7` |
+| PUF | syndrome (helper data), `CHASH`, `AUX`, `SYN_INVLD`, `SYN_WR_LOCK`, `REG_DIS` |
+
+**eMMC**:
+
+- the **RPMB authentication key** (`Program Key`) — one shot per device, and
+  unreadable once programmed;
+- the eMMC **permanent write-protect** bits.
+
+**Catch-all**: any OTP, and any fuse whose name contains `*_LOCK`, `*_DISABLE`
+or `*_EN` — treat as a red line on sight.
+
+### Reversible alternatives (allowed; outside this section's scope)
+
+| Mechanism | Why it is reversible |
+|---|---|
+| **BBRAM key** | Battery-backed, rewritable as often as you like |
+| **QSPI reflash** | Ordinary flash, rewritable |
+| **SD card** | Swap the file, or swap the card |
+| **Bitstream reload** | `fpgautil` reconfigures the PL at any time |
+| **Device DNA** | **Read-only** — physically cannot be written |
+
+⚠️ One known trap: BBRAM is reversible but **this board's `VCC_BATT` has no
+battery**, so its contents are lost on power-down. "Rewritable" holds;
+"persistent" does not. See the BBRAM section of this document.
+
+### Current state: this board's eMMC RPMB (2026-08-18 incident, **recovered**)
+
+⚠️ **The facts here changed twice on 2026-08-18. This is the current position.**
+
+- **What happened**: `rpmb_tool provision`'s `Program Key` request **actually
+  succeeded**, but the tool read back a **stale response frame**, reported
+  "programming failed", and the key file — apparently unused — was then deleted.
+- **The conclusion drawn at the time**: "authentication key unknown, RPMB
+  permanently unusable". **That conclusion was wrong.**
+- **The actual outcome**: the key was recovered from **freed blocks** on the SD
+  card and confirmed cryptographically (`Read Write Counter` with HMAC and
+  nonce-echo verification: recovered key 3/3, a one-bit variant and fully random
+  keys 0/8). **RPMB is usable**; the rollback anchor can land.
+- **Blast radius**: RPMB only, throughout. Boot lives on the SD card
+  (`mmcblk1`); PL, network, OP-TEE and the demo path were unaffected — the board
+  booted fully after the incident and the nine-section demo ran green.
+- **The recovery was luck, not process**: the block holding those 65 bytes
+  happened not to have been reused yet. At a different moment it would have been
+  overwritten and this eMMC's RPMB would have been gone for good. **The incident
+  therefore stands as a lesson and is not downgraded because it ended well.**
+
+### How the rule is enforced (not just written down)
+
+`provision` in `board/src/rpmb_tool.c` is **not compiled in** unless
+`RPMB_ALLOW_PROVISION` is defined; running it only prints this rule and exits.
+Provisioning a genuinely **new** board requires editing the source and
+rebuilding (`-DRPMB_ALLOW_PROVISION=1`) — making it a **recorded decision**
+rather than a command anyone can type.
+
+Compile time rather than a runtime flag, for a direct reason: **a runtime flag
+does not stop the "I know what I'm doing" moment**, and that moment is exactly
+when this class of incident happens.
 
 ## The boundary
 

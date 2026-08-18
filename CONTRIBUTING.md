@@ -13,6 +13,11 @@ software project.
 - **There is exactly one board.** Anything that touches real hardware is
   serialised by hand, so changes that can only be validated on silicon will
   take a while to land.
+- ⛔ **Read the red lines first:
+  [docs/SECURITY.md — Irreversible-operation red lines](docs/SECURITY.md#-irreversible-operation-red-lines)**
+  (中文：[docs/SECURITY.zh-CN.md — 不可逆操作红线](docs/SECURITY.zh-CN.md#-不可逆操作红线)).
+  That section is normative; the summary below is only a pointer to it.
+
 - **Nothing in this repository performs one-time / irreversible programming.**
   Not eFUSEs, not the eMMC RPMB authentication key, not BBRAM latch bits, not
   one-time latches that cannot be cleared. Do not add a code path that can, and
