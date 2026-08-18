@@ -73,7 +73,7 @@ PORT=$(( 19000 + RANDOM % 20000 ))
 "$D" -p "$PORT" -s 2 -k "$KS" >"$WORK/d2.log" 2>&1
 RC=$?
 if [ "$RC" -ne 0 ]; then
-	ok "密钥库损坏时 daemon 拒绝启动（退出码 $RC）"
+	ok "密钥库损坏时 daemon 拒绝启动（退出码 ${RC}）"
 else
 	bad "密钥库损坏时 daemon 仍然起来了（fail-open）"
 fi
@@ -96,7 +96,7 @@ PORT=$(( 19000 + RANDOM % 20000 ))
 RC=$?
 chmod 600 "$KS"
 if [ "$RC" -ne 0 ]; then
-	ok "密钥库读不了时拒绝启动（退出码 $RC）"
+	ok "密钥库读不了时拒绝启动（退出码 ${RC}）"
 else
 	# root 跑测试时 chmod 000 挡不住读，这时这一条没有判据 —— 说清楚，不假装通过
 	if [ "$(id -u)" = "0" ]; then

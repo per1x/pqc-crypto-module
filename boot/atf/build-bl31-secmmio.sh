@@ -1,6 +1,6 @@
 #!/bin/bash
 # 编带受限安全 MMIO **读写**服务的 BL31，打成一份放非 golden 槽验证用的镜像
-# （产物名见下面的 $BIN；验证通过后由人决定要不要提升成 BOOT.BIN）
+# （产物名见下面的 ${BIN}；验证通过后由人决定要不要提升成 BOOT.BIN）
 #
 # 提供两个 SiP（见 patch_atf_secmmio.py）：
 #   0x8200ff12  读：x1 = 物理地址          → x0 = 0/~0，x1 = 值
@@ -114,7 +114,7 @@ for sym in PROT_READ PL_SECREAD; do
   printf "  %-12s %s\n" "$sym" "$(aarch64-none-elf-objdump -t "$NEW" | grep -ci "$sym" || true)"
 done
 
-echo "======== 打 $BIN（放非 golden 槽，当前用槽 6）"
+echo "======== 打 ${BIN}（放非 golden 槽，当前用槽 6）"
 cd "$IMG"
 cat > boot_secmmio_xmpu.bif <<BIF
 the_ROM_image:

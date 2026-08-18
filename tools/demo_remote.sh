@@ -189,7 +189,7 @@ fi
 # ---- 3. 跑（纯 mTLS/TCP，无 SSH）-------------------------------------------
 step "本机调用密码机　$BOARD:$PORT"
 ok "客户端　${BUILT}（${CLIENT}）"
-ok "凭据来自　$PKI_DIR（mTLS，期望设备 CN=$DEVICE_CN）"
+ok "凭据来自　${PKI_DIR}（mTLS，期望设备 CN=${DEVICE_CN}）"
 printf '\n'
 
 run() { "$CLIENT" "$BOARD" "$PKI_DIR" "$PORT" "$DEVICE_CN" 2>&1; }

@@ -189,7 +189,7 @@ dtc -I dts -O dtb -o "$OUT/rescue.dtb" "$OUT/rescue.dts" 2>/dev/null
 ls -l "$OUT/rescue.dtb"
 
 echo
-echo "三个产物都在 $OUT，可以跑 xsct $SRC/jtag_rescue.tcl 了"
+echo "三个产物都在 ${OUT}，可以跑 xsct $SRC/jtag_rescue.tcl 了"
 echo
 cat <<'STATUS'
 ⚠️ 当前状态（2026-08-17，如实记）：

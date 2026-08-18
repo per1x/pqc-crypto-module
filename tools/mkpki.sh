@@ -65,7 +65,7 @@ sign() {
 		-CAcreateserial -days "$DAYS" -sha256 \
 		-extfile "$name.ext" -out "$name.crt"
 	rm -f "$name.csr" "$name.ext"
-	echo "签发 $name.crt（CN=$cn）"
+	echo "签发 $name.crt（CN=${cn}）"
 }
 
 # 设备证书：serverAuth。**同时给 clientAuth 是错的** —— 那会让一张被偷走的

@@ -324,6 +324,10 @@ add_test(NAME prim_count COMMAND python3
 # 远程口 mTLS 的回归：正例 + 三条否定（别家 CA / 不出示证书 / CN 不在 ACL）。
 # 不需要板子，也不碰任何真的凭据 —— 每轮临时生成一套 PKI。
 add_test(NAME tls_regress COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/tls_regress.sh)
+# 结构性检查：shell 里 $VAR 后面紧跟多字节字符会把变量名吃坏（环境相关，
+# 本仓库已踩过两次，两次都是用户先撞上）。带自测，先验扫描器再扫仓库。
+add_test(NAME shell_var_braces COMMAND ${Python3_EXECUTABLE}
+         ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_shell_vars.py)
 # 回归 P1④：密钥库 fail-closed（装载失败拒绝启动、且不写盘）
 add_test(NAME daemon_failclosed
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/daemon_failclosed.sh
