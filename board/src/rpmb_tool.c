@@ -2,10 +2,29 @@
  *
  * 用法：
  *   rpmb_tool status                  只读：看 RPMB 在不在、密钥烧过没有、计数器多少
- *   rpmb_tool provision --i-understand-this-is-irreversible
- *                                     生成一把随机密钥、烧进 RPMB、存到 rpmb.key
  *   rpmb_tool bump                    做一次认证写，计数器 +1（防回滚锚点前进一格）
  *   rpmb_tool selftest                连做几次，验证"只增不减"，并证明重放会被拒
+ *   rpmb_tool provision               **已停用** —— 见下面那条项目规则
+ *
+ * ============================================================================
+ * ⛔ 项目规则：**不再做任何一次性/不可逆的烧写**（2026-08-18 定）
+ * ============================================================================
+ * 这条规则是拿一块板换来的。2026-08-18 在这块 AXU3EGB 上：
+ * `Program Key` **实际上成功了**，但工具读回一份陈的响应帧、报成"烧写失败"，
+ * 随后那份"看起来没用上的"密钥文件被删掉 —— 一度判定 RPMB 永久报废。
+ * （后来从 SD 的已释放块里按"块对齐 + 行尾换行"扫回来了，但那是运气，
+ *   不是流程。换个时间点那个块被覆盖，这块板的 RPMB 就真的没了。）
+ *
+ * 教训不是"下次小心点"，而是：**不可逆动作 + 会撒谎的状态读取 = 不可接受**。
+ * 这块 eMMC 的 RPMB 读隔次返回陈帧，也就是说"设备说它没烧过"这句话本身不可信；
+ * 在一个读不准的设备上做不可逆的事，风险不由操作者的谨慎程度决定。
+ *
+ * 所以 provision 在**编译期**就被关掉了，不是加一个更长的运行时开关 ——
+ * 运行时开关拦不住"我知道我在干什么"的那一刻。真要给一块**新板**做供应，
+ * 必须改代码重编（-DRPMB_ALLOW_PROVISION=1），让它成为一次有记录的决定。
+ *
+ * 同类不可逆动作一并适用：eFUSE（本项目**永久排除**）、BBRAM 锁存位、
+ * 一次性闩锁里那些解不开的、以及任何"烧了就回不去"的位。
  *
  * ============================================================================
  * 【为什么 provision 要一个这么长的开关】
@@ -30,6 +49,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef RPMB_ALLOW_PROVISION
 static void hexout(const uint8_t *p, size_t n, char *out)
 {
 	size_t i;
@@ -40,6 +60,7 @@ static void hexout(const uint8_t *p, size_t n, char *out)
 	out[n * 2] = '\n';
 	out[n * 2 + 1] = 0;
 }
+#endif  /* RPMB_ALLOW_PROVISION —— 只有 provision 用得到它 */
 
 static int cmd_status(void)
 {
@@ -60,20 +81,32 @@ static int cmd_status(void)
 	}
 	if (rc == 0 && have_key) {
 		/* 有密钥就再验一次带 MAC 的读：能验过才说明这把密钥就是烧进去的那把。 */
-		if (rpmb_read_counter(RPMB_DEV_PATH, key, &cnt, &res) == 0) {
+		int krc = rpmb_read_counter(RPMB_DEV_PATH, key, &cnt, &res);
+
+		if (krc == 0) {
 			printf("\n结论：RPMB 已启用，密钥文件与设备里的**对得上**，"
 			       "计数器 %u。防回滚锚点可用。\n", cnt);
 			return 0;
 		}
-		printf("\n结论：设备里已经烧过密钥，但 %s 里那把**验不过** ——"
-		       " 拿的不是同一把。这条路对本机关闭。\n", RPMB_KEY_PATH);
-		return 1;
+		/* ⚠️ **只有 MAC/nonce 真的对不上才说"密钥不对"。**
+		 * 其它返回码是设备 I/O（这块 eMMC 隔次抽风），把它报成"密钥不对"
+		 * 正是当初毁掉密钥的那类误判 —— 那次就是把陈帧当成了设备状态。 */
+		if (krc == -4 || krc == -5) {
+			printf("\n结论：设备里已经烧过密钥，但 %s 里那把**验不过** ——"
+			       " 拿的不是同一把。这条路对本机关闭。\n", RPMB_KEY_PATH);
+			return 1;
+		}
+		printf("\n结论：**读不准，不是密钥不对**（返回码 %d，重试已用尽）。\n"
+		       "      这块 eMMC 的 RPMB 读会隔次抽风；再跑一次 status 通常就好。\n"
+		       "      在读准之前**不要**据此判断密钥是否有效。\n", krc);
+		return 2;
 	}
 	printf("\n结论：设备里已经烧过密钥，而本机没有它（%s 不存在）。\n"
 	       "      RPMB 无法使用；密钥烧过就读不出来了。\n", RPMB_KEY_PATH);
 	return 1;
 }
 
+#ifdef RPMB_ALLOW_PROVISION
 static int cmd_provision(void)
 {
 	uint8_t key[RPMB_KEY_LEN];
@@ -144,6 +177,7 @@ static int cmd_provision(void)
 	printf("③ 带 MAC 的读验过了，计数器 = %u。防回滚锚点就绪。\n", cnt);
 	return 0;
 }
+#endif  /* RPMB_ALLOW_PROVISION */
 
 static int cmd_bump(void)
 {
@@ -230,6 +264,7 @@ int main(int argc, char **argv)
 		return cmd_status();
 	}
 	if (!strcmp(cmd, "provision")) {
+#ifdef RPMB_ALLOW_PROVISION
 		if (argc < 3 || strcmp(argv[2], "--i-understand-this-is-irreversible")) {
 			printf("烧写认证密钥**不可逆，一块板只有一次机会**。\n"
 			       "确认要做就完整打出来：\n"
@@ -237,6 +272,18 @@ int main(int argc, char **argv)
 			return 2;
 		}
 		return cmd_provision();
+#else
+		printf("⛔ provision 已在**编译期**停用 —— 项目规则：不再做任何一次性/\n"
+		       "   不可逆的烧写。理由（拿一块板换来的）写在本文件头。\n"
+		       "\n"
+		       "   真要给一块**新板**做供应，必须改代码重编：\n"
+		       "       -DRPMB_ALLOW_PROVISION=1\n"
+		       "   —— 让它成为一次有记录的决定，而不是一条随手能敲的命令。\n"
+		       "\n"
+		       "   动手之前先读一遍那段文件头，尤其是「设备说它没烧过」这句话\n"
+		       "   在这块 eMMC 上并不可信。\n");
+		return 2;
+#endif
 	}
 	if (!strcmp(cmd, "bump")) {
 		return cmd_bump();

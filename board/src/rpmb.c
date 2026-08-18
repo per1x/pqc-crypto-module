@@ -169,8 +169,20 @@ int rpmb_read_counter(const char *dev, const uint8_t key[RPMB_KEY_LEN],
 		if (RAND_bytes(req.nonce, sizeof req.nonce) != 1) {
 			return -1;
 		}
+		/* ⚠️ ioctl 失败也要重试，不能直接返回。
+		 *
+		 * 这块 eMMC 的 RPMB **隔次**会让 ioctl 回 EILSEQ（与陈帧是同一个
+		 * 毛病的两副面孔）。第一版只在 req_resp 对不上时重试，ioctl 失败
+		 * 直接 return -2 —— 于是 rpmb_tool status 里"先无密钥读一次、
+		 * 再带密钥读一次"的写法，第二次稳定落在坏的那一半上，
+		 * **每次都把"设备 I/O 抖了一下"报成"密钥不对"**。
+		 *
+		 * 这正是当初毁掉密钥的同一类错误：把 I/O 故障当成设备状态。
+		 * 所以这里把两种失败一视同仁地重试，只有重试用尽才认输，
+		 * 而且认输的返回码（-6）与"MAC 不匹配"（-4）严格分开 ——
+		 * **调用方永远不该把 -6 说成"密钥不对"**。 */
 		if (do_ioc(dev, 2, &req, NULL, &resp, 0) != 0) {
-			return -2;
+			continue;
 		}
 		if (get_be16(resp.req_resp) == 0x0200) {
 			break;      /* 这是这条请求的响应，不是陈帧 */

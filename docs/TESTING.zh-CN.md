@@ -45,7 +45,7 @@
 | 安全状态抗掉电 | PIN 失败计数、锁定、解锁**不经任何 save 也在盘上**（模拟拔电后重载） | `tests/unit/test_keystore.c` |
 | 防回滚锚点两种强度 | 文件锚点**确实能被"两个文件一起换"绕过**（把弱点钉住）；硬件单调锚点同样的攻击不成立 | `tests/unit/test_keystore.c` |
 | PRODUCTION 里没有桩根密钥 | 目标文件里搜不到那段字面量，**且带空对照**（DEV 里必须搜得到） | `tools/check_profile.sh` |
-| eMMC RPMB | 硬件够（4 MB、内核支持），但**这块板的认证密钥已烧且丢失** —— 结论与经过见 `docs/SECURITY.zh-CN.md` 2026-08-18 那节 | `board/src/rpmb_probe.c`、`rpmb_tool.c` |
+| eMMC RPMB | 硬件够（4 MB、内核支持），密钥曾误删、**已从 SD 已释放块里找回并密码学确证**（正确密钥 3/3 通过，错误密钥 0/8）—— 经过与由此定下的「不再做一次性烧写」规则见 `docs/SECURITY.zh-CN.md` 2026-08-18 那节 | `board/src/rpmb_probe.c`、`rpmb_tool.c`、`rpmb_verify.c` |
 
 ## 原则
 

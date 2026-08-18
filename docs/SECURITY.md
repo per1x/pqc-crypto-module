@@ -436,7 +436,7 @@ so this document is not mistaken for a statement of readiness.
 | **No algorithm certificates** | ACVP vectors are run locally. That is evidence of correctness, not a certificate |
 | **Single-writer audit log** | The audit module does not lock the file |
 | **Unkeyed Shamir share checksums** | They detect corruption, not tampering |
-| **Keystore rollback protection only stops swapping one file** | The header carries an `epoch` incremented on every write (covered by the MAC); where the anchor lives is chosen by a provider (`pqchsm/rbanchor.h`), and loading a file older than the anchor is **refused**. The default provider keeps the anchor in a sibling `<keystore>.epoch` file, which **is not real anti-rollback**: an attacker who rolls both files back consistently still gets through (`test_keystore` pins this weakness with a dedicated case). Real anti-rollback needs a monotonic value the attacker cannot rewind — the RPMB implementation exists in the tree, but **this board's RPMB is no longer usable**; see the 2026-08-18 section below |
+| **Keystore rollback protection only stops swapping one file** | The header carries an `epoch` incremented on every write (covered by the MAC); where the anchor lives is chosen by a provider (`pqchsm/rbanchor.h`), and loading a file older than the anchor is **refused**. The default provider keeps the anchor in a sibling `<keystore>.epoch` file, which **is not real anti-rollback**: an attacker who rolls both files back consistently still gets through (`test_keystore` pins this weakness with a dedicated case). Real anti-rollback needs a monotonic value the attacker cannot rewind — the RPMB implementation exists in the tree and this board's RPMB **is usable** (the key was deleted by mistake, then recovered and confirmed); see the 2026-08-18 section below |
 | **SO PIN lockout not enforced** | Failures are counted but the slot is not locked, because locking it would brick the device; recovery is by M-of-N |
 | **`CKM_HASH_ML_DSA_*` not implemented** | PKCS#11 multi-part signing buffers the whole message instead of streaming a digest |
 | **Host RNG is OpenSSL** | The PL entropy source is inside the boundary, but the host software still seeds from the operating system through OpenSSL |
@@ -542,32 +542,60 @@ it back**, so an old snapshot can never match again.
 `EXT_CSD[168] RPMB_SIZE_MULT = 32` → **4 MB RPMB**, `/dev/mmcblk0rpmb` present, and a
 kernel that supports `MMC_IOC_MULTI_CMD`. **The hardware is sufficient.**
 
-**But the path is closed on this board, and we closed it ourselves**:
+**There was an incident on this board and the key was nearly lost for good. The
+account stays here:**
 
 > While provisioning the RPMB authentication key on 2026-08-18, the `Program Key`
 > request **actually succeeded**, but the tool read back a **stale response frame**
 > (RPMB reads on this eMMC alternate between the correct response and the previous
 > request's response) and reported "programming failed"; the key file, apparently
-> unused, was then deleted. The result is an eMMC holding an authentication key
-> **nobody knows**: RPMB reads now always return `result=0x0000` (key programmed) and
-> no key verifies the MAC. **RPMB anti-rollback is permanently unavailable on this
-> board short of replacing the eMMC.**
+> unused, was then deleted. The conclusion drawn at the time was "RPMB permanently
+> unusable".
 >
-> Blast radius is RPMB only: boot lives on the SD card (`mmcblk1`), and PL, network
-> and the demo path are unaffected — the nine-section demo was re-run green
-> afterwards. Nothing in the project had used RPMB before.
+> **That conclusion was wrong.** The key was later recovered from **freed blocks** on
+> the SD card and confirmed cryptographically (`Read Write Counter` with HMAC and
+> nonce-echo verification: the recovered key passed 3/3, a one-bit variant and fully
+> random keys passed 0/8). RPMB is **usable**; the rollback anchor can land.
+>
+> The recovery method is worth recording. The key is `RAND_bytes(32)` and therefore
+> **not recomputable** — only the bytes themselves could be found. But ext4 here has
+> `inline_data` off and a 4096-byte block size, so those 65 bytes (64 hex characters
+> plus a newline) **necessarily occupy a whole block, starting at its first byte**.
+> Scanning the partition for "64 lowercase hex at a block boundary, immediately
+> followed by a newline" left **exactly one** hit out of 1 824 256 blocks.
+> ⚠️ A scan without the alignment criterion is useless: the partition holds 6882
+> distinct 64-hex strings (KAT vectors and hashes in logs).
 
-The code is retained and correct (`board/src/rpmb.c`, `rpmb_tool.c`) and works on a
-fresh board or eMMC. Three lessons are now encoded in it:
-- RPMB responses must be validated on `req_resp` (read `0x0200` / write `0x0300` /
-  program-key `0x0100`) and **never on `result`** — `result` is precisely the field a
-  stale frame corrupts;
-- with a key present, the nonce echo must also be checked, or replaying an old
-  response shows you a smaller counter;
-- **never delete the key file after a programming attempt, whatever it reports** — run
-  `rpmb_tool status` and let the device speak first.
+**The real lesson is not "be more careful next time"** — it is the rule below, which
+now lives in the code.
 
-**Alternatives** (none of them landed on this board; recorded honestly):
+### ⛔ Project rule: no more one-time / irreversible programming
+
+**An irreversible action plus a state read that can lie is unacceptable.** RPMB reads
+on this eMMC alternate with stale frames, which means "the device says it is not
+programmed" **is not trustworthy**; on a device that cannot be read reliably, the risk
+of an irreversible act is not a function of how careful the operator is. In the
+incident above the tool, the criteria and the warnings had all been written — and it
+happened anyway, because the failing step was outside what care can cover.
+
+The rule is enforced **at compile time**, not with a longer runtime flag (a runtime
+flag does not stop the "I know what I'm doing" moment):
+
+- `rpmb_tool provision` is **not compiled in** unless `RPMB_ALLOW_PROVISION` is
+  defined; running it only prints this rule and exits. Provisioning a **new** board
+  requires editing and rebuilding (`-DRPMB_ALLOW_PROVISION=1`), making it a recorded
+  decision rather than a command anyone can type.
+- The same applies to **eFUSEs** (permanently excluded by this project), BBRAM latch
+  bits, one-time latches that cannot be cleared, and any "burn it and it never comes
+  back" bit.
+- Correspondingly, **any irreversible decision taken on a device-state reading** must
+  first establish that the reading is sound: RPMB responses are always validated on
+  `req_resp` (read `0x0200` / write `0x0300` / program-key `0x0100`) and on the nonce
+  echo, and **never on `result`** (precisely the field a stale frame corrupts); I/O
+  failure and "wrong key" must return distinct codes — reporting the former as the
+  latter is exactly the misjudgement behind this incident.
+
+**Alternatives** (none of them landed on this board; recorded honestly):**Alternatives** (none of them landed on this board; recorded honestly):
 - **TPM NV counter** — no TPM on this board and no usable SPI/I²C TPM header;
 - **eFUSE counter** — burning eFUSEs is **permanently excluded** by this project
   (irreversible, single board);

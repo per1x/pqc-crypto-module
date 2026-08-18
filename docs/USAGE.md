@@ -37,6 +37,23 @@
 - [On the board](#on-the-board)
 - [Offline and intranet installation](#offline-and-intranet-installation)
 
+
+> ## ⛔ Read this first: no one-time / irreversible programming
+>
+> Not eFUSEs, not the eMMC RPMB authentication key, not BBRAM latch bits, not
+> one-time latches that cannot be cleared. The single remaining path in this
+> repository (`provision` in `board/src/rpmb_tool.c`) is disabled **at compile
+> time** and needs `-DRPMB_ALLOW_PROVISION=1` plus a rebuild.
+>
+> The rule cost a board. On 2026-08-18 a `Program Key` request **succeeded**
+> while the tool read back a stale response frame, reported "failed", and the key
+> file was then deleted. It was recovered from freed blocks on the SD card —
+> luck, not process. The account and the criteria are in the 2026-08-18 section
+> of [SECURITY.md](SECURITY.md).
+>
+> The point is not "be careful". It is that **an irreversible action combined
+> with a state read that can lie is unacceptable.**
+
 ## Simulation and static checks
 
 Nothing here needs a board or a licensed toolchain.
