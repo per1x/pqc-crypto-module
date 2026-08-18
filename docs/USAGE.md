@@ -154,7 +154,20 @@ The daemon needs `/dev/secmmio`, which is provided by the kernel module in
 ./service/sdf_demo
 ```
 
-### One-shot script (**start here**)
+### One command, no setup (**start here**)
+
+If the board is already provisioned — which it is — any machine that can reach it
+runs the whole demo with no configuration at all:
+
+```bash
+./demo/remote/run.sh            # --smoke for headlines, --status to just connect
+```
+
+That path uses the **public demo credentials** committed under `demo/remote/creds/`.
+Read [demo/remote/README.md](../demo/remote/README.md) for what that costs before
+relying on it for anything but a LAN demo.
+
+### Provisioning script (a board with its own private PKI)
 
 ```bash
 ./tools/demo_remote.sh --provision   # once: make a PKI, install it, keep the client creds

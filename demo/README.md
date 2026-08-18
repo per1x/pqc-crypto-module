@@ -1,6 +1,13 @@
 **English** · [中文](README.zh-CN.md)
 
-# PKCS#11 provider demos
+# Demos
+
+| | |
+|---|---|
+| [remote/](remote/) | **One command against the real board** — no SSH, no configuration. Start here. |
+| Python / Java below | The PKCS#11 provider, driven through a full key lifecycle. Software backend by default; no board needed. |
+
+## PKCS#11 provider demos
 
 Two demonstrations of loading the module as a PKCS#11 provider and driving a complete
 key lifecycle from Python and from Java: `C_Initialize` → initialise the token and PINs

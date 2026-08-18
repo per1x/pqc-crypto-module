@@ -474,6 +474,16 @@ machine, with no hardware protection, no intermediate CA and no revocation. It i
 enough to replace a shared token with a private key; it is not a PKI in the
 institutional sense.
 
+⚠️ **On this board's demo path the client identity is published, deliberately.**
+`demo/remote/creds/` carries a client certificate and its private key in this public
+repository so that a LAN demo needs no setup. On that link mTLS therefore stops
+observation and modification but **not impersonation** — the guarantee is reduced to
+"whoever can reach port 9797", and only the board's placement on a private network
+makes that acceptable. The CA and device private keys are **not** published; a
+deployment generates its own CA with `tools/mkpki.sh`, distributes credentials out of
+band, and restricts by CN through `hsm_acl`. The reasoning is restated at the point of
+use, in `demo/remote/README.md`.
+
 **The local UNIX socket is deliberately not wrapped in TLS.** It is 0600 and
 host-local, so reaching it already means root; encrypting it stops nobody and adds a
 certificate for on-board tools to manage.

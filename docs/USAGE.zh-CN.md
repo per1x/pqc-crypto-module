@@ -143,7 +143,19 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 ./service/sdf_demo
 ```
 
-### 一键脚本（**最省事，先用这个**）
+### 零配置的一条命令（**从这里开始**）
+
+板子已经装好凭据了，所以任何一台够得着它的机器都不需要任何配置：
+
+```bash
+./demo/remote/run.sh            # --smoke 只看结论，--status 只连一下
+```
+
+这条路用的是提交在 `demo/remote/creds/` 下的**公开演示凭据**。把它用在内网演示
+之外的场合之前，先读 [demo/remote/README.zh-CN.md](../demo/remote/README.zh-CN.md)
+里那段代价说明。
+
+### 装板子的脚本（给一块板子配它自己的私有 PKI）
 
 ```bash
 ./tools/demo_remote.sh --provision   # 只需做一次：生成 PKI、装板子、留凭据

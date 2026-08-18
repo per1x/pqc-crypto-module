@@ -1,6 +1,13 @@
 [English](README.md) · **中文**
 
-# PKCS#11 provider 演示
+# 演示
+
+| | |
+|---|---|
+| [remote/](remote/) | **一条命令直接打到真板子** —— 不用 SSH、不用配置。先看这个。 |
+| 下面的 Python / Java | PKCS#11 provider 的完整密钥生命周期。默认走软件后端，不需要板子。 |
+
+## PKCS#11 provider 演示
 
 两个演示程序把本模块作为 PKCS#11 provider 加载，并驱动完整的密钥生命周期：
 `C_Initialize` → 初始化令牌与 PIN → 登录 → 在槽位中生成 ML-DSA 与 ML-KEM 密钥 →
