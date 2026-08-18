@@ -115,8 +115,8 @@ EOF
     # 猜错形态会让一份看着正常的报告说出反的结论，比直接报"没认出来"糟得多。
     hr "③ 跳过 —— 认不出当前是哪个位流形态"
     cat <<EOF
-读 $FAN_VERSION（风扇观测口）得到 ${FAN:-读不到}
-读 $TRNG_VERSION（trng VERSION）得到 ${TRNG:-读不到}
+读 ${FAN_VERSION}（风扇观测口）得到 ${FAN:-读不到}
+读 ${TRNG_VERSION}（trng VERSION）得到 ${TRNG:-读不到}
 
 预期是这两种之一：
   0x00010000 / 0x00000000  → 送检形态（SECURE_ONLY=1）
