@@ -80,6 +80,13 @@ sh /media/sd-mmcblk1p2/hsm/run_demo.sh
 sh board/demo/build_client.sh
 ```
 
+> **只是想演示的话不必读下去** —— SSH 上板一条命令：
+> ```
+> sh /media/sd-mmcblk1p2/demo/run.sh
+> ```
+> 那个目录只放这一个入口（`hsm/` 里有六十多个文件，不该让人在里面找）。
+> 脚本在仓库里是 [board_demo.sh](board_demo.sh)。
+
 它会产出两个东西：`sdf_demo`（SDF 接口）和 `p11_hw_demo`（标准 PKCS#11 接口）。
 
 **第二步：拿凭据**（只需一次）。远程口是 mTLS，不是口令 —— 需要
