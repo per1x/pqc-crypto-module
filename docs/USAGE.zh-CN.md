@@ -143,7 +143,18 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 ./service/sdf_demo
 ```
 
-### 零配置的一条命令（**从这里开始**）
+### 功能一览（不需要板子）
+
+想看管理功能面 —— 算法支持性、槽位、密钥、M-of-N 备份、安全存储 —— 零配置：
+
+```bash
+./demo/functions/run.sh
+```
+
+它自带密钥库与 daemon，退出即删。每一节各证明什么见
+[demo/functions/README.zh-CN.md](../demo/functions/README.zh-CN.md)。
+
+### 打到板子的一条命令（**硬件从这里开始**）
 
 板子已经装好凭据了，所以任何一台够得着它的机器都不需要任何配置：
 

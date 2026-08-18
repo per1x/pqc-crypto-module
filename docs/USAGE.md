@@ -154,7 +154,19 @@ The daemon needs `/dev/secmmio`, which is provided by the kernel module in
 ./service/sdf_demo
 ```
 
-### One command, no setup (**start here**)
+### The function tour (no board needed)
+
+To see the management surface — algorithm support, slots, keys, M-of-N backup,
+secure storage — with nothing to set up:
+
+```bash
+./demo/functions/run.sh
+```
+
+It brings its own keystore and daemon and deletes them on exit. Details and what
+each section proves: [demo/functions/README.md](../demo/functions/README.md).
+
+### One command against the board (**start here for the hardware**)
 
 If the board is already provisioned — which it is — any machine that can reach it
 runs the whole demo with no configuration at all:

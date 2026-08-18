@@ -4,6 +4,7 @@
 
 | | |
 |---|---|
+| [functions/](functions/) | **The crypto-module function tour**: algorithm support, entropy, slots, keys, M-of-N backup, secure storage. No board needed. |
 | [remote/](remote/) | **One command against the real board**: `./demo/remote/run.sh` — it asks for the address, no SSH, no credential setup. Start here. |
 | Python / Java below | The PKCS#11 provider, driven through a full key lifecycle. Software backend by default; no board needed. |
 
