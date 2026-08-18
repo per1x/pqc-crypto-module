@@ -69,13 +69,36 @@ for a in "$@"; do
 	esac
 done
 
+# 只在真的有人在敲键盘时问（-t 0）；管道/CI/cron 里回到"打印用法并退出"，
+# 否则脚本会挂在那儿等一个永远不来的回车。
+# ⚠️ 这里只问地址，**不把模式做成菜单** —— --provision 会重装板上的设备凭据，
+#    那是要人明确打出来的动作，不是从列表里随手点中的一项。
+ask_board() {
+	[ -t 0 ] || {
+		echo "没给板子地址。用法： $0 <板子IP> [--provision|--smoke|--status]" >&2
+		echo "（也可以设 \$BOARD，或用 demo/remote/run.sh <IP> --save 记一次）" >&2
+		exit 2
+	}
+	printf '\n\033[1m这台密码机在哪？\033[0m\n'
+	printf '  板子的 IP 或主机名，例如 \033[2m192.168.1.50\033[0m（Ctrl-C 退出）\n\n'
+	while :; do
+		printf '  地址： '
+		IFS= read -r ans || { printf '\n'; exit 2; }
+		ans=$(printf '%s' "$ans" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+		case "$ans" in
+		"") printf '  \033[33m·\033[0m 空的。直接给个 IP 就行\n' ;;
+		*[!A-Za-z0-9.:_-]*)
+		    printf '  \033[33m·\033[0m "%s" 不像个地址 —— 只要主机名或 IP，不带 http:// 和端口\n' "$ans" ;;
+		*)  BOARD=$ans; return 0 ;;
+		esac
+	done
+}
+
 if   [ -n "$ARG_BOARD" ];  then BOARD=$ARG_BOARD
 elif [ -n "${BOARD:-}" ];  then :
 elif [ -f "$CONF" ];       then BOARD=$(tr -d ' \t\r\n' < "$CONF")
-else
-	echo "没给板子地址。用法： $0 <板子IP> [--provision|--smoke|--status]" >&2
-	echo "（也可以设 \$BOARD，或用 demo/remote/run.sh <IP> --save 记一次）" >&2
-	exit 2
+                                [ -n "$BOARD" ] || ask_board
+else                            ask_board
 fi
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

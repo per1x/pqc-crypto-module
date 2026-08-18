@@ -148,9 +148,12 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 板子已经装好凭据了，所以任何一台够得着它的机器都不需要任何配置：
 
 ```bash
-./demo/remote/run.sh <板子IP>            # --smoke 只看结论，--status 只连一下
-./demo/remote/run.sh <板子IP> --save     # 记住地址，之后可以省略
+./demo/remote/run.sh                     # 会问你板子地址，再问跑哪一个
+./demo/remote/run.sh <板子IP> --smoke    # 也可以一次给全；--status 只连一下
 ```
+
+什么都不带跑它会交互询问（跑通后还会问要不要记住地址），不必先查用法。
+从管道或 CI 里跑则打印用法退出，不会卡住。
 
 这条路用的是提交在 `demo/remote/creds/` 下的**公开演示凭据**。把它用在内网演示
 之外的场合之前，先读 [demo/remote/README.zh-CN.md](../demo/remote/README.zh-CN.md)

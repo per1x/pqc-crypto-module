@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| [remote/](remote/) | **一条命令直接打到真板子**：`./demo/remote/run.sh <板子IP>` —— 不用 SSH、不用装凭据。先看这个。 |
+| [remote/](remote/) | **一条命令直接打到真板子**：`./demo/remote/run.sh` —— 地址它会问你，不用 SSH、不用装凭据。先看这个。 |
 | 下面的 Python / Java | PKCS#11 provider 的完整密钥生命周期。默认走软件后端，不需要板子。 |
 
 ## PKCS#11 provider 演示

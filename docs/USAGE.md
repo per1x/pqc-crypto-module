@@ -160,9 +160,13 @@ If the board is already provisioned — which it is — any machine that can rea
 runs the whole demo with no configuration at all:
 
 ```bash
-./demo/remote/run.sh <board-ip>          # --smoke for headlines, --status to just connect
-./demo/remote/run.sh <board-ip> --save   # remember it; omit the address from then on
+./demo/remote/run.sh                     # asks for the board address, then what to run
+./demo/remote/run.sh <board-ip> --smoke  # or give it up front; --status to just connect
 ```
+
+With no arguments it prompts (and offers to remember the address once it works),
+so nothing has to be looked up first. From a pipe or CI it prints usage and exits
+instead of blocking.
 
 That path uses the **public demo credentials** committed under `demo/remote/creds/`.
 Read [demo/remote/README.md](../demo/remote/README.md) for what that costs before

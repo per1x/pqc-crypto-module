@@ -56,21 +56,22 @@ die()  { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; shift
 
 usage() {
     cat >&2 <<USAGE
-用法： $0 <板子IP|主机名> [--full|--smoke|--status] [--save]
+用法： $0 [板子IP|主机名] [--full|--smoke|--status] [--save]
 
+    $0                          什么都不给 —— 会问你要地址（交互式）
     $0 192.168.1.50             完整九节演示
     $0 192.168.1.50 --smoke     只打关键结论
     $0 192.168.1.50 --status    只连一下看设备在不在
     $0 192.168.1.50 --save      记住这个地址，以后可以省略
 
-板子地址不写死在脚本里。取值顺序：命令行参数 → \$BOARD → ${CONF}
+板子地址不写死在脚本里。取值顺序：命令行参数 → \$BOARD → ${CONF} → 交互询问。
 端口/设备 CN/凭据目录：PORT= DEVICE_CN= CREDS= 三个环境变量。
 USAGE
     exit 2
 }
 
 # ---- 0. 参数：地址与模式不分先后，哪个在前都认 -----------------------------
-ARG_BOARD=""; MODE=""; SAVE=0
+ARG_BOARD=""; MODE=""; SAVE=0; ASKED=0
 for a in "$@"; do
     case "${a}" in
     --full|--smoke|--status)
@@ -78,23 +79,76 @@ for a in "$@"; do
         MODE=${a} ;;
     --save)  SAVE=1 ;;
     -h|--help) usage ;;
-    -*)      die "不认识的参数：${a}" "用法： $0 <板子IP> [--full|--smoke|--status] [--save]" ;;
+    -*)      die "不认识的参数：${a}" "用法： $0 [板子IP] [--full|--smoke|--status] [--save]" ;;
     *)
         [ -z "${ARG_BOARD}" ] || die "地址给了不止一个：${ARG_BOARD} 与 ${a}"
         ARG_BOARD=${a} ;;
     esac
 done
-MODE=${MODE:---full}
 
-# 命令行 → 环境变量 → 存过的那份。都没有就说清楚，不猜。
-if   [ -n "${ARG_BOARD}" ];        then BOARD=${ARG_BOARD}
-elif [ -n "${BOARD:-}" ];          then :
-elif [ -f "${CONF}" ];             then BOARD=$(tr -d ' \t\r\n' < "${CONF}")
-else
-    printf '  \033[31m✗\033[0m 没给板子地址\n\n' >&2
-    usage
+# 地址长得像不像个地址。宽松是有意的（主机名、.local、IPv6 都要能过），
+# 只把明显不是地址的挡掉 —— 空格、引号、斜杠这类多半是复制粘贴粘歪了。
+looks_like_address() {
+    case "$1" in
+    ""|*[!A-Za-z0-9.:_-]*) return 1 ;;
+    *) return 0 ;;
+    esac
+}
+
+# 交互问一次。只在**真的有人在敲键盘**时问（-t 0）；管道里、CI 里、
+# cron 里一律回到"打印用法并退出"，否则脚本会挂在那儿等一个永远不来的回车。
+ask_board() {
+    [ -t 0 ] || { printf '  \033[31m✗\033[0m 没给板子地址\n\n' >&2; usage; }
+    ASKED=1
+    printf '\n'; bold "这台密码机在哪？"
+    printf '  板子的 IP 或主机名，例如 \033[2m192.168.1.50\033[0m 或 \033[2mhsm.local\033[0m\n'
+    printf '  （板子的 eth1 是静态地址，上电约 35 秒后就绪；Ctrl-C 退出）\n\n'
+    while :; do
+        printf '  地址： '
+        IFS= read -r ans || { printf '\n'; die "没读到输入"; }
+        # 只去掉首尾空白（含粘贴带来的 \r），中间不动 —— 报错时要把人**真正
+        # 输入的**东西原样回显出去，改过的字符串会让人以为自己没打错。
+        ans=${ans#"${ans%%[![:space:]]*}"}
+        ans=${ans%"${ans##*[![:space:]]}"}
+        if looks_like_address "${ans}"; then BOARD=${ans}; return 0; fi
+        if [ -z "${ans}" ]; then
+            printf '  \033[33m·\033[0m 空的。直接给个 IP 就行，比如 192.168.1.50\n'
+        else
+            printf '  \033[33m·\033[0m "%s" 不像个地址 —— 只要主机名或 IP，不带 http://、端口和路径\n' "${ans}"
+            printf '    （端口用 PORT=… 覆盖，默认 %s）\n' "${PORT}"
+        fi
+    done
+}
+
+# 没指定模式又是交互式，就把三种形态摆出来让人选 —— 不必先去读用法。
+ask_mode() {
+    [ -t 0 ] || { MODE=--full; return 0; }
+    printf '\n'; bold "跑哪一个？"
+    printf '    1) 完整九节演示　　　　\033[2m默认\033[0m\n'
+    printf '    2) 只打关键结论　　　　\033[2m--smoke\033[0m\n'
+    printf '    3) 只连一下看在不在　　\033[2m--status\033[0m\n\n'
+    while :; do
+        printf '  选 [1-3，回车= 1]： '
+        IFS= read -r ans || { printf '\n'; MODE=--full; return 0; }
+        case "$(printf '%s' "${ans}" | tr -d ' \t\r')" in
+        ""|1) MODE=--full;   return 0 ;;
+        2)    MODE=--smoke;  return 0 ;;
+        3)    MODE=--status; return 0 ;;
+        *)    printf '  \033[33m·\033[0m 只认 1 / 2 / 3\n' ;;
+        esac
+    done
+}
+
+# 命令行 → 环境变量 → 存过的那份 → 问人。一层都不猜。
+if   [ -n "${ARG_BOARD}" ]; then BOARD=${ARG_BOARD}
+elif [ -n "${BOARD:-}" ];   then :
+elif [ -f "${CONF}" ];      then BOARD=$(tr -d ' \t\r\n' < "${CONF}")
+                                 [ -n "${BOARD}" ] || ask_board
+else                             ask_board
 fi
-[ -n "${BOARD}" ] || die "地址是空的" "· 看一眼 ${CONF}"
+
+[ -n "${MODE}" ] || { [ "${ASKED}" = 1 ] && ask_mode; }
+MODE=${MODE:---full}
 
 if [ "${SAVE}" = 1 ]; then
     printf '%s\n' "${BOARD}" > "${CONF}"
@@ -174,4 +228,17 @@ if [ "${MODE}" = --status ]; then
     ok "设备在线（三个 VERSION 都应是 0x00010000）"
 else
     ok "演示通过 —— 上面每一个正确结果都只可能来自 FPGA"
+fi
+
+# 问过地址、又还没存过，才提议记住它 —— 而且只在**跑通之后**问：
+# 存一个连不上的地址，下次就是拿着一个错答案再撞一次墙。
+if [ "${ASKED}" = 1 ] && [ ! -f "${CONF}" ] && [ -t 0 ]; then
+    printf '\n  以后记住 \033[1m%s\033[0m 吗？下次直接 %s --smoke 就行 [Y/n] ' "${BOARD}" "$0"
+    IFS= read -r ans || ans=n
+    case "$(printf '%s' "${ans}" | tr -d ' \t\r')" in
+    ""|y|Y|yes|YES)
+        printf '%s\n' "${BOARD}" > "${CONF}"
+        ok "记住了（${CONF}，不进仓库）" ;;
+    *)  printf '  没记。下次再问一遍，或者 %s %s --save\n' "$0" "${BOARD}" ;;
+    esac
 fi
