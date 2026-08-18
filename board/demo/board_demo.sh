@@ -51,13 +51,25 @@ else
     exit 1
 fi
 
+# ---- ⑤ 管理功能面：槽位 / 密钥 / 备份 / 安全存储 ---------------------------
+# 这一段用的是**主机侧那个软件密码机**（pqchsmd + pqchsm-cli + pqchsm-admin），
+# 交叉编译后放在 demo/bin/。上面 ①-④ 演的是 FPGA 那半，这一段演的是"一台
+# 密码机该有的管理功能"——槽位状态机、SO/User 角色、M-of-N 备份、密钥库。
+# 两半合起来才是一台密码机。
+if [ -x "$(dirname "$0")/functions.sh" ] || [ -r "$(dirname "$0")/functions.sh" ]; then
+    bash "$(dirname "$0")/functions.sh"
+else
+    hr "⑤ 管理功能面 —— 跳过"
+    echo "  找不到 $(dirname "$0")/functions.sh"
+fi
+
 # ---- 收尾：把还能往下看的东西指出来 ----------------------------------------
 hr "还能看什么"
 cat <<'EOF'
   远程调用（在另一台机器上，全程不用 SSH，mTLS 双向证书）：
       ./demo/remote/run.sh <板子IP>
 
-  密码机的管理功能面（槽位/密钥/M-of-N 备份/安全存储/算法调用，不需要板子）：
+  管理功能面已经在上面第 ⑤ 段跑过了。主机上也能单独跑（不需要板子）：
       ./demo/functions/run.sh
 
   这块板上更细的证据（原始输出，未经整理）：

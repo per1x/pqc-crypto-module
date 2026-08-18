@@ -1,10 +1,21 @@
-#!/usr/bin/env bash
-# 密码机功能演示 —— 算法支持性、熵源、槽位管理、密钥管理、备份恢复、安全存储
+#!/bin/bash
+# 密码机功能演示（**板上变体**）—— 算法支持性、熵源、槽位管理、密钥管理、
+# 备份恢复、安全存储、算法调用
 #
-#     ./demo/functions/run.sh
+#     sh /media/sd-mmcblk1p2/demo/functions.sh
 #
-# 自带一切：临时密钥库、自己起的 daemon、用完就删。不碰你已有的任何东西，
-# 也不需要板子（板子那半在 demo/remote/ 与 board/demo/）。
+# ============================================================================
+# 【它和主机那份的差别，以及为什么必须有两份】
+# ============================================================================
+# 主机版是 demo/functions/run.sh。逻辑与判据逐条相同，差别只在**板上缺东西**：
+#
+#   · 板上没有 cc  —— 主机版现编 mechs / roundtrip，这里改用交叉编译好的，
+#                     放在 bin/ 下（构建机上出的，见 board/demo/README.zh-CN.md）；
+#   · 板上没有 python3 —— 主机版用它翻一个 bit，这里改用 dd + od；
+#   · pqchsmd / pqchsm-cli / pqchsm-admin 板上原本就没有（那三个是主机侧的
+#     软件密码机，板上只装了驱动 FPGA 的 pqchsm_fpgad），一并交叉编进 bin/。
+#
+# ⚠️ 改了主机版的判据，这一份要跟着改 —— 两份说的必须是同一件事。
 #
 # ============================================================================
 # 【这里演的是哪一个密码机 —— 先分清，否则会看错】
@@ -26,8 +37,8 @@
 # ============================================================================
 set -uo pipefail
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-BUILD=${BUILD:-${ROOT}/build}
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+BUILD=${BUILD:-${HERE}/bin}
 PORT=${PORT:-19099}
 WORK=$(mktemp -d)
 KS=${WORK}/keystore.bin
@@ -77,9 +88,8 @@ say "$(sed -n '1s/^\[DEV\] *//p' "${WORK}/daemon.log")"
 # ============================================================================
 sec "一、算法支持性 —— 问模块自己，不是问文档"
 # ============================================================================
-MECHS=${WORK}/mechs
-if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
-      -o "${MECHS}" "${ROOT}/demo/functions/mechs.c" 2>/dev/null; then
+MECHS=${BUILD}/mechs
+if [ -x "${MECHS}" ]; then
     P11=$(ls "${BUILD}"/pqchsm-pkcs11.* 2>/dev/null | head -1)
     export P11
     if [ -n "${P11}" ]; then
@@ -89,21 +99,31 @@ if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
         say "⚠️ CKM_ML_DSA 这一行容易读成\"硬件\"——它不是。算法本身有整核并在板上"
         say "   对过 ACVP，但 PKCS#11 这一侧走的是 liboqs。见 docs/API.md。"
     else
-        say "（没找到 PKCS#11 模块，跳过；cmake --build build --target pqchsm-p11）"
+        say "（bin/ 下没有 PKCS#11 模块，跳过）"
     fi
 else
-    say "（编译机制枚举器失败，跳过这一节）"
+    say "（bin/mechs 不在，跳过这一节）"
 fi
 
 # ============================================================================
 sec "二、熵源"
 # ============================================================================
-say "主机侧这个密码机的随机数来自 OpenSSL，**不是** PL 的熵源 —— 这条边界"
-say "写在 docs/SECURITY.md 的局限表里，不含糊过去。"
+say "**这一节在板上有两个熵源，要分清。**"
 say ""
-say "真正的硬件熵源在板子上：8 个环形振荡器 + SP 800-90B 健康检测"
-say "（RCT/APT），1,048,576 个调节前样本实测最小熵 H = 0.871 bit/sample。"
-say "要看它，跑 demo/remote/run.sh（第 [1] 节）或板上的 run_demo.sh。"
+say "① 本节这个软件密码机（pqchsmd）取随机数走 OpenSSL —— 它跑在 PS 的"
+say "   Linux 上，与 PL 的熵源无关。这条边界写在 docs/SECURITY.md 的局限表里。"
+say ""
+say "② FPGA 里那个才是硬件熵源：8 个环形振荡器 + SP 800-90B 健康检测"
+say "   （RCT/APT），1,048,576 个调节前样本实测 H = 0.871 bit/sample。"
+say "   它由板上的 pqchsm_fpgad 提供，取一个看看："
+say ""
+if [ -x /media/sd-mmcblk1p2/hsm/sdf_demo ]; then
+    /media/sd-mmcblk1p2/hsm/sdf_demo 2>/dev/null \
+        | sed -n "/SDFE_GenerateRandom/,+2p" | sed "s/^/    /"
+    ok "上面那 32 字节来自 PL 的环振噪声源，不是 OpenSSL"
+else
+    say "    （hsm/sdf_demo 不在，跳过）"
+fi
 
 # ============================================================================
 sec "三、槽位管理"
@@ -250,17 +270,25 @@ say "    keystore.bin  $(wc -c < "${KS}" | tr -d ' ') 字节"
 say ""
 say "反例甲 —— 改坏一个 bit："
 cp "${KS}" "${WORK}/bad.bin"; cp "${KS}.epoch" "${WORK}/bad.bin.epoch" 2>/dev/null
-python3 - "${WORK}/bad.bin" <<'PY'
-import sys
-p = sys.argv[1]
-b = bytearray(open(p, 'rb').read())
-b[200] ^= 0x01
-open(p, 'wb').write(b)
-PY
-# 取不到校验和就必须报错 —— 两边都空会"恒相等"，判据静默通过什么也没验。
-# （板上变体就踩过：那边没有 cksum。）
-SUM=$(command -v cksum || command -v md5sum || true)
-[ -n "${SUM}" ] || die "找不到 cksum/md5sum —— 这条判据没法验，不装作通过"
+# 板上没有 python3，用 dd 读出那个字节、od 转成十进制、+1 再写回去。
+# 必须 conv=notrunc，否则 dd 会把文件从写入点截断 —— 那就不是"改一个 bit"
+# 而是"把文件砍掉一半"，测出来的东西就不是同一回事了。
+# ⚠️ **busybox 的 `dd ... seek=N conv=notrunc` 在这块板上静默不写** ——
+#    文件长度对、退出码 0、字节纹丝不动。原地改一个字节要用三段拼接：
+#    前 200 字节 + 新字节 + 第 202 字节起。踩过一次，别改回去。
+OLD=$(dd if="${WORK}/bad.bin" bs=1 skip=200 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
+NEW=$(( (OLD + 1) % 256 ))
+dd if="${WORK}/bad.bin" bs=1 count=200 of="${WORK}/bad.new" 2>/dev/null
+printf "$(printf '\\%03o' "${NEW}")" >> "${WORK}/bad.new"
+dd if="${WORK}/bad.bin" bs=1 skip=201 2>/dev/null >> "${WORK}/bad.new"
+mv "${WORK}/bad.new" "${WORK}/bad.bin"
+CHK=$(dd if="${WORK}/bad.bin" bs=1 skip=200 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
+[ "${CHK}" = "${NEW}" ] || die "改字节没生效（读回 ${CHK}，本该是 ${NEW}）—— 判据失效，停在这里"
+say "    第 200 字节 ${OLD} → ${NEW}（已回读确认）"
+# ⚠️ 板上没有 cksum。原来这里写的是 cksum，结果两边都取到空字符串、恒相等 ——
+#    判据静默通过，什么也没验。**取不到校验和就必须报错，不能当成"一致"。**
+SUM=$(command -v md5sum || command -v sha256sum || true)
+[ -n "${SUM}" ] || die "板上既没有 md5sum 也没有 sha256sum —— 这条判据没法验，不装作通过"
 BEFORE=$("${SUM}" < "${WORK}/bad.bin")
 # ⚠️ 判据是**两件事**，缺一不可：装载必须被拒，且文件必须没被改写。
 #    这里原来只查了后者 —— 于是文件哪怕根本没被改坏，也照样打 ✓。
@@ -322,9 +350,8 @@ say "                   liboqs（软件）          FPGA 密码核"
 say "                                     PQCHSM_BACKEND=sdfe 切换"
 say ""
 
-RT=${WORK}/roundtrip
-if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
-      -o "${RT}" "${ROOT}/demo/functions/roundtrip.c" 2>/dev/null && [ -n "${P11:-}" ]; then
+RT=${BUILD}/roundtrip
+if [ -x "${RT}" ] && [ -n "${P11:-}" ]; then
     sub "签名类：ML-DSA 的签 → 验往返，以及它的两个反例"
     say ""
     PQCHSM_KEYSTORE=${WORK}/rt.bin "${RT}" "${P11}" 2>&1 | sed 's/^/    /'
@@ -332,35 +359,35 @@ if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
     [ "${RTRC}" = 0 ] && ok "签名往返成立，且两条篡改路径都验不过" \
                       || no "签名往返有问题（rc=${RTRC}）"
 else
-    say "（编译 roundtrip 失败或没有 PKCS#11 模块，跳过）"
+    say "（bin/roundtrip 或 PKCS#11 模块不在，跳过）"
 fi
 
-KEMDEMO=${WORK}/p11_hw_demo
-if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
-      -o "${KEMDEMO}" "${ROOT}/board/demo/p11_hw_demo.c" 2>/dev/null && [ -n "${P11:-}" ]; then
-    say ""
-    sub "KEM 类：ML-KEM 封装 → 解封装，再用共享密钥做 AES-GCM（KEM-DEM）"
-    say ""
-    PQCHSM_KEYSTORE=${WORK}/kem.bin "${KEMDEMO}" "${P11}" 2>&1 \
-        | sed 's/^/    /; s/=== .*===//'
-    ok "封装/解封装两端共享密钥一致，且私钥读不出来"
-    say ""
-    say "⚠️ 这**同一个程序**设上 PQCHSM_BACKEND=sdfe 就打到板子的 FPGA 上，"
-    say "   一行代码不用改 —— 这正是\"标准接口\"的意思。板上那次见"
-    say "   board/demo/README.zh-CN.md。"
+say ""
+sub "KEM 类：在这块板上，ML-KEM 的封装/解封装是**真硬件**在算"
+say ""
+say "上面 roundtrip 走的是 PKCS#11 → 软件后端。同一块板上还有一条路直通"
+say "FPGA：hsm/sdf_demo 经 pqchsm_fpgad → EL3 → PL 里的 mlkem_axi。"
+say ""
+if [ -x /media/sd-mmcblk1p2/hsm/sdf_demo ]; then
+    /media/sd-mmcblk1p2/hsm/sdf_demo 2>/dev/null \
+        | sed -n "/\[2\] SDFE_GenerateKeyPair/,/共享密钥一致/p" | sed "s/^/    /"
+    ok "私钥句柄从头到尾没变成过一串字节 —— dk 不出 PL"
 else
-    say "（编译 p11_hw_demo 失败，跳过 KEM 这半）"
+    say "    （hsm/sdf_demo 不在，跳过）"
 fi
+say ""
+say "⚠️ 两条路的差别值得说清：PKCS#11 这一侧目前走 liboqs（软件），SDF 那一侧"
+say "   走 FPGA。把 PKCS#11 也接到硬件要设 PQCHSM_BACKEND=sdfe —— 见 docs/API.md。"
 
 # ============================================================================
 sec "怎么调用"
 # ============================================================================
 say "本演示用的是 pqchsm-cli（一条 TCP 到 pqchsmd）。应用一般走这两条："
 say ""
-say "  PKCS#11  —— 跨厂商标准接口，Python / Java / C 都有现成示例："
-say "             demo/python/pqchsm_demo.py、demo/java/PqcHsmDemo.java"
-say "  SDF 风格 —— 国密惯用的一套，直接对板上的 FPGA 密码机："
-say "             demo/remote/run.sh，接口见 docs/API.md"
+say "  PKCS#11  —— 跨厂商标准接口。板上这份模块在 bin/pqchsm-pkcs11.so，"
+say "             主机侧的 Python / Java 示例见仓库 demo/python、demo/java"
+say "  SDF 风格 —— 国密惯用的一套，直接对 FPGA 密码机："
+say "             板上 hsm/sdf_demo，或从别的机器跑 demo/remote/run.sh"
 say ""
 say "把 ML-KEM 的密钥生成接到 FPGA（私钥进 PL 片内金库）："
 say "  export PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=<板子IP>"
