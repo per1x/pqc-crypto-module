@@ -44,6 +44,7 @@ below.
 | 4. Key management | Generate / export public key / sign / destroy. **There is no "export private key" command — that is a structural fact, not an omission** |
 | 5. Backup and restore | A policy bit decides what can be backed up; 2-of-3 threshold. **Negative: one share must fail**; a different pair still works, so it is a real threshold scheme |
 | 6. Secure storage | **Negative A**: flip one bit → refuses to load **and does not rewrite the file**. **Negative B**: replay an old snapshot → refused by the epoch anchor |
+| 7. Calling the algorithms | Support is not use. The signature path runs `C_GenerateKeyPair → C_Sign → C_Verify`, then verifies again with **one bit flipped in the message, and again with one bit flipped in the signature — both must fail**. The KEM path runs encapsulate → decapsulate → AES-GCM (KEM-DEM), and shows the private-key export being refused |
 
 The negatives are the point. A crypto module is defined by what it **refuses**, not by
 what it computes.

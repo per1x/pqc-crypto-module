@@ -44,6 +44,7 @@ cleanup() {
 trap cleanup EXIT
 
 sec()  { printf '\n\033[1m━━ %s\033[0m\n\n' "$1"; }
+sub()  { printf '  \033[1m%s\033[0m\n' "$1"; }   # say 走 %s，不解释转义
 say()  { printf '  %s\n' "$1"; }
 # 回显时把仓库路径与临时目录缩掉 —— 观众要看的是"调了哪条命令"，
 # 不是一串 /var/folders/... 的绝对路径。
@@ -80,6 +81,7 @@ MECHS=${WORK}/mechs
 if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
       -o "${MECHS}" "${ROOT}/demo/functions/mechs.c" 2>/dev/null; then
     P11=$(ls "${BUILD}"/pqchsm-pkcs11.* 2>/dev/null | head -1)
+    export P11
     if [ -n "${P11}" ]; then
         say "PKCS#11 的标准问法：C_GetMechanismList + C_GetMechanismInfo"
         PQCHSM_KEYSTORE=${WORK}/p11.bin "${MECHS}" "${P11}"
@@ -286,6 +288,54 @@ say ""
 say "⚠️ 默认 KDR 是编译进二进制的**公开常量**（见开头那行 DEV 告警）——"
 say "   也就是说这个演示形态下密钥库的机密性等于零。PRODUCTION 形态会拒绝"
 say "   在没有硬件派生根时启动。见 docs/SECURITY.md「构建形态」一节。"
+
+# ============================================================================
+sec "七、算法调用 —— 支持不等于能用，走一遍完整调用链"
+# ============================================================================
+say "第一节列出了 5 个机制。列出来只是声明，这一节把它们**调一遍**。"
+say ""
+say "调用链（两条路，最终落到同一个后端）："
+say ""
+say "    应用 ──▶ PKCS#11 C_*  ──┐"
+say "                            ├──▶ 槽位层（会话/角色/策略）"
+say "    应用 ──▶ SDF SDFE_*  ──┘         │"
+say "                                     ▼"
+say "                              pqc 后端 vtable"
+say "                                     │"
+say "                       ┌─────────────┴─────────────┐"
+say "                   liboqs（软件）          FPGA 密码核"
+say "                                     PQCHSM_BACKEND=sdfe 切换"
+say ""
+
+RT=${WORK}/roundtrip
+if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
+      -o "${RT}" "${ROOT}/demo/functions/roundtrip.c" 2>/dev/null && [ -n "${P11:-}" ]; then
+    sub "签名类：ML-DSA 的签 → 验往返，以及它的两个反例"
+    say ""
+    PQCHSM_KEYSTORE=${WORK}/rt.bin "${RT}" "${P11}" 2>&1 | sed 's/^/    /'
+    RTRC=${PIPESTATUS[0]}
+    [ "${RTRC}" = 0 ] && ok "签名往返成立，且两条篡改路径都验不过" \
+                      || no "签名往返有问题（rc=${RTRC}）"
+else
+    say "（编译 roundtrip 失败或没有 PKCS#11 模块，跳过）"
+fi
+
+KEMDEMO=${WORK}/p11_hw_demo
+if cc -O2 -I "${ROOT}/third_party/pkcs11-v3.2" -I "${ROOT}/src/p11" \
+      -o "${KEMDEMO}" "${ROOT}/board/demo/p11_hw_demo.c" 2>/dev/null && [ -n "${P11:-}" ]; then
+    say ""
+    sub "KEM 类：ML-KEM 封装 → 解封装，再用共享密钥做 AES-GCM（KEM-DEM）"
+    say ""
+    PQCHSM_KEYSTORE=${WORK}/kem.bin "${KEMDEMO}" "${P11}" 2>&1 \
+        | sed 's/^/    /; s/=== .*===//'
+    ok "封装/解封装两端共享密钥一致，且私钥读不出来"
+    say ""
+    say "⚠️ 这**同一个程序**设上 PQCHSM_BACKEND=sdfe 就打到板子的 FPGA 上，"
+    say "   一行代码不用改 —— 这正是\"标准接口\"的意思。板上那次见"
+    say "   board/demo/README.zh-CN.md。"
+else
+    say "（编译 p11_hw_demo 失败，跳过 KEM 这半）"
+fi
 
 # ============================================================================
 sec "怎么调用"
