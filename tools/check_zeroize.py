@@ -45,11 +45,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ct_audit import blank_out, is_secret, match_paren  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-# ⚠️ service/ 一度不在扫描范围里，而它**已经被编译进 libpqchsm**
-# （CMakeLists 里的 libsdfe.c 与 sdfe_pkenc.c）。漏扫的直接后果是
-# sdfe_pkenc.c 里四条早退路径带着 32 字节共享密钥直接 return，
-# 而且清零用的是会被 -O2 消掉的裸 memset —— 独立评审点的就是这个盲区。
-# **凡是进了产物的目录都要在这张表里。**
 # ⚠️ service/ 里**进了产物的那两个文件**必须在扫描范围里：libsdfe.c 与
 # sdfe_pkenc.c 都被编译进 libpqchsm（见 CMakeLists）。漏扫的直接后果已经
 # 出现过 —— sdfe_pkenc.c 有四条早退路径带着 32 字节共享密钥直接 return，

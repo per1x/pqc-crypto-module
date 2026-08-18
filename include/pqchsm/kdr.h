@@ -60,7 +60,7 @@ typedef struct pqc_kdr_provider {
 	 *    拷到别的板上打不开（防克隆成立）；但 DNA **不是秘密** —— 有 JTAG
 	 *    的人直接就能读出来，所以它不提供任何机密性。
 	 *
-	 *    把这两件事合成一个 flag，就是独立评审点名的那类夸大：
+	 *    把这两件事合成一个 flag 就是一种夸大：
 	 *    "绑定到硬件" 会被读成 "受硬件保护"。 */
 	int device_bound;
 } pqc_kdr_provider_t;

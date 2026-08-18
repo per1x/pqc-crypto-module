@@ -21,30 +21,15 @@ software project.
 - **Nothing in this repository performs one-time / irreversible programming.**
   Not eFUSEs, not the eMMC RPMB authentication key, not BBRAM latch bits, not
   one-time latches that cannot be cleared. Do not add a code path that can, and
-  do not re-enable an existing one without saying so in the commit message.
-
-  This rule cost a board. On 2026-08-18 the RPMB `Program Key` request
-  **succeeded**, the tool read back a **stale response frame**, reported
-  "programming failed", and the key file — apparently unused — was deleted. The
-  key was later recovered from freed blocks on the SD card, but that was luck,
-  not process: had those blocks been reused, the eMMC's RPMB would have been
-  dead for good. The full account is in
-  [docs/SECURITY.md](docs/SECURITY.md#-project-rule-no-more-one-time--irreversible-programming).
-
-  The lesson is not "be careful". It is that **an irreversible action combined
-  with a state read that can lie is unacceptable** — on this eMMC, "the device
-  says it is not programmed" is not a trustworthy statement, so no amount of
-  care makes the operation safe. The one remaining path
-  (`board/src/rpmb_tool.c`'s `provision`) is therefore disabled **at compile
-  time**: it needs `-DRPMB_ALLOW_PROVISION=1` and a rebuild, so that
-  provisioning a genuinely new board is a recorded decision rather than a
-  command anyone can type.
+  do not re-enable an existing one without saying so in the commit message. The
+  one remaining path (`provision` in `board/src/rpmb_tool.c`) is disabled at
+  compile time and needs `-DRPMB_ALLOW_PROVISION=1` plus a rebuild.
 
 - **If an irreversible decision rests on a device-state reading, prove the
   reading first.** RPMB responses are validated on `req_resp` and the nonce
   echo, never on `result` (the field a stale frame corrupts), and I/O failure
-  must return a different code from "wrong key" — reporting the former as the
-  latter is exactly what went wrong above.
+  must return a different code from "wrong key". The red-lines section explains
+  why this is not optional.
 
 ## What a change has to pass
 

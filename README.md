@@ -13,18 +13,6 @@ Every number in this repository comes from **the real device**, not simulation.
 > production. See [Status and limitations](#status-and-limitations) — the gaps
 > are listed, not hidden.
 
-> ### ⛔ Before you touch the board: irreversible-operation red lines
->
-> **No one-time, irreversible programming is permitted on this board** — not
-> eFUSEs, not the eMMC RPMB authentication key, not BBRAM latch bits, not any
-> OTP or `*_LOCK` / `*_DISABLE` / `*_EN` fuse. Any such action needs the board
-> owner's explicit consent first; **the default is "no"**, and evaluating
-> something is never permission to execute it.
->
-> The full rule, the fuse list, the reversible alternatives and the 2026-08-18
-> incident that produced it:
-> **[docs/SECURITY.md — Irreversible-operation red lines](docs/SECURITY.md#-irreversible-operation-red-lines)**
-
 ---
 
 ## What it does
@@ -32,6 +20,7 @@ Every number in this repository comes from **the real device**, not simulation.
 | | |
 |---|---|
 | **Post-quantum KEM** | ML-KEM-512 / 768 / 1024 (FIPS 203), full KeyGen / Encaps / Decaps in RTL — byte-exact against NIST ACVP vectors **on silicon** |
+| **Post-quantum signature** | ML-DSA-44 / 65 / 87 (FIPS 204), KeyGen / Sign / Verify in RTL, one bitstream covering all three parameter sets — byte-exact against ACVP **on silicon** |
 | **Symmetric & SM-series** | AES-128/256, SM4, SM3 — checked against FIPS 197, GB/T 32907, GB/T 32905 |
 | **True random source** | 8-ring-oscillator entropy source, SP 800-90B health tests (RCT/APT), SHA-3 sponge conditioning. Measured min-entropy **H = 0.871 bit/sample** |
 | **Hardware key vault** | Symmetric keys enter over the bus and leave only over a private wire to the cipher cores. There is **no read path in the RTL** |
@@ -161,7 +150,7 @@ Measured on the device, in the configuration described in
 | ML-KEM 512/768/1024 vs NIST ACVP, on silicon | 20 / 20 byte-exact |
 | Board self-test (symmetric, SM, boundary, AxPROT, TRNG) | 24 / 24 |
 | Key vault counter-proof — 256 bytes scanned on each of two slaves | key words appear **0** times; ciphertext correct |
-| AxPROT gate, both directions *(measured on the development bitstream, where a `SECURE_ONLY=0` control exists; taken before the RAZ/WI change, so refusal was logged as DECERR)* | EL3 reads `SECURE_ONLY=1`; EL1-NS refused at the same address; same EL1-NS reads a `SECURE_ONLY=0` core successfully |
+| AxPROT gate, both directions *(on the development bitstream, which carries a `SECURE_ONLY=0` control)* | EL3 reads `SECURE_ONLY=1`; EL1-NS refused at the same address; same EL1-NS reads a `SECURE_ONLY=0` core successfully |
 | Default (shipping) bitstream — normal world reachability | 0 of 5 cores readable; 6 / 6 refused |
 | TRNG min-entropy, 1,048,576 pre-conditioning samples | H = 0.871234 bit/sample → RCT 47, APT 672 |
 | Decaps timing, valid vs implicit-reject, 200 runs each | median difference 0.000 % |
@@ -175,12 +164,12 @@ kept verbatim under [board/logs/](board/logs/).
 
 Accurate statements about what this does **not** do.
 
-- **ML-KEM private keys leave the hardware.** `KeyGen` returns `ek ‖ dk` over
-  AXI, because checking against ACVP vectors requires it. The daemon keeps `dk`
-  and hands the application a handle, so it does not leave the *interface* — but
-  "the private key never leaves the hardware" is not yet true, and is not
-  claimed. Symmetric keys in the key vault are a different case: those genuinely
-  have no read path.
+- **A key-export path still exists in the RTL.** The daemon uses
+  `MODE.DK_TO_SLOT`, which keeps `dk` in the on-chip vault and decapsulates by
+  handle, so no private key crosses the bus on the normal path. But the
+  non-vault path remains, because ACVP verification has to read the private key
+  out to check it. In the delivery posture it is closed by a one-way latch — a
+  latch, not a fuse, so a power cycle re-opens it.
 - **root can still drive the hardware.** The EL3 SiP exposes whitelisted MMIO
   reads and writes, with the operation sequence assembled in the normal world.
   The normal world cannot *read* key material; it can still load and use key
@@ -199,32 +188,22 @@ Accurate statements about what this does **not** do.
 - **Power and EM side channels are out of scope, deliberately.** Constant-time
   work covers timing only. Masking cannot be validated without a side-channel
   bench, and shipping unvalidated masking is worse than shipping none.
-- ~~**ML-DSA is operators only.**~~ **Now chained into whole cores.** ML-DSA
-  44/65/87 KeyGen/Sign/Verify are in the bitstream (slot 6) and match ACVP vectors
-  byte-for-byte on real silicon.
-- **There is no encrypted boot, and the conclusion is definitive.** See the
-  [final status report](docs/FINAL-REPORT-2026-08-17.zh-CN.md): BBRAM is blocked by
-  board hardware (no cell on `VCC_BATT`); the PUF black key was tested the *valid*
-  way (cold boot after POR) and the BootROM rejects it **before ever touching the
-  PUF** — JTAG reads of the CSU show `PUF_CMD=0`, `KEY_RDY=0`, and OCM never
-  loaded. **RSA authenticated boot does work** (zero eFUSE, verified on board), but
-  it is not a trust root: `bh_auth_enable` is defined as skipping the eFUSE PPK
-  hash check. **A replacement-resistant trust root requires burning eFUSE, which is
-  this project's permanent red line.**
+- **There is no encrypted boot.** BBRAM is blocked by board hardware (no cell on
+  `VCC_BATT`) and the PUF black key is rejected by the BootROM before the PUF is
+  ever reached. RSA authenticated boot does work with zero eFUSEs, but it is not a
+  trust root — `bh_auth_enable` is defined as skipping the eFUSE PPK hash check. A
+  replacement-resistant trust root requires burning eFUSE, which is this project's
+  permanent red line. Evidence and the full argument:
+  [docs/SECURITY.md](docs/SECURITY.md).
 - **PS-side XMPU/XPPU cannot reach the PL window.** UG1085 settles it: no PS
   protection unit covers `0x8000_0000`. The firewall in the PL is the only
   enforcement point on this path — which is why the address decode is one-to-one
   with no mirrors.
-- **DDR-side XMPU has a separate, now-understood boundary.** The XMPU **does not
-  gate transactions**; it poisons them and the endpoint gates (XAPP1320 v3.0 p.10).
-  With `POISON.ATTRIB` enabled, a normal-world read of OP-TEE secure memory **does
-  become a bus error** (verified on board, zero functional impact).
-  **This is now applied automatically at boot**: BL31 configures all six XMPU_DDR
-  instances from EL3, so `devmem 0x60000000` is a bus error ~35 s after power-on with
-  **no manual step**, in the default demo form. What it blocks is **only "normal world
-  reads OP-TEE's core segment"** — root can still ask the hardware to compute (the SiP
-  does not check the caller), and the shared-memory segment is meant to be readable
-  from both sides. See the final status report for details.
+- **DDR-side XMPU blocks reads, not use.** The XMPU does not gate transactions; it
+  poisons them and the endpoint gates (XAPP1320 v3.0 p.10). BL31 configures it at
+  boot, so a normal-world read of OP-TEE's secure memory is a bus error with no
+  manual step. That is all it stops — root can still ask the hardware to compute,
+  since the SiP does not check the caller.
 
 ## Repository layout
 
@@ -256,17 +235,16 @@ docs/               Architecture, API, security model, testing, register maps
 | [USAGE.md](docs/USAGE.md) | Building, running, deploying, and driving the board |
 | [reference/](docs/reference/) | Security policy draft, offline deployment, constant-time audit, port plan |
 
-Chinese versions live beside each file as `*.zh-CN.md`. Architecture, API,
-registers, security and testing are also published together as a single PDF —
-[设计与验证参考](docs/reference/design-validation.zh-CN.pdf), 26 pages — built
-from those same Markdown files by `./tools/pdf/build-pdf.sh`, so the two cannot
-drift apart.
+Chinese versions live beside each file as `*.zh-CN.md`. `./tools/pdf/build-pdf.sh`
+renders architecture, API, registers, security and testing into a single PDF from
+those same Markdown files.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). To report a vulnerability, read
-[SECURITY.md](SECURITY.md) first — but note that this is a prototype, and the
-known gaps above are already known.
+See [CONTRIBUTING.md](CONTRIBUTING.md); anyone about to touch the board should first
+read [the irreversible-operation red lines](docs/SECURITY.md#-irreversible-operation-red-lines).
+To report a vulnerability, read [SECURITY.md](SECURITY.md) — but note that this is a
+prototype, and the known gaps above are already known.
 
 ## License
 

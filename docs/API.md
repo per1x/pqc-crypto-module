@@ -65,10 +65,8 @@ open sessions, and never see each other's handles.
 int SDFE_OpenDevice(SDFE_HANDLE *phDev);           /* local UNIX socket */
 
 /* Remote: **mTLS** (TLS 1.3, certificates on both sides). The first three
- * fields are mandatory.
- * ⚠️ Before 2026-08-18 this took a `const char *token` (plaintext TCP plus a
- *    pre-shared secret). That path is gone, not kept for compatibility — the
- *    reasoning is in service/pqcs_tls.h. */
+ * fields are mandatory. There is no plaintext or shared-token alternative —
+ * the reasoning is in service/pqcs_tls.h. */
 typedef struct {
     const char *ca_file;      /* device CA certificate: verifies the board */
     const char *cert_file;    /* this client's certificate */
@@ -203,9 +201,9 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 > separate facts: `mldsa_axi` is a real core, verified against ACVP on the board
 > (see `board/logs/`), and it is reachable **through the SDF path**
 > (libsdfe → daemon → EL3 → core). But the **PKCS#11 module has no transport to
-> that hardware** — it calls liboqs. The independent review (H5) refuted the
-> assumption that this is "just a backend switch": `src/hal/` implements only the
-> NTT and Keccak primitives, not a whole-algorithm hardware transport. The correct
+> that hardware** — it calls liboqs. This is not "just a backend switch" away:
+> `src/hal/` implements only the NTT and Keccak primitives, not a whole-algorithm
+> hardware transport. The correct
 > phrasing is "the algorithm is verified in hardware, while PKCS#11 runs in
 > software", not one or the other.
 

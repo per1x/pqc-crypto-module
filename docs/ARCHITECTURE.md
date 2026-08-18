@@ -46,7 +46,7 @@ runs Linux and issues commands; it holds no key material of its own.
 
 For remote calls the `libsdfe` → `pqchsm_fpgad` hop runs over **mTLS** (TLS 1.3,
 certificates on both sides); the local hop is a 0600 UNIX socket and is deliberately
-not wrapped (see the 2026-08-18 section of `docs/SECURITY.md`). **The frame format is
+not wrapped (see "The remote port" in `docs/SECURITY.md`). **The frame format is
 byte-identical on both paths**, so nothing else in the diagram above changes.
 
 
@@ -89,21 +89,17 @@ equivalent entrances to the one defence, each returning OKAY and leaving no
 trace. `test_xbar` sweeps a whole 64 KB slot word by word: exactly the 64
 addresses `0x00`–`0xFC` are reachable, the other 16,320 all read back 0.
 
-**All four functional slaves are `SECURE_ONLY=1`, and how that came about.**
-Linux runs in the normal world, so every transaction it issues through
-`/dev/mem` carries `AxPROT[1] = 1`. With all four set to 1, Linux cannot read a
-single register of the crypto cores.
+**All four functional slaves are `SECURE_ONLY=1`.** Linux runs in the normal
+world, so every transaction it issues through `/dev/mem` carries
+`AxPROT[1] = 1`. With all four set to 1, Linux cannot read a single register of
+the crypto cores.
 
-The first build deliberately did *not* do that. It set the four functional
-slaves to `SECURE_ONLY=0` so Linux could drive the KATs directly, and put a
-canary instance — differing in **only** that one parameter — at slot 4 to
-demonstrate the gate. That build proved two real things (the algorithms are
-correct on silicon; the AxPROT gate works against a genuine non-secure master)
-but left a gap: **the thing shown to be protected was the empty canary, not the
-crypto cores themselves.**
-
-The current build closes it. All four are `SECURE_ONLY=1`, and the whole KAT
-suite is driven from the **secure world** instead — a patched BL31 exposes a
+That choice decides how the KATs are driven, and the alternative is worth naming
+because it looks equivalent and is not. Leaving the functional slaves open and
+demonstrating the gate on a canary instance elsewhere proves the gate works —
+but **what it shows to be protected is the empty canary, not the crypto cores.**
+So all four are closed, and the whole KAT suite is driven from the **secure
+world** instead — a patched BL31 exposes a
 restricted secure-MMIO SiP whose whitelist covers exactly these cores' legal
 register offsets (`boot/atf/patch_atf_secmmio.py`), and the normal-world test
 program routes every core access through it via SMC. The canary stays at slot 4

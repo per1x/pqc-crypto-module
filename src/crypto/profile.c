@@ -35,8 +35,8 @@ int pqc_profile_startup_check(const char **why)
 	 *
 	 * ⚠️ device-dna provider **不满足**这一条：它 device_bound=1、
 	 *    hardware_backed=0。DNA 逐片不同（防克隆成立），但它不是秘密 ——
-	 *    有 JTAG 的人直接读得到。把防克隆当成机密性，正是独立评审点名的
-	 *    那类夸大，这里用代码把它钉死。 */
+	 *    有 JTAG 的人直接读得到。把防克隆当成机密性是一种夸大，
+	 *    这里用代码把它钉死。 */
 	if (!p->hardware_backed) {
 		msg = "PRODUCTION 形态要求 KDR 有硬件保证（不出芯片、不可读出），"
 		      "而当前 provider 不是 —— 拒绝启动。"

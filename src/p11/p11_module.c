@@ -26,7 +26,7 @@
  *
  * 【范围】
  * 实现的是**能把 pkcs11-tool 常用流程跑通**的子集，其余返回
- * CKR_FUNCTION_NOT_SUPPORTED。未实现的部分见 docs/design/status-and-roadmap.md。
+ * CKR_FUNCTION_NOT_SUPPORTED。未覆盖的机制见 docs/API.md 的 PKCS#11 一节。
  *
  * 【多段签名 / 对象导入 / KEM 封装的三处设计取舍，都写在各自函数上方】
  *   C_SignUpdate/Final        累积后单次签 —— ML-DSA 本来就不是 hash-then-sign
@@ -528,18 +528,16 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 	 *
 	 * 装上之后 C_GenerateKeyPair 生成的 ML-KEM 私钥**留在 PL 的片内金库**，
 	 * 本进程只拿到公钥和一个句柄；C_Decapsulate 把句柄交给硬件，
-	 * 私钥连指针都不存在。ML-DSA 的 C_Sign 走的是同一套（keypair_hw + sign_hw），
-	 * 只是它的从机 mldsa_axi **尚未落地** —— 驱动就位，运算还没有地方跑。
+	 * 私钥连指针都不存在。ML-DSA 的 C_Sign 走的是同一套（keypair_hw + sign_hw）。
 	 *
 	 * 与熵源那个开关分开，是因为它们的失败方式不同：熵源取不到就该停机，
 	 * 而算法后端不支持某个算法时要能回落到软件 —— 后端的 vtable 里那几项
 	 * 填 NULL，pqc_* 包装会回 PQC_ERR_UNSUPPORTED，上层据此选择。
 	 * **回落是显式的，不是静默的。**
 	 *
-	 * 这道闸门只问 KEM：它是本开关成立的最低条件（板上真正跑着的就是它），
-	 * 也是加签名之前这行代码一直在问的那件事。签名那一半由 slot 层按算法各自
-	 * 判（pqc_backend_has_hw_keys_kind(info->kind)）—— 在这里一并要求，
-	 * 等于让还没落地的 ML-DSA 把已经能用的 ML-KEM 一起挡在门外。
+	 * 这道闸门只问 KEM：它是本开关成立的最低条件。签名那一半由 slot 层按算法
+	 * 各自判（pqc_backend_has_hw_keys_kind(info->kind)），在这里一并要求会让
+	 * 任一算法的缺失把另一个也挡在门外。
 	 */
 	{
 		const char *be = getenv("PQCHSM_BACKEND");
@@ -1908,7 +1906,7 @@ out:
  * 这里如实照此实现：Update 往会话缓冲里追加，Final 调一次 hsm_object_sign。
  * **不假装流式**——内存占用与消息等长这件事，调用方应该知道。
  * 真要处理超大消息，正确做法是外部先 SHA3-512 再签摘要（HashML-DSA，
- * 对应 CKM_HASH_ML_DSA_*，本模块尚未实现，见 docs/design/status-and-roadmap.md）。
+ * 对应 CKM_HASH_ML_DSA_*，本模块尚未实现）。
  */
 CK_DEFINE_FUNCTION(CK_RV, C_SignUpdate)(CK_SESSION_HANDLE hSession,
                                         CK_BYTE_PTR pPart, CK_ULONG ulPartLen)

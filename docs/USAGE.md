@@ -169,11 +169,9 @@ SSH; it generates a device PKI, installs the device certificate on the board, ke
 client certificate locally (`~/.config/pqchsm/pki`, 0600) and syncs the board clock.
 After that a board shell is never needed again.
 
-⚠️ **The remote port is mTLS now, not a shared secret** (changed 2026-08-18). The old
-`--fetch-token` path is gone. It was plaintext TCP plus one static pre-shared token:
-a single packet capture on the same segment took over the device permanently, the
-session had neither confidentiality nor integrity, and the auth frame could be
-replayed. The reasoning and the new design are in `service/pqcs_tls.h`.
+⚠️ **The remote port is mTLS, not a shared secret.** There is no token-based path;
+the design and its limits are in `service/pqcs_tls.h` and in "The remote port" in
+[SECURITY.md](SECURITY.md).
 
 ⚠️ In a real deployment client certificates should be distributed out of band (or the
 operator generates a CSR and has it signed). `--provision` is a convenience for people

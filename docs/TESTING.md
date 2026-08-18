@@ -46,7 +46,7 @@ repository.
 | Security state survives power loss | PIN failure counts, lockout and unlock are **on disk without any save call** (simulated pull-the-plug, then reload) | `tests/unit/test_keystore.c` |
 | Both rollback-anchor strengths | the file anchor **can indeed be bypassed by rolling both files back** (the weakness is pinned as a test); a hardware-monotonic anchor defeats the same attack | `tests/unit/test_keystore.c` |
 | No stub root key in PRODUCTION | the literal is absent from the object file, **with a null control** (it must be present in DEV) | `tools/check_profile.sh` |
-| eMMC RPMB | the hardware is sufficient (4 MB, kernel support); the key was deleted by mistake and **recovered from freed blocks and confirmed cryptographically** (recovered key 3/3, wrong keys 0/8) — the account and the resulting "no irreversible programming" rule are in the 2026-08-18 section of `docs/SECURITY.md` | `board/src/rpmb_probe.c`, `rpmb_tool.c`, `rpmb_verify.c` |
+| eMMC RPMB | the hardware is sufficient (4 MB, kernel support) and the authentication key is verified cryptographically before use (correct key 3/3, wrong keys 0/8) | `board/src/rpmb_probe.c`, `rpmb_tool.c`, `rpmb_verify.c` |
 
 ## Principles
 
@@ -152,7 +152,7 @@ shipped silently.
 
 ## On-silicon results
 
-**ML-DSA (2026-08-17, verified in both bitstream forms).** All three parameter
+**ML-DSA, verified in both bitstream forms.** All three parameter
 sets' KeyGen/Sign/Verify match ACVP byte for byte, plus the on-chip signing
 vault and runtime parameter-set switching:
 

@@ -122,7 +122,7 @@ module mldsa_keygen (
                           : (cnxt == 9'd32) ? KB : LB;
 
     // ================= 海绵归属（FSM ↔ η 采样器）=================
-    // 只在换手方空闲时切（见设计文档）。均匀采样器留到第 ④ 段再接。
+    // 只在换手方空闲时切（见设计文档）。
     localparam [1:0] OWN_FSM = 2'd0, OWN_ETA = 2'd1, OWN_UNI = 2'd2;
     reg [1:0] owner;
 
@@ -175,7 +175,7 @@ module mldsa_keygen (
         .wr_en(nt_we), .wr_addr(nt_waddr), .wr_data(nt_wdata),
         .rd_addr(nt_raddr), .rd_data(nt_rdata));
 
-    // ---- 均匀采样器（ExpandA，第 ④ 段：Â 现采现用，不存）----
+    // ---- 均匀采样器（ExpandA：Â 现采现用，不存）----
     reg         un_start;
     reg  [15:0] un_nonce;
     wire        un_done;
@@ -193,7 +193,7 @@ module mldsa_keygen (
         .sha_out_ready(un_sor), .sha_out_data(sha_out_data),
         .rd_addr(un_rd_addr), .rd_data(un_rd_data), .count());
 
-    // ---- 累加缓冲：k 条，每条 256×32（第 ④ 段临时全存；⑤⑥ 接上后改逐 i 流水）----
+    // ---- 累加缓冲：k 条，每条 256×32 ----
     reg         ac_we;  reg [10:0] ac_waddr; reg signed [31:0] ac_din;
     reg  [10:0] ac_raddr; wire signed [31:0] ac_dout;
     ram_dp #(.DW(32), .AW(11)) u_acc (
@@ -249,7 +249,7 @@ module mldsa_keygen (
     wire signed [31:0] mm_oacc = $signed(mm_otag[31:0]);
     wire        mm_empty  = ~mm_iv & ~mm_busy;
 
-    // reduce32：MAC 累加值在灌进 invNTT 前先规约（第 ⑤ 段）
+    // reduce32：MAC 累加值在灌进 invNTT 前先规约
     wire signed [31:0] red_out;
     mldsa_reduce32 u_red (.a(ac_dout), .r(red_out));
 

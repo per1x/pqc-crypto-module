@@ -11,16 +11,6 @@ ARM 核上的 Linux 只是发命令的那一侧。
 > **状态：研究原型。** 未认证、未加固、不可用于生产。见
 > [状态与局限](#状态与局限)——差距是列出来的，不是藏起来的。
 
-> ### ⛔ 动板子之前先读：不可逆操作红线
->
-> **这块板上禁止任何一次性、不可逆的烧写** —— 不只是 eFUSE，还包括 eMMC 的
-> RPMB 认证密钥、BBRAM 锁存位，以及任何 OTP 与 `*_LOCK` / `*_DISABLE` /
-> `*_EN` 熔丝位。凡涉及此类动作，**必须先取得板子所有者的明确同意，默认一律
-> "否"**；而且"评估过"从来不等于"可以执行"。
->
-> 完整规则、熔丝清单、可逆替代，以及催生这条规则的 2026-08-18 事故：
-> **[docs/SECURITY.zh-CN.md — 不可逆操作红线](docs/SECURITY.zh-CN.md#-不可逆操作红线)**
-
 ---
 
 ## 能做什么
@@ -28,6 +18,7 @@ ARM 核上的 Linux 只是发命令的那一侧。
 | | |
 |---|---|
 | **后量子 KEM** | ML-KEM-512 / 768 / 1024（FIPS 203），KeyGen / Encaps / Decaps 全流程在 RTL 中实现——**在真硅上**与 NIST ACVP 向量逐字节一致 |
+| **后量子签名** | ML-DSA-44 / 65 / 87（FIPS 204），KeyGen / Sign / Verify 在 RTL 中实现，一份位流覆盖三个参数集——**在真硅上**与 ACVP 向量逐字节一致 |
 | **对称与 SM 系列** | AES-128/256、SM4、SM3——对照 FIPS 197、GB/T 32907、GB/T 32905 校验 |
 | **真随机源** | 8 环形振荡器熵源，SP 800-90B 健康测试（RCT/APT），SHA-3 海绵调节。实测最小熵 **H = 0.871 bit/sample** |
 | **硬件密钥仓** | 对称密钥经总线进入，只能沿一条通往密码核的专用线离开。**RTL 中不存在读出路径** |
@@ -53,17 +44,29 @@ ARM 核上的 Linux 只是发命令的那一侧。
    │   ┌──────┬──────────┬──────────┬──────────┬─────────┬────────┐  │
    │   │ slot0│  slot1   │  slot2   │  slot3   │  slot4  │ slot5  │  │
    │   │ trng │key_vault │   sym    │  mlkem   │ canary  │  fan   │  │
-   │   │      │          │AES/SM4/  │ 512/768/ │ SECURE_ │ observe│  │
-   │   │      │          │   SM3    │   1024   │ ONLY=1  │  only  │  │
+   │   │      │          │AES/SM4/  │ 512/768/ │ same as │ observe│  │
+   │   │      │          │   SM3    │   1024   │ slot 1  │  only  │  │
+   │   │      SECURE_ONLY=1 (default build)              │ =0     │  │
    │   └──────┴────┬─────┴────▲─────┴──────────┴─────────┴────────┘  │
    │               └──────────┘  use_key: private wire, not the bus  │
    │      every slot sits behind axi4lite_firewall (AxPROT gate)     │
    └─────────────────────────────────────────────────────────────────┘
 ```
 
-每个 slot 占 64 KB，位于 `0x8000_0000 + slot × 0x1_0000`。slot 4 是密钥仓的
-第二个实例，与前一个**仅有** `SECURE_ONLY=1` 之差；它存在的全部意义就是被拒绝，
-正是这一点把"门控有效"变成了证据。
+每个 slot 占 64 KB，位于 `0x8000_0000 + slot × 0x1_0000`。
+
+**默认位流里四个功能从机全是 `SECURE_ONLY=1`** —— 普通世界一个都够不着，整套 KAT
+由安全世界经 BL31 SiP 驱动。slot 4 是密钥仓的第二个实例，在这个配置下充当同款对照：
+它证明"被拒"是门控干的，不是核坏了。风扇（slot 5）保持 0：它不在密码边界里，也不该在。
+
+另有一份开发用配置——`PQC_DEV_OPEN=1` 把功能从机设成 `SECURE_ONLY=0`，让 Linux
+可以直接驱动，产物名为 `zu3eg_hsm_dev.bit`。同一份 RTL，只差一个参数。
+
+> ⚠️ **被拒的访问读回 0，不报错。** 防火墙与地址译码都是 RAZ/WI，所以用户态程序
+> 不可能用一个错地址把板子搞挂——这是有意的，并已在真硅上验过（36,000 次被拒访问，
+> 板子照常）。代价是敲错地址是静默的：判断是否接上，请读 `VERSION`（每个核都是
+> `0x0001_0000`），而不是等一个错误码。细节见
+> [docs/REGISTERS.zh-CN.md](docs/REGISTERS.zh-CN.md)。
 
 完整细节：[docs/ARCHITECTURE.zh-CN.md](docs/ARCHITECTURE.zh-CN.md) ·
 寄存器级契约：[docs/REGISTERS.zh-CN.md](docs/REGISTERS.zh-CN.md)。
@@ -143,7 +146,7 @@ SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 此后不可读出      
 | ML-KEM 512/768/1024 对照 NIST ACVP，真硅上 | 20 / 20 逐字节一致 |
 | 板上自检（对称、SM、边界、AxPROT、TRNG） | 24 / 24 |
 | 密钥仓反证——两个从机各扫 256 字节 | 密钥的字出现 **0** 次；密文正确 |
-| AxPROT 门控，双向（测于 RAZ/WI 改动之前，当时记为 DECERR） | EL3 读 `SECURE_ONLY=1` 得到 `0x0001_0000`；EL1-NS 读同一地址被拒；同一个 EL1-NS 能读到 `SECURE_ONLY=0` 的核 |
+| AxPROT 门控，双向（测于开发位流，那份带一个 `SECURE_ONLY=0` 的对照核） | EL3 读 `SECURE_ONLY=1` 得到 `0x0001_0000`；EL1-NS 读同一地址被拒；同一个 EL1-NS 能读到 `SECURE_ONLY=0` 的核 |
 | TRNG 最小熵，1,048,576 个调节前样本 | H = 0.871234 bit/sample → RCT 47、APT 672 |
 | Decaps 时序，有效密文 vs 隐式拒绝，各 200 次 | 中位数差异 0.000 % |
 | ML-KEM-512 吞吐 @ 75 MHz | 924 / 1339 / 1018 ops/s（KeyGen / Encaps / Decaps） |
@@ -156,10 +159,10 @@ SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 此后不可读出      
 
 关于本项目**不**做什么的准确陈述。
 
-- **ML-KEM 私钥会离开硬件。** `KeyGen` 经 AXI 返回 `ek ‖ dk`，因为对照 ACVP 向量
-  校验必须如此。守护进程留下 `dk`，交给应用的是一个句柄，所以它不会离开*接口*
-  ——但"私钥永不离开硬件"目前还不成立，本项目也不这么主张。密钥仓里的对称密钥
-  是另一回事：那些确实没有读出路径。
+- **RTL 里仍留着一条私钥导出路径。** 守护进程走的是 `MODE.DK_TO_SLOT`：`dk` 留在
+  片内金库、按句柄解封装，正常路径上私钥一个字节都不过总线。但"不进金库"那条路
+  仍在，因为 ACVP 验证必须把私钥读出来核对。交付形态下它由一次性闩锁关掉 ——
+  是闩锁不是熔丝，断一次电就又开了。
 - **root 仍然能驱动硬件。** EL3 SiP 暴露的是白名单内的 MMIO 读写，操作序列在普通
   世界里拼装。普通世界*读*不到密钥材料；但它仍然能装载并使用密钥仓槽位。要堵上
   这一点，需要一个以操作为粒度的 SiP。
@@ -173,25 +176,18 @@ SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 此后不可读出      
   公布它们是为了给出各参数集之间 1 : 1.5 : 2.1 的比例，而不是作为性能主张。
 - **功耗与电磁侧信道是有意排除在范围之外的。** 常数时间方面的工作只覆盖时序。
   没有侧信道测试台就无法验证掩码，而交付未经验证的掩码比不做掩码更糟。
-- ~~**ML-DSA 只有算子。**~~ **已串成整核。** ML-DSA-44/65/87 的 KeyGen/Sign/Verify
-  已进位流（槽 6），并在真硅上逐字节对上 ACVP 向量。
-- **没有加密启动，而且结论是确定性的。** 见
-  [最终状态报告](docs/FINAL-REPORT-2026-08-17.zh-CN.md)：BBRAM 受阻于板级硬件
-  （`VCC_BATT` 没接电池）；PUF 黑钥用有效测法（POR 冷启动）验过，BootROM **在碰
-  PUF 之前**就拒收 —— JTAG 读 CSU 证明 `PUF_CMD=0`、`KEY_RDY=0`、OCM 从未装载。
-  **RSA 认证启动倒是通的**（零 eFUSE，上板验过），但它不是信任根：`bh_auth_enable`
-  的语义就是跳过 eFUSE 里的 PPK 摘要校验。**防替换的信任根只有烧 eFUSE 才有，
-  而 eFUSE 是本项目的永久红线。**
+- **没有加密启动。** BBRAM 受阻于板级硬件（`VCC_BATT` 没接电池）；PUF 黑钥在
+  BootROM 碰到 PUF 之前就被拒收。**RSA 认证启动倒是通的**（零 eFUSE，上板验过），
+  但它不是信任根：`bh_auth_enable` 的语义就是跳过 eFUSE 里的 PPK 摘要校验。
+  防替换的信任根只有烧 eFUSE 才有，而 eFUSE 是本项目的永久红线。证据与完整论证见
+  [docs/SECURITY.zh-CN.md](docs/SECURITY.zh-CN.md)。
 - **PS 侧的 XMPU/XPPU 覆盖不到 PL 窗口。** UG1085 对此有定论：没有任何 PS 保护单元
   覆盖 `0x8000_0000`。PL 里的防火墙是这条路径上唯一的执行点——这也正是地址译码
   一一对应、不设镜像的原因。
-- **DDR 侧的 XMPU 另有一条已查清的边界。** XMPU **本身不拦截事务**，它只打毒标记、
-  由终点 gate（XAPP1320 v3.0 p.10）。开了 `POISON.ATTRIB` 之后，普通世界读 OP-TEE
-  安全内存**确实变成 Bus error**（板上验过，功能零影响）。
-  **现在它开机自动生效**：BL31 在 EL3 里把六个 XMPU_DDR 实例配好，上电 35 秒后
-  `devmem 0x60000000` 就是 Bus error，**没有任何手工步骤**，在默认演示形态里。
-  它挡住的**只是"普通世界读 OP-TEE 的 core 段"这一条** —— root 仍然能命令硬件做运算
-  （SiP 不校验调用来源），共享内存段本来就该双向可读。详见最终状态报告。
+- **DDR 侧的 XMPU 挡的是"读"，不是"用"。** XMPU 本身不拦截事务，它只打毒标记、
+  由终点 gate（XAPP1320 v3.0 p.10）。BL31 开机时把它配好，于是普通世界读 OP-TEE
+  安全内存就是 Bus error，没有任何手工步骤。它挡住的仅此一条 —— root 仍然能命令
+  硬件做运算，因为 SiP 不校验调用来源。
 
 ## 仓库结构
 
@@ -223,14 +219,13 @@ docs/               Architecture, API, security model, testing, register maps
 | [USAGE.zh-CN.md](docs/USAGE.zh-CN.md) | 构建、运行、部署，以及如何驱动板子 |
 | [reference/](docs/reference/) | 安全策略草稿、离线部署、常量时间审计、移植计划 |
 
-英文版本以去掉 `.zh-CN` 后缀的同名文件并列存放。架构、API、寄存器、安全与测试
-另有一份合订 PDF——[设计与验证参考](docs/reference/design-validation.zh-CN.pdf)，
-26 页，由 `./tools/pdf/build-pdf.sh` 从同一批 Markdown 重出，因此两者不会互相
-漂移。
+英文版本以去掉 `.zh-CN` 后缀的同名文件并列存放。`./tools/pdf/build-pdf.sh` 可以把
+架构、API、寄存器、安全与测试这五份从同一批 Markdown 重出为一份合订 PDF。
 
 ## 参与贡献
 
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。报告漏洞前请先读
+见 [CONTRIBUTING.md](CONTRIBUTING.md)；要动板子的人请先读
+[不可逆操作红线](docs/SECURITY.zh-CN.md#-不可逆操作红线)。报告漏洞前请先读
 [SECURITY.md](SECURITY.md)——但请注意这是一个原型，上面列出的已知差距已经是
 已知的。
 

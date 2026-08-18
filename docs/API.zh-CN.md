@@ -63,8 +63,7 @@ SM4 / SM3 的任何实现，这一点没有因为引入 TLS 而改变。
 int SDFE_OpenDevice(SDFE_HANDLE *phDev);           /* 本机 UNIX socket */
 
 /* 远程：走 **mTLS**（TLS 1.3，双向证书）。creds 里三样必给。
- * ⚠️ 2026-08-18 之前这里是一个 `const char *token`（明文 TCP + 预共享口令），
- *    那条路已经整个删掉，不是保留兼容 —— 理由见 service/pqcs_tls.h。 */
+ * 没有明文或预共享口令的备选路 —— 理由见 service/pqcs_tls.h。 */
 typedef struct {
     const char *ca_file;      /* 设备 CA 的证书：用它验板子 */
     const char *cert_file;    /* 本客户端的证书：板子用它验我 */
@@ -205,8 +204,8 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 的机制在这里 */
 ⚠️ **`CKM_ML_DSA` 这一行容易被读成"硬件"，它不是。** 两件事要分开：
 `mldsa_axi` 是真核、已在板上逐字节对上 ACVP（board/logs/），**经 SDF 那条路
 （libsdfe → daemon → EL3 → 核）可达**；但 **PKCS#11 模块没有走到硬件的传输层**
-——它调的是 liboqs。独立评审 H5 推翻过"换个后端就行"这个前提：`src/hal/` 现有的
-accel 只实现了 NTT 与 Keccak 两个算子，整算法的硬件 transport 尚不存在。
+——它调的是 liboqs。这不是"换个后端就行"：`src/hal/` 现有的 accel 只实现了
+NTT 与 Keccak 两个算子，整算法的硬件 transport 尚不存在。
 所以正确说法是"**算法在硬件上验过，PKCS#11 走的是软件**"，而不是二选一。
 
 `C_GenerateKeyPair` → `CMD_GENERATE` → `mlkem_axi` KeyGen；

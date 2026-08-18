@@ -157,10 +157,9 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 把设备证书装到板上、在本机留一份客户端凭据、给板子对时。装完之后
 （凭据在 `~/.config/pqchsm/pki`，0600）就不再需要板子的 shell。
 
-⚠️ **远程口是 mTLS，不再是明文口令**（2026-08-18 改）。以前那条
-`--fetch-token` 的路已经删掉 —— 它是明文 TCP + 一条静态预共享口令：
-同网段抓一次包就永久接管，整条会话既不保密也不防篡改，认证帧还能重放。
-换掉的理由与新设计写在 `service/pqcs_tls.h` 的文件头。
+⚠️ **远程口是 mTLS，不是共享口令。** 没有基于口令的备选路；设计与它的边界写在
+`service/pqcs_tls.h` 的文件头，以及 [SECURITY.zh-CN.md](SECURITY.zh-CN.md) 的
+「远程口」一节。
 
 ⚠️ 真实部署里客户端证书应当**带外分发**（或由操作端自己出 CSR 送签），
 `--provision` 只是给手上就有板子 shell 的人省事。**CA 私钥只留在本机**，

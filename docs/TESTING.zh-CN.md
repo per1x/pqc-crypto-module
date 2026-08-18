@@ -45,7 +45,7 @@
 | 安全状态抗掉电 | PIN 失败计数、锁定、解锁**不经任何 save 也在盘上**（模拟拔电后重载） | `tests/unit/test_keystore.c` |
 | 防回滚锚点两种强度 | 文件锚点**确实能被"两个文件一起换"绕过**（把弱点钉住）；硬件单调锚点同样的攻击不成立 | `tests/unit/test_keystore.c` |
 | PRODUCTION 里没有桩根密钥 | 目标文件里搜不到那段字面量，**且带空对照**（DEV 里必须搜得到） | `tools/check_profile.sh` |
-| eMMC RPMB | 硬件够（4 MB、内核支持），密钥曾误删、**已从 SD 已释放块里找回并密码学确证**（正确密钥 3/3 通过，错误密钥 0/8）—— 经过与由此定下的「不再做一次性烧写」规则见 `docs/SECURITY.zh-CN.md` 2026-08-18 那节 | `board/src/rpmb_probe.c`、`rpmb_tool.c`、`rpmb_verify.c` |
+| eMMC RPMB | 硬件够（4 MB、内核支持），认证密钥在使用前先密码学确证（正确密钥 3/3 通过，错误密钥 0/8） | `board/src/rpmb_probe.c`、`rpmb_tool.c`、`rpmb_verify.c` |
 
 ## 原则
 
@@ -132,7 +132,7 @@ set_clock_uncertainty -hold 0.100 [get_clocks -of_objects [get_pins u_div/O]]
 
 ## 真硅结果
 
-**ML-DSA（2026-08-17，两种位流形态各验一遍）。** 三个参数集的
+**ML-DSA，两种位流形态各验一遍。** 三个参数集的
 KeyGen/Sign/Verify 逐字节对上 ACVP，加上片内签名金库与运行时切参数集：
 
 | 判据 | 演示形态 `SECURE_ONLY=0` | 送检形态 `SECURE_ONLY=1` |
