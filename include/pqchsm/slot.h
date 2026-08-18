@@ -206,6 +206,24 @@ hsm_status_t hsm_slot_zeroize_forced(hsm_token_t *tok, hsm_slot_id_t slot);
 /* 解锁并重置 User PIN 失败计数；恢复到锁定前的状态。需 SO。 */
 hsm_status_t hsm_slot_unlock(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t slot);
 
+/* ---- 安全状态的同步持久化 ----------------------------------------------
+ *
+ * 【为什么必须有这一层，而不是"退出时存一次"】
+ * PIN 失败计数、锁定状态、已销毁的对象、策略位 —— 这些都是**安全状态**。
+ * 只改内存、等 CMD_SAVE 才落盘的话，攻击者拔一次电就能把它们全部回到从前：
+ * 试三次 PIN → 拔电 → 再试三次，锁定形同虚设。
+ *
+ * 所以槽位层在**每一次安全状态变化之后**回调这个钩子，由上层（daemon / p11）
+ * 决定"落盘"具体是什么。钩子在**放掉所有槽位锁之后**调用，因此实现里可以
+ * 放心地再去读所有槽位（hsm_keystore_save 就是这么做的）。
+ *
+ * 返回非 0 表示落盘失败。槽位层会把它变成 HSM_ERR_CRYPTO 交回调用方 ——
+ * fail-closed：宁可让这次操作报错，也不要"内存里锁了、盘上没锁"。
+ *
+ * fn 为 NULL 解除挂接（默认就是没挂，纯内存 token 不受影响）。 */
+typedef int (*hsm_persist_fn)(hsm_token_t *tok, void *user);
+void hsm_token_set_persist_hook(hsm_token_t *tok, hsm_persist_fn fn, void *user);
+
 /* ---- 审计-------------------------------------------------------- */
 /* 挂接 append-only 哈希链日志。挂上之后所有敏感操作自动落审计；
  * log 的生命周期由调用方管理，传 NULL 解除挂接。

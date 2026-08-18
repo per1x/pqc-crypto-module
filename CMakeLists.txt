@@ -11,6 +11,22 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wshadow -Wvla -Wpointer-arith -Wwrite-strings)
 
+# ---- 构建形态：DEV（默认）/ PRODUCTION ---------------------------------------
+# 见 include/pqchsm/profile.h。PRODUCTION 会把 kdr.c 里那段公开的桩根密钥
+# **整段编译掉**，并让启动闸门要求 hardware_backed 的 KDR。
+# 这块板上没有秘密硬件根，所以 PRODUCTION 构建出来的 daemon 会如实拒绝启动 ——
+# 那正是这个开关要表达的事实。演示与回归一律走 DEV。
+set(PQC_PROFILE "DEV" CACHE STRING "构建形态：DEV 或 PRODUCTION")
+set_property(CACHE PQC_PROFILE PROPERTY STRINGS DEV PRODUCTION)
+if(PQC_PROFILE STREQUAL "PRODUCTION")
+  add_compile_definitions(PQC_PROFILE=1)
+elseif(PQC_PROFILE STREQUAL "DEV")
+  add_compile_definitions(PQC_PROFILE=0)
+else()
+  message(FATAL_ERROR "PQC_PROFILE 只能是 DEV 或 PRODUCTION，实得 ${PQC_PROFILE}")
+endif()
+message(STATUS "构建形态 PQC_PROFILE: ${PQC_PROFILE}")
+
 # ---- 依赖 -------------------------------------------------------------------
 # liboqs：PQC 算法（最终版 FIPS 203/204）。见 README「技术栈选择理由」。
 # OpenSSL 3：AES-256-GCM 包裹、SHA3/KMAC256、安全清零。
@@ -102,6 +118,7 @@ add_library(pqchsm
   src/crypto/oqs_rng.c
   src/crypto/kdf.c
   src/crypto/kdr.c
+  src/crypto/profile.c
   src/crypto/kdr_dna.c
   src/hal/accel_stub.c
   src/hal/accel_verilator.c
@@ -115,6 +132,7 @@ add_library(pqchsm
   src/hal/hwrng_sdfe.c
   src/hal/pqc_sdfe.c
   service/libsdfe.c
+  service/pqcs_tls.c
   service/sdfe_pkenc.c
   src/proto/proto.c
   src/audit/audit.c
@@ -124,6 +142,7 @@ add_library(pqchsm
   src/backup/inject.c
   src/store/wrap.c
   src/store/keystore.c
+  src/store/rbanchor.c
   src/slot/persist.c
   src/slot/fsm.c
   src/slot/meta.c
@@ -137,7 +156,10 @@ target_include_directories(pqchsm
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LIBOQS_INCLUDE_DIR}
           ${CMAKE_CURRENT_SOURCE_DIR}/service
 )
-target_link_libraries(pqchsm PUBLIC OpenSSL::Crypto Threads::Threads PRIVATE ${LIBOQS_LIBRARY})
+# ⚠️ 远程口是 mTLS（service/pqcs_tls.c），所以除了 Crypto 还要 SSL。
+#    少了它的症状是链接期一堆 SSL_* 未定义 —— 而那些符号只有走远程的调用方
+#    才会用到，本机路径完全正常，很容易以为是别的问题。
+target_link_libraries(pqchsm PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads PRIVATE ${LIBOQS_LIBRARY})
 if(VERILATOR_BIN)
   target_compile_definitions(pqchsm PRIVATE PQCHSM_HAVE_VERILATOR=1)
   target_link_libraries(pqchsm PUBLIC pqchsm-vsim)
@@ -244,6 +266,9 @@ add_dependencies(test_p11 pqchsm-p11)
 pqchsm_test(test_anchor    tests/unit/test_anchor.c)
 pqchsm_test(test_audit_integration tests/unit/test_audit_integration.c)
 pqchsm_test(test_slot_concurrent tests/unit/test_slot_concurrent.c)
+# 两条 P0 并发缺陷的回归（liboqs 全局随机源串扰 / 自测闸门被旁路）。
+# 必须真起线程，单线程跑一万遍也不会现形 —— 理由写在文件头。
+pqchsm_test(test_crypto_concurrent tests/unit/test_crypto_concurrent.c)
 pqchsm_test(test_accel     tests/unit/test_accel.c)
 pqchsm_test(test_accel_axi tests/unit/test_accel_axi.c)
 pqchsm_test(test_e2e       tests/integration/test_e2e.c)
@@ -261,6 +286,10 @@ add_test(NAME slot_fsm      COMMAND test_slot_fsm)
 add_test(NAME slot_meta     COMMAND test_slot_meta)
 add_test(NAME slot          COMMAND test_slot)
 add_test(NAME slot_concurrent COMMAND test_slot_concurrent)
+add_test(NAME crypto_concurrent COMMAND test_crypto_concurrent)
+# 结构性回归：PRODUCTION 形态的二进制里搜不到桩根密钥（带空对照）
+add_test(NAME profile_no_stub_kdr
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_profile.sh)
 add_test(NAME wrap          COMMAND test_wrap)
 add_test(NAME keystore      COMMAND test_keystore)
 add_test(NAME shamir        COMMAND test_shamir)
@@ -292,6 +321,13 @@ add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
 add_test(NAME prim_count COMMAND python3
          ${CMAKE_CURRENT_SOURCE_DIR}/tools/prim_count.py --self-test)
 
+# 远程口 mTLS 的回归：正例 + 三条否定（别家 CA / 不出示证书 / CN 不在 ACL）。
+# 不需要板子，也不碰任何真的凭据 —— 每轮临时生成一套 PKI。
+add_test(NAME tls_regress COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/tls_regress.sh)
+# 回归 P1④：密钥库 fail-closed（装载失败拒绝启动、且不写盘）
+add_test(NAME daemon_failclosed
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/daemon_failclosed.sh
+                 ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME cli_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/cli_smoke.sh
          ${CMAKE_CURRENT_BINARY_DIR})
 # Python / Java 的 provider demo（缺 PyKCS11 或 JDK22+ 时自动 SKIP）

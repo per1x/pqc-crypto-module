@@ -1,12 +1,29 @@
 #include "pqchsm/kdr.h"
 #include "pqchsm/kdf.h"
+#include "pqchsm/profile.h"
 #include "pqchsm/util.h"
 
 #include <string.h>
 
+/* ============================================================================
+ * 【桩根密钥：只在 DEV 形态下存在】
+ * ============================================================================
+ * "固件二进制里搜不到 KDR" 是验收项之一。老版本把这条写在注释里当作将来的
+ * 待办，于是**默认构建出来的二进制里就躺着一个公开的根密钥**，而且没有
+ * provider 时会自动回退到它 —— 谁都不会发现。
+ *
+ * 现在由 PQC_PROFILE 分开（见 pqchsm/profile.h）：
+ *   DEV        —— 编译进来，且启动时会打一句明确的告警；
+ *   PRODUCTION —— 整段 #if 掉，**二进制里搜不到这 32 字节**，
+ *                 pqc_kdr_provider_stub() 返回 NULL，没装 provider 就
+ *                 派生不出任何东西（fail-closed）。
+ * tools/check_profile.sh 在 ctest 里对着 PRODUCTION 的目标文件扫这段字面量，
+ * 保证这条不是靠人记住。
+ */
+#if PQC_PROFILE != PQC_PROFILE_PRODUCTION
+
 /* ⚠️ 桩根密钥。真实设备上这 32 字节来自 eFUSE/BBRAM/PUF，永不出芯片。
- * 在当前阶段它保护的只是测试数据；进入真实设备后，"固件二进制里搜不到 KDR"
- * 是验收项之一，届时这段常量必须消失。
+ * 在当前阶段它保护的只是测试数据。
  * 字面量本身就写着 NOT SECRET，避免有人误以为它是真的。 */
 static const uint8_t KDR_STUB[PQC_KDR_LEN] = {
 	0x50, 0x51, 0x43, 0x2d, 0x48, 0x53, 0x4d, 0x20,   /* "PQC-HSM " */
@@ -46,6 +63,17 @@ const pqc_kdr_provider_t *pqc_kdr_provider_stub(void)
 	return &g_stub;
 }
 
+#else   /* PQC_PROFILE == PQC_PROFILE_PRODUCTION */
+
+/* 生产形态：桩**根本不存在**。返回 NULL 而不是"一个不会派生成功的桩" ——
+ * 前者让调用方在编译期/启动期就撞上，后者会一路跑到第一次派生才失败。 */
+const pqc_kdr_provider_t *pqc_kdr_provider_stub(void)
+{
+	return NULL;
+}
+
+#endif  /* PQC_PROFILE */
+
 static const pqc_kdr_provider_t *g_provider;
 
 void pqc_kdr_set_provider(const pqc_kdr_provider_t *p)
@@ -55,9 +83,13 @@ void pqc_kdr_set_provider(const pqc_kdr_provider_t *p)
 
 const pqc_kdr_provider_t *pqc_kdr_get_provider(void)
 {
+#if PQC_PROFILE != PQC_PROFILE_PRODUCTION
 	if (!g_provider) {
-		g_provider = &g_stub;
+		g_provider = &g_stub;   /* DEV：没装就用桩，并由 profile 闸门告警 */
 	}
+#endif
+	/* PRODUCTION：没装 provider 就是 NULL。**不回退到任何东西** ——
+	 * 一个"看起来能用、其实根本没有信任根"的密码机比起不来更糟。 */
 	return g_provider;
 }
 
@@ -84,6 +116,12 @@ int pqc_kdr_derive(const char *label, const uint8_t *salt, size_t salt_len,
 
 void pqc_kdr_set_test_root(const uint8_t *seed, size_t seed_len)
 {
+#if PQC_PROFILE == PQC_PROFILE_PRODUCTION
+	/* 生产形态里没有桩，也就没有"换个测试根"这回事 */
+	(void)seed;
+	(void)seed_len;
+	return;
+#else
 	/* 只对桩 provider 有意义 —— 硬件 provider 的根密钥改不了，这正是重点 */
 	if (pqc_kdr_get_provider() != &g_stub) {
 		return;
@@ -103,4 +141,5 @@ void pqc_kdr_set_test_root(const uint8_t *seed, size_t seed_len)
 	memcpy(g_root, root, PQC_KDR_LEN);
 	g_root_ready = 1;
 	pqc_secure_zero(root, sizeof(root));
+#endif
 }

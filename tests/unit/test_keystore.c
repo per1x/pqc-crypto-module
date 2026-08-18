@@ -9,6 +9,7 @@
 #include "pqchsm/keystore.h"
 #include "pqchsm/slot.h"
 #include "pqchsm/kdr.h"
+#include "pqchsm/rbanchor.h"
 #include "pqchsm/util.h"
 
 #include <stdlib.h>
@@ -431,6 +432,256 @@ static void test_rollback(void)
 	unlink(g_path);
 }
 
+/* ---- 回归 P1⑦：安全状态变化必须当场落盘 ------------------------------------
+ *
+ * 老实现只在 CMD_SAVE / CMD_ROTATE_KEK 时写盘，PIN 失败计数与锁定状态只在
+ * 内存里。于是攻击者的最优策略是：**试三次、拔电、再试三次**——
+ * 锁定永远不会发生，PIN 空间被无限次尝试。
+ *
+ * 现在槽位层在每次安全状态变化之后回调 persist 钩子（hsm_token_set_persist_hook）。
+ * 这个用例模拟"拔电"：改完之后**不调用任何 save**，直接丢掉 token，
+ * 再从盘上装一份新的看计数在不在。
+ */
+static int g_persist_calls;
+
+static int persist_cb(hsm_token_t *tok, void *user)
+{
+	g_persist_calls++;
+	return hsm_keystore_save(tok, (const char *)user) == HSM_OK ? 0 : -1;
+}
+
+static void test_persist_on_security_change(void)
+{
+	char path[300];
+	hsm_token_t *tok;
+	hsm_session_t s;
+	slot_meta_t m;
+
+	snprintf(path, sizeof(path), "%s.persist", g_path);
+	unlink(path);
+	{
+		char t[340];
+
+		snprintf(t, sizeof(t), "%s.epoch", path);
+		unlink(t);
+	}
+
+	TCASE("PIN 失败计数不靠 save 也会落盘（抗掉电）");
+	tok = hsm_token_new(N_SLOTS);
+	CHECK(tok != NULL);
+	provision(tok, 0, PQC_ALG_ML_DSA_65, KEY_USAGE_SIGN, 0, NULL, NULL);
+	provision(tok, 1, PQC_ALG_ML_DSA_65, KEY_USAGE_SIGN, 0, NULL, NULL);
+	provision(tok, 2, PQC_ALG_ML_DSA_65, KEY_USAGE_SIGN, 0, NULL, NULL);
+	/* 先落一份基线，再挂钩子 —— 与 daemon 的启动顺序一致 */
+	CHECK_EQ_INT(hsm_keystore_save(tok, path), HSM_OK);
+	g_persist_calls = 0;
+	hsm_token_set_persist_hook(tok, persist_cb, path);
+
+	CHECK_EQ_INT(hsm_session_open(tok, 0, &s), HSM_OK);
+	CHECK_EQ_INT(hsm_session_login(tok, s, HSM_ROLE_USER, "wrong-pin"),
+	             HSM_ERR_PIN_INCORRECT);
+	CHECK(g_persist_calls > 0);            /* 钩子真的被调了 */
+
+	/* **不 save**，直接扔掉 token —— 这就是"拔电" */
+	hsm_token_free(tok);
+
+	tok = hsm_token_new(N_SLOTS);
+	CHECK(tok != NULL);
+	CHECK_EQ_INT(hsm_keystore_load(tok, path), HSM_OK);
+	CHECK_EQ_INT(hsm_slot_get_meta(tok, 0, &m), HSM_OK);
+	CHECK_EQ_INT(m.user_pin_fails, 1);     /* 老实现这里是 0 */
+
+	TCASE("连续失败到锁定，锁定状态同样扛得住掉电");
+	hsm_token_set_persist_hook(tok, persist_cb, path);
+	CHECK_EQ_INT(hsm_session_open(tok, 0, &s), HSM_OK);
+	for (uint32_t i = m.user_pin_fails; i + 1 < HSM_PIN_MAX_FAILS; i++) {
+		CHECK_EQ_INT(hsm_session_login(tok, s, HSM_ROLE_USER, "wrong-pin"),
+		             HSM_ERR_PIN_INCORRECT);
+	}
+	CHECK_EQ_INT(hsm_session_login(tok, s, HSM_ROLE_USER, "wrong-pin"),
+	             HSM_ERR_PIN_LOCKED);
+	hsm_token_free(tok);                   /* 又一次"拔电" */
+
+	tok = hsm_token_new(N_SLOTS);
+	CHECK(tok != NULL);
+	CHECK_EQ_INT(hsm_keystore_load(tok, path), HSM_OK);
+	CHECK_EQ_INT(hsm_slot_get_meta(tok, 0, &m), HSM_OK);
+	CHECK_EQ_INT(m.state, SLOT_ST_LOCKED);
+	/* 重启之后 User 仍然登不进去 —— 这才是"锁定"的意义 */
+	CHECK_EQ_INT(hsm_session_open(tok, 0, &s), HSM_OK);
+	CHECK_EQ_INT(hsm_session_login(tok, s, HSM_ROLE_USER, USER_PIN),
+	             HSM_ERR_PIN_LOCKED);
+
+	TCASE("SO 解锁之后的状态也当场落盘");
+	hsm_token_set_persist_hook(tok, persist_cb, path);
+	CHECK_EQ_INT(hsm_session_login(tok, s, HSM_ROLE_SO, SO_PIN), HSM_OK);
+	CHECK_EQ_INT(hsm_slot_unlock(tok, s, 0), HSM_OK);
+	hsm_token_free(tok);
+
+	tok = hsm_token_new(N_SLOTS);
+	CHECK(tok != NULL);
+	CHECK_EQ_INT(hsm_keystore_load(tok, path), HSM_OK);
+	CHECK_EQ_INT(hsm_slot_get_meta(tok, 0, &m), HSM_OK);
+	CHECK_EQ_INT(m.user_pin_fails, 0);
+	CHECK(m.state != SLOT_ST_LOCKED);
+	CHECK_EQ_INT(hsm_session_open(tok, 0, &s), HSM_OK);
+	CHECK_EQ_INT(hsm_session_login(tok, s, HSM_ROLE_USER, USER_PIN), HSM_OK);
+	hsm_token_free(tok);
+
+	unlink(path);
+	{
+		char t[340];
+
+		snprintf(t, sizeof(t), "%s.epoch", path);
+		unlink(t);
+		snprintf(t, sizeof(t), "%s.tmp", path);
+		unlink(t);
+	}
+}
+
+/* ---- 防回滚锚点 provider（C）------------------------------------------------
+ *
+ * 这个用例要说清的是**两种锚点的强度差在哪**，而不只是"epoch 起作用了"：
+ *
+ *   file  锚点是旁边的另一个文件 → 攻击者**两个一起换**就绕过去了。
+ *         这一条是已知的、被文档写明的弱点，所以这里**断言它确实能被绕过** ——
+ *         把弱点当成回归钉住，免得哪天有人以为它是防回滚而不再往前推。
+ *
+ *   硬件单调  锚点是一个攻击者写不了、也退不回去的计数器 → 换文件没用。
+ *         这里用一个内存里的假 provider 模拟"计数器只增不减"，
+ *         证明 keystore 那一侧的判据是对的。真硬件（eMMC RPMB）的实现在
+ *         board/src/rpmb.c，这块板上为什么用不了见 docs/SECURITY.md。
+ */
+static uint64_t g_fake_counter;
+
+static int fake_read(void *user, const char *scope, uint64_t *out)
+{
+	(void)user; (void)scope;
+	*out = g_fake_counter;
+	return 0;
+}
+
+static int fake_bump(void *user, const char *scope, uint64_t *out)
+{
+	(void)user; (void)scope;
+	g_fake_counter++;          /* 只增不减 —— 这正是硬件计数器的性质 */
+	if (out) {
+		*out = g_fake_counter;
+	}
+	return 0;
+}
+
+static const pqc_rbanchor_provider_t g_fake_hw = {
+	.name = "fake(hardware-monotonic, for tests)",
+	.hardware_monotonic = 1,
+	.read = fake_read,
+	.bump = fake_bump,
+	.user = NULL,
+};
+
+static void copy_file(const char *from, const char *to)
+{
+	FILE *a = fopen(from, "rb"), *b = fopen(to, "wb");
+	int c;
+
+	if (a && b) {
+		while ((c = fgetc(a)) != EOF) {
+			fputc(c, b);
+		}
+	}
+	if (a) fclose(a);
+	if (b) fclose(b);
+}
+
+static void test_anchor_provider(void)
+{
+	char path[300], snap[340], esnap[340], epath[340];
+	uint8_t pk[4096];
+	size_t pkl = 0;
+	hsm_token_t *tok;
+
+	snprintf(path,  sizeof path,  "%s.anch", g_path);
+	snprintf(snap,  sizeof snap,  "%s.anch.snap", g_path);
+	snprintf(epath, sizeof epath, "%s.anch.epoch", g_path);
+	snprintf(esnap, sizeof esnap, "%s.anch.epoch.snap", g_path);
+	unlink(path); unlink(snap); unlink(epath); unlink(esnap);
+
+	TCASE("默认锚点是文件，且**如实说自己不是硬件单调**");
+	pqc_rbanchor_set_provider(NULL);
+	CHECK_EQ_INT(pqc_rbanchor_is_hardware_monotonic(), 0);
+
+	/* ---- 文件锚点：两个文件一起换 → 绕过（已知弱点，钉住它）---- */
+	TCASE("文件锚点：连锚点一起换回去，回放**绕得过**（这是已知边界）");
+	tok = make_populated(pk, &pkl);
+	CHECK(tok != NULL);
+	CHECK_EQ_INT(hsm_keystore_save(tok, path), HSM_OK);
+	copy_file(path, snap);
+	copy_file(epath, esnap);          /* 攻击者把锚点也一起留了一份 */
+	CHECK_EQ_INT(hsm_keystore_save(tok, path), HSM_OK);
+	CHECK_EQ_INT(hsm_keystore_save(tok, path), HSM_OK);
+	hsm_token_free(tok);
+
+	copy_file(snap, path);            /* 只换 keystore → 必须被拒 */
+	{
+		hsm_token_t *t = hsm_token_new(N_SLOTS);
+
+		CHECK(t != NULL);
+		CHECK_EQ_INT(hsm_keystore_load(t, path), HSM_ERR_INTEGRITY);
+		hsm_token_free(t);
+	}
+	copy_file(esnap, epath);          /* 再把锚点也换回去 → 就装得上了 */
+	{
+		hsm_token_t *t = hsm_token_new(N_SLOTS);
+
+		CHECK(t != NULL);
+		CHECK_EQ_INT(hsm_keystore_load(t, path), HSM_OK);
+		hsm_token_free(t);
+	}
+
+	/* ---- 硬件单调锚点：同样的攻击不成立 ---- */
+	TCASE("硬件单调锚点：同样的回放**绕不过**");
+	unlink(path); unlink(snap); unlink(epath); unlink(esnap);
+	g_fake_counter = 0;
+	pqc_rbanchor_set_provider(&g_fake_hw);
+	CHECK_EQ_INT(pqc_rbanchor_is_hardware_monotonic(), 1);
+
+	tok = make_populated(pk, &pkl);
+	CHECK(tok != NULL);
+	CHECK_EQ_INT(hsm_keystore_save(tok, path), HSM_OK);
+	copy_file(path, snap);            /* 旧快照 */
+	CHECK_EQ_INT(hsm_keystore_save(tok, path), HSM_OK);
+	CHECK_EQ_INT(hsm_keystore_save(tok, path), HSM_OK);
+	hsm_token_free(tok);
+
+	/* 当前文件照常装得上 */
+	{
+		hsm_token_t *t = hsm_token_new(N_SLOTS);
+
+		CHECK(t != NULL);
+		CHECK_EQ_INT(hsm_keystore_load(t, path), HSM_OK);
+		hsm_token_free(t);
+	}
+	/* 把旧快照换回去：攻击者**没有任何文件可以一起换** —— 锚点不在文件系统里 */
+	copy_file(snap, path);
+	{
+		hsm_token_t *t = hsm_token_new(N_SLOTS);
+
+		CHECK(t != NULL);
+		CHECK_EQ_INT(hsm_keystore_load(t, path), HSM_ERR_INTEGRITY);
+		hsm_token_free(t);
+	}
+	/* 计数器退不回去这一条由 provider 自己保证；这里断言它确实只增 */
+	{
+		uint64_t before = g_fake_counter, after = 0;
+
+		CHECK_EQ_INT(pqc_rbanchor_bump(path, &after), 0);
+		CHECK(after > before);
+	}
+
+	pqc_rbanchor_set_provider(NULL);
+	unlink(path); unlink(snap); unlink(epath); unlink(esnap);
+}
+
 int main(void)
 {
 	snprintf(g_path, sizeof(g_path), "/tmp/pqchsm_ks_%d.bin", (int)getpid());
@@ -439,6 +690,8 @@ int main(void)
 	test_tamper();
 	test_power_fail();
 	test_rollback();
+	test_persist_on_security_change();
+	test_anchor_provider();
 
 	unlink(g_path);
 	char tmp[340];

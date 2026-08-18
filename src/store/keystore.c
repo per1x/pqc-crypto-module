@@ -2,6 +2,7 @@
 
 #include "pqchsm/kdf.h"
 #include "pqchsm/kdr.h"
+#include "pqchsm/rbanchor.h"
 #include "pqchsm/util.h"
 #include "pqchsm/wrap.h"
 #include "../slot/persist.h"
@@ -24,27 +25,29 @@ static const uint8_t KS_MAGIC[8] = { 'P', 'Q', 'C', 'H', 'S', 'M', 'K', 'S' };
 #define KS_OFF_EPOCH (8 + 4 + 4 + KS_SALT_LEN)
 
 /* ============================================================================
- * 【防回滚 epoch —— 它挡得住什么、挡不住什么，先说清楚】
+ * 【防回滚 epoch —— 它挡得住什么、挡不住什么，取决于锚点放在哪】
  * ============================================================================
  * 独立评审 H3：keystore 没有任何单调量，于是**把整份文件换成一份旧快照**
  * （回放）不会被发现 —— PIN 锁定计数、已吊销的密钥、槽位状态全都跟着回到
  * 从前，而全文件 MAC 对旧快照**照样是对的**（那份 MAC 当初就是自己算的）。
  *
- * 这里加一个每次成功写盘就 +1 的 epoch，进头部、进 MAC 覆盖范围，并把
- * "见过的最大 epoch"记在**另一个文件**里（`<keystore>.epoch`）。装载时
- * epoch 比记录的小就**拒绝装载**（fail-closed，不是只报个警告）。
+ * 这里每次成功写盘就把锚点推一格，把推完的值写进文件头、进 MAC 覆盖范围。
+ * 装载时 epoch 比锚点小就**拒绝装载**（fail-closed，不是只报个警告）。
  *
- * ⚠️⚠️ **这不是真正的防回滚，别当它是。**
- * 真正的防回滚需要**攻击者写不了的单调存储** —— eFUSE 计数器、RPMB、
- * TPM NV 之类。这块板一个都没有：eFUSE 已被永久排除（不可逆、只有一块板），
- * BBRAM 存的是 AES 密钥不是计数器，RPMB 没有开通。
+ * **锚点放在哪儿由 pqchsm/rbanchor.h 的 provider 决定**，强度差一个量级：
  *
- * 所以这一步的**真实收益**是：把"换掉一个文件"提高到"必须**一致地**换掉
- * 两个文件"。对拿到 SD 卡随手拷回一份旧 keystore 的攻击者有效；对能同时
- * 写这两个文件的攻击者**无效**。
+ *   file（默认）—— 旁边的另一个普通文件。⚠️ **这不是真正的防回滚**：
+ *                   能写 SD 卡的攻击者两个文件一起换回去就绕过了。
+ *                   真实收益只有"必须一致地换两个文件"和"事后查得出来"。
  *
- * 之所以现在就做，是因为**没有 epoch 连"事后发现被回滚过"都做不到** ——
- * 等哪天有了防回滚存储，把锚点挪进去就行，文件格式不用再动一次。
+ *   rpmb        —— eMMC 的 RPMB 写计数器。硬件维护、只增不减，**谁都没办法
+ *                   让它变小**，包括拿到 RPMB 认证密钥的人。这一条成立时
+ *                   回放在物理上不成立，而不只是"很难"。
+ *                   这块板实测有 4 MB RPMB 且认证密钥未烧写（board/src/rpmb_probe.c），
+ *                   所以这条路是通的；结论与取舍见 docs/SECURITY.md。
+ *
+ * pqc_rbanchor_is_hardware_monotonic() 会如实告诉上层现在是哪一种 ——
+ * 别把 file 说成"有防回滚"。
  */
 
 /* ---- 掉电模拟钩子（仅测试用）------------------------------------------- */
@@ -113,61 +116,6 @@ static uint64_t get_u64(const uint8_t *p)
 	return v;
 }
 
-/* ---- epoch 锚点：与 keystore **分开的**一个小文件 ----
- * 只存一个十进制数。之所以不放进 keystore 自己：回放攻击换的就是那个文件，
- * 锚点跟它同生共死就毫无意义。放在旁边至少要求攻击者**一致地**换两个。
- * 读不到（首次运行、被删）按 0 处理 —— 那时 epoch=1 的新文件照常能装，
- * 而**删锚点本身就是一次可观测的事件**（下面 load 里会记审计）。 */
-static void ks_epoch_path(const char *ks_path, char *out, size_t cap)
-{
-	snprintf(out, cap, "%s.epoch", ks_path);
-}
-
-static uint64_t ks_epoch_read(const char *ks_path)
-{
-	char p[512];
-	unsigned long long v = 0;
-	FILE *f;
-
-	ks_epoch_path(ks_path, p, sizeof(p));
-	f = fopen(p, "r");
-	if (!f) {
-		return 0;
-	}
-	if (fscanf(f, "%llu", &v) != 1) {
-		v = 0;
-	}
-	fclose(f);
-	return (uint64_t)v;
-}
-
-/* 写锚点：先写临时文件再 rename，掉电不会留下半个数。 */
-static int ks_epoch_write(const char *ks_path, uint64_t epoch)
-{
-	char p[512], t[544];
-	FILE *f;
-
-	ks_epoch_path(ks_path, p, sizeof(p));
-	snprintf(t, sizeof(t), "%s.tmp", p);
-	f = fopen(t, "w");
-	if (!f) {
-		return -1;
-	}
-	if (fprintf(f, "%llu\n", (unsigned long long)epoch) < 0) {
-		fclose(f);
-		remove(t);
-		return -1;
-	}
-	fflush(f);
-	fsync(fileno(f));
-	fclose(f);
-	if (rename(t, p) != 0) {
-		remove(t);
-		return -1;
-	}
-	return 0;
-}
-
 /* 全文件 MAC 的密钥：由 KDR 按 kek_salt 派生，与 KEK 分开（不同域分隔串） */
 static int derive_file_key(const uint8_t *salt, uint8_t key[32])
 {
@@ -232,8 +180,26 @@ static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
 	put_u32(body + 8, HSM_KEYSTORE_VERSION);
 	put_u32(body + 12, (uint32_t)n_slots);
 	memcpy(body + 16, salt, KS_SALT_LEN);
-	/* epoch = 现有锚点 + 1。锚点读不到就从 1 起 —— 首次落盘的正常情形。 */
-	uint64_t epoch = ks_epoch_read(path) + 1u;
+	/* epoch = 当前锚点 + 1。锚点在**文件落定之后**才真正推进（见下面 fsync_dir 之后）。
+	 *
+	 * ⚠️ 这个顺序不能反，而且我一度反过、被掉电用例当场抓住：
+	 * 先推锚点再写文件的话，中间掉一次电就得到"锚点 N+1、文件还是 N"，
+	 * 下一次装载被自己的防回滚判据拒掉 —— **一次掉电把好好的库变成打不开的库**。
+	 * 现在这个顺序最坏是"文件 N+1、锚点还是 N"：装载照过（N+1 ≥ N），
+	 * 下次写盘再把锚点推上去，什么都不丢。
+	 *
+	 * 这个顺序对 RPMB 锚点同样成立：读计数器拿到 C，文件里写 C+1，
+	 * 然后那一次认证写把计数器推到 C+1。 */
+	uint64_t epoch = 0;
+	{
+		uint64_t seen = 0;
+
+		if (pqc_rbanchor_read(path, &seen) != 0) {
+			st = HSM_ERR_CRYPTO;
+			goto out;
+		}
+		epoch = seen + 1u;
+	}
 	put_u64(body + KS_OFF_EPOCH, epoch);
 	size_t body_len = KS_HDR_LEN;
 
@@ -302,15 +268,14 @@ static hsm_status_t keystore_save_impl(hsm_token_t *tok, const char *path,
 		goto out;
 	}
 	fsync_dir(path);
-	/* ⚠️ **锚点必须在 keystore 落定之后再推进**，顺序不能反。
-	 * 反了的话，中间掉一次电就得到"锚点说 N+1、文件还是 N"，下次装载被
-	 * 自己的防回滚判据拒掉 —— 一次掉电把好好的库变成打不开的库。
-	 * 现在这个顺序最坏是"文件 N+1、锚点还是 N"：装载照过（N+1 >= N），
-	 * 下次写盘再把锚点推上去，没有任何东西丢。 */
-	if (ks_epoch_write(path, epoch) != 0) {
-		/* 锚点写不了不算保存失败：keystore 本身已经落定、能用。
-		 * 但要如实记一笔 —— 这时防回滚保护是缺位的。 */
-		audit_detail = "keystore saved but epoch anchor write failed";
+	/* 文件落定了才推锚点。推不动不算保存失败：keystore 本身已经在盘上、能用；
+	 * 但要如实记一笔 —— 这段时间里防回滚保护是缺位的。 */
+	{
+		uint64_t got = 0;
+
+		if (pqc_rbanchor_bump(path, &got) != 0 || got != epoch) {
+			audit_detail = "keystore saved but rollback anchor did not advance";
+		}
 	}
 	st = HSM_OK;
 out:
@@ -414,21 +379,27 @@ hsm_status_t hsm_keystore_load(hsm_token_t *tok, const char *path)
 		 * 这个数是我们自己写下的那个。反过来先信 epoch 等于信了未认证的数据。
 		 *
 		 * 判据是**严格小于就拒**（fail-closed）。相等是正常的：同一份文件
-		 * 反复装载。大于也放行 —— 那说明锚点落后于文件（保存后锚点没写成，
-		 * 见 save 里那段），文件本身是新的，装载它并无风险。 */
+		 * 反复装载。大于也放行 —— 那说明锚点落后于文件（掉电窗口，或者把
+		 * 同一份库拿到另一台机器上装），文件本身是新的，装载它并无风险。 */
 		{
 			uint64_t epoch = get_u64(buf + KS_OFF_EPOCH);
-			uint64_t seen = ks_epoch_read(path);
+			uint64_t seen = 0;
 
-			if (epoch < seen) {
-				/* 这是一次**被检测到的回放**：文件比我们见过的旧。 */
+			if (pqc_rbanchor_read(path, &seen) != 0) {
+				/* 读不到锚点**不能**当成"锚点是 0"放行 —— 那等于把防回滚
+				 * 的开关交到攻击者手上（把锚点弄坏即可）。 */
 				st = HSM_ERR_INTEGRITY;
 				goto out;
 			}
-			/* 文件比锚点新就把锚点推上去，免得下次又落后。 */
-			if (epoch > seen) {
-				(void)ks_epoch_write(path, epoch);
+			if (epoch < seen) {
+				/* 这是一次**被检测到的回放**：文件比锚点旧。 */
+				st = HSM_ERR_INTEGRITY;
+				goto out;
 			}
+			/* ⚠️ epoch > seen 时**不把锚点往上推**。
+			 * 老版本推了，理由是"免得下次又落后"。但那给了攻击者一条
+			 * 抹证据的路：拿一份自己造的高 epoch 文件读一次，锚点就被顶上去，
+			 * 真正的当前文件反而被判成回放。推进只由 save 做。 */
 		}
 
 		/* MAC 过了才逐槽位装载。到这一步失败只可能是文件内部自相矛盾。 */

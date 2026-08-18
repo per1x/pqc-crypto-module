@@ -106,6 +106,85 @@ out:
 	return st;
 }
 
+/* 找出 target_sess 当前占着的那个槽位。
+ *
+ * 判据是"能不能用这个会话读到它的公钥"：读得到就是这个会话的槽位。
+ * 缓冲故意只给 8 字节 —— 我们要的是**归属**，不是公钥本身，于是：
+ *   · 不是这个会话的槽位 → HSM_ERR_BAD_HANDLE
+ *   · 是这个会话的槽位   → HSM_ERR_BAD_ARG（缓冲不够），也就是"找到了"
+ * 这两个码的区分是这段代码成立的全部前提，改 hsm_object_public_key 的
+ * 错误码语义时必须回来看一眼。
+ *
+ * 找到返回 HSM_OK 并回填槽位、句柄与元数据；没有任何已装载的槽位属于它，
+ * 返回 HSM_ERR_BAD_HANDLE（那是正常情况：往空槽注入）。 */
+static hsm_status_t find_target_slot(hsm_token_t *tok, hsm_session_t target_sess,
+                                     hsm_slot_id_t *slot, hsm_handle_t *handle,
+                                     slot_meta_t *meta)
+{
+	for (size_t i = 0; i < hsm_token_slot_count(tok); i++) {
+		slot_meta_t m;
+		uint8_t probe[8];
+		size_t plen = 0;
+		hsm_handle_t h;
+
+		if (hsm_slot_get_meta(tok, (hsm_slot_id_t)i, &m) != HSM_OK) {
+			continue;
+		}
+		if (m.state != SLOT_ST_LOADED && m.state != SLOT_ST_IN_USE) {
+			continue;
+		}
+		h = ((hsm_handle_t)m.generation << 32) | (hsm_handle_t)(i + 1);
+		if (hsm_object_public_key(tok, target_sess, h, probe, sizeof(probe),
+		                          &plen) == HSM_ERR_BAD_HANDLE) {
+			continue;
+		}
+		*slot   = (hsm_slot_id_t)i;
+		*handle = h;
+		*meta   = m;
+		return HSM_OK;
+	}
+	return HSM_ERR_BAD_HANDLE;
+}
+
+/* 用途位必须落在该算法种类的允许集合内。
+ * 这一条在 slot.c 的 install_key 里还会再查一遍 —— 这里**提前**查，是因为
+ * 事务的最后一步（destroy → load_seed）中间不能有可预见的失败点：真到那时
+ * 才发现 usage 不合法，旧密钥已经没了。 */
+static hsm_status_t check_usage(pqc_alg_t alg, uint32_t usage)
+{
+	const pqc_alg_info_t *info = pqc_alg_info(alg);
+	uint32_t allowed;
+
+	if (!info || usage == 0) {
+		return HSM_ERR_BAD_ARG;
+	}
+	allowed = (info->kind == PQC_KIND_KEM)
+	          ? (uint32_t)(KEY_USAGE_ENCAP | KEY_USAGE_DECAP)
+	          : (uint32_t)(KEY_USAGE_SIGN | KEY_USAGE_VERIFY);
+	return (usage & ~allowed) ? HSM_ERR_USAGE_DENIED : HSM_OK;
+}
+
+/* ============================================================================
+ * 注入：**先认证、后改状态**（2026-08-18 修复，别退回去）
+ * ============================================================================
+ * 老版本的顺序是：找到目标槽位 → 立刻 hsm_object_destroy() 把旧密钥销毁 →
+ * 然后才去解封装、解包、校验。于是**任何人**只要能发一个 blob 到这个入口，
+ * 哪怕整包都是随机字节、连 GCM 标签都对不上，旧密钥也已经先被删掉了 ——
+ * 一个纯粹的破坏性操作，不需要任何密钥材料就能触发。
+ *
+ * 现在分三段，中间没有回头路：
+ *
+ *   ① 认证 —— 解封装 + 解包 + 长度/用途校验。**一个字节的状态都不改。**
+ *              这一段里任何失败都直接返回，旧密钥原封不动。
+ *   ② 授权 —— 目标槽位存在的话，检查它允许被注入更新（SLOT_POLICY_INJECTABLE）。
+ *   ③ 提交 —— 销毁旧对象，装入新种子。到这一步为止所有可预见的失败都已经
+ *              排除，destroy 与 load_seed 之间只剩不可预见的故障。
+ *
+ * ③ 仍然不是原子的（槽位层没有"换掉密钥"这个单一操作）。但要走到那里，
+ * 攻击者必须先拿出一个**用设备注入私钥封装、且 GCM 标签对得上**的包 ——
+ * 也就是说他已经有权限做这次注入了。这是本层能给到的边界，写在这里免得
+ * 有人以为它是完整的两阶段提交。
+ */
 hsm_status_t hsm_inject_apply(hsm_token_t *tok,
                               hsm_session_t kem_sess, hsm_handle_t kem_handle,
                               hsm_session_t target_sess,
@@ -133,50 +212,21 @@ hsm_status_t hsm_inject_apply(hsm_token_t *tok,
 		return HSM_ERR_INTEGRITY;
 	}
 
-	/* 目标槽位已装载时，必须显式允许被注入更新 */
+	/* 会话本身得是合法的。这一步不改状态。 */
 	{
-		hsm_slot_id_t tslot = 0;
 		hsm_role_t role;
 		hsm_status_t rs = hsm_session_role(tok, target_sess, &role);
+
 		if (rs != HSM_OK) {
 			return rs;
-		}
-		/* 通过一次 get_meta 拿到目标槽位状态：会话所属槽位由 slot 层校验，
-		 * 这里遍历找出会话对应的槽位并不划算，改为让 generate/load 自己报状态错。
-		 * 但"已装载且不可注入"这条必须在装载前判掉，所以用下面的探测方式。 */
-		for (size_t i = 0; i < hsm_token_slot_count(tok); i++) {
-			slot_meta_t m;
-			if (hsm_slot_get_meta(tok, (hsm_slot_id_t)i, &m) != HSM_OK) {
-				continue;
-			}
-			if (m.state != SLOT_ST_LOADED && m.state != SLOT_ST_IN_USE) {
-				continue;
-			}
-			hsm_handle_t h = ((hsm_handle_t)m.generation << 32) | (hsm_handle_t)(i + 1);
-			uint8_t probe[8];
-			size_t plen = 0;
-			/* 能读到公钥 = 这个槽位属于 target_sess */
-			if (hsm_object_public_key(tok, target_sess, h, probe, sizeof(probe),
-			                          &plen) == HSM_ERR_BAD_HANDLE) {
-				continue;
-			}
-			tslot = (hsm_slot_id_t)i;
-			if (!(m.policy & SLOT_POLICY_INJECTABLE)) {
-				return HSM_ERR_POLICY;
-			}
-			/* 允许更新：先销毁旧对象，槽位回到 EMPTY */
-			hsm_status_t ds = hsm_object_destroy(tok, target_sess, h);
-			if (ds != HSM_OK) {
-				return ds;
-			}
-			(void)tslot;
-			break;
 		}
 	}
 
 	uint8_t ss[64], cek[PQC_KEK_LEN], seed[64];
 	size_t ss_len = 0, seed_len = 0;
-	hsm_status_t st = HSM_ERR_INTEGRITY;
+	hsm_status_t st;
+
+	/* ---- ① 认证：解封装 → 派生 CEK → 解包 → 校验。不改任何状态 ---- */
 
 	/* 解封装在设备内完成：CEK 从不出现在链路上 */
 	st = hsm_object_decaps(tok, kem_sess, kem_handle, blob + IJ_HDR_LEN, ct_len,
@@ -191,7 +241,8 @@ hsm_status_t hsm_inject_apply(hsm_token_t *tok,
 	if (pqc_unwrap(cek, sizeof(cek), blob, IJ_HDR_LEN,
 	               blob + IJ_HDR_LEN + ct_len, blob_len - IJ_HDR_LEN - ct_len,
 	               seed, sizeof(seed), &seed_len) != 0) {
-		/* 解包失败：可能是 blob 被改、也可能是拿错了注入钥 */
+		/* 解包失败：可能是 blob 被改、也可能是拿错了注入钥。
+		 * **到这里为止旧密钥一根汗毛都没动过** —— 这正是这次修复的要点。 */
 		st = HSM_ERR_INTEGRITY;
 		goto out;
 	}
@@ -199,9 +250,35 @@ hsm_status_t hsm_inject_apply(hsm_token_t *tok,
 		st = HSM_ERR_INTEGRITY;
 		goto out;
 	}
-	/* 种子直接装进目标槽位 —— 明文密钥从未离开设备 */
-	st = hsm_slot_load_seed(tok, target_sess, key_alg, usage, policy,
-	                        seed, seed_len, out);
+	st = check_usage(key_alg, usage);
+	if (st != HSM_OK) {
+		goto out;
+	}
+
+	/* ---- ② 授权：目标槽位若已装载，必须显式允许被注入更新 ---- */
+	{
+		hsm_slot_id_t tslot = 0;
+		hsm_handle_t  told  = HSM_INVALID_HANDLE;
+		slot_meta_t   tmeta;
+		int occupied = (find_target_slot(tok, target_sess, &tslot, &told, &tmeta)
+		                == HSM_OK);
+
+		if (occupied && !(tmeta.policy & SLOT_POLICY_INJECTABLE)) {
+			st = HSM_ERR_POLICY;
+			goto out;
+		}
+
+		/* ---- ③ 提交 ---- */
+		if (occupied) {
+			st = hsm_object_destroy(tok, target_sess, told);
+			if (st != HSM_OK) {
+				goto out;
+			}
+		}
+		/* 种子直接装进目标槽位 —— 明文密钥从未离开设备 */
+		st = hsm_slot_load_seed(tok, target_sess, key_alg, usage, policy,
+		                        seed, seed_len, out);
+	}
 out:
 	pqc_secure_zero(ss, sizeof(ss));
 	pqc_secure_zero(cek, sizeof(cek));

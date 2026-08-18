@@ -63,6 +63,7 @@
 #include <unistd.h>
 
 #include "wire.h"
+#include "pqcs_tls.h"
 #include "../board/kmod/secmmio_uapi.h"
 
 /* ⚠️ 这几个码**走在线上**（pqcs_resp.status），所以它们其实是协议的一部分，
@@ -218,24 +219,73 @@ static void logf_(const char *fmt, ...)
 	fflush(stderr);
 }
 
-/* ---- 远程口令 ---- */
-static uint8_t token[PQCS_TOKEN_MAX + 1];
-static size_t  token_len;
-static int     tcp_srv = -1;
-
-/* 定长比较，不因第一个不同的字节在哪儿而提前返回。
+/* ---- 远程口：mTLS ----------------------------------------------------------
  *
- * 口令是短的、可以被反复试的，而"第几个字节开始不对"这种时间差在局域网上
- * 是测得出来的 —— 一次朴素的 memcmp 就把 128 字节的搜索空间降成 128×256 次
- * 尝试。这一行的代价是零，不写才是需要解释的那个选择。 */
-static int ct_eq(const uint8_t *a, const uint8_t *b, size_t n)
-{
-	uint8_t d = 0;
-	size_t i;
+ * ⚠️ 这里以前是"明文 TCP + 一条静态预共享口令 + 常量时间比较"。
+ *    常量时间比较在那个设计里是**无用功**：口令在线上就是明文的，
+ *    抓一次包就拿到了，根本不需要按字节猜。整段已经换成 mTLS，
+ *    理由与取舍写在 service/pqcs_tls.h 的文件头。
+ *
+ * 凭据缺一不可（CA / 设备证书 / 设备私钥），少一样就**不监听 TCP** ——
+ * 与原来"没有口令文件就不监听"同样是 fail-closed 的姿态。 */
+static int      tcp_srv = -1;
+static SSL_CTX *tls_ctx;
 
-	for (i = 0; i < n; i++)
-		d |= (uint8_t)(a[i] ^ b[i]);
-	return d == 0;
+/* ---- 握手限速 --------------------------------------------------------------
+ * 挡的是"拿一堆无效证书猛敲"。TLS 握手要做非对称运算，而这个 daemon 是
+ * **单线程**的（硬件序列必须串行化，见文件头）—— 不限速的话一台机器就能
+ * 把它占满。这是可用性问题，不是机密性问题，所以做得很朴素：
+ * 每个源 IP 一个漏桶，失败一次扣一个令牌，满了就直接拒连。
+ *
+ * 表只有 16 项，满了就覆盖最旧的那一项。攻击者可以靠换 IP 把别人挤出去，
+ * 但那已经是"内网里有个能随便伪造源地址的人"的场景 —— 那种场景下这条限速
+ * 本来就不是防线。写小是有意的：没有动态分配，也就没有"限速表本身被打爆"
+ * 这种二阶故障。 */
+#define RL_SLOTS      16
+#define RL_MAX_FAILS  8         /* 窗口内允许的握手失败次数 */
+#define RL_WINDOW_S   60
+
+struct rl_ent {
+	uint32_t ip;
+	int      fails;
+	time_t   since;
+};
+static struct rl_ent rl_tab[RL_SLOTS];
+static int rl_next;
+
+/* 返回 1 = 放行，0 = 拒绝 */
+static int rl_allow(uint32_t ip)
+{
+	time_t now = time(NULL);
+	int i;
+
+	for (i = 0; i < RL_SLOTS; i++) {
+		if (rl_tab[i].ip != ip || rl_tab[i].since == 0)
+			continue;
+		if (now - rl_tab[i].since > RL_WINDOW_S) {
+			rl_tab[i].fails = 0;
+			rl_tab[i].since = now;
+		}
+		return rl_tab[i].fails < RL_MAX_FAILS;
+	}
+	return 1;
+}
+
+static void rl_fail(uint32_t ip)
+{
+	time_t now = time(NULL);
+	int i;
+
+	for (i = 0; i < RL_SLOTS; i++) {
+		if (rl_tab[i].ip == ip && rl_tab[i].since != 0) {
+			rl_tab[i].fails++;
+			return;
+		}
+	}
+	rl_tab[rl_next].ip = ip;
+	rl_tab[rl_next].fails = 1;
+	rl_tab[rl_next].since = now;
+	rl_next = (rl_next + 1) % RL_SLOTS;
 }
 
 /* ---- 硬件访问：每一笔都经 EL3 ---- */
@@ -1155,6 +1205,15 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 	}
 }
 
+/* ---- 连接抽象：本机 UNIX socket 走裸 fd，远程走 TLS -----------------------
+ * 两条路的**帧格式逐字节相同**，差别只在读写函数。用一个小结构把它们统一，
+ * 主循环因此不需要到处 if (is_tcp)。 */
+struct conn {
+	int   fd;
+	SSL  *ssl;      /* 非 NULL = 走 TLS */
+	char  peer[128];
+};
+
 static int read_all(int fd, void *p, size_t n)
 {
 	uint8_t *b = p;
@@ -1183,6 +1242,29 @@ static int write_all(int fd, const void *p, size_t n)
 		put += (size_t)r;
 	}
 	return 0;
+}
+
+static int conn_read(struct conn *c, void *p, size_t n)
+{
+	return c->ssl ? pqcs_tls_read_all(c->ssl, p, n) : read_all(c->fd, p, n);
+}
+
+static int conn_write(struct conn *c, const void *p, size_t n)
+{
+	return c->ssl ? pqcs_tls_write_all(c->ssl, p, n) : write_all(c->fd, p, n);
+}
+
+static void conn_close(struct conn *c)
+{
+	if (c->ssl) {
+		SSL_shutdown(c->ssl);
+		SSL_free(c->ssl);
+		c->ssl = NULL;
+	}
+	if (c->fd >= 0) {
+		close(c->fd);
+		c->fd = -1;
+	}
 }
 
 int main(int argc, char **argv)
@@ -1295,28 +1377,31 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* ---- 远程口令：读得到就开 TCP，读不到就**不开** ----
+	/* ---- 远程口的凭据：三样齐了才开 TCP，缺一样就**不开** ----
 	 *
 	 * fail-closed 是有意的：一个能驱动密码机的端口裸奔在内网上，
-	 * 比"远程功能用不了"糟得多。所以没有口令文件时，daemon 照常
-	 * 提供本机 UNIX socket，只是不监听 TCP，并在日志里说清楚原因。 */
+	 * 比"远程功能用不了"糟得多。缺凭据时 daemon 照常提供本机 UNIX socket，
+	 * 只是不监听 TCP，并在日志里说清楚缺的是哪一样。
+	 *
+	 * ⚠️ 与老版本（预共享口令）相比，fail-closed 的**判据变严了**：
+	 *    以前只要有一个 ≥8 字节的文件就开口；现在要 CA、设备证书、设备私钥
+	 *    三样都在，而且证书与私钥必须配得上（在 pqcs_tls_server_ctx 里查）。 */
 	{
-		int tf = open(PQCS_TOKEN_PATH, O_RDONLY);
+		char err[256] = {0};
 
-		if (tf >= 0) {
-			ssize_t n = read(tf, token, sizeof token - 1);
+		SSL_load_error_strings();
+		OpenSSL_add_ssl_algorithms();
 
-			close(tf);
-			while (n > 0 && (token[n-1] == '\n' || token[n-1] == '\r'))
-				n--;            /* 文件末尾的换行不算口令的一部分 */
-			if (n >= 8) {
-				token_len = (size_t)n;
-				token[n] = 0;
-			} else {
-				logf_("口令文件短于 8 字节，当作没有；不监听 TCP");
-			}
+		if (access(PQCS_CA_FILE, R_OK) != 0 ||
+		    access(PQCS_DEV_CERT, R_OK) != 0 ||
+		    access(PQCS_DEV_KEY, R_OK) != 0) {
+			logf_("远程凭据不全（要 %s / %s / %s），不监听 TCP（只提供本机 socket）",
+			      PQCS_CA_FILE, PQCS_DEV_CERT, PQCS_DEV_KEY);
 		} else {
-			logf_("没有 %s，不监听 TCP（只提供本机 socket）", PQCS_TOKEN_PATH);
+			tls_ctx = pqcs_tls_server_ctx(PQCS_CA_FILE, PQCS_DEV_CERT,
+			                              PQCS_DEV_KEY, err, sizeof err);
+			if (!tls_ctx)
+				logf_("TLS 上下文建不起来（%s），不监听 TCP", err);
 		}
 	}
 
@@ -1333,7 +1418,7 @@ int main(int argc, char **argv)
 	chmod(PQCS_SOCK_PATH, 0600);
 	listen(srv, 8);
 
-	if (token_len) {
+	if (tls_ctx) {
 		struct sockaddr_in in4;
 		int one = 1;
 
@@ -1349,14 +1434,17 @@ int main(int argc, char **argv)
 				logf_("TCP 监听失败：%s", strerror(errno));
 				close(tcp_srv); tcp_srv = -1;
 			} else {
-				logf_("TCP 监听 :%d（需要口令）", PQCS_TCP_PORT);
+				logf_("TCP 监听 :%d（mTLS，客户端必须出示本 CA 签发的证书）",
+				      PQCS_TCP_PORT);
 			}
 		}
 	}
 	logf_("就绪：%s（每一笔核访问都经 EL3 发出）", PQCS_SOCK_PATH);
 
 	for (;;) {
-		int c, is_tcp = 0, authed = 0;
+		struct conn cn = { .fd = -1, .ssl = NULL, .peer = "本机" };
+		int is_tcp = 0;
+		uint32_t peer_ip = 0;
 		struct pqcs_req q;
 		struct pqcs_resp rp;
 		static uint8_t pay[PQCS_MAXPAY], out[PQCS_MAXPAY];
@@ -1378,62 +1466,91 @@ int main(int argc, char **argv)
 			struct sockaddr_in peer;
 			socklen_t pl = sizeof peer;
 
-			c = accept(tcp_srv, (struct sockaddr *)&peer, &pl);
+			cn.fd = accept(tcp_srv, (struct sockaddr *)&peer, &pl);
 			is_tcp = 1;
-			if (c >= 0)
-				logf_("远程连上 %s:%d", inet_ntoa(peer.sin_addr),
-				      ntohs(peer.sin_port));
+			peer_ip = peer.sin_addr.s_addr;
+			if (cn.fd >= 0)
+				snprintf(cn.peer, sizeof cn.peer, "%s:%d",
+					 inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
 		} else {
-			c = accept(srv, NULL, NULL);
-			if (c >= 0)
+			cn.fd = accept(srv, NULL, NULL);
+			if (cn.fd >= 0)
 				logf_("本机客户端连上");
 		}
-		if (c < 0)
+		if (cn.fd < 0)
 			continue;
 
 		if (is_tcp) {
 			/* 超时是**可用性**要求，不是安全要求：服务是单线程的，
 			 * 一个连上就不说话（或者网络中断）的远程客户端，会把
 			 * 后面所有人一起挡住。演示里这表现为"密码机忽然没反应了"。
-			 * 有了超时，最坏情况是卡 10 秒而不是永远。 */
+			 * 有了超时，最坏情况是卡 10 秒而不是永远。
+			 *
+			 * ⚠️ 这个超时也覆盖 TLS 握手 —— 一个连上就不握手的客户端
+			 *    同样会把 daemon 占住，而握手是在下面**同步**做的。 */
 			struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
 			int one = 1;
 
-			setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-			setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-			setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-		}
-		/* 一次一个连接、一条一条处理 —— 硬件序列必须串行化（见文件头） */
-		while (read_all(c, &q, sizeof q) == 0) {
-			if (q.magic != PQCS_MAGIC || q.len > PQCS_MAXPAY)
-				break;
-			if (q.len && read_all(c, pay, q.len))
-				break;
-			rp.magic = PQCS_MAGIC;
+			setsockopt(cn.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+			setsockopt(cn.fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+			setsockopt(cn.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 
-			/* ---- TCP：先认口令，认过之前什么都不给做 ---- */
-			if (is_tcp && !authed) {
-				if (q.op != OP_AUTH) {
-					logf_("远程未认证就发 op=%u，断开", q.op);
-					break;
-				}
-				rp.len = 0;
-				if (q.len == token_len && q.len <= PQCS_MAXPAY &&
-				    ct_eq(pay, token, token_len)) {
-					authed = 1;
-					rp.status = SDR_OK;
-					logf_("远程认证通过");
-				} else {
-					rp.status = SDR_AUTHFAIL;
-					logf_("远程口令不对，断开");
-				}
-				write_all(c, &rp, sizeof rp);
-				if (!authed)
-					break;
+			if (!rl_allow(peer_ip)) {
+				logf_("%s 握手失败过多，暂时拒连", cn.peer);
+				conn_close(&cn);
 				continue;
 			}
-			/* 本机 socket 是 0600 的，能连上就已经是 root；
-			 * 对它要求口令没有增加任何东西，只会让本机工具更难用。 */
+
+			/* ---- mTLS 握手。**这里就是全部的认证** ----
+			 * SSL_accept 成功即意味着：对端出示了一张本 CA 签发、
+			 * 未过期的证书，并且**证明了它持有对应的私钥**
+			 * （TLS 1.3 的 CertificateVerify）。老版本那条
+			 * "第一帧必须是 OP_AUTH" 的规矩因此整个不存在了。 */
+			cn.ssl = SSL_new(tls_ctx);
+			if (!cn.ssl) {
+				conn_close(&cn);
+				continue;
+			}
+			SSL_set_fd(cn.ssl, cn.fd);
+			if (SSL_accept(cn.ssl) != 1) {
+				char e[256];
+
+				pqcs_tls_last_error(e, sizeof e);
+				logf_("%s TLS 握手失败：%s", cn.peer, e);
+				rl_fail(peer_ip);
+				conn_close(&cn);
+				continue;
+			}
+			{
+				char cnbuf[128] = {0};
+
+				if (pqcs_tls_peer_cn(cn.ssl, cnbuf, sizeof cnbuf) != 0) {
+					/* SSL_VERIFY_FAIL_IF_NO_PEER_CERT 之下这条
+					 * 理论上到不了；留着是因为"到不了"是别处的
+					 * 一个配置决定的，而这里付不起它被改掉的代价。 */
+					logf_("%s 没有可用的客户端 CN，断开", cn.peer);
+					rl_fail(peer_ip);
+					conn_close(&cn);
+					continue;
+				}
+				if (!pqcs_tls_acl_allows(PQCS_ACL_FILE, cnbuf)) {
+					logf_("%s 客户端 CN=\"%s\" 不在 %s 里，拒绝",
+					      cn.peer, cnbuf, PQCS_ACL_FILE);
+					rl_fail(peer_ip);
+					conn_close(&cn);
+					continue;
+				}
+				logf_("远程连上 %s，客户端 CN=\"%s\"，%s",
+				      cn.peer, cnbuf, SSL_get_version(cn.ssl));
+			}
+		}
+		/* 一次一个连接、一条一条处理 —— 硬件序列必须串行化（见文件头） */
+		while (conn_read(&cn, &q, sizeof q) == 0) {
+			if (q.magic != PQCS_MAGIC || q.len > PQCS_MAXPAY)
+				break;
+			if (q.len && conn_read(&cn, pay, q.len))
+				break;
+			rp.magic = PQCS_MAGIC;
 
 			/* 每个请求独立判定硬件是否可用：清零 → 处理 → 检查。
 			 * 不这么做的话，一次失败会永久污染后面所有请求；
@@ -1447,7 +1564,7 @@ int main(int argc, char **argv)
 			    wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA")) {
 				rp.status = SDR_HARDFAIL;
 				rp.len = 0;
-				if (write_all(c, &rp, sizeof rp))
+				if (conn_write(&cn, &rp, sizeof rp))
 					break;
 				continue;
 			}
@@ -1460,12 +1577,12 @@ int main(int argc, char **argv)
 				rp.status = SDR_HARDFAIL;
 				rp.len = 0;
 			}
-			if (write_all(c, &rp, sizeof rp))
+			if (conn_write(&cn, &rp, sizeof rp))
 				break;
-			if (rp.len && write_all(c, out, rp.len))
+			if (rp.len && conn_write(&cn, out, rp.len))
 				break;
 		}
-		close(c);
+		conn_close(&cn);
 		/* ⚠️ 会话结束的清理必须在**这里**，不能放在 for(;;) 之后。
 		 * 那个位置以前有一句 keys_wipe()，而外层循环没有任何 break /
 		 * return / exit —— 它是**不可达代码**，一次都没执行过。

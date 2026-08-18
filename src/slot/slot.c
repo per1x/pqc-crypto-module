@@ -244,6 +244,48 @@ void hsm_token_attach_audit(hsm_token_t *tok, struct audit_log *log)
 	pthread_mutex_unlock(&tok->audit_lock);
 }
 
+void hsm_token_set_persist_hook(hsm_token_t *tok, hsm_persist_fn fn, void *user)
+{
+	if (!tok) {
+		return;
+	}
+	pthread_mutex_lock(&tok->audit_lock);
+	tok->persist_fn   = fn;
+	tok->persist_user = user;
+	pthread_mutex_unlock(&tok->audit_lock);
+}
+
+/* 见 slot_internal.h。**调用方必须已经放掉所有槽位锁** ——
+ * 钩子的实现（hsm_keystore_save）会去读每一个槽位，持锁调用必死锁。 */
+int slot_persist(hsm_token_t *tok)
+{
+	hsm_persist_fn fn = NULL;
+	void          *user = NULL;
+
+	if (!tok) {
+		return 0;
+	}
+	pthread_mutex_lock(&tok->audit_lock);
+	/* 落盘途中不再触发落盘：save 自己会遍历槽位，而遍历不改状态，
+	 * 但万一将来某条路径在 save 里改了什么，这里要挡住无穷递归。 */
+	if (!tok->persist_busy && tok->persist_fn) {
+		fn   = tok->persist_fn;
+		user = tok->persist_user;
+		tok->persist_busy = 1;
+	}
+	pthread_mutex_unlock(&tok->audit_lock);
+
+	if (!fn) {
+		return 0;
+	}
+	int rc = fn(tok, user);
+
+	pthread_mutex_lock(&tok->audit_lock);
+	tok->persist_busy = 0;
+	pthread_mutex_unlock(&tok->audit_lock);
+	return rc;
+}
+
 void slot_audit(hsm_token_t *tok, int op, hsm_role_t role,
                 hsm_slot_id_t slot, hsm_status_t result, const char *detail)
 {
@@ -258,6 +300,19 @@ void slot_audit(hsm_token_t *tok, int op, hsm_role_t role,
 		                   (uint32_t)role, (uint32_t)slot, (uint32_t)result, detail);
 	}
 	pthread_mutex_unlock(&tok->audit_lock);
+}
+
+/* 安全状态刚变过 → 同步落盘。
+ *
+ * fail-closed：落盘失败就把这次操作判为失败。理由是"内存里锁了、盘上没锁"
+ * 比"这次操作报错"危险得多 —— 前者拔一次电就回到从前，而且没有人会发现。
+ * 已经失败的操作保留原来的错误码，不要被落盘结果盖掉。 */
+static hsm_status_t commit_security_state(hsm_token_t *tok, hsm_status_t st)
+{
+	if (slot_persist(tok) != 0 && st == HSM_OK) {
+		return HSM_ERR_CRYPTO;
+	}
+	return st;
 }
 
 /* ---- Token 生命周期 ----------------------------------------------------- */
@@ -445,6 +500,7 @@ hsm_status_t hsm_slot_init_token(hsm_token_t *tok, hsm_slot_id_t id,
 	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
+	st = commit_security_state(tok, st);   /* SO PIN 的确立必须当场落盘 */
 	slot_audit(tok, AUDIT_OP_INIT_TOKEN, HSM_ROLE_SO, id, st, label);
 	return st;
 }
@@ -483,7 +539,8 @@ hsm_status_t hsm_slot_set_user_pin(hsm_token_t *tok, hsm_session_t sess, const c
 	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
-	slot_audit(tok, AUDIT_OP_UNLOCK, HSM_ROLE_SO, id, st, NULL);
+	st = commit_security_state(tok, st);   /* 改 PIN 是安全状态变化 */
+	slot_audit(tok, AUDIT_OP_SET_USER_PIN, HSM_ROLE_SO, id, st, NULL);
 	return st;
 }
 
@@ -511,17 +568,33 @@ hsm_status_t hsm_session_open(hsm_token_t *tok, hsm_slot_id_t id, hsm_session_t 
 	return st;
 }
 
+/* ⚠️ 校验与清空必须在**同一个临界区**里。
+ *
+ * 老版本先 session_info() 验一次 generation（取锁、放锁），再取锁 memset ——
+ * 两次取锁之间那一格里，别的线程完全可以把这个槽位关掉再 open 一个新会话
+ * （open 会复用第一个 open==0 的表项）。于是本次 close 抹掉的是**别人刚开的
+ * 那个会话**：典型的 ABA。表现是"会话莫名其妙失效"，而且只在并发下偶发。
+ *
+ * 现在只取一次锁，验完直接清 —— 中间没有任何人能插进来。 */
 hsm_status_t hsm_session_close(hsm_token_t *tok, hsm_session_t sess)
 {
-	hsm_status_t st = session_info(tok, sess, NULL, NULL);
-	if (st != HSM_OK) {
-		return st;
+	if (!tok || sess == 0) {
+		return HSM_ERR_BAD_ARG;
 	}
 	uint32_t idx = (uint32_t)(sess & 0xffffffffu);
+	uint32_t gen = (uint32_t)(sess >> 32);
+	if (idx == 0 || idx > MAX_SESSIONS) {
+		return HSM_ERR_BAD_ARG;
+	}
+	hsm_status_t st = HSM_ERR_BAD_ARG;
 	pthread_mutex_lock(&tok->tlock);
-	memset(&tok->sessions[idx - 1], 0, sizeof(session_t));
+	session_t *s = &tok->sessions[idx - 1];
+	if (s->open && s->gen == gen) {
+		memset(s, 0, sizeof(*s));
+		st = HSM_OK;
+	}
 	pthread_mutex_unlock(&tok->tlock);
-	return HSM_OK;
+	return st;
 }
 
 hsm_status_t hsm_session_role(hsm_token_t *tok, hsm_session_t sess, hsm_role_t *out)
@@ -559,6 +632,10 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 	}
 
 	int login_ok = 0;
+	/* 元数据被改过（失败计数 ++ 或清零、锁定）就必须落盘 —— 哪怕这次登录
+	 * 是失败的。**尤其是**失败的那次：只改内存的话，攻击者试三次拔一次电
+	 * 就能无限试，PIN 锁定等于不存在。 */
+	int meta_changed = 0;
 	SLOCK(s);
 	st = slot_check_integrity(s);
 	if (st != HSM_OK) {
@@ -596,6 +673,7 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 				s->meta.user_pin_fails = 0;
 			}
 			login_ok = 1;
+			meta_changed = 1;
 			st = slot_reseal(s);
 			goto out;
 		}
@@ -604,11 +682,13 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 			/* SO 失败只计数不锁槽位：锁了就没人能解锁，设备直接变砖。
 			 * SO 凭证的兜底恢复归 的 Shamir M-of-N 仪式管。 */
 			s->meta.so_pin_fails++;
+			meta_changed = 1;
 			(void)slot_reseal(s);
 			st = HSM_ERR_PIN_INCORRECT;
 			goto out;
 		}
 		s->meta.user_pin_fails++;
+		meta_changed = 1;
 		if (s->meta.user_pin_fails >= HSM_PIN_MAX_FAILS) {
 			hsm_status_t lst = fsm_apply(s, SLOT_EV_PIN_LOCKOUT);
 			(void)slot_reseal(s);
@@ -620,6 +700,9 @@ hsm_status_t hsm_session_login(hsm_token_t *tok, hsm_session_t sess,
 	}
 out:
 	SUNLOCK(s);
+	if (meta_changed) {
+		st = commit_security_state(tok, st);
+	}
 	if (login_ok) {
 		set_session_role(tok, sess, role);   /* 放掉槽位锁后再动会话表，保持锁序 */
 	}
@@ -808,6 +891,7 @@ static hsm_status_t create_object(hsm_token_t *tok, hsm_session_t sess,
 	}
 out:
 	SUNLOCK(s);
+	st = commit_security_state(tok, st);
 	{
 		const pqc_alg_info_t *ai = pqc_alg_info(alg);
 		slot_audit(tok, ev == SLOT_EV_GENERATE ? AUDIT_OP_GENERATE : AUDIT_OP_LOAD,
@@ -1096,6 +1180,7 @@ hsm_status_t hsm_object_destroy(hsm_token_t *tok, hsm_session_t sess, hsm_handle
 	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
+	st = commit_security_state(tok, st);
 	slot_audit(tok, AUDIT_OP_DESTROY, HSM_ROLE_USER, id, st, NULL);
 	return st;
 }
@@ -1143,6 +1228,7 @@ hsm_status_t hsm_slot_zeroize(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_
 	if (st == HSM_OK) {
 		drop_sessions_on_slot(tok, id);   /* 清零后登录态一并失效 */
 	}
+	st = commit_security_state(tok, st);
 	slot_audit(tok, AUDIT_OP_ZEROIZE, HSM_ROLE_SO, id, st, "so");
 	return st;
 }
@@ -1159,6 +1245,7 @@ hsm_status_t hsm_slot_zeroize_forced(hsm_token_t *tok, hsm_slot_id_t id)
 	if (st == HSM_OK) {
 		drop_sessions_on_slot(tok, id);
 	}
+	st = commit_security_state(tok, st);
 	slot_audit(tok, AUDIT_OP_ZEROIZE, HSM_ROLE_PUBLIC, id, st, "forced");
 	return st;
 }
@@ -1190,5 +1277,7 @@ hsm_status_t hsm_slot_unlock(hsm_token_t *tok, hsm_session_t sess, hsm_slot_id_t
 	st = slot_reseal(s);
 out:
 	SUNLOCK(s);
+	st = commit_security_state(tok, st);
+	slot_audit(tok, AUDIT_OP_UNLOCK, HSM_ROLE_SO, id, st, "unlock");
 	return st;
 }

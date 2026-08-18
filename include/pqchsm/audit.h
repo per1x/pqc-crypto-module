@@ -105,6 +105,13 @@ typedef enum {
 	AUDIT_OP_DESTROY, AUDIT_OP_ZEROIZE, AUDIT_OP_UNLOCK, AUDIT_OP_LOCKOUT,
 	AUDIT_OP_BACKUP_EXPORT, AUDIT_OP_BACKUP_IMPORT, AUDIT_OP_RESTORE,
 	AUDIT_OP_KEK_ROTATE,
+	/* 设置 User PIN。以前它复用 AUDIT_OP_UNLOCK —— 那是两件不同的事，
+	 * 而且带来一个很隐蔽的后果：hsm_slot_unlock() 当时**根本没落审计**，
+	 * 于是"解锁有留痕"这条断言实际上是被 set_user_pin 写下的那条记录顶过去的。
+	 * 分开之后两边各记各的，断言才真的在测它写的那件事。
+	 * ⚠️ 新值只能加在末尾：op 是落盘记录里的一个字段，插在中间会让既有
+	 *    审计日志的语义整体错位。audit_append 的范围检查跟着改。 */
+	AUDIT_OP_SET_USER_PIN,
 } audit_op_t;
 
 typedef struct audit_log audit_log_t;

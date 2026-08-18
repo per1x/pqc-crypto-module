@@ -114,7 +114,11 @@ int main(void)
 	CHECK_EQ_INT(hsm_keystore_save(tok, g_ks), HSM_OK);
 	CHECK_EQ_INT(hsm_slot_zeroize(tok, s, 0), HSM_OK);
 	n = audit_count(log);
+	/* 这一条以前是"假通过"：hsm_slot_unlock() 根本没落审计，唯一那条
+	 * AUDIT_OP_UNLOCK 是 hsm_slot_set_user_pin() 写的。现在两件事各有各的
+	 * op（AUDIT_OP_SET_USER_PIN），这条断言才真的在测解锁。 */
 	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_UNLOCK, n), 1);
+	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_SET_USER_PIN, n), 1);
 	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_BACKUP_EXPORT, n), 1);
 	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_KEK_ROTATE, n), 1);
 	CHECK_EQ_INT(count_op(g_log, AUDIT_OP_ZEROIZE, n), 1);

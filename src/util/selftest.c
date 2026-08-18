@@ -16,6 +16,29 @@
  *
  * 【错误状态】任一项失败即置错误状态，pqc.c 的每个入口都会拒绝服务。
  * 自测本身不受该状态阻断，否则一旦进入错误状态就再也出不来。
+ *
+ * 【并发 —— 2026-08-18 修复，别退回去】
+ * 老版本用一个进程级的 g_running 标志做"自测期间不阻断自身"的旁路：
+ *
+ *     if (g_running) return 1;      // ← 全进程可见
+ *
+ * 于是**任何**线程只要撞上另一个线程正在跑自测的那个窗口，就能直接过闸拿到
+ * 密码服务 —— 而那一刻模块恰恰还没有证明自己是对的。这正是 FIPS 140-3 /
+ * GM/T 0028 要求的那条线：自测通过之前不得提供密码服务。旁路必须是**执行
+ * 自测的那个线程自己的**，不能是全进程的。
+ *
+ * 另外 g_running / g_passed / g_failures 三个变量原本在没有任何同步的情况下
+ * 被多线程读写，本身就是数据竞争。
+ *
+ * 现在是一个显式状态机，每一次读写都在 g_mu 下：
+ *
+ *     UNTESTED ──pqc_self_test()──▶ RUNNING ──┬──▶ PASSED
+ *         ▲                                   └──▶ FAILED
+ *         └──────── force_error(0) ───────────────┘
+ *
+ *   · 只有 g_runner（正在跑自测的那个线程）在 RUNNING 期间走内部旁路；
+ *   · 别的线程在 RUNNING 期间**等 condvar**，等到结论再回答，不放行；
+ *   · UNTESTED 时由第一个到达的线程惰性触发，其余线程等它。
  */
 #include "pqchsm/selftest.h"
 
@@ -25,6 +48,7 @@
 
 #include <openssl/evp.h>
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,9 +118,24 @@ static const uint8_t DSA_EXP_DIGEST[32] = {
 
 /* ---- 状态 ---- */
 
-static int      g_passed;
-static int      g_running;
-static uint32_t g_failures = 0xFFFFFFFFu;   /* 未跑过之前视为"未通过" */
+typedef enum {
+	ST_UNTESTED = 0,   /* 从没跑过 —— 不提供服务，但可以惰性触发一次 */
+	ST_RUNNING,        /* g_runner 正在跑 */
+	ST_PASSED,
+	ST_FAILED,
+} st_state_t;
+
+static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_cv = PTHREAD_COND_INITIALIZER;
+static st_state_t      g_state = ST_UNTESTED;
+static pthread_t       g_runner;                    /* 仅 ST_RUNNING 期间有效 */
+static uint32_t        g_failures = 0xFFFFFFFFu;    /* 未跑过之前视为"未通过" */
+
+/* 调用方须持 g_mu */
+static int running_here(void)
+{
+	return g_state == ST_RUNNING && pthread_equal(g_runner, pthread_self());
+}
 
 const char *pqc_selftest_name(pqc_selftest_id_t id)
 {
@@ -188,11 +227,11 @@ static int st_keypair(pqc_alg_t alg, const uint8_t *seed, size_t seed_len,
 
 /* ---- 对外接口 ---- */
 
-uint32_t pqc_self_test(void)
+/* 真正跑那五项。调用方须已把状态置成 ST_RUNNING 并放开 g_mu。 */
+static uint32_t run_all(void)
 {
 	uint32_t fails = 0;
 
-	g_running = 1;
 	if (st_sha3() != 0) {
 		fails |= 1u << PQC_ST_SHA3;
 	}
@@ -214,38 +253,92 @@ uint32_t pqc_self_test(void)
 	                  DSA_EXP_DIGEST) != 0) {
 		fails |= 1u << PQC_ST_ML_DSA;
 	}
-	g_running = 0;
+	return fails;
+}
 
+/* 跑一遍自测。
+ *
+ * 已经有别的线程在跑时**不重复跑**，而是等它出结论并返回同一个结论 ——
+ * 两个线程同时跑这五项没有任何收益，还会让"谁的结论说了算"变成竞争。 */
+uint32_t pqc_self_test(void)
+{
+	uint32_t fails;
+
+	pthread_mutex_lock(&g_mu);
+	if (running_here()) {
+		/* 自测内部又调到自测（惰性触发的递归）。不重入，直接给当前位图。 */
+		fails = g_failures;
+		pthread_mutex_unlock(&g_mu);
+		return fails;
+	}
+	while (g_state == ST_RUNNING) {
+		pthread_cond_wait(&g_cv, &g_mu);
+	}
+	g_state  = ST_RUNNING;
+	g_runner = pthread_self();
+	pthread_mutex_unlock(&g_mu);
+
+	fails = run_all();
+
+	pthread_mutex_lock(&g_mu);
 	g_failures = fails;
-	g_passed = (fails == 0);
+	g_state    = (fails == 0) ? ST_PASSED : ST_FAILED;
+	pthread_cond_broadcast(&g_cv);
+	pthread_mutex_unlock(&g_mu);
 	return fails;
 }
 
 int pqc_self_test_passed(void)
 {
-	if (g_running) {
-		/* 自测过程中不阻断自身，否则进入错误状态后无法恢复 */
+	int ok;
+
+	pthread_mutex_lock(&g_mu);
+	if (running_here()) {
+		/* **只有正在跑自测的那个线程**才走这条旁路 —— 否则自测自己
+		 * 用到的密码原语会被它自己置的错误状态挡住，一进错误状态就再也
+		 * 出不来。别的线程没有这个理由，它们必须等结论。 */
+		pthread_mutex_unlock(&g_mu);
 		return 1;
 	}
-	if (!g_passed && g_failures == 0xFFFFFFFFu) {
-		pqc_self_test();
+	while (g_state == ST_RUNNING) {
+		pthread_cond_wait(&g_cv, &g_mu);   /* 等结论，不放行 */
 	}
-	return g_passed;
+	if (g_state == ST_UNTESTED) {
+		pthread_mutex_unlock(&g_mu);
+		return pqc_self_test() == 0;       /* 惰性上电自测 */
+	}
+	ok = (g_state == ST_PASSED);
+	pthread_mutex_unlock(&g_mu);
+	return ok;
 }
 
 uint32_t pqc_self_test_failures(void)
 {
-	return g_failures;
+	uint32_t f;
+
+	pthread_mutex_lock(&g_mu);
+	f = g_failures;
+	pthread_mutex_unlock(&g_mu);
+	return f;
 }
 
 void pqc_self_test_force_error(int on)
 {
 	if (on) {
-		g_passed = 0;
+		pthread_mutex_lock(&g_mu);
+		g_state    = ST_FAILED;
 		g_failures = 1u << PQC_ST__COUNT;   /* 与任何真实项都不重合 */
-	} else {
-		g_failures = 0xFFFFFFFFu;
-		g_passed = 0;
-		pqc_self_test();
+		pthread_cond_broadcast(&g_cv);
+		pthread_mutex_unlock(&g_mu);
+		return;
 	}
+	pthread_mutex_lock(&g_mu);
+	while (g_state == ST_RUNNING && !running_here()) {
+		pthread_cond_wait(&g_cv, &g_mu);
+	}
+	g_state    = ST_UNTESTED;
+	g_failures = 0xFFFFFFFFu;
+	pthread_cond_broadcast(&g_cv);
+	pthread_mutex_unlock(&g_mu);
+	(void)pqc_self_test();
 }

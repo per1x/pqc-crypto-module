@@ -17,8 +17,16 @@
 
 #include "sdfe.h"
 #include "wire.h"
+#include "pqcs_tls.h"
 
-struct dev { int fd; };
+/* ssl 非 NULL = 远程（mTLS）。本机 UNIX socket 那条路不套 TLS：
+ * 它是 0600 的、只在本机，能连上就已经是 root —— 加密它挡不住任何人，
+ * 只会让板上的排查工具多一份证书要管。这条取舍写在 docs/SECURITY.md。 */
+struct dev {
+	int      fd;
+	SSL     *ssl;
+	SSL_CTX *ctx;
+};
 
 static int rw_all(int fd, void *p, size_t n, int wr)
 {
@@ -35,6 +43,29 @@ static int rw_all(int fd, void *p, size_t n, int wr)
 	return 0;
 }
 
+static int dev_rw(struct dev *d, void *p, size_t n, int wr)
+{
+	if (d->ssl)
+		return wr ? pqcs_tls_write_all(d->ssl, p, n)
+			  : pqcs_tls_read_all(d->ssl, p, n);
+	return rw_all(d->fd, p, n, wr);
+}
+
+static void dev_free(struct dev *d)
+{
+	if (!d)
+		return;
+	if (d->ssl) {
+		SSL_shutdown(d->ssl);
+		SSL_free(d->ssl);
+	}
+	if (d->ctx)
+		SSL_CTX_free(d->ctx);
+	if (d->fd >= 0)
+		close(d->fd);
+	free(d);
+}
+
 static int call(struct dev *d, uint32_t op, uint32_t a0, uint32_t a1,
 		const uint8_t *in, uint32_t in_len,
 		uint8_t *out, uint32_t out_cap, uint32_t *out_len)
@@ -44,17 +75,17 @@ static int call(struct dev *d, uint32_t op, uint32_t a0, uint32_t a1,
 
 	if (!d || d->fd < 0)
 		return SDR_OPENDEVICE;
-	if (rw_all(d->fd, &q, sizeof q, 1))
+	if (dev_rw(d, &q, sizeof q, 1))
 		return SDR_COMMFAIL;
-	if (in_len && rw_all(d->fd, (void *)in, in_len, 1))
+	if (in_len && dev_rw(d, (void *)in, in_len, 1))
 		return SDR_COMMFAIL;
-	if (rw_all(d->fd, &rp, sizeof rp, 0))
+	if (dev_rw(d, &rp, sizeof rp, 0))
 		return SDR_COMMFAIL;
 	if (rp.magic != PQCS_MAGIC)
 		return SDR_COMMFAIL;
 	if (rp.len > out_cap)
 		return SDR_INARGERR;
-	if (rp.len && rw_all(d->fd, out, rp.len, 0))
+	if (rp.len && dev_rw(d, out, rp.len, 0))
 		return SDR_COMMFAIL;
 	if (out_len)
 		*out_len = rp.len;
@@ -84,58 +115,120 @@ int SDFE_OpenDevice(SDFE_HANDLE *phDev)
 	return SDR_OK;
 }
 
-/* 远程打开：连另一台机器上的密码机。
+/* 远程打开：连另一台机器上的密码机，走 **mTLS**。
  *
- * 连上之后先发一条 OP_AUTH。**这一步失败就把 fd 关掉、返回错误** ——
- * 不留一个"连上了但没认证"的半开句柄：那种句柄的后续调用会一条条被
- * 服务端拒绝并断开，报出来的错是 COMMFAIL，把真正的原因（口令不对）
- * 藏起来了。
+ * 【为什么认证放在 OpenDevice 而不是每次调用里】
+ * 认证是**连接**的属性，不是请求的属性。放在每次调用里意味着每条请求都要
+ * 重新证明一次身份，而 TLS 已经在握手时把这件事做完了 —— 再做一遍既没有
+ * 增加任何保证，又会让"这条连接到底认证过没有"变成一个可以被忘记检查的状态。
  *
- * 除了这个函数，远程和本机对调用方**完全一样** —— 上层不需要知道
- * 自己在跟谁说话，这正是把认证放在 OpenDevice 而不是每次调用里的理由。 */
+ * 【握手失败就把整个句柄销毁，绝不返回半开的连接】
+ * 老版本（预共享口令）这里就踩过：留一个"连上了但没认证"的句柄，后续调用
+ * 会被服务端一条条拒绝并断开，报出来的错是 COMMFAIL —— 真正的原因（凭据不对）
+ * 被藏起来了。所以这里失败即全拆，并且把 TLS 的原因回给调用方区分：
+ *   SDR_AUTHFAIL  —— 握手/证书这一层不过（凭据不对、CN 不符、被 ACL 拒）
+ *   SDR_OPENDEVICE—— 根本没连上（板子没起、端口不对、网络不通）
+ *
+ * 除了这个函数，远程和本机对调用方**完全一样**。 */
 int SDFE_OpenDeviceRemote(SDFE_HANDLE *phDev, const char *host,
-			  int port, const char *token)
+			  int port, const SDFE_TLS_CREDS *creds)
 {
 	struct dev *d;
 	struct sockaddr_in sa;
-	struct pqcs_req q;
-	struct pqcs_resp rp;
-	size_t tl;
+	char err[256] = {0};
 	int one = 1;
 
-	if (!phDev || !host || !token)
-		return SDR_INARGERR;
-	tl = strlen(token);
-	if (tl < 8 || tl > PQCS_TOKEN_MAX)
+	if (!phDev || !host || !creds ||
+	    !creds->ca_file || !creds->cert_file || !creds->key_file)
 		return SDR_INARGERR;
 
 	d = calloc(1, sizeof *d);
 	if (!d)
 		return SDR_UNKNOWERR;
+	d->fd = -1;
+
+	SSL_load_error_strings();
+	OpenSSL_add_ssl_algorithms();
+	d->ctx = pqcs_tls_client_ctx(creds->ca_file, creds->cert_file,
+				     creds->key_file, err, sizeof err);
+	if (!d->ctx) {
+		fprintf(stderr, "TLS 凭据不可用：%s\n", err);
+		dev_free(d);
+		return SDR_AUTHFAIL;
+	}
+
 	d->fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (d->fd < 0) { free(d); return SDR_OPENDEVICE; }
+	if (d->fd < 0) { dev_free(d); return SDR_OPENDEVICE; }
 
 	memset(&sa, 0, sizeof sa);
 	sa.sin_family = AF_INET;
 	sa.sin_port = htons((uint16_t)(port ? port : PQCS_TCP_PORT));
 	if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
-		close(d->fd); free(d); return SDR_INARGERR;
+		dev_free(d); return SDR_INARGERR;
 	}
 	if (connect(d->fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-		close(d->fd); free(d); return SDR_OPENDEVICE;
+		dev_free(d); return SDR_OPENDEVICE;
 	}
 	setsockopt(d->fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 
-	q.magic = PQCS_MAGIC; q.op = OP_AUTH; q.a0 = 0; q.a1 = 0;
-	q.len = (uint32_t)tl;
-	if (rw_all(d->fd, &q, sizeof q, 1) ||
-	    rw_all(d->fd, (void *)token, tl, 1) ||
-	    rw_all(d->fd, &rp, sizeof rp, 0)) {
-		close(d->fd); free(d); return SDR_COMMFAIL;
+	d->ssl = SSL_new(d->ctx);
+	if (!d->ssl) { dev_free(d); return SDR_UNKNOWERR; }
+	SSL_set_fd(d->ssl, d->fd);
+	if (SSL_connect(d->ssl) != 1) {
+		pqcs_tls_last_error(err, sizeof err);
+		fprintf(stderr, "TLS 握手失败：%s\n", err);
+		dev_free(d);
+		return SDR_AUTHFAIL;
 	}
-	if (rp.magic != PQCS_MAGIC || rp.status != SDR_OK) {
-		close(d->fd); free(d);
-		return rp.status == SDR_AUTHFAIL ? SDR_AUTHFAIL : SDR_COMMFAIL;
+	/* SSL_VERIFY_PEER 已经让握手在链验不过时失败，这里再确认一次结果码：
+	 * 一行的代价，换掉"某天有人把 verify 模式改松了而没人发现"这个风险。 */
+	if (SSL_get_verify_result(d->ssl) != X509_V_OK) {
+		fprintf(stderr, "设备证书验证不通过\n");
+		dev_free(d);
+		return SDR_AUTHFAIL;
+	}
+	if (creds->expect_cn) {
+		char cn[128] = {0};
+
+		if (pqcs_tls_peer_cn(d->ssl, cn, sizeof cn) != 0 ||
+		    strcmp(cn, creds->expect_cn) != 0) {
+			fprintf(stderr, "设备身份不符：期望 CN=\"%s\"，实得 \"%s\"\n",
+				creds->expect_cn, cn);
+			dev_free(d);
+			return SDR_AUTHFAIL;
+		}
+	}
+
+	/* ---- 握手完了还要再走一个来回，才敢说"连上了" ----
+	 *
+	 * ⚠️ TLS 1.3 里 SSL_connect() 成功**不代表服务端接受了我们**。
+	 *    客户端证书是在最后一段发出去的，客户端不等服务端的裁决就认为握手
+	 *    结束了；服务端拒绝时发的是一条**握手后**的 alert，要等下一次读写
+	 *    才会看到。（TLS 1.2 不是这样，所以照 1.2 的直觉写就会踩。）
+	 *
+	 *    不补这一下的症状极其难认：OpenDevice 返回成功，第一条请求"发出去了"，
+	 *    然后读回来的是 alert 的字节 —— 上层把它当成响应解析，打印出一串乱码，
+	 *    再往后全是 COMMFAIL。实测就是这么栽的一次（板子时钟比证书的
+	 *    notBefore 早，服务端判"证书尚未生效"）。
+	 *
+	 *    所以这里主动做一次 OP_PING：一个真实的来回，把服务端的裁决逼出来。
+	 *    代价是开设备时多一个 RTT，换来的是"OpenDevice 成功 = 这条通道真的能用"。 */
+	{
+		uint8_t probe[256];
+		uint32_t plen = 0;
+		int prv = call(d, OP_PING, 0, 0, NULL, 0, probe, sizeof probe, &plen);
+
+		if (prv != SDR_OK) {
+			pqcs_tls_last_error(err, sizeof err);
+			fprintf(stderr,
+				"握手之后的第一个来回失败 —— 多半是**对端拒绝了我们的证书**"
+				"（TLS 1.3 的拒绝是握手后才送到的）。\n"
+				"常见原因：客户端证书不是这台设备的 CA 签的；"
+				"CN 不在板上的 ACL 里；两边时钟差太多导致证书\"尚未生效\"。\n"
+				"TLS: %s\n", err[0] ? err : "(无更多信息)");
+			dev_free(d);
+			return SDR_AUTHFAIL;
+		}
 	}
 	*phDev = d;
 	return SDR_OK;
@@ -147,8 +240,7 @@ int SDFE_CloseDevice(SDFE_HANDLE hDev)
 
 	if (!d)
 		return SDR_INARGERR;
-	close(d->fd);
-	free(d);
+	dev_free(d);
 	return SDR_OK;
 }
 
@@ -451,7 +543,7 @@ const char *SDFE_StrError(int rv)
 	case SDR_INARGERR:    return "参数错误";
 	case SDR_KEYNOTEXIST: return "句柄不存在";
 	case SDR_HARDFAIL:    return "硬件运算失败";
-	case SDR_AUTHFAIL:    return "远程口令不对";
+	case SDR_AUTHFAIL:    return "远程通道认证失败（证书/身份/时钟）";
 	case SDR_VERIFYFAIL:  return "验签不通过（是结果，不是故障）";
 	default:              return "未知错误";
 	}

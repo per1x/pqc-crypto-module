@@ -47,8 +47,21 @@ int main(int argc, char **argv)
 	int rv, ret = 1;
 
 	if (argc >= 3) {
-		/* 端口用 0 = 走 libsdfe 的默认端口，别在这里再抄一份端口号。 */
-		rv = SDFE_OpenDeviceRemote(&dev, argv[1], 0, argv[2]);
+		/* 端口用 0 = 走 libsdfe 的默认端口，别在这里再抄一份端口号。
+		 * argv[2] 是**凭据目录**（hsm_ca.crt / client.crt / client.key），
+		 * 不再是口令 —— 远程口已经换成 mTLS，见 service/pqcs_tls.h。 */
+		/* 文件路径，不是密钥材料 —— 见 check_zeroize.py 的判据 */
+		static char cred_ca[512], cred_crt[512], cred_key[512];
+		SDFE_TLS_CREDS creds;
+
+		snprintf(cred_ca,  sizeof cred_ca,  "%s/hsm_ca.crt", argv[2]);
+		snprintf(cred_crt, sizeof cred_crt, "%s/client.crt", argv[2]);
+		snprintf(cred_key, sizeof cred_key, "%s/client.key", argv[2]);
+		creds.ca_file   = cred_ca;
+		creds.cert_file = cred_crt;
+		creds.key_file  = cred_key;
+		creds.expect_cn = argc >= 4 ? argv[3] : NULL;
+		rv = SDFE_OpenDeviceRemote(&dev, argv[1], 0, &creds);
 	} else {
 		rv = SDFE_OpenDevice(&dev);
 	}

@@ -122,7 +122,8 @@ typedef struct hwrng_byte_source {
 void hwrng_set_byte_source(const hwrng_byte_source_t *src);
 
 /* 经密码机服务（pqchsm_fpgad）取硬件熵源。本机走 UNIX socket；
- * 设了 PQCHSM_SDFE_HOST + PQCHSM_SDFE_TOKEN 就走 TCP（远程演示）。 */
+ * 设了 PQCHSM_SDFE_HOST + PQCHSM_SDFE_PKI 就走 TCP（远程演示，**mTLS**）。
+ * ⚠️ 老的 PQCHSM_SDFE_TOKEN 已经没有任何作用 —— 远程口不再是预共享口令。 */
 const hwrng_byte_source_t *hwrng_byte_source_sdfe(void);
 const hwrng_byte_source_t *hwrng_get_byte_source(void);
 

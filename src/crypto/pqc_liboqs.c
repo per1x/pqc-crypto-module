@@ -2,6 +2,11 @@
  *
  * 这是当前唯一的后端。将来 src/hal/pqc_accel.c 会实现同一张 vtable，
  * 通过 AXI-Lite 寄存器驱动 PL 里的算法核，上层代码不改一行。
+ *
+ * ⚠️ **凡是会让 liboqs 调 randombytes 的调用，都必须包在 RNG_GUARD 里。**
+ *    liboqs 的随机源是进程级全局状态，而本模块又用它做确定性脚本（KAT 与
+ *    种子存储）。少包一个，两条路就会互相吃对方的字节 —— 症状见 oqs_rng.c
+ *    的文件头。新增后端方法时先问一句"它会不会取随机数"，会就包上。
  */
 #include "pqchsm/pqc.h"
 #include "pqchsm/util.h"
@@ -10,6 +15,10 @@
 #include <oqs/oqs.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* 随机源临界区。递归锁，所以与 pqc_oqs_rng_begin()/end() 嵌套是安全的。 */
+#define RNG_GUARD_ENTER() pqc_oqs_rng_lock()
+#define RNG_GUARD_LEAVE() pqc_oqs_rng_unlock()
 
 static const char *oqs_kem_name(pqc_alg_t a)
 {
@@ -46,7 +55,9 @@ static pqc_status_t be_keypair(pqc_alg_t alg, uint8_t *pk, uint8_t *sk)
 		if (!k) {
 			return PQC_ERR_UNSUPPORTED;
 		}
+		RNG_GUARD_ENTER();
 		pqc_status_t st = map(OQS_KEM_keypair(k, pk, sk));
+		RNG_GUARD_LEAVE();
 		OQS_KEM_free(k);
 		return st;
 	}
@@ -55,7 +66,9 @@ static pqc_status_t be_keypair(pqc_alg_t alg, uint8_t *pk, uint8_t *sk)
 		if (!s) {
 			return PQC_ERR_UNSUPPORTED;
 		}
+		RNG_GUARD_ENTER();
 		pqc_status_t st = map(OQS_SIG_keypair(s, pk, sk));
+		RNG_GUARD_LEAVE();
 		OQS_SIG_free(s);
 		return st;
 	}
@@ -118,7 +131,9 @@ static pqc_status_t be_encaps(pqc_alg_t alg, const uint8_t *pk, uint8_t *ct, uin
 	if (!k) {
 		return PQC_ERR_UNSUPPORTED;
 	}
+	RNG_GUARD_ENTER();
 	pqc_status_t st = map(OQS_KEM_encaps(k, ct, ss, pk));
+	RNG_GUARD_LEAVE();
 	OQS_KEM_free(k);
 	return st;
 }
@@ -198,8 +213,12 @@ static pqc_status_t be_sign(pqc_alg_t alg, const uint8_t *sk,
 			st = PQC_ERR_UNSUPPORTED;
 		}
 	} else {
+		/* 不给 rnd 就是 hedged 签名：liboqs 会自己去取那 32 B 随机数，
+		 * 所以这条路一样要进临界区。 */
+		RNG_GUARD_ENTER();
 		st = map(OQS_SIG_sign_with_ctx_str(s, sig, sig_len, msg, msg_len,
 		                                   ctx, ctx_len, sk));
+		RNG_GUARD_LEAVE();
 	}
 	OQS_SIG_free(s);
 	return st;

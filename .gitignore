@@ -39,3 +39,16 @@ tee/ta/out/
 tee/tests/run_tests
 tee/tests/interop_test
 build-demo/
+
+# 远程口的 mTLS 凭据。**私钥绝不进仓库** —— tools/mkpki.sh 现生成。
+pki/
+
+# service/ 是 Makefile 构建的（不进 CMake），产物落在源码目录里
+service/*.o
+service/*.a
+service/pqchsm_fpgad
+service/sdf_demo
+service/sslprobe*
+service/ctorprobe
+service/h_static
+service/h_dyn

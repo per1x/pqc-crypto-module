@@ -1,8 +1,16 @@
 // sdf_demo —— 一个**独立的应用程序**，像调用真正的密码机一样调用它
 //
-//   编译：cc -o sdf_demo sdf_demo.c -L. -lsdfe
+//   编译：cc -o sdf_demo sdf_demo.c -L. -lsdfe -lssl -lcrypto
 //   本机运行：./sdf_demo
-//   远程运行：./sdf_demo <板子IP> <口令> [端口]
+//   远程运行：./sdf_demo <板子IP> <凭据目录> [端口] [期望设备CN]
+//
+//   凭据目录里要有三个文件（tools/mkpki.sh 生成，demo_remote.sh 自动取）：
+//       hsm_ca.crt     设备 CA 的证书 —— 用它验板子
+//       client.crt     本客户端的证书 —— 板子用它验我
+//       client.key     本客户端的私钥（0600）
+//
+//   ⚠️ 远程口以前是"IP + 一条明文口令"。那条路已经删了，不是弃用 ——
+//      理由见 service/pqcs_tls.h 的文件头。
 //
 // **本机和远程走的是同一段代码**：只有开设备那一行不同，从第 [1] 步开始
 // 一个字都不变。这不是省事，这是要展示的性质本身 ——
@@ -43,14 +51,28 @@ int main(int argc, char **argv)
 	unsigned int kh = 0;
 	char info[160];
 	int rv;
+	SDFE_TLS_CREDS creds;
+	char cred_ca[512], cred_crt[512], cred_key[512];
 
 	printf("=== 应用程序：通过 SDF 风格接口使用密码机 ===\n\n");
 
 	if (argc >= 3) {
 		int port = argc >= 4 ? atoi(argv[3]) : 0;
 
-		printf("[连接] 远程 %s:%d\n", argv[1], port ? port : 9797);
-		rv = SDFE_OpenDeviceRemote(&dev, argv[1], port, argv[2]);
+		snprintf(cred_ca,  sizeof cred_ca,  "%s/hsm_ca.crt", argv[2]);
+		snprintf(cred_crt, sizeof cred_crt, "%s/client.crt", argv[2]);
+		snprintf(cred_key, sizeof cred_key, "%s/client.key", argv[2]);
+		memset(&creds, 0, sizeof creds);
+		creds.ca_file   = cred_ca;
+		creds.cert_file = cred_crt;
+		creds.key_file  = cred_key;
+		/* 第 4 个参数给了就连设备身份一起验。不给只验签发链 ——
+		 * 单板演示里那已经够，多板共用一个 CA 时必须给。 */
+		creds.expect_cn = argc >= 5 ? argv[4] : NULL;
+
+		printf("[连接] 远程 %s:%d（mTLS，凭据来自 %s）\n",
+		       argv[1], port ? port : 9797, argv[2]);
+		rv = SDFE_OpenDeviceRemote(&dev, argv[1], port, &creds);
 	} else {
 		printf("[连接] 本机\n");
 		rv = SDFE_OpenDevice(&dev);
@@ -326,7 +348,7 @@ int main(int argc, char **argv)
 	SDFE_CloseDevice(dev);
 	if (argc >= 3)
 		rv = SDFE_OpenDeviceRemote(&dev, argv[1],
-		                           argc >= 4 ? atoi(argv[3]) : 0, argv[2]);
+		                           argc >= 4 ? atoi(argv[3]) : 0, &creds);
 	else
 		rv = SDFE_OpenDevice(&dev);
 	if (rv != SDR_OK) { printf("  重连失败：%s\n", SDFE_StrError(rv)); return 1; }

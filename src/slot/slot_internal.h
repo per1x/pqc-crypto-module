@@ -66,6 +66,14 @@ struct hsm_token {
 	/* 审计日志。单独一把锁：审计要 fsync，不该卡住会话表。 */
 	pthread_mutex_t audit_lock;
 	struct audit_log *audit;
+
+	/* 安全状态落盘钩子（见 slot.h）。与 audit 共用 audit_lock 保护指针本身；
+	 * 调用时**不持任何锁**，否则会与 hsm_keystore_save 里的槽位锁互锁。 */
+	hsm_persist_fn persist_fn;
+	void          *persist_user;
+	/* 落盘期间置位：hsm_keystore_save 会读所有槽位，途中不得再触发落盘。
+	 * 只由持有 audit_lock 的路径读写。 */
+	int            persist_busy;
 };
 
 /* 落一条审计。detail 只能放非敏感的短文本（算法名、标签），
@@ -75,6 +83,10 @@ void slot_audit(hsm_token_t *tok, int op, hsm_role_t role,
 
 #define SLOCK(s)   pthread_mutex_lock(&(s)->lock)
 #define SUNLOCK(s) pthread_mutex_unlock(&(s)->lock)
+
+/* 安全状态变化后调用（**必须已放掉全部槽位锁**）。没挂钩子时是空操作。
+ * 返回 0 成功；非 0 表示落盘失败，调用方应把这次操作判为失败。 */
+int slot_persist(hsm_token_t *tok);
 
 /* 定义在 slot.c，供 persist.c 复用（调用方须持槽位锁）*/
 hsm_status_t slot_reseal(slot_t *s);

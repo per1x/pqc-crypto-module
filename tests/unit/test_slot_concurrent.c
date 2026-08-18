@@ -215,10 +215,118 @@ static void scenario_session_table(void)
 	hsm_token_free(tok);
 }
 
+/* ---- 回归 P1⑥：hsm_session_close 的 ABA/TOCTOU ---------------------------
+ *
+ * 老实现是两次取锁：
+ *
+ *     session_info(sess)          // 取锁验 generation、放锁
+ *     ... 这一格里别人可以 close + open，把表项换成另一个会话 ...
+ *     lock; memset(&sessions[idx-1]); unlock
+ *
+ * 后果有两条，第二条更要命：
+ *   ① 同一个句柄被两个线程同时 close，**两次都会返回 HSM_OK** ——
+ *      它们都在各自的第一段里通过了校验；
+ *   ② 第二次那个 memset 抹掉的是**别人刚 open 出来的会话**。
+ *      表现是"会话莫名其妙失效"，只在并发下偶发，查起来极贵。
+ *
+ * 这个用例直接钉 ①：N 个线程同时关同一个句柄，**成功的必须恰好一个**。
+ * 同时另有一个"受害者"线程不停地 open/用/close 自己的会话，
+ * 它的会话在自己 close 之前一次都不许失效（那就是 ②）。
+ */
+#define CLOSERS   4
+#define CLOSE_ROUNDS 300
+
+typedef struct {
+	hsm_token_t  *tok;
+	hsm_session_t target;
+	int           ok;          /* 本轮 close 返回 HSM_OK 的次数（原子累加） */
+	int           go;
+	int           victim_lost; /* 受害者的会话被别人抹掉的次数 */
+	int           stop;
+} close_arg_t;
+
+static close_arg_t g_ca;
+
+static void *closer(void *p)
+{
+	(void)p;
+	for (int r = 0; r < CLOSE_ROUNDS; r++) {
+		int mygo;
+		/* 等本轮开锣 */
+		do {
+			mygo = __atomic_load_n(&g_ca.go, __ATOMIC_SEQ_CST);
+		} while (mygo != r + 1);
+		if (hsm_session_close(g_ca.tok, g_ca.target) == HSM_OK) {
+			__atomic_add_fetch(&g_ca.ok, 1, __ATOMIC_SEQ_CST);
+		}
+		__atomic_add_fetch(&g_ca.stop, 1, __ATOMIC_SEQ_CST);   /* 本轮我做完了 */
+	}
+	return NULL;
+}
+
+/* 受害者：一直开自己的会话、确认它还在、再自己关掉。
+ * 它的会话被别人的 close 抹掉，就会表现为 role 查不到或 close 失败。 */
+static void *victim(void *p)
+{
+	(void)p;
+	while (__atomic_load_n(&g_ca.go, __ATOMIC_SEQ_CST) <= CLOSE_ROUNDS) {
+		hsm_session_t s;
+		hsm_role_t r;
+
+		if (hsm_session_open(g_ca.tok, 0, &s) != HSM_OK) {
+			continue;
+		}
+		if (hsm_session_role(g_ca.tok, s, &r) != HSM_OK ||
+		    hsm_session_close(g_ca.tok, s) != HSM_OK) {
+			__atomic_add_fetch(&g_ca.victim_lost, 1, __ATOMIC_SEQ_CST);
+		}
+	}
+	return NULL;
+}
+
+static void scenario_close_race(void)
+{
+	pthread_t th[CLOSERS], tv;
+	int r;
+
+	TCASE("并发：同一句柄被多线程 close，成功的必须恰好一个");
+	g_ca.tok = hsm_token_new(1);
+	CHECK(g_ca.tok != NULL);
+	g_ca.ok = 0;
+	g_ca.go = 0;
+	g_ca.victim_lost = 0;
+	g_ca.stop = 0;
+
+	for (int i = 0; i < CLOSERS; i++) {
+		CHECK_EQ_INT(pthread_create(&th[i], NULL, closer, NULL), 0);
+	}
+	CHECK_EQ_INT(pthread_create(&tv, NULL, victim, NULL), 0);
+
+	for (r = 0; r < CLOSE_ROUNDS; r++) {
+		CHECK_EQ_INT(hsm_session_open(g_ca.tok, 0, &g_ca.target), HSM_OK);
+		__atomic_store_n(&g_ca.stop, 0, __ATOMIC_SEQ_CST);
+		__atomic_store_n(&g_ca.go, r + 1, __ATOMIC_SEQ_CST);
+		while (__atomic_load_n(&g_ca.stop, __ATOMIC_SEQ_CST) < CLOSERS) {
+			/* 等本轮四个 closer 都做完再开下一轮 */
+		}
+	}
+	__atomic_store_n(&g_ca.go, CLOSE_ROUNDS + 1, __ATOMIC_SEQ_CST);
+	for (int i = 0; i < CLOSERS; i++) {
+		pthread_join(th[i], NULL);
+	}
+	pthread_join(tv, NULL);
+
+	/* 每一轮只开了一个会话，所以总成功数必须等于轮数 */
+	CHECK_EQ_INT(__atomic_load_n(&g_ca.ok, __ATOMIC_SEQ_CST), CLOSE_ROUNDS);
+	CHECK_EQ_INT(__atomic_load_n(&g_ca.victim_lost, __ATOMIC_SEQ_CST), 0);
+	hsm_token_free(g_ca.tok);
+}
+
 int main(void)
 {
 	scenario_distinct_slots();
 	scenario_same_slot();
 	scenario_session_table();
+	scenario_close_race();
 	return test_report("test_slot_concurrent");
 }

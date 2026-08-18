@@ -152,7 +152,8 @@ typedef struct pqc_backend {
 const pqc_backend_t *pqc_backend_liboqs(void);
 
 /* 经密码机服务（pqchsm_fpgad）打 FPGA 的后端。
- * 本机走 UNIX socket；设了 PQCHSM_SDFE_HOST + PQCHSM_SDFE_TOKEN 就走 TCP。
+ * 本机走 UNIX socket；设了 PQCHSM_SDFE_HOST + PQCHSM_SDFE_PKI 就走 TCP（**mTLS**）。
+ * ⚠️ 老的 PQCHSM_SDFE_TOKEN 已经没有任何作用 —— 远程口不再是预共享口令。
  * 连不上时返回 NULL —— 让调用方显式决定，不静默退回软件。 */
 const pqc_backend_t *pqc_backend_sdfe(void);
 

@@ -64,7 +64,7 @@ extern "C" {
 #define SDR_INARGERR      (SDR_BASE + 0x04)
 #define SDR_KEYNOTEXIST   (SDR_BASE + 0x05)
 #define SDR_HARDFAIL      (SDR_BASE + 0x06)
-#define SDR_AUTHFAIL      (SDR_BASE + 0x07)   /* 远程连接口令不对 */
+#define SDR_AUTHFAIL      (SDR_BASE + 0x07)   /* 远程通道的证书/身份不过 */
 /* 验签不通过。**这是结果，不是故障**，但仍然占一个非 SDR_OK 的码：
  * 若用 SDR_OK + 一个"通过与否"的出参，忘了看那个出参就等于验过了。
  * 让"没检查返回值"这个最常见的疏忽落在安全的一侧。 */
@@ -89,11 +89,27 @@ typedef void *SDFE_HANDLE;
 
 /* ---- 设备与会话 ---- */
 int SDFE_OpenDevice(SDFE_HANDLE *phDev);
-/* 远程打开：连另一台机器上的密码机（内网演示）。
- * token 是预共享口令，与板上 /media/sd-mmcblk1p2/hsm/hsm_token 一致。
+/* 远程通道的凭据。**前三项必给** —— 这条接口不提供"只验服务端"的半程模式：
+ * 那样板子就无法知道对面是谁，而它是一台密码机。
+ *
+ * ⚠️ 2026-08-18 之前这里是一个 `const char *token`（明文 TCP + 预共享口令）。
+ *    那条路已经整个删掉了，不是"保留兼容"：留着它就等于留着一条抓包即可
+ *    完全接管密码机的路，而且没有人会知道自己用的是哪一条。
+ *    换成 mTLS 的完整理由见 service/pqcs_tls.h 的文件头。 */
+typedef struct {
+	const char *ca_file;      /* 设备 CA 的证书：用它验板子 */
+	const char *cert_file;    /* 本客户端的证书：板子用它验我 */
+	const char *key_file;     /* 本客户端的私钥 */
+	/* 期望的设备身份（证书里的 CN）。非 NULL 时逐字比对 ——
+	 * 光验签发链只能证明"这是我们 CA 签的某台设备"，证明不了
+	 * "这是我要连的那一台"。多台设备共用一个 CA 时这一项必须给。 */
+	const char *expect_cn;
+} SDFE_TLS_CREDS;
+
+/* 远程打开：连另一台机器上的密码机（内网演示），走 mTLS。
  * 之后所有 SDFE_* 调用与本机完全一样 —— 调用方不需要知道自己是远程的。 */
 int SDFE_OpenDeviceRemote(SDFE_HANDLE *phDev, const char *host,
-                          int port, const char *token);
+                          int port, const SDFE_TLS_CREDS *creds);
 int SDFE_CloseDevice(SDFE_HANDLE hDev);
 int SDFE_OpenSession(SDFE_HANDLE hDev, SDFE_HANDLE *phSession);
 int SDFE_CloseSession(SDFE_HANDLE hSession);

@@ -64,6 +64,42 @@ st()  { echo "$*" >> $STATUS; sync; }
 say "=== hsm-boot 开始 ==="
 
 # ============================================================================
+# 第零步：时钟。**在起 daemon 之前**，因为远程口是 mTLS，而证书有有效期。
+# ============================================================================
+# 这块板有 /dev/rtc，正常情况下时间是对的。但只要它掉一次（RTC 没电、
+# 被谁写坏、或者干脆换了块板），系统时间就会落到证书的 notBefore 之前，
+# 于是**握手被拒、远程口用不了**，而症状一点都不像时钟问题：
+# TLS 1.3 的拒绝是握手后才送到的，客户端那侧看到的是"设备信息是一串乱码"。
+# 这个坑 2026-08-18 实测踩过一次（板子慢 5 天）。
+#
+# 兜底很朴素：时间**不许比 SD 上这些文件的最后修改时间还早**。
+# 那些文件是上一次装凭据/上一次开机写下的，所以这条规则等价于
+# "时钟单调不倒退"，足以让证书始终处在有效期内。
+#
+# ⚠️ 只往前调，绝不往后调 —— 往后调会把审计日志的时间戳弄乱，
+#    而那比时钟不准糟得多。
+CLOCK_STAMP=$D/CLOCK_STAMP
+newest=0
+for f in $D/pki/hsm_device.crt $D/pki/hsm_ca.crt $CLOCK_STAMP; do
+    [ -f "$f" ] || continue
+    t=$(date -u -r "$f" +%s 2>/dev/null) || continue
+    [ -n "$t" ] || continue
+    [ "$t" -gt "$newest" ] && newest=$t
+done
+now=$(date -u +%s 2>/dev/null || echo 0)
+if [ "$newest" -gt "$now" ]; then
+    date -u -s "@$newest" >/dev/null 2>&1
+    busybox hwclock -w -u >/dev/null 2>&1
+    say "时钟往前拨到 $(date -u)（原来比 SD 上的凭据还早，mTLS 会因此失败）"
+    st "CLOCK=corrected"
+else
+    say "时钟看起来正常：$(date -u)"
+    st "CLOCK=ok"
+fi
+# 推进一格，好让下一次开机至少不早于这一次
+touch $CLOCK_STAMP 2>/dev/null
+
+# ============================================================================
 # 第一步：网络。**在碰 PL 之前**，而且不管后面成不成都先做完。
 # ============================================================================
 busybox ifconfig eth1 up 2>/dev/null
@@ -174,14 +210,19 @@ if [ -x "$D/pqchsm_fpgad" ]; then
     if [ -S /tmp/pqchsm_fpgad.sock ]; then   # 见 service/wire.h
         say "daemon 已起"
         st "DAEMON=ok"
-        # TCP 前端是**可选**的：有口令文件才监听（fail-closed，见 wire.h）。
+        # TCP 前端是**可选**的：pki/ 里三样齐了才监听（fail-closed，见 wire.h）。
         # 所以这里如实报"有没有在听"，而不是假定它一定在。
+        #
+        # ⚠️ 判据从"有没有 hsm_token"换成了"pki 三件套全不全" ——
+        #    远程口 2026-08-18 从「明文 TCP + 预共享口令」换成了 mTLS。
+        #    旧的 hsm_token 文件即便还在也不再有任何作用，别照着它判断。
         if busybox netstat -ltn 2>/dev/null | grep -q ":9797 "; then
-            st "TCP=9797 远程可用"
-        elif [ -f "$D/hsm_token" ]; then
-            st "TCP=fail 有口令文件但没监听上"
+            st "TCP=9797 远程可用（mTLS）"
+        elif [ -f "$D/pki/hsm_ca.crt" ] && [ -f "$D/pki/hsm_device.crt" ] &&
+             [ -f "$D/pki/hsm_device.key" ]; then
+            st "TCP=fail 凭据齐全但没监听上"
         else
-            st "TCP=off 没有 hsm_token，只提供本机 socket"
+            st "TCP=off pki/ 凭据不全，只提供本机 socket"
         fi
         st "READY=yes"
     else

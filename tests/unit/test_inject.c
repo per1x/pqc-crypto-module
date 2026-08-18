@@ -122,9 +122,16 @@ int main(void)
 		CHECK_EQ_INT(hsm_slot_generate(tok, tgt2_sess, PQC_ALG_ML_KEM_768,
 		                               KEY_USAGE_DECAP, 0, &other), HSM_OK);
 		hsm_handle_t dummy;
-		/* 目标用 slot2 自己（已装载且无 INJECTABLE）→ 先撞策略 */
+		/* ⚠️ 期望值从 HSM_ERR_POLICY 改成 HSM_ERR_INTEGRITY，是因为
+		 * hsm_inject_apply 的顺序改了（见 inject.c 文件头）：现在**先认证
+		 * 后改状态**，于是拿错注入钥的包在解包那一步就被判掉，根本走不到
+		 * 策略检查。
+		 *
+		 * 这不只是"顺序换了"：老顺序下，一个连 GCM 标签都对不上的包也能
+		 * 问出"目标槽位允不允许注入"这条策略信息，而且在它撞策略之前，
+		 * 目标槽位的旧密钥已经被 destroy 掉了。新顺序两件事一起没有了。 */
 		CHECK_EQ_INT(hsm_inject_apply(tok, tgt2_sess, other, tgt2_sess,
-		                              blob, blob_len, &dummy), HSM_ERR_POLICY);
+		                              blob, blob_len, &dummy), HSM_ERR_INTEGRITY);
 		CHECK_EQ_INT(hsm_object_destroy(tok, tgt2_sess, other), HSM_OK);
 		/* 重新生成注入钥，目标为空槽位 → 这次应当因为解封装结果不对而失败 */
 		CHECK_EQ_INT(hsm_slot_generate(tok, tgt2_sess, PQC_ALG_ML_KEM_768,
@@ -132,9 +139,9 @@ int main(void)
 		hsm_session_t s3;
 		CHECK_EQ_INT(hsm_session_open(tok, 1, &s3), HSM_OK);
 		CHECK_EQ_INT(hsm_session_login(tok, s3, HSM_ROLE_USER, USER_PIN), HSM_OK);
-		/* slot1 已装载注入进去的密钥、且没有 INJECTABLE → 策略拦截 */
+		/* 同上：注入钥不对，先在认证那一步就失败，轮不到策略检查 */
 		CHECK_EQ_INT(hsm_inject_apply(tok, tgt2_sess, other, s3, blob, blob_len, &dummy),
-		             HSM_ERR_POLICY);
+		             HSM_ERR_INTEGRITY);
 		CHECK_EQ_INT(hsm_session_close(tok, s3), HSM_OK);
 	}
 
@@ -205,8 +212,91 @@ int main(void)
 		hsm_handle_t h3;
 		CHECK_EQ_INT(hsm_inject_apply(tok, kem_sess, kem_h, s, b3, l3, &h3), HSM_OK);
 		CHECK(h3 != h);   /* generation 递增，旧句柄失效 */
+
+		TCASE("回归 P1⑤：坏包不得销毁已有密钥");
+		{
+			/* 老实现的顺序是"先 destroy 旧对象、再解包"。于是**任何人**
+			 * 发一个整包乱码的 blob 过来，旧密钥就先没了 —— 一个不需要
+			 * 任何密钥材料的纯破坏性操作。
+			 *
+			 * 这个槽位现在带 INJECTABLE，正好走的就是那条更新路径。 */
+			uint8_t *before = malloc(dsa->pk_len);
+			uint8_t *after  = malloc(dsa->pk_len);
+			uint8_t *bad    = malloc(l3);
+			size_t bl = 0, al = 0;
+
+			CHECK_EQ_INT(hsm_object_public_key(tok, s, h3, before, dsa->pk_len, &bl),
+			             HSM_OK);
+
+			memcpy(bad, b3, l3);
+			bad[l3 - 1] ^= 0xFF;   /* 打坏 GCM 标签的最后一字节 */
+			hsm_handle_t hbad = HSM_INVALID_HANDLE;
+			CHECK_EQ_INT(hsm_inject_apply(tok, kem_sess, kem_h, s, bad, l3, &hbad),
+			             HSM_ERR_INTEGRITY);
+			CHECK_EQ_INT((long long)hbad, (long long)HSM_INVALID_HANDLE);
+
+			/* 旧句柄必须还活着，公钥必须一字节不差 */
+			CHECK_EQ_INT(hsm_object_public_key(tok, s, h3, after, dsa->pk_len, &al),
+			             HSM_OK);
+			CHECK_EQ_INT((long long)al, (long long)bl);
+			CHECK_EQ_MEM(after, before, dsa->pk_len);
+
+			/* 不只是元数据还在 —— 私钥也还在，签得出来 */
+			{
+				uint8_t *sig = malloc(dsa->sig_len);
+				size_t sl = 0;
+				const uint8_t m[] = "still-usable-after-bad-blob";
+
+				CHECK_EQ_INT(hsm_object_sign(tok, s, h3, m, sizeof(m), NULL, 0,
+				                             sig, dsa->sig_len, &sl), HSM_OK);
+				CHECK_EQ_INT(pqc_verify(PQC_ALG_ML_DSA_65, after, m, sizeof(m),
+				                        NULL, 0, sig, sl), PQC_OK);
+				free(sig);
+			}
+			free(before);
+			free(after);
+			free(bad);
+		}
 		free(b2);
 		free(b3);
+	}
+
+	TCASE("没有 INJECTABLE 的槽位：**认证过的**包也要被策略挡住");
+	{
+		/* "拿错注入钥"那一节现在撞的是认证，测不到策略了。策略这条要用
+		 * 一个**解得开**的包才测得着 —— 顺序是"先认证、后授权"，
+		 * 两道都得各有各的用例。 */
+		hsm_session_t so;
+		CHECK_EQ_INT(hsm_session_open(tok, 1, &so), HSM_OK);
+		CHECK_EQ_INT(hsm_session_login(tok, so, HSM_ROLE_SO, SO_PIN), HSM_OK);
+		CHECK_EQ_INT(hsm_slot_zeroize(tok, so, 1), HSM_OK);
+		CHECK_EQ_INT(hsm_session_close(tok, so), HSM_OK);
+		hsm_session_t s = provision(tok, 1);
+
+		uint8_t *bn = malloc(cap);
+		size_t ln = 0;
+		/* policy = 0：装进去之后这个槽位**不**允许被注入更新 */
+		CHECK_EQ_INT(hsm_inject_build(PQC_ALG_ML_KEM_768, device_pk, pk_len,
+		                              PQC_ALG_ML_DSA_65, KEY_USAGE_SIGN, 0,
+		                              seed, sizeof(seed), bn, cap, &ln), HSM_OK);
+		hsm_handle_t hn = HSM_INVALID_HANDLE;
+		CHECK_EQ_INT(hsm_inject_apply(tok, kem_sess, kem_h, s, bn, ln, &hn), HSM_OK);
+
+		/* 同一个（完全合法的）包再来一次 → 这次必须撞策略 */
+		hsm_handle_t hn2 = HSM_INVALID_HANDLE;
+		CHECK_EQ_INT(hsm_inject_apply(tok, kem_sess, kem_h, s, bn, ln, &hn2),
+		             HSM_ERR_POLICY);
+		/* 而且被策略挡住时旧密钥同样得完好 */
+		{
+			uint8_t *pk2 = malloc(dsa->pk_len);
+			size_t n2 = 0;
+
+			CHECK_EQ_INT(hsm_object_public_key(tok, s, hn, pk2, dsa->pk_len, &n2),
+			             HSM_OK);
+			CHECK_EQ_INT((long long)n2, (long long)dsa->pk_len);
+			free(pk2);
+		}
+		free(bn);
 	}
 
 	TCASE("非法参数");

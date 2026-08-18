@@ -326,7 +326,7 @@ int audit_append(audit_log_t *log, uint64_t timestamp, audit_op_t op,
 	if (!log || log->fd < 0) {
 		goto out;
 	}
-	if (op < AUDIT_OP_INIT_TOKEN || op > AUDIT_OP_KEK_ROTATE) {
+	if (op < AUDIT_OP_INIT_TOKEN || op > AUDIT_OP_SET_USER_PIN) {
 		goto out;
 	}
 	/* seq 是链的一部分，回绕会让两条记录同号 —— 宁可拒写 */

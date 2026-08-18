@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """对 pqchsm_fpgad 的线协议打畸形请求，看它会不会卡住 / 算错 / 崩
 
-    python3 wire_fuzz.py <板子IP> <口令> [端口]
+    python3 wire_fuzz.py <板子IP> <凭据目录> [端口]
+
+凭据目录里要有 hsm_ca.crt / client.crt / client.key（tools/mkpki.sh 生成，
+demo_remote.sh --provision 会放到 ~/.config/pqchsm/pki）。
+
+⚠️ 第二个参数以前是一条明文口令。远程口 2026-08-18 改成了 mTLS，那条路已经删掉 ——
+   本脚本因此改成在 TLS 之上拼字节。**要绕过的是 libsdfe 的参数检查，不是传输安全**，
+   所以这里照样用 Python 自己拼 wire.h 的帧，只是套在一条 TLS 连接里。
 
 ============================================================================
 【判据不是"它拒绝了"，而是三条更强的】
@@ -27,7 +34,9 @@
 libsdfe 自己会做参数检查 —— 用它就永远送不出畸形请求，测的是客户端不是服务端。
 这里直接按 wire.h 拼字节，绕过客户端的一切善意。
 """
+import os
 import socket
+import ssl
 import struct
 import sys
 
@@ -36,8 +45,9 @@ MAGIC = 0x53434750
 #    "len 超过 MAXPAY" 变成一条**送得进去的合法请求** —— 用例照常"通过"，
 #    实际上已经不再测它声称要测的东西。这是双份定义最典型的坏法。
 MAXPAY = 16384
+# 8 是曾经的 OP_AUTH（明文口令那条路），已删除且号码不复用 —— 见 wire.h。
 (OP_PING, OP_RANDOM, OP_KEYGEN, OP_ENCAPS,
- OP_DECAPS, OP_IMPORT, OP_SYM, OP_AUTH,
+ OP_DECAPS, OP_IMPORT, OP_SYM, OP_AUTH_REMOVED,
  OP_MLDSA_KEYGEN, OP_MLDSA_SIGN, OP_MLDSA_VERIFY) = range(1, 12)
 
 SDR_OK = 0
@@ -63,14 +73,39 @@ def bad(m):
     print(f"  FAIL  {m}")
 
 
-def connect(host, port, token):
-    s = socket.create_connection((host, port), TIMEOUT)
-    s.settimeout(TIMEOUT)
-    tb = token.encode()
-    s.sendall(struct.pack("<5I", MAGIC, OP_AUTH, 0, 0, len(tb)) + tb)
+def tls_ctx(pki):
+    """双向证书。**服务端的证书也要验** —— 只验一边等于把中间人放进来，
+    而这个脚本恰恰要在"通道是可信的"前提下测应用层。"""
+    if not ssl.HAS_TLSv1_3:
+        sys.exit(
+            "这个 Python 的 SSL 后端不支持 TLS 1.3（%s），连不上密码机。\n"
+            "macOS 自带的 python3 链的是 LibreSSL 2.8 —— 换 Homebrew 那份：\n"
+            "    /opt/homebrew/bin/python3 service/wire_fuzz.py ..." % ssl.OPENSSL_VERSION)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ctx.load_verify_locations(os.path.join(pki, "hsm_ca.crt"))
+    ctx.load_cert_chain(os.path.join(pki, "client.crt"),
+                        os.path.join(pki, "client.key"))
+    # 证书里的 CN 是设备名（axu3egb-hsm-01），不是 IP —— 按主机名校验必然失败，
+    # 而我们要验的是"这张证书是不是本 CA 签的"。所以关掉主机名校验、保留链校验。
+    ctx.check_hostname = False
+    return ctx
+
+
+def connect(host, port, pki):
+    raw = socket.create_connection((host, port), TIMEOUT)
+    raw.settimeout(TIMEOUT)
+    s = tls_ctx(pki).wrap_socket(raw)
+    # ⚠️ TLS 1.3 里握手"成功"不代表服务端接受了我们：客户端证书是最后一段发的，
+    #    拒绝是**握手之后**才送到的。所以先走一个 PING 把裁决逼出来，
+    #    否则后面每条用例的失败原因都会被记成"超时/断开"。
+    s.sendall(struct.pack("<5I", MAGIC, OP_PING, 0, 0, 0))
     hdr = s.recv(12)
     if len(hdr) != 12 or struct.unpack("<3I", hdr)[1] != SDR_OK:
-        raise RuntimeError("认证失败")
+        raise RuntimeError("mTLS 之后的第一条 PING 没通过 —— 多半是证书被拒")
+    plen = struct.unpack("<3I", hdr)[2]
+    while plen > 0:
+        plen -= len(s.recv(plen))
     return s
 
 
@@ -147,7 +182,7 @@ def case(host, port, token, name, fn, expect_reject=True):
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    host, token = sys.argv[1], sys.argv[2]
+    host, token = sys.argv[1], sys.argv[2]   # token 现在是**凭据目录**
     port = int(sys.argv[3]) if len(sys.argv) > 3 else 9797
 
     print("=== 线协议畸形输入 ===\n")

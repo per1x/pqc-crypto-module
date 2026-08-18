@@ -97,5 +97,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 远程口是 mTLS（service/pqcs_tls.c），所以这一步现在需要 OpenSSL 的开发包。
+      # ubuntu-latest 自带 libssl-dev，显式装一次是为了让"哪天镜像不带了"
+      # 表现为这一行失败，而不是一堆看不懂的链接错误。
+      - name: Install OpenSSL headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
       - name: Build daemon, client library and demo
         run: make -C service
+      # mTLS 那一层的回归：一条正例 + 三条否定（别家 CA / 不出示证书 / CN 不在 ACL）。
+      # 不需要板子，也不碰任何真的凭据 —— 每轮临时生成一套 PKI。
+      - name: mTLS regression (positive + three negatives)
+        run: ./tools/tls_regress.sh
+
