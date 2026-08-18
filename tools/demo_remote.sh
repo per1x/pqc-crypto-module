@@ -62,7 +62,7 @@ for a in "$@"; do
 	--status)    MODE=status ;;
 	--provision) MODE=provision ;;
 	-h|--help)   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-	-*) echo "未知参数：$a（用 --help 看用法）" >&2; exit 2 ;;
+	-*) echo "未知参数：${a}（用 --help 看用法）" >&2; exit 2 ;;
 	*)
 		[ -z "$ARG_BOARD" ] || { echo "地址给了不止一个：$ARG_BOARD 与 $a" >&2; exit 2; }
 		ARG_BOARD=$a ;;
@@ -76,7 +76,7 @@ done
 ask_board() {
 	[ -t 0 ] || {
 		echo "没给板子地址。用法： $0 <板子IP> [--provision|--smoke|--status]" >&2
-		echo "（也可以设 \$BOARD，或用 demo/remote/run.sh <IP> --save 记一次）" >&2
+		echo "（也可以设 BOARD= 环境变量，或用 demo/remote/run.sh <IP> --save 记一次）" >&2
 		exit 2
 	}
 	printf '\n\033[1m这台密码机在哪？\033[0m\n'
