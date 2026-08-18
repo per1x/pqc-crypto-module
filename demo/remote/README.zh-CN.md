@@ -7,16 +7,22 @@
 
 ```bash
 git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
-./demo/remote/run.sh
+./demo/remote/run.sh <板子IP>
 ```
 
 | | |
 |---|---|
-| `./demo/remote/run.sh` | 完整九节演示 |
-| `./demo/remote/run.sh --smoke` | 只打关键结论 |
-| `./demo/remote/run.sh --status` | 只连一下，打印设备横幅 |
+| `./demo/remote/run.sh 192.168.1.50` | 完整九节演示 |
+| `./demo/remote/run.sh 192.168.1.50 --smoke` | 只打关键结论 |
+| `./demo/remote/run.sh 192.168.1.50 --status` | 只连一下，打印设备横幅 |
+| `./demo/remote/run.sh 192.168.1.50 --save` | 记住这个地址，以后可以省略 |
 
-可覆盖：`BOARD=… PORT=… DEVICE_CN=… CREDS=… ./demo/remote/run.sh`
+**地址是参数，不是写死的常量** —— 你的板子不在我们的网段上。取值顺序是命令行
+参数 → `$BOARD` → `demo/remote/board.conf`（`--save` 写的那份，不进仓库）。三样
+都没有就打印用法退出，**不猜默认值**：猜错的表现是"连不上"，比"你没给地址"
+难查得多。
+
+其余可覆盖：`PORT=… DEVICE_CN=… CREDS=… ./demo/remote/run.sh <板子IP>`
 
 客户端在第一次运行时由三个文件现编（`sdf_demo.c`、`libsdfe.c`、`pqcs_tls.c`）。
 它**不链接任何密码算法库** —— 链的 OpenSSL 只做 mTLS 传输 —— 所以它打印出的
@@ -45,4 +51,4 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
 CREDS=~/.config/pqchsm/pki ./demo/remote/run.sh
 ```
 
-给一块板子装一套全新的、私有的 PKI，用 `tools/demo_remote.sh --provision`。
+给一块板子装一套全新的、私有的 PKI，用 `tools/demo_remote.sh <板子IP> --provision`。

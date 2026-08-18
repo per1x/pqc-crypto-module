@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| [remote/](remote/) | **One command against the real board** — no SSH, no configuration. Start here. |
+| [remote/](remote/) | **One command against the real board**: `./demo/remote/run.sh <board-ip>` — no SSH, no credential setup. Start here. |
 | Python / Java below | The PKCS#11 provider, driven through a full key lifecycle. Software backend by default; no board needed. |
 
 ## PKCS#11 provider demos

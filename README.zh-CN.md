@@ -109,8 +109,8 @@ vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 从另一台机器一条命令跑完整演示（远程口是 **mTLS**）：
 
 ```bash
-./tools/demo_remote.sh --provision   # 只需一次：生成 PKI、装板子、留凭据
-./tools/demo_remote.sh --smoke       # 之后纯本地，零 SSH
+./demo/remote/run.sh <板子IP>                  # 仓库自带演示凭据，零配置
+./tools/demo_remote.sh <板子IP> --provision    # 想用自己的 PKI 就走这条（只需一次）
 ```
 
 ```c

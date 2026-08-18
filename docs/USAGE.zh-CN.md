@@ -148,7 +148,8 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 板子已经装好凭据了，所以任何一台够得着它的机器都不需要任何配置：
 
 ```bash
-./demo/remote/run.sh            # --smoke 只看结论，--status 只连一下
+./demo/remote/run.sh <板子IP>            # --smoke 只看结论，--status 只连一下
+./demo/remote/run.sh <板子IP> --save     # 记住地址，之后可以省略
 ```
 
 这条路用的是提交在 `demo/remote/creds/` 下的**公开演示凭据**。把它用在内网演示
@@ -158,10 +159,10 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 ### 装板子的脚本（给一块板子配它自己的私有 PKI）
 
 ```bash
-./tools/demo_remote.sh --provision   # 只需做一次：生成 PKI、装板子、留凭据
-./tools/demo_remote.sh               # 之后纯本地：编译 + mTLS 调用，零 SSH
-./tools/demo_remote.sh --smoke       # 最小冒烟，只打关键结论
-./tools/demo_remote.sh --status      # 只连一下看设备在不在
+./tools/demo_remote.sh <板子IP> --provision   # 只需做一次：生成 PKI、装板子、留凭据
+./tools/demo_remote.sh <板子IP>              # 之后纯本地：编译 + mTLS 调用，零 SSH
+./tools/demo_remote.sh <板子IP> --smoke      # 最小冒烟，只打关键结论
+./tools/demo_remote.sh <板子IP> --status     # 只连一下看设备在不在
 ```
 
 **密码运算一步都不经过 SSH。** 客户端是本机原生二进制，自己开 TCP 到板子的

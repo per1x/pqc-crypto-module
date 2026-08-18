@@ -160,7 +160,8 @@ If the board is already provisioned — which it is — any machine that can rea
 runs the whole demo with no configuration at all:
 
 ```bash
-./demo/remote/run.sh            # --smoke for headlines, --status to just connect
+./demo/remote/run.sh <board-ip>          # --smoke for headlines, --status to just connect
+./demo/remote/run.sh <board-ip> --save   # remember it; omit the address from then on
 ```
 
 That path uses the **public demo credentials** committed under `demo/remote/creds/`.
@@ -170,10 +171,10 @@ relying on it for anything but a LAN demo.
 ### Provisioning script (a board with its own private PKI)
 
 ```bash
-./tools/demo_remote.sh --provision   # once: make a PKI, install it, keep the client creds
-./tools/demo_remote.sh               # then purely local: build + mTLS call, no SSH
-./tools/demo_remote.sh --smoke       # minimal smoke, key lines only
-./tools/demo_remote.sh --status      # just check the device answers
+./tools/demo_remote.sh <board-ip> --provision   # once: make a PKI, install it, keep the client creds
+./tools/demo_remote.sh <board-ip>              # then purely local: build + mTLS call, no SSH
+./tools/demo_remote.sh <board-ip> --smoke      # minimal smoke, key lines only
+./tools/demo_remote.sh <board-ip> --status     # just check the device answers
 ```
 
 **No cryptographic operation goes through SSH.** The client is a native local binary

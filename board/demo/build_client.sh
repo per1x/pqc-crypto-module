@@ -34,6 +34,7 @@ echo
 echo
 echo "本机连（板子上有 daemon 的 UNIX socket）："
 echo "    $OUT"
-echo "远程连（另一台机器，先从板子拿口令）："
-echo "    TOK=\$(ssh root@192.168.50.175 cat /media/sd-mmcblk1p2/hsm/hsm_token)"
-echo "    $OUT 192.168.50.175 \"\$TOK\""
+echo "远程连（另一台机器，走 mTLS —— 口令那条路已经删掉了）："
+echo "    $OUT <板子IP> <凭据目录> [端口] [设备CN]"
+echo "  凭据目录里要有 hsm_ca.crt / client.crt / client.key；仓库里带了一份"
+echo "  演示用的：demo/remote/creds（也可以直接跑 demo/remote/run.sh <板子IP>）"

@@ -1,13 +1,16 @@
 #!/bin/sh
 # demo_remote.sh —— 在本机（Mac / 任意主机）调用密码机。**主路径不用 SSH。**
 #
-#   ./tools/demo_remote.sh --provision   # 只需做一次：生成 PKI、装板子、留凭据
-#   ./tools/demo_remote.sh               # 之后就是纯本地：编译 + mTLS 调用
-#   ./tools/demo_remote.sh --smoke       # 最小冒烟，只打关键结论
-#   ./tools/demo_remote.sh --status      # 只连一下看设备在不在
+#   ./tools/demo_remote.sh <IP> --provision   # 只需做一次：生成 PKI、装板子、留凭据
+#   ./tools/demo_remote.sh <IP>               # 之后就是纯本地：编译 + mTLS 调用
+#   ./tools/demo_remote.sh <IP> --smoke       # 最小冒烟，只打关键结论
+#   ./tools/demo_remote.sh <IP> --status      # 只连一下看设备在不在
 #
-# 可用环境变量覆盖（正常情况下一个都不用设）：
-#   BOARD=192.168.50.175        密码机地址
+# 地址与模式不分先后。地址取值顺序：命令行参数 → $BOARD 环境变量 →
+# demo/remote/board.conf（`demo/remote/run.sh --save` 写的那份）。三样都没有
+# 就打印用法退出 —— **不猜默认值**，猜错的表现是"连不上"，比"你没给地址"难查。
+#
+# 其余可用环境变量覆盖：
 #   PORT=9797                   daemon 的 TCP 口
 #   PQCHSM_PKI=<目录>           本机凭据目录（默认 ~/.config/pqchsm/pki）
 #   DEVICE_CN=axu3egb-hsm-01    期望的设备证书 CN（连上后逐字比对）
@@ -44,22 +47,36 @@
 #    一步都不上板。
 set -eu
 
-BOARD=${BOARD:-192.168.50.175}
 PORT=${PORT:-9797}
 PKI_DIR=${PQCHSM_PKI:-$HOME/.config/pqchsm/pki}
 DEVICE_CN=${DEVICE_CN:-axu3egb-hsm-01}
 SSH_KEY=${SSH_KEY:-$HOME/.ssh/id_rsa}
 BOARD_PKI=/media/sd-mmcblk1p2/hsm/pki
+CONF=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/demo/remote/board.conf
 
 MODE=full
-case "${1:-}" in
+ARG_BOARD=""
+for a in "$@"; do
+	case "$a" in
 	--smoke)     MODE=smoke ;;
 	--status)    MODE=status ;;
 	--provision) MODE=provision ;;
-	-h|--help)   sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-	"") ;;
-	*) echo "未知参数：$1（用 --help 看用法）" >&2; exit 2 ;;
-esac
+	-h|--help)   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-*) echo "未知参数：$a（用 --help 看用法）" >&2; exit 2 ;;
+	*)
+		[ -z "$ARG_BOARD" ] || { echo "地址给了不止一个：$ARG_BOARD 与 $a" >&2; exit 2; }
+		ARG_BOARD=$a ;;
+	esac
+done
+
+if   [ -n "$ARG_BOARD" ];  then BOARD=$ARG_BOARD
+elif [ -n "${BOARD:-}" ];  then :
+elif [ -f "$CONF" ];       then BOARD=$(tr -d ' \t\r\n' < "$CONF")
+else
+	echo "没给板子地址。用法： $0 <板子IP> [--provision|--smoke|--status]" >&2
+	echo "（也可以设 \$BOARD，或用 demo/remote/run.sh <IP> --save 记一次）" >&2
+	exit 2
+fi
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 CLIENT=$ROOT/build-demo/sdf_demo
@@ -151,7 +168,7 @@ fi
 for f in hsm_ca.crt client.crt client.key; do
 	[ -f "$PKI_DIR/$f" ] || die "本机缺 $PKI_DIR/$f" \
 		"远程口是 mTLS，要一次性装凭据（唯一用 SSH 的动作）：" \
-		"    $0 --provision" \
+		"    $0 ${BOARD} --provision" \
 		"（2026-08-18 之前那条 --fetch-token 的明文口令路已经删掉了）"
 done
 
@@ -199,7 +216,7 @@ run() { "$CLIENT" "$BOARD" "$PKI_DIR" "$PORT" "$DEVICE_CN" 2>&1; }
 diagnose() {
 	printf '%s\n' "$1" | grep -q 'TLS 握手失败\|设备证书\|设备身份不符' && \
 		die "mTLS 没通过" \
-		"· 板子换过凭据就要重装： $0 --provision" \
+		"· 板子换过凭据就要重装： $0 ${BOARD} --provision" \
 		"· 设备 CN 不符时可以先用 DEVICE_CN=<板上证书的CN> $0 看一眼" \
 		"· 板上 pki/ 三样缺一，daemon 就不监听 9797"
 	printf '%s\n' "$1" | grep -q '打开设备失败' && die "连不上 $BOARD:$PORT" \

@@ -7,16 +7,24 @@ can reach it. No SSH, no configuration, no credential wrangling.
 
 ```bash
 git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
-./demo/remote/run.sh
+./demo/remote/run.sh <board-ip>
 ```
 
 | | |
 |---|---|
-| `./demo/remote/run.sh` | the full nine-section demo |
-| `./demo/remote/run.sh --smoke` | headline results only |
-| `./demo/remote/run.sh --status` | just connect and print the device banner |
+| `./demo/remote/run.sh 192.168.1.50` | the full nine-section demo |
+| `./demo/remote/run.sh 192.168.1.50 --smoke` | headline results only |
+| `./demo/remote/run.sh 192.168.1.50 --status` | just connect and print the device banner |
+| `./demo/remote/run.sh 192.168.1.50 --save` | remember this address; omit it from then on |
 
-Overrides: `BOARD=… PORT=… DEVICE_CN=… CREDS=… ./demo/remote/run.sh`
+**The address is an argument, not a baked-in constant** — your board is not on
+our network. It is resolved from the command line, then `$BOARD`, then
+`demo/remote/board.conf` (what `--save` writes; it is not tracked). If none of
+the three is set the script prints usage and stops rather than guessing: a wrong
+guess shows up as "cannot connect", which is far harder to diagnose than "you
+did not give me an address".
+
+Other overrides: `PORT=… DEVICE_CN=… CREDS=… ./demo/remote/run.sh <board-ip>`
 
 The client is built from three files (`sdf_demo.c`, `libsdfe.c`, `pqcs_tls.c`) on
 first run. It links **no cryptographic algorithm library** — the OpenSSL it links
@@ -52,4 +60,5 @@ To use your own credentials instead, point `CREDS` at them:
 CREDS=~/.config/pqchsm/pki ./demo/remote/run.sh
 ```
 
-Provisioning a board with a fresh, private PKI is `tools/demo_remote.sh --provision`.
+Provisioning a board with a fresh, private PKI is
+`tools/demo_remote.sh <board-ip> --provision`.

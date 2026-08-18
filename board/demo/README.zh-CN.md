@@ -82,25 +82,29 @@ sh board/demo/build_client.sh
 
 它会产出两个东西：`sdf_demo`（SDF 接口）和 `p11_hw_demo`（标准 PKCS#11 接口）。
 
-**第二步：拿口令**（只需一次）：
-
-```
-ssh root@192.168.50.175 cat /media/sd-mmcblk1p2/hsm/hsm_token
-```
+**第二步：拿凭据**（只需一次）。远程口是 mTLS，不是口令 —— 需要
+`hsm_ca.crt` / `client.crt` / `client.key` 三个文件。仓库里带了一份演示用的
+（`demo/remote/creds`），要自己那套就跑 `tools/demo_remote.sh <板子IP> --provision`。
 
 **第三步：连**。
 
 SDF 接口：
 
 ```
-./sdf_demo 192.168.50.175 <口令>
+./sdf_demo <板子IP> <凭据目录> [端口] [设备CN]
+```
+
+不想记这些参数，仓库根下有一条一键的：
+
+```
+./demo/remote/run.sh <板子IP>
 ```
 
 标准 PKCS#11 接口（这一条最能说明问题——一个不认识这块板的标准应用，
 拿标准 `C_*` 调用过来，密钥就在 FPGA 里生成、私钥永不离开硬件）：
 
 ```
-PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=192.168.50.175 \
+PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=<板子IP> \
   PQCHSM_SDFE_PKI=~/.config/pqchsm/pki PQCHSM_SDFE_DEVICE_CN=axu3egb-hsm-01 \
     ./p11_hw_demo <PKCS#11 模块.so>
 ```
@@ -155,7 +159,7 @@ PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=192.168.50.175 \
 | `.175` 也连不上 | 网线是不是只插了一个口？串口 115200 进去看 `HSM_STATUS` |
 | `READY=no` | 看 `/media/sd-mmcblk1p2/hsm/hsm-boot.log`，每一步失败都写了原因 |
 | 想回到出厂状态 | 删掉 `/media/sd-mmcblk1p2/hsm/zu3eg_hsm.bit` 再重启，就不装密码位流了 |
-| 远程连不上 | 口令对不对？没有 `hsm_token` 文件时**不会**监听端口（有意为之） |
+| 远程连不上 | 凭据对不对？板上 `pki/` 三件套（`hsm_ca.crt` / `hsm_device.crt` / `hsm_device.key`）缺一就**不会**监听端口（有意为之） |
 | `uptime` 显示 load 约 1.0，但 CPU 是 100% 空闲 | **正常，不用管。** 是一个 USB 集线器的内核工作线程常驻在不可中断等待里 —— 它不占 CPU，但按 Linux 的算法会永久计入 load。开机 5 秒时 USB 枚举就已经这样了，早于密码机的任何脚本，与本项目无关。别在演示时去追它 |
 
 **重启**用 `sh /media/sd-mmcblk1p2/hsm/hsmreboot.sh`（这块板子的 `reboot`
@@ -165,8 +169,11 @@ PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=192.168.50.175 \
 
 ## 六、还没做的，说清楚
 
-- 远程接口只有**预共享口令**，没有身份体系、没有权限分级、**没有传输加密**。
-  内网演示够用，不是可以直接对外的形态。
+- 远程接口是 **mTLS**（TLS 1.3 双向证书），传输加密与身份都有了，但**没有权限
+  分级** —— 握手过了就等于拿到全部操作，也没有吊销。而且仓库里那份演示凭据是
+  **公开的**（`demo/remote/creds`），凭它任何够得着这个口的人都能驱动这台机器。
+  内网演示够用，不是可以直接对外的形态；边界写在
+  [docs/SECURITY.zh-CN.md](../../docs/SECURITY.zh-CN.md#远程口)。
 - ML-KEM 的私钥**现在整个留在 FPGA 片内**（片内私钥金库）：KeyGen 把 dk 写进
   PL 里的一块 BRAM，只交出公钥和一个槽号；Decaps 按槽号用它。dk 一个字节都不
   经过 AXI 总线，服务进程的内存里也没有它。而且开机时置了一道**一次性闩锁**，
