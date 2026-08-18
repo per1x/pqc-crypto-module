@@ -44,6 +44,12 @@ runs Linux and issues commands; it holds no key material of its own.
    └─────────────────────────────────────────────────────────────────┘
 ```
 
+For remote calls the `libsdfe` → `pqchsm_fpgad` hop runs over **mTLS** (TLS 1.3,
+certificates on both sides); the local hop is a 0600 UNIX socket and is deliberately
+not wrapped (see the 2026-08-18 section of `docs/SECURITY.md`). **The frame format is
+byte-identical on both paths**, so nothing else in the diagram above changes.
+
+
 Two paths deliberately bypass the bus:
 
 - **`use_key`** — the key vault hands a key to the symmetric cores over private

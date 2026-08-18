@@ -436,7 +436,7 @@ so this document is not mistaken for a statement of readiness.
 | **No algorithm certificates** | ACVP vectors are run locally. That is evidence of correctness, not a certificate |
 | **Single-writer audit log** | The audit module does not lock the file |
 | **Unkeyed Shamir share checksums** | They detect corruption, not tampering |
-| **Keystore rollback protection only stops swapping one file** | The header carries an `epoch` incremented on every write (covered by the MAC), the highest epoch seen is kept in a sibling `<keystore>.epoch` file, and loading an older one is **refused**. That stops "take the SD card and copy an old keystore back" — the old snapshot's own MAC is valid, so the MAC cannot catch it. **But an attacker who rolls both files back consistently still gets through**: real anti-rollback needs monotonic storage the attacker cannot write (an eFUSE counter, RPMB, TPM NV), and this board has none |
+| **Keystore rollback protection only stops swapping one file** | The header carries an `epoch` incremented on every write (covered by the MAC); where the anchor lives is chosen by a provider (`pqchsm/rbanchor.h`), and loading a file older than the anchor is **refused**. The default provider keeps the anchor in a sibling `<keystore>.epoch` file, which **is not real anti-rollback**: an attacker who rolls both files back consistently still gets through (`test_keystore` pins this weakness with a dedicated case). Real anti-rollback needs a monotonic value the attacker cannot rewind — the RPMB implementation exists in the tree, but **this board's RPMB is no longer usable**; see the 2026-08-18 section below |
 | **SO PIN lockout not enforced** | Failures are counted but the slot is not locked, because locking it would brick the device; recovery is by M-of-N |
 | **`CKM_HASH_ML_DSA_*` not implemented** | PKCS#11 multi-part signing buffers the whole message instead of streaming a digest |
 | **Host RNG is OpenSSL** | The PL entropy source is inside the boundary, but the host software still seeds from the operating system through OpenSSL |
@@ -452,3 +452,155 @@ corrected above), and their root cause is now identified.
 
 A FIPS 140-3 / GM/T 0028 style security policy draft, with its own gap list, is
 in [reference/security-policy.md](reference/security-policy.md).
+
+---
+
+## 2026-08-18: remote channel, rollback anchor, build profile
+
+This section states the **current** position on three things. Where it conflicts with
+anything earlier in this document, this section wins.
+
+### 1. The remote port moved from "plaintext TCP + shared token" to **mTLS**
+
+**What it used to be** (the TCP front end of `service/pqchsm_fpgad`): the first frame
+had to be `OP_AUTH` carrying a static pre-shared token, compared in constant time.
+Three problems:
+
+1. **The token was on the wire in the clear.** One packet capture on the same segment
+   yielded it, and it was static — capture once, own it forever. Constant-time
+   comparison bought nothing here: the attacker never had to guess byte by byte.
+2. **The whole session was plaintext and malleable.** Public keys, ciphertexts,
+   signatures and plaintext data all travelled unprotected, with no integrity at all —
+   a man in the middle could flip a verification result from "fail" to "pass".
+3. **It was replayable.** The auth frame itself could be recorded and replayed; the
+   server had no freshness check.
+
+**Now**: the TCP connection runs inside **TLS 1.3** with **certificates on both sides**
+(`SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT`), with the protocol version
+pinned to 1.3 at both ends so there is nothing to downgrade to. Identity moves from
+"knows a string" to "holds a private key".
+
+**What this layer now stops**: any host on the segment, anyone who can capture,
+anyone who can modify, anyone replaying a recording.
+
+**What it still is not**: complete access control.
+- No privilege separation and no per-operation authorisation — passing mTLS grants
+  every operation.
+- The ACL is CN-granular only (`pki/hsm_acl`, one per line; **absent file means any
+  certificate signed by this CA is accepted**, a deliberate default explained in
+  `service/pqcs_tls.h`).
+- No revocation (no CRL/OCSP) — a leaked client certificate means re-issuing the CA.
+- Rate limiting is a per-IP leaky bucket (8 failed handshakes / 60 s) that addresses
+  availability (a single-threaded daemon being pinned by handshake spam), not
+  confidentiality.
+
+**The PKI is prototype grade**: the CA private key sits in a 0600 file on the
+operator's machine, with no hardware protection, no intermediate CA, no revocation. It
+is enough to replace "plaintext token" with "holds a private key"; it is **not** a PKI
+in the institutional sense.
+
+**The local UNIX socket is deliberately not wrapped in TLS**: it is 0600 and
+host-local, so reaching it already means root; encrypting it stops nobody and only
+adds a certificate for on-board troubleshooting tools to manage.
+
+**Dependency cost**: both the daemon and the client link OpenSSL. The board build is
+**not fully static** — linking this prebuilt OpenSSL 1.1.1d statically segfaults on
+the target **before `main`** (a constructor of our own never gets to print; it happens
+whenever `libssl.a` enters the link). The board build therefore links dynamically,
+with the two `.so` files on the SD card in `hsm/lib/` and an `-rpath` pinning the
+lookup path. The reasoning is in the header of `service/Makefile`.
+
+**The clock is a real precondition** for this channel: certificates have validity
+dates and this board's clock can fall behind `notBefore`. A TLS 1.3 rejection arrives
+*after* the client considers the handshake done, so the symptom is "device info prints
+garbage", not "authentication failed". Three mitigations: `demo_remote.sh --provision`
+syncs the clock and writes the RTC; `hsm-boot.sh` refuses to leave the clock older
+than the credentials on the SD card; the client performs one `OP_PING` round trip at
+open to force such a rejection into the open.
+
+Regression: `tools/tls_regress.sh` (ctest `tls_regress`) — one positive case plus
+three negatives (certificate from a different CA / no client certificate at all / CN
+not in the ACL). **The negatives are the point**; "it connects" only proves the
+configuration is not broken.
+
+### 2. Rollback anchor: abstracted, but **this board's RPMB is gone**
+
+`include/pqchsm/rbanchor.h` turns "where the monotonic epoch lives" into a provider:
+
+- `file` (default) — the sibling `<keystore>.epoch`. **Not real anti-rollback**, for
+  the reason above.
+- `rpmb` — the eMMC RPMB write counter: hardware-maintained, increment-only.
+
+**Why the anchor is the write counter and not a value stored in RPMB**: the RPMB data
+area can be rewritten at will by whoever holds the authentication key, including to a
+smaller value. This board has no secret hardware root, so the RPMB key can only live
+in a file — "the attacker has the key" is an assumption we must make. Anchoring on the
+counter makes that assumption survivable: **they can push it forward, they cannot pull
+it back**, so an old snapshot can never match again.
+
+**Hardware finding (measured)**: this AXU3EGB has eMMC (`mmcblk0`, Q2J55L) with
+`EXT_CSD[168] RPMB_SIZE_MULT = 32` → **4 MB RPMB**, `/dev/mmcblk0rpmb` present, and a
+kernel that supports `MMC_IOC_MULTI_CMD`. **The hardware is sufficient.**
+
+**But the path is closed on this board, and we closed it ourselves**:
+
+> While provisioning the RPMB authentication key on 2026-08-18, the `Program Key`
+> request **actually succeeded**, but the tool read back a **stale response frame**
+> (RPMB reads on this eMMC alternate between the correct response and the previous
+> request's response) and reported "programming failed"; the key file, apparently
+> unused, was then deleted. The result is an eMMC holding an authentication key
+> **nobody knows**: RPMB reads now always return `result=0x0000` (key programmed) and
+> no key verifies the MAC. **RPMB anti-rollback is permanently unavailable on this
+> board short of replacing the eMMC.**
+>
+> Blast radius is RPMB only: boot lives on the SD card (`mmcblk1`), and PL, network
+> and the demo path are unaffected — the nine-section demo was re-run green
+> afterwards. Nothing in the project had used RPMB before.
+
+The code is retained and correct (`board/src/rpmb.c`, `rpmb_tool.c`) and works on a
+fresh board or eMMC. Three lessons are now encoded in it:
+- RPMB responses must be validated on `req_resp` (read `0x0200` / write `0x0300` /
+  program-key `0x0100`) and **never on `result`** — `result` is precisely the field a
+  stale frame corrupts;
+- with a key present, the nonce echo must also be checked, or replaying an old
+  response shows you a smaller counter;
+- **never delete the key file after a programming attempt, whatever it reports** — run
+  `rpmb_tool status` and let the device speak first.
+
+**Alternatives** (none of them landed on this board; recorded honestly):
+- **TPM NV counter** — no TPM on this board and no usable SPI/I²C TPM header;
+- **eFUSE counter** — burning eFUSEs is **permanently excluded** by this project
+  (irreversible, single board);
+- **A replacement eMMC or a second board of the same type** — the RPMB path works
+  as-is, the code is already in the tree;
+- **A remote anchor service** (fetch a monotonic ticket on every save) — trades the
+  problem for "that server must always be reachable", which does not hold for an
+  offline HSM but is viable for a networked deployment.
+
+### 3. Build profile `PQC_PROFILE`: DEV and PRODUCTION
+
+The old default was "fall back to the stub if no KDR provider is installed", and the
+stub's root key is a **public constant compiled into the binary** (the literal itself
+reads `NOT SECRET`). In other words, **by default the keystore's wrapping key was
+public** and anyone with the SD card could decrypt the whole keystore offline — with
+nothing anywhere in the code to say so.
+
+There are now two explicit profiles (`cmake -DPQC_PROFILE=…`, default `DEV`):
+
+| | DEV (default) | PRODUCTION |
+|---|---|---|
+| Stub root key | compiled in | **`#if`'d out entirely — not findable in the binary** |
+| No provider installed | falls back to the stub | provider is NULL, every derivation fails |
+| Startup gate | proceeds, with an explicit warning | requires `hardware_backed`, else **refuses to start** |
+
+`tools/check_profile.sh` (ctest `profile_no_stub_kdr`) scans the PRODUCTION object file
+for that literal **and carries a null control** (it must be findable in DEV) —
+otherwise renaming the literal would make the check silently pass forever.
+
+⚠️ **This board cannot reach PRODUCTION**: there is no secret hardware root (eFUSE
+permanently excluded, BBRAM has no battery, PUF black key never worked), and the
+device-dna provider is `device_bound=1` but `hardware_backed=0` (the DNA differs per
+die so anti-cloning holds, but the DNA **is not a secret** — anyone with JTAG reads it
+directly). A PRODUCTION build therefore refuses to start on this board, which is
+**exactly what the switch is meant to express**, not a defect. Demos and regressions
+run DEV.

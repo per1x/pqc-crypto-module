@@ -100,7 +100,8 @@ SDF 接口：
 拿标准 `C_*` 调用过来，密钥就在 FPGA 里生成、私钥永不离开硬件）：
 
 ```
-PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=192.168.50.175 PQCHSM_SDFE_TOKEN=<口令> \
+PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=192.168.50.175 \
+  PQCHSM_SDFE_PKI=~/.config/pqchsm/pki PQCHSM_SDFE_DEVICE_CN=axu3egb-hsm-01 \
     ./p11_hw_demo <PKCS#11 模块.so>
 ```
 

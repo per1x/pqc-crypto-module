@@ -136,30 +136,46 @@ make -C service CROSS=aarch64-linux-gnu-     # for the board
 ### 一键脚本（**最省事，先用这个**）
 
 ```bash
-./tools/demo_remote.sh --fetch-token   # 只需做一次：把口令存到本地
-./tools/demo_remote.sh                 # 之后纯本地：编译 + TCP 调用，零 SSH
-./tools/demo_remote.sh --smoke         # 最小冒烟，只打关键结论
-./tools/demo_remote.sh --status        # 只连一下看设备在不在
+./tools/demo_remote.sh --provision   # 只需做一次：生成 PKI、装板子、留凭据
+./tools/demo_remote.sh               # 之后纯本地：编译 + mTLS 调用，零 SSH
+./tools/demo_remote.sh --smoke       # 最小冒烟，只打关键结论
+./tools/demo_remote.sh --status      # 只连一下看设备在不在
 ```
 
 **密码运算一步都不经过 SSH。** 客户端是本机原生二进制，自己开 TCP 到板子的
-9797 口。`--fetch-token` 是唯一会用 SSH 的动作，且只用来 `cat` 一个文本文件；
-口令存到 `~/.config/pqchsm/token`（0600）之后就不再需要板子的 shell。
-手上已经有口令的话连这一步都免了：`HSM_TOKEN=<口令> ./tools/demo_remote.sh`。
+9797 口。`--provision` 是唯一会用 SSH 的动作，它做四件事：生成一套设备 PKI、
+把设备证书装到板上、在本机留一份客户端凭据、给板子对时。装完之后
+（凭据在 `~/.config/pqchsm/pki`，0600）就不再需要板子的 shell。
 
-⚠️ 真实部署里口令应当**带外分发**，而不是每次 ssh 去 cat。`--fetch-token`
-只是给手上就有板子 shell 的人省事。
+⚠️ **远程口是 mTLS，不再是明文口令**（2026-08-18 改）。以前那条
+`--fetch-token` 的路已经删掉 —— 它是明文 TCP + 一条静态预共享口令：
+同网段抓一次包就永久接管，整条会话既不保密也不防篡改，认证帧还能重放。
+换掉的理由与新设计写在 `service/pqcs_tls.h` 的文件头。
 
-覆盖用环境变量：`BOARD=… PORT=… HSM_TOKEN=… HSM_TOKEN_FILE=… SSH_KEY=…`。
+⚠️ 真实部署里客户端证书应当**带外分发**（或由操作端自己出 CSR 送签），
+`--provision` 只是给手上就有板子 shell 的人省事。**CA 私钥只留在本机**，
+一步都不上板。
+
+⚠️ **两边时钟差太多会握不上手**：证书有 notBefore/notAfter，而这块板的时钟
+掉过就会落到证书生效之前。更坑的是 TLS 1.3 的拒绝是**握手之后**才送到的，
+症状表现为"设备信息是一串乱码"而不是"认证失败"。所以 `--provision` 里有一步
+对时（并写 RTC），`hsm-boot.sh` 开机也会做一次"时钟不许比 SD 上的凭据还早"
+的兜底。客户端那侧则在开设备时多走一个 OP_PING 来回，把这类拒绝逼出来。
+
+覆盖用环境变量：`BOARD=… PORT=… PQCHSM_PKI=… DEVICE_CN=… SSH_KEY=…`。
 **每一步失败都会给出可执行的下一步**，而不是只回一个非零退出码。
 
 ### 手工做同样的事（想知道每一步在干什么就看这里）
 
 `sdf_demo` 的本机版和远程版是**同一个程序**，只有开设备那一行不同。
-它只链接 `libsdfe`（纯 socket，**不依赖 OpenSSL / liboqs**），所以两个文件就能编：
+它链接 `libsdfe` 与 OpenSSL（**OpenSSL 只做 TLS 传输**，里面没有 ML-KEM /
+ML-DSA / SM4 / SM3 的任何实现），三个文件就能编：
 
 ```bash
-cc -O2 -Iservice -o sdf_demo service/sdf_demo.c service/libsdfe.c
+cc -O2 -Iservice -o sdf_demo \
+   service/sdf_demo.c service/libsdfe.c service/pqcs_tls.c -lssl -lcrypto
+# macOS：系统自带的是 LibreSSL，缺 TLS 1.3 的 API，要用 Homebrew 那份
+#   P=$(brew --prefix openssl@3); cc -O2 -I$P/include -Iservice ... -L$P/lib -lssl -lcrypto
 ```
 
 ⚠️ 仓库里**没有** `sdf_demo` 的 CMake 目标（上面那行就是它唯一的编译方式）。
@@ -167,22 +183,22 @@ cc -O2 -Iservice -o sdf_demo service/sdf_demo.c service/libsdfe.c
 会生成它。
 
 ```bash
-# 取一次性口令（板子的 dropbear 是 2019.78，需要这两个 -o；见下）
-TOK=$(ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
-         root@192.168.50.175 'cat /media/sd-mmcblk1p2/hsm/hsm_token')
-
-./sdf_demo 192.168.50.175 "$TOK"        # 端口默认 9797，可加第三个参数改
+# 凭据目录里要有 hsm_ca.crt / client.crt / client.key
+./sdf_demo 192.168.50.175 ~/.config/pqchsm/pki 9797 axu3egb-hsm-01
+#          └ 板子 IP      └ 凭据目录            └ 口  └ 期望的设备证书 CN（可省）
 ```
 
-⚠️ **现代 OpenSSH 连这块板要两个 `-o`**：`HostKeyAlgorithms=+ssh-rsa` 让它接受板子的
-RSA 主机密钥，`PubkeyAcceptedAlgorithms=+ssh-rsa` 让它愿意用 RSA(SHA-1) 签名认证。
+⚠️ **现代 OpenSSH 连这块板要两个 `-o`**（只跟 `--provision` 那一步有关）：
+`HostKeyAlgorithms=+ssh-rsa` 让它接受板子的 RSA 主机密钥，
+`PubkeyAcceptedAlgorithms=+ssh-rsa` 让它愿意用 RSA(SHA-1) 签名认证。
 少了后者会得到 `Permission denied (publickey,password)` —— **不是公钥没装**，
 而是本机 OpenSSH 默认不再发这种签名。
 
-⚠️ **没有 `hsm_token` 文件 daemon 就不监听**（fail-closed）。远程口是 TCP **9797**。
+⚠️ **板上 `pki/` 里三样（`hsm_ca.crt` / `hsm_device.crt` / `hsm_device.key`）
+缺一，daemon 就不监听 TCP**（fail-closed）。远程口是 TCP **9797**。
 
-`sdf_demo` **只**链接 `libsdfe`——完全不链接任何密码库——所以它自己算不出任何
-东西。它打印出的每一个正确数值都出自 FPGA。
+`sdf_demo` **不链接任何密码算法库**——它链的 OpenSSL 只做 TLS 传输——所以它自己
+算不出任何东西。它打印出的每一个正确数值都出自 FPGA。
 
 ```
 [device] pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000

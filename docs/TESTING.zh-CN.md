@@ -29,15 +29,23 @@
 | SP 800-90B 重启测试 | H_restart = 0.745427，通过 | `board/logs/RESULT_restart.txt` |
 | Decaps 时序，合法 vs 隐式拒绝 | 中位差 0.000 % | `board/logs/RESULT_seckem3.txt` |
 | 经 SDF 接口的端到端 | 通过，另加 6/6 反证（测于 RAZ/WI 之前，当时记录为 DECERR） | `board/logs/RESULT_service.txt` |
-| `ctest`（主机软件） | 46 / 46，4109 条断言 | `ctest --test-dir build` |
+| `ctest`（主机软件） | 51 / 51 全过 | `ctest --test-dir build` |
 | ASan + UBSan / TSan / `leaks` | 全过 · 0 竞争 · 0 泄漏 | `docs/USAGE.zh-CN.md` |
 | libFuzzer | 138 万次执行，无崩溃 | `./tools/fuzz.sh` |
 | aarch64 Linux（GCC 12） | 全过 | `./tools/aarch64_test.sh` |
 | RAZ/WI 边界反证，真硅 | 6 / 6 —— 每个 `SECURE_ONLY=1` 的核在放着 `0x00010000` 的地址上读回 0；`SECURE_ONLY=0` 的对照读到真值 | `board/logs/RESULT_secneg.txt` |
 | **任何用户态程序都崩不了板**，真硅 | 11 / 11 —— 九类地址各读写 2000 次（共 36,000 笔），板子活着 | `board/logs/RESULT_nocrash.txt` |
 | 网络穿过 PL 重配 | eth1（PS GEM）在解绑驱动 + 装载密码位流全程不掉 | `board/logs/deadman_eth1.log` |
-| 线协议畸形输入 | 26 / 26 —— 没有一条请求能让服务卡住、死掉、或被悄悄算成别的东西 | `service/wire_fuzz.py` |
-| TCP 远程调用 | 另一台机器完成完整 KEM + SM4；错口令/短口令/无口令全部拒绝 | `service/sdf_demo.c` |
+| 线协议畸形输入 | 32 / 32 —— 没有一条请求能让服务卡住、死掉、或被悄悄算成别的东西（现在跑在 mTLS 之上） | `service/wire_fuzz.py` |
+| 远程调用（**mTLS**） | 另一台机器完成完整九节演示（KEM / 三个参数集的 ML-DSA / 四种分组模式 / SM3 / 句柄失效反证）；**别家 CA 签的客户端证书被拒**，实测于真板子 | `tools/demo_remote.sh`、`service/sdf_demo.c` |
+| mTLS 层本身 | 4 / 4 —— 一条正例 + 三条否定（别家 CA / 不出示证书 / CN 不在 ACL）。**否定是主体**："能连上"只证明配置没写错 | `tools/tls_regress.sh` |
+| 两条 P0 并发缺陷 | 各自在修复前**确实会红**：liboqs 随机源串扰 849/3000 次、自测闸门 85 万次不自洽 | `tests/unit/test_crypto_concurrent.c` |
+| 会话 close 的 ABA | 修复前同一句柄被 4 线程 close 成功 311 次（应为 300），且旁观线程的会话被误抹 2 次 | `tests/unit/test_slot_concurrent.c` |
+| 密钥库 fail-closed | 库损坏/读不了时 daemon 拒绝启动，**且原文件一字节不改** | `tools/daemon_failclosed.sh` |
+| 安全状态抗掉电 | PIN 失败计数、锁定、解锁**不经任何 save 也在盘上**（模拟拔电后重载） | `tests/unit/test_keystore.c` |
+| 防回滚锚点两种强度 | 文件锚点**确实能被"两个文件一起换"绕过**（把弱点钉住）；硬件单调锚点同样的攻击不成立 | `tests/unit/test_keystore.c` |
+| PRODUCTION 里没有桩根密钥 | 目标文件里搜不到那段字面量，**且带空对照**（DEV 里必须搜得到） | `tools/check_profile.sh` |
+| eMMC RPMB | 硬件够（4 MB、内核支持），但**这块板的认证密钥已烧且丢失** —— 结论与经过见 `docs/SECURITY.zh-CN.md` 2026-08-18 那节 | `board/src/rpmb_probe.c`、`rpmb_tool.c` |
 
 ## 原则
 
@@ -287,3 +295,29 @@ PQC_CHARACTERIZE=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 
 在板子上，每一个碰到 PL 的动作都必须走 harness——见
 [USAGE.zh-CN.md](USAGE.zh-CN.md)。
+
+## CI 门禁：哪些 job 应当设为 required（**需要在网页端开**）
+
+`main` 目前**没有开分支保护，也没有必需检查** —— 也就是说 `.github/workflows/ci.yml`
+跑不跑得过，都拦不住任何一次推送。这一节给出应当设成 required 的清单；
+**设置本身只能在 GitHub 网页端做**（Settings → Branches → Add branch ruleset），
+仓库里的文件改不了它，所以这里只能写清楚该怎么设。
+
+| Job（`ci.yml` 里的 `name:`） | 覆盖什么 | 为什么必须拦 |
+|---|---|---|
+| `RTL — lint, simulate, synthesise` | Verilator/Icarus lint、cocotb 全量回归、Yosys 可综合性 | RTL 的错在仿真里是几秒，在板子上是一次断电 |
+| `Host software — build and test` | `cmake` + `ctest`（51 项） | 两条 P0 并发缺陷的回归就在这里；它们**单线程跑一万遍也不会红** |
+| `Static analysis` | 常量时间扫描、清零结构检查、SP 800-90B 自测 | 这三条测的是"看不见的性质"，没有它们功能测试全绿也说明不了什么 |
+| `Service layer` | daemon/客户端构建 + `tls_regress.sh` | 远程口是 mTLS，四条用例里三条是否定用例 —— 漏配 `FAIL_IF_NO_PEER_CERT` 只有它们能发现 |
+
+建议一并打开的两条：
+
+- **Require a pull request before merging**，至少 1 个 review。理由不是流程洁癖：
+  这个仓库里大量决定写在注释里（"别改回去"那类），而那些决定只有在 review 里
+  才会被读到；直接 push 到 `main` 等于绕过唯一一次被读的机会。
+- **Require branches to be up to date before merging**：RTL 与主机侧有共享的常量
+  （`wire.h` 的 `PQCS_MAXPAY`、寄存器偏移），两条分支各自绿、合起来红是常见情形。
+
+⚠️ 板上那几项（`--smoke` 九节、`wire_fuzz.py`、RPMB）**进不了 CI** —— 它们要真板子。
+它们的位置是"合并前人工跑一遍"，清单见上面的表。别把它们写进 required：
+一个永远拿不到 runner 的必需检查会把仓库锁死。

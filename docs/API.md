@@ -62,7 +62,22 @@ open sessions, and never see each other's handles.
 
 ```c
 /* device and session */
-int SDFE_OpenDevice(SDFE_HANDLE *phDev);
+int SDFE_OpenDevice(SDFE_HANDLE *phDev);           /* local UNIX socket */
+
+/* Remote: **mTLS** (TLS 1.3, certificates on both sides). The first three
+ * fields are mandatory.
+ * ⚠️ Before 2026-08-18 this took a `const char *token` (plaintext TCP plus a
+ *    pre-shared secret). That path is gone, not kept for compatibility — the
+ *    reasoning is in service/pqcs_tls.h. */
+typedef struct {
+    const char *ca_file;      /* device CA certificate: verifies the board */
+    const char *cert_file;    /* this client's certificate */
+    const char *key_file;     /* this client's private key */
+    const char *expect_cn;    /* expected device CN; NULL = chain check only */
+} SDFE_TLS_CREDS;
+int SDFE_OpenDeviceRemote(SDFE_HANDLE *phDev, const char *host,
+                          int port, const SDFE_TLS_CREDS *creds);
+
 int SDFE_CloseDevice(SDFE_HANDLE hDev);
 int SDFE_OpenSession(SDFE_HANDLE hDev, SDFE_HANDLE *phSession);
 int SDFE_CloseSession(SDFE_HANDLE hSession);

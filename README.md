@@ -111,7 +111,8 @@ vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 ### Calling it like a crypto module
 
 `service/` gives an application the interface a real HSM exposes. The demo links
-**only** `libsdfe` — no crypto library at all — so any correct answer it prints
+**no cryptographic algorithm library** — the OpenSSL it links serves the remote
+port's TLS transport only — so any correct answer it prints
 can only have come from the FPGA.
 
 ```c

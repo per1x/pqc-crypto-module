@@ -143,54 +143,73 @@ The daemon needs `/dev/secmmio`, which is provided by the kernel module in
 ### One-shot script (**start here**)
 
 ```bash
-./tools/demo_remote.sh --fetch-token   # once: cache the token locally
-./tools/demo_remote.sh                 # then purely local: build + TCP call, no SSH
-./tools/demo_remote.sh --smoke         # minimal smoke, key lines only
-./tools/demo_remote.sh --status        # just check the device answers
+./tools/demo_remote.sh --provision   # once: make a PKI, install it, keep the client creds
+./tools/demo_remote.sh               # then purely local: build + mTLS call, no SSH
+./tools/demo_remote.sh --smoke       # minimal smoke, key lines only
+./tools/demo_remote.sh --status      # just check the device answers
 ```
 
 **No cryptographic operation goes through SSH.** The client is a native local binary
-that opens TCP to port 9797 on the board. `--fetch-token` is the only action that uses
-SSH, and only to `cat` a text file; once the token is cached in
-`~/.config/pqchsm/token` (0600) a board shell is never needed again. If you already
-have the token, skip even that: `HSM_TOKEN=<token> ./tools/demo_remote.sh`.
+that opens TCP to port 9797 on the board. `--provision` is the only action that uses
+SSH; it generates a device PKI, installs the device certificate on the board, keeps a
+client certificate locally (`~/.config/pqchsm/pki`, 0600) and syncs the board clock.
+After that a board shell is never needed again.
 
-⚠️ In a real deployment the token should be distributed out of band, not fetched over
-SSH each time. `--fetch-token` is a convenience for people who already have a board shell.
+⚠️ **The remote port is mTLS now, not a shared secret** (changed 2026-08-18). The old
+`--fetch-token` path is gone. It was plaintext TCP plus one static pre-shared token:
+a single packet capture on the same segment took over the device permanently, the
+session had neither confidentiality nor integrity, and the auth frame could be
+replayed. The reasoning and the new design are in `service/pqcs_tls.h`.
 
-Overrides: `BOARD=… PORT=… HSM_TOKEN=… HSM_TOKEN_FILE=… SSH_KEY=…`. **Every failure
+⚠️ In a real deployment client certificates should be distributed out of band (or the
+operator generates a CSR and has it signed). `--provision` is a convenience for people
+who already have a board shell. **The CA private key never leaves your machine.**
+
+⚠️ **A large clock skew breaks the handshake.** Certificates carry notBefore/notAfter
+and this board's clock can fall behind them. Worse, a TLS 1.3 rejection arrives
+*after* the client considers the handshake complete, so the symptom is "device info
+prints garbage", not "authentication failed". Hence `--provision` syncs the clock (and
+writes the RTC), `hsm-boot.sh` refuses to run with a clock older than the credentials
+on the SD card, and the client does one OP_PING round trip at open to surface such
+rejections.
+
+Overrides: `BOARD=… PORT=… PQCHSM_PKI=… DEVICE_CN=… SSH_KEY=…`. **Every failure
 prints an actionable next step** rather than just a non-zero exit code.
 
 ### Doing the same by hand (read this to see what each step does)
 
 The local and remote forms are the **same program**; only the device-open line
-differs. It links `libsdfe` only (pure sockets, **no OpenSSL, no liboqs**), so two
-files are all it takes:
+differs. It links `libsdfe` and OpenSSL — **OpenSSL is used for TLS transport only**;
+there is no ML-KEM, ML-DSA, SM4 or SM3 implementation in it:
 
 ```bash
-cc -O2 -Iservice -o sdf_demo service/sdf_demo.c service/libsdfe.c
+cc -O2 -Iservice -o sdf_demo \
+   service/sdf_demo.c service/libsdfe.c service/pqcs_tls.c -lssl -lcrypto
+# macOS ships LibreSSL, which lacks the TLS 1.3 API — use Homebrew's openssl@3:
+#   P=$(brew --prefix openssl@3); cc -O2 -I$P/include -Iservice ... -L$P/lib -lssl -lcrypto
 ```
 
 ⚠️ There is **no CMake target** for `sdf_demo`; the line above is the only way to
 build it. The `./service/sdf_demo` referenced above is a hand-built artifact.
 
 ```bash
-TOK=$(ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
-         root@192.168.50.175 'cat /media/sd-mmcblk1p2/hsm/hsm_token')
-
-./sdf_demo 192.168.50.175 "$TOK"        # port defaults to 9797
+# the credential directory must hold hsm_ca.crt / client.crt / client.key
+./sdf_demo 192.168.50.175 ~/.config/pqchsm/pki 9797 axu3egb-hsm-01
+#          └ board IP     └ credentials        └ port └ expected device CN (optional)
 ```
 
-⚠️ Modern OpenSSH needs **both** `-o` flags for this board (dropbear 2019.78):
-without `PubkeyAcceptedAlgorithms=+ssh-rsa` you get
+⚠️ Modern OpenSSH needs **both** `-o` flags for this board (dropbear 2019.78), which
+only matters for `--provision`: without `PubkeyAcceptedAlgorithms=+ssh-rsa` you get
 `Permission denied (publickey,password)` — the key *is* installed; your client
 simply refuses to offer an RSA/SHA-1 signature.
 
-⚠️ The daemon does not listen without an `hsm_token` file (fail-closed). The remote
+⚠️ The daemon does not listen unless all three of `hsm_ca.crt`, `hsm_device.crt` and
+`hsm_device.key` are present in the board's `pki/` directory (fail-closed). The remote
 port is TCP **9797**.
 
-`sdf_demo` links **only** `libsdfe` — no crypto library at all — so it cannot
-compute anything itself. Every correct value it prints came out of the FPGA.
+`sdf_demo` links **no cryptographic algorithm library** — the OpenSSL it links does
+TLS transport only — so it cannot compute anything itself. Every correct value it
+prints came out of the FPGA.
 
 ```
 [device] pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000

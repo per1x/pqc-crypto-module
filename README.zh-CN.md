@@ -89,8 +89,16 @@ vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 
 ### 像调用密码机一样调用它
 
-`service/` 给应用提供的是一台真实密码机所暴露的接口。演示程序**只**链接
-`libsdfe`——完全不链接任何密码库——因此它打印出的任何正确结果都只可能来自 FPGA。
+`service/` 给应用提供的是一台真实密码机所暴露的接口。演示程序**不链接任何密码
+算法库**（它链的 OpenSSL 只做远程口的 TLS 传输），因此它打印出的任何正确结果
+都只可能来自 FPGA。
+
+从另一台机器一条命令跑完整演示（远程口是 **mTLS**）：
+
+```bash
+./tools/demo_remote.sh --provision   # 只需一次：生成 PKI、装板子、留凭据
+./tools/demo_remote.sh --smoke       # 之后纯本地，零 SSH
+```
 
 ```c
 #include "sdfe.h"

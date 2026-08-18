@@ -38,7 +38,15 @@ repository.
 | **No user-space program can crash the board**, on silicon | 11 / 11 — nine address classes, 2000 reads + 2000 writes each (36,000 accesses), board alive | `board/logs/RESULT_nocrash.txt` |
 | Network survives PL reconfiguration | eth1 (PS GEM) stays up across driver unbind + crypto bitstream load | `board/logs/deadman_eth1.log` |
 | Malformed wire requests | 26 / 26 — no request hangs the service, kills it, or is silently computed as something else | `service/wire_fuzz.py` |
-| Remote call over TCP | full KEM + SM4 from another machine; wrong/short/absent token all refused | `service/sdf_demo.c` |
+| Remote call (**mTLS**) | full nine-section demo from another machine (KEM / ML-DSA at all three parameter sets / four block modes / SM3 / stale-handle counter-proof); **a client certificate from a different CA is refused**, measured against the real board | `tools/demo_remote.sh`, `service/sdf_demo.c` |
+| The mTLS layer itself | 4 / 4 — one positive plus three negatives (foreign CA / no client certificate / CN not in the ACL). **The negatives are the point**; "it connects" only proves the configuration is not broken | `tools/tls_regress.sh` |
+| Two P0 concurrency defects | each is demonstrably **red before the fix**: liboqs RNG cross-talk 849/3000 times, self-test gate inconsistent 852 862 times | `tests/unit/test_crypto_concurrent.c` |
+| Session-close ABA | before the fix, four threads closing one handle succeeded 311 times (should be 300) and a bystander's session was wiped twice | `tests/unit/test_slot_concurrent.c` |
+| Keystore fail-closed | a corrupt or unreadable keystore makes the daemon refuse to start **without touching the file** | `tools/daemon_failclosed.sh` |
+| Security state survives power loss | PIN failure counts, lockout and unlock are **on disk without any save call** (simulated pull-the-plug, then reload) | `tests/unit/test_keystore.c` |
+| Both rollback-anchor strengths | the file anchor **can indeed be bypassed by rolling both files back** (the weakness is pinned as a test); a hardware-monotonic anchor defeats the same attack | `tests/unit/test_keystore.c` |
+| No stub root key in PRODUCTION | the literal is absent from the object file, **with a null control** (it must be present in DEV) | `tools/check_profile.sh` |
+| eMMC RPMB | the hardware is sufficient (4 MB, kernel support), but **this board's authentication key is programmed and lost** — see the 2026-08-18 section of `docs/SECURITY.md` | `board/src/rpmb_probe.c`, `rpmb_tool.c` |
 
 ## Principles
 
@@ -332,3 +340,33 @@ PQC_CHARACTERIZE=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 
 On the board, every action that touches the PL must go through the harness —
 see [USAGE.md](USAGE.md#on-the-board).
+
+## CI gating: which jobs should be required (**must be enabled in the web UI**)
+
+`main` currently has **no branch protection and no required checks** — whether
+`.github/workflows/ci.yml` passes does not block any push. This section lists what
+should be marked required. **The setting itself can only be made in the GitHub web UI**
+(Settings → Branches → Add branch ruleset); no file in the repository can do it, so all
+this document can do is say what to configure.
+
+| Job (`name:` in `ci.yml`) | Covers | Why it must block |
+|---|---|---|
+| `RTL — lint, simulate, synthesise` | Verilator/Icarus lint, full cocotb regression, Yosys synthesisability | an RTL mistake costs seconds in simulation and a power cycle on the board |
+| `Host software — build and test` | `cmake` + `ctest` (51 tests) | the two P0 concurrency regressions live here, and they **stay green forever under single-threaded runs** |
+| `Static analysis` | constant-time audit, zeroization structure check, SP 800-90B self-test | these test properties functional tests cannot observe |
+| `Service layer` | daemon/client build + `tls_regress.sh` | the remote port is mTLS and three of its four cases are negatives — nothing else catches a missing `FAIL_IF_NO_PEER_CERT` |
+
+Two settings worth enabling alongside:
+
+- **Require a pull request before merging**, at least one review. Not process hygiene:
+  a great many decisions in this repository live in comments ("do not change this
+  back"), and those are only ever read during review; pushing straight to `main`
+  bypasses the one moment they get read.
+- **Require branches to be up to date before merging**: RTL and host share constants
+  (`PQCS_MAXPAY` in `wire.h`, register offsets), and "both branches green, merge red"
+  is the normal failure here.
+
+⚠️ The on-board checks (the nine-section `--smoke`, `wire_fuzz.py`, RPMB) **cannot go
+into CI** — they need the real board. They belong to a manual pre-merge pass; the list
+is in the table above. Do not mark them required: a required check that can never get a
+runner locks the repository.

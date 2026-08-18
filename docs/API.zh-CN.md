@@ -55,9 +55,25 @@ GM/T 0018 的惯例，但国密标准尚未定义 ML-KEM 接口，因此这些�
 **这个库不做任何密码运算。** 它把一次调用翻译成一条发给 `pqchsm_fpgad` 的请求。
 它是无状态的；不同进程可以各自链接它、各自开会话，永远看不到对方的句柄。
 
+它链接 OpenSSL，但**只用来做远程口的 TLS 传输** —— 库里没有 ML-KEM / ML-DSA /
+SM4 / SM3 的任何实现，这一点没有因为引入 TLS 而改变。
+
 ```c
 /* 设备与会话 */
-int SDFE_OpenDevice(SDFE_HANDLE *phDev);
+int SDFE_OpenDevice(SDFE_HANDLE *phDev);           /* 本机 UNIX socket */
+
+/* 远程：走 **mTLS**（TLS 1.3，双向证书）。creds 里三样必给。
+ * ⚠️ 2026-08-18 之前这里是一个 `const char *token`（明文 TCP + 预共享口令），
+ *    那条路已经整个删掉，不是保留兼容 —— 理由见 service/pqcs_tls.h。 */
+typedef struct {
+    const char *ca_file;      /* 设备 CA 的证书：用它验板子 */
+    const char *cert_file;    /* 本客户端的证书：板子用它验我 */
+    const char *key_file;     /* 本客户端的私钥 */
+    const char *expect_cn;    /* 期望的设备 CN；NULL = 只验签发链 */
+} SDFE_TLS_CREDS;
+int SDFE_OpenDeviceRemote(SDFE_HANDLE *phDev, const char *host,
+                          int port, const SDFE_TLS_CREDS *creds);
+
 int SDFE_CloseDevice(SDFE_HANDLE hDev);
 int SDFE_OpenSession(SDFE_HANDLE hDev, SDFE_HANDLE *phSession);
 int SDFE_CloseSession(SDFE_HANDLE hSession);
@@ -66,7 +82,7 @@ int SDFE_GetDeviceInfo(SDFE_HANDLE hSession, char *buf, size_t cap);
 /* 随机数——来自 PL 里的环形振荡器源，不是软件 PRNG */
 int SDFE_GenerateRandom(SDFE_HANDLE hSession, uint32_t len, uint8_t *out);
 
-/* ML-KEM——dk 留在守护进程；应用拿到的是句柄 */
+/* ML-KEM —— dk 进 PL 的片内金库（**不是**留在守护进程内存里）；应用拿到的是句柄 */
 int SDFE_GenerateKeyPair_MLKEM(SDFE_HANDLE hSession, uint32_t pset,
                                uint8_t *ek, uint32_t *ek_len,
                                uint32_t *key_handle);
