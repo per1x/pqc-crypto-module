@@ -11,10 +11,23 @@
  * 派生链的**结构**（域分隔串、每类子密钥的用途隔离、KEK 轮换流程）是纯软件，
  * 只有"根密钥从哪来"这一个点需要硬件。所以把根密钥抽象成 provider：
  *
- *     stub    —— 当前唯一实现，源码里一段固定的假根密钥（src/crypto/kdr.c）
- *     bbram   —— ：Zynq-7000 的 BBRAM AES-256 密钥
- *     efuse   —— ：eFUSE（⚠️ 烧录不可逆，先在 BBRAM 上跑通再考虑）
- *     puf     —— ：Zynq UltraScale+ 的 PUF 生成设备唯一 KEK（首选）
+ * ⚠️ 下面四行里**只有前两个真的存在**，后三个是规划，一行代码都还没有。
+ *    别把这张表读成"四个 provider 都能选"。
+ *
+ *   【已实现】
+ *     stub       —— 源码里一段固定的假根密钥（src/crypto/kdr.c）；
+ *                   hardware_backed=0, device_bound=0；PRODUCTION 下整段编译掉
+ *     device-dna —— 根 = KDF(设备 DNA)（src/crypto/kdr_dna.c）；
+ *                   hardware_backed=0, device_bound=1（防克隆，非机密）
+ *
+ *   【规划中，尚无实现】—— 无函数声明、无 .c 文件，全仓 grep 零命中
+ *     bbram      —— BBRAM AES-256 密钥（注：这块 AXU3EGB 的 VCC_BATT 无电池）
+ *     efuse      —— eFUSE FUSE_AES（⚠️ 烧录不可逆，落在本项目红线内）
+ *     puf        —— Zynq UltraScale+ 的 PUF 生成设备唯一 KEK（量产首选）
+ *
+ *    这三个要落地，不止是"烧片"：还要接上 pqchsmd 的 provider 安装（现在它
+ *    一个都不装）、把 p11_module 里写死的 strcmp("device-dna") 换成注册表、
+ *    以及一条换根后的 keystore 迁移路径。详见 docs/reference/HSM-COMPARISON.md §4.3。
  *
  * 换 provider 时上层一行不改 —— 与 pqchsm/pqc.h 的算法后端 vtable 是同一个套路。
  *
