@@ -1,4 +1,7 @@
-global-incdirs-y += . ../include config
+# ../../include 是仓库根的 include/ —— PWRP 线格式的**唯一**定义
+# （pqchsm/pwrp_format.h）在那里，普通世界那份实现 include 的是同一个头。
+# 见 ta_wrap.h 顶上的说明。
+global-incdirs-y += . ../include ../../include config
 
 srcs-y += pqchsm_ta.c
 srcs-y += ta_fips202.c

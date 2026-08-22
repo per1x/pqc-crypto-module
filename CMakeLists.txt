@@ -251,6 +251,25 @@ pqchsm_test(test_kdr       tests/unit/test_kdr.c)
 pqchsm_test(test_proto     tests/unit/test_proto.c)
 pqchsm_test(test_inject    tests/unit/test_inject.c)
 
+# ---- 跨世界一致性：TA 那几个 .c 用主机编译器一起编进来 ----------------
+# KMAC-256 与 PWRP 各有两份实现（TA 里没有 OpenSSL，自实现是正当的），
+# 线格式的**定义**已经收进 include/pqchsm/pwrp_format.h 一处，但**实现**
+# 是否跑偏只能靠对拍钉住。漂移的症状是"跨世界那一次认证失败"，
+# 与密钥不对/文件被改分不开，所以必须有这条。
+add_executable(test_cross_world
+  tests/unit/test_cross_world.c
+  tee/ta/ta_kdf.c
+  tee/ta/ta_fips202.c
+  tee/ta/ta_wrap.c
+  tee/ta/ta_random.c)
+target_link_libraries(test_cross_world PRIVATE pqchsm OpenSSL::Crypto)
+target_include_directories(test_cross_world PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests
+  ${CMAKE_CURRENT_SOURCE_DIR}/tee/ta
+  ${CMAKE_CURRENT_SOURCE_DIR}/tee/ta/config
+  ${CMAKE_CURRENT_SOURCE_DIR}/tee/include)
+
+
 # PKCS#11 测试要 dlopen 真正的 .dylib —— 测的是发布出去的那个库，
 # 包括符号导出与函数表填得对不对；直接链接会绕过这些。
 add_executable(test_p11 tests/unit/test_p11.c)
@@ -300,6 +319,7 @@ add_test(NAME audit         COMMAND test_audit)
 add_test(NAME kdr           COMMAND test_kdr)
 add_test(NAME proto         COMMAND test_proto)
 add_test(NAME inject        COMMAND test_inject)
+add_test(NAME cross_world  COMMAND test_cross_world)
 add_test(NAME p11           COMMAND test_p11)
 
 # pkcs11-tool 冒烟 + SoftHSMv2 行为对比。没装 OpenSC 时脚本自己 SKIP（退出 0）。

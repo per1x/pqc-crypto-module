@@ -8,7 +8,8 @@
 #include <openssl/rand.h>
 #include <string.h>
 
-static const uint8_t WRAP_MAGIC[4] = { 'P', 'W', 'R', 'P' };
+/* magic / 版本 / 字段偏移 / 头部组装全部来自 pqchsm/pwrp_format.h
+ * （wrap.h 已经把它 include 进来）—— 这里一个格式常量都不许再定义。 */
 
 size_t pqc_wrap_blob_len(size_t pt_len)
 {
@@ -22,33 +23,6 @@ int pqc_kek_derive(const uint8_t *salt, size_t salt_len, uint8_t kek[PQC_KEK_LEN
 	}
 	/* ：KEK 由 KDR 现场派生，不落盘。域分隔串固定为 "storage"。 */
 	return pqc_kdr_derive("pqc-hsm/storage-kek", salt, salt_len, kek, PQC_KEK_LEN);
-}
-
-static void put_u16(uint8_t *p, uint16_t v)
-{
-	p[0] = (uint8_t)v;
-	p[1] = (uint8_t)(v >> 8);
-}
-
-static void put_u32(uint8_t *p, uint32_t v)
-{
-	for (int i = 0; i < 4; i++) {
-		p[i] = (uint8_t)(v >> (8 * i));
-	}
-}
-
-static uint16_t get_u16(const uint8_t *p)
-{
-	return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
-}
-
-static uint32_t get_u32(const uint8_t *p)
-{
-	uint32_t v = 0;
-	for (int i = 0; i < 4; i++) {
-		v |= (uint32_t)p[i] << (8 * i);
-	}
-	return v;
 }
 
 int pqc_wrap_with_nonce(const uint8_t *kek, size_t kek_len,
@@ -71,12 +45,8 @@ int pqc_wrap_with_nonce(const uint8_t *kek, size_t kek_len,
 		return -1;
 	}
 
-	memcpy(blob, WRAP_MAGIC, 4);
-	put_u16(blob + 4, PQC_WRAP_VERSION);
-	put_u16(blob + 6, PQC_WRAP_ALG_AES256GCM);
-	put_u32(blob + 8, (uint32_t)aad_len);
-	put_u32(blob + 12, (uint32_t)pt_len);
-	memcpy(blob + PQC_WRAP_HDR_LEN, nonce, PQC_WRAP_NONCE_LEN);
+	pwrp_hdr_put(blob, (uint32_t)aad_len, (uint32_t)pt_len);
+	memcpy(blob + PWRP_OFF_NONCE, nonce, PQC_WRAP_NONCE_LEN);
 
 	uint8_t *ct  = blob + PQC_WRAP_HDR_LEN + PQC_WRAP_NONCE_LEN;
 	uint8_t *tag = ct + pt_len;
@@ -145,18 +115,18 @@ int pqc_unwrap(const uint8_t *kek, size_t kek_len,
 	if ((!aad && aad_len) || blob_len < PQC_WRAP_OVERHEAD) {
 		return -1;
 	}
-	if (memcmp(blob, WRAP_MAGIC, 4) != 0) {
+	uint32_t hdr_aad_len = 0, hdr_pt_len = 0;
+
+	if (pwrp_hdr_parse(blob, &hdr_aad_len, &hdr_pt_len) != 0) {
 		return -1;
 	}
-	if (get_u16(blob + 4) != PQC_WRAP_VERSION ||
-	    get_u16(blob + 6) != PQC_WRAP_ALG_AES256GCM) {
+	/* 头里声明的 aad_len 必须与调用方给的一致 —— 否则就是拿别处的元数据来配。
+	 * 这一条**留在调用方**判：只有它知道自己给了多长的 aad（见 pwrp_hdr_parse
+	 * 的说明）。 */
+	if (hdr_aad_len != (uint32_t)aad_len) {
 		return -1;
 	}
-	/* 头里声明的 aad_len 必须与调用方给的一致 —— 否则就是拿别处的元数据来配 */
-	if (get_u32(blob + 8) != (uint32_t)aad_len) {
-		return -1;
-	}
-	size_t ct_len = get_u32(blob + 12);
+	size_t ct_len = hdr_pt_len;
 	if (ct_len != blob_len - PQC_WRAP_OVERHEAD) {
 		return -1;
 	}
