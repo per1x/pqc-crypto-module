@@ -36,38 +36,53 @@
 /*
  * CMD_GET_INFO：握手/自检。
  *   [0] value.out: a = 协议版本(PQCHSM_TA_PROTO_VERSION), b = 特性位
- * 特性位：bit0 = 支持 KDF；bit1 = 支持 WRAP/UNWRAP；bit2 = 支持 ML-KEM；
- *        bit3 = 支持 ML-DSA
+ * 特性位：bit0 = 支持 KDF（**已删除，恒 0**）；
+ *        bit1 = 支持 WRAP/UNWRAP（**已删除，恒 0**）；
+ *        bit2 = 支持 ML-KEM；bit3 = 支持 ML-DSA
+ * bit0/bit1 保留位置而不是让后面的位往前挪：挪了的话旧 host 会把
+ * "支持 ML-KEM" 读成 "支持 KDF"。
  */
 #define TA_PQCHSM_CMD_GET_INFO        0
 
-/*
- * CMD_KDF_DERIVE：由 TA 内 KDR 派生子密钥（KMAC-256）。
- *   [0] memref.in:     label（NUL 结尾字符串，域分隔用，非空）
- *   [1] memref.in:     salt（可为空）
- *   [2] memref.output: 派生结果（调用方给定长度，≤256B）
- * 返回 TEE_SUCCESS 或 TEE_ERROR_BAD_PARAMETERS。
+/* ============================================================================
+ * 【已删除的三条命令：1 / 3 / 4 —— 编号永久保留，不得复用】
+ * ============================================================================
+ * 它们是登记表 PS-22 / PS-24 那两颗地雷。删掉而不是收紧，是因为**产品路径
+ * 一条都不用它们**（KEYGEN 返回包裹好的 blob，SIGN/DECAPS 在 TA 内部自己
+ * 解包），而它们各自都是一个完整的谕言机：
+ *
+ *  · CMD_KDF_DERIVE（1）：拿 TA 内的 KDR 按**调用方给的任意 label + 任意
+ *    salt** 派生并把结果交出来。于是任何普通世界进程只要写
+ *        label = "pqc-hsm/storage-kek"、salt = keystore 头部那 16 字节明文
+ *    就能把**存储 KEK 原样要出来**。KDR 的全部意义是"只进不出"，而这条
+ *    命令是一个带域分隔参数的读出口。
+ *    ⚠️ 今天泄的还只是由 SHA-256(DNA) 退化根派生出来的 KEK；**等量产接上
+ *    真 HUK，泄的就是真 KEK** —— 信任根越真，这个洞越值钱。
+ *
+ *  · CMD_KEK_SET（2，保留）+ CMD_UNWRAP（4）：前者让调用方指定 salt 来定
+ *    KEK，后者拿这个 KEK 解开**任意** blob。两条合起来就是一台通用解包机：
+ *    拿到 keystore 文件 → 读出它的明文 salt → KEK_SET → UNWRAP 每一条记录。
+ *    KEK_SET 本身单独留着无害（它只在 TA 内缓存一个值，没有出口），
+ *    真正要拿掉的是那个出口。
+ *
+ *  · CMD_WRAP（3）：与 UNWRAP 成对，是同一个 KEK 下的加密谕言机。危害小于
+ *    解包，但同样没有产品用途，一起删干净 —— 留着半对更容易被将来补全。
+ *
+ * **编号 1/3/4 永久保留不复用**：普通世界可能还有旧客户端在发它们，把编号
+ * 让给新命令的话，一个旧调用会安静地触发一件完全不同的事。
+ * TA 侧对它们不再有 case，落到 default 返回 TEE_ERROR_NOT_SUPPORTED。
  */
-#define TA_PQCHSM_CMD_KDF_DERIVE      1
+#define TA_PQCHSM_CMD_RETIRED_KDF_DERIVE  1
+#define TA_PQCHSM_CMD_RETIRED_WRAP        3
+#define TA_PQCHSM_CMD_RETIRED_UNWRAP      4
 
 /*
  * CMD_KEK_SET：指定密钥库 salt，派生并缓存本实例 KEK（KEK 不出 TA）。
  *   [0] memref.in: salt（16B，密钥库头部所存）
- * 之后 WRAP/UNWRAP/KEYGEN 系列/SIGN/DECAPS 均使用该 KEK 包裹私钥。
+ * 之后 KEYGEN 系列 / SIGN / DECAPS 均使用该 KEK 包裹、解包私钥 blob。
+ * 它没有任何把 KEK 或明文交出去的路径 —— 那条路径（CMD_UNWRAP）已经删掉。
  */
 #define TA_PQCHSM_CMD_KEK_SET         2
-
-/*
- * CMD_WRAP / CMD_UNWRAP：KEK(AES-256-GCM) 包裹/解包。
- *   WRAP:   [0] memref.in aad, [1] memref.in 明文,
- *           [2] memref.inout blob（.size 输入容量/输出实际，容量不足返回
- *               TEE_ERROR_SHORT_BUFFER 并把 .size 置为需要值）
- *   UNWRAP: [0] memref.in aad, [1] memref.in blob,
- *           [2] memref.inout 明文（同上的 SHORT_BUFFER 语义）；
- *           认证失败返回 TEE_ERROR_MAC_INVALID，且输出缓冲已清零。
- */
-#define TA_PQCHSM_CMD_WRAP            3
-#define TA_PQCHSM_CMD_UNWRAP          4
 
 /*
  * CMD_KEYGEN：生成密钥对。私钥以 PWRP blob 返回，公钥明文返回。

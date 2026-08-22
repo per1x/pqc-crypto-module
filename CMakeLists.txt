@@ -349,6 +349,19 @@ add_test(NAME p11_smoke COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/p11_smoke.sh
          $<TARGET_FILE:pqchsm-p11>)
 add_test(NAME anchor        COMMAND test_anchor)
 
+# TA 侧的密码原语：另一份实现（TA 里没有 OpenSSL，海绵自带），
+# 与普通世界那份的一致性不是自动成立的。缺 OpenSSL 时脚本自己 SKIP。
+add_test(NAME tee_native COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/tee_native_tests.sh)
+
+# 结构性回归：TA 那三条谕言机命令（PS-22/24）必须一直是删掉的。
+# 缺陷的表现是"什么都没发生"，所以只能靠这种检查挡住。
+if(Python3_Interpreter_FOUND)
+  add_test(NAME ta_surface_self_test COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_ta_surface.py --self-test)
+  add_test(NAME ta_surface COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_ta_surface.py)
+endif()
+
 # 结构性回归：KDR 铁律是"只进不出"。这条用例扫公共头，确保没人加回读出根密钥的接口。
 # 这与硬件上"地址译码层面不存在读回路径"是同一条约束在软件阶段的对应实现。
 if(Python3_Interpreter_FOUND)

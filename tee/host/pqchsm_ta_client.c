@@ -20,8 +20,11 @@ int pqchsm_ta_open(pqchsm_ta *t)
 	if (res != TEEC_SUCCESS)
 		return (int)res;
 	memset(&op, 0, sizeof(op));
+	/* ⚠️ 不再用 TEEC_LOGIN_PUBLIC（PS-22）：那等于"调用方是谁不记录也不检查"。
+	 * USER 让 OP-TEE 把调用进程的 uid 放进客户端身份里，TA 侧据此拒绝匿名会话
+	 * （见 pqchsm_ta.c 的 TA_OpenSessionEntryPoint）。 */
 	res = TEEC_OpenSession(&t->ctx, &t->sess, &uuid,
-	                       TEEC_LOGIN_PUBLIC, NULL, &op, &origin);
+	                       TEEC_LOGIN_USER, NULL, &op, &origin);
 	if (res != TEEC_SUCCESS) {
 		TEEC_FinalizeContext(&t->ctx);
 		return (int)res;
@@ -67,27 +70,14 @@ int pqchsm_ta_get_info(pqchsm_ta *t, uint32_t *version, uint32_t *features)
 	return 0;
 }
 
-int pqchsm_ta_kdf(pqchsm_ta *t, const char *label,
-                  const uint8_t *salt, size_t salt_len,
-                  uint8_t *out, size_t out_len)
-{
-	TEEC_Operation op;
-	uint32_t       origin;
-
-	if (!label || !out || !out_len)
-		return -1;
-	memset(&op, 0, sizeof(op));
-	op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_TEMP_INPUT,
-	                                 TEEC_MEMREF_TEMP_INPUT,
-	                                 TEEC_MEMREF_TEMP_OUTPUT, TEEC_NONE);
-	op.params[0].tmpref.buffer = (void *)label;
-	op.params[0].tmpref.size   = strlen(label) + 1;
-	op.params[1].tmpref.buffer = (void *)salt;
-	op.params[1].tmpref.size   = salt_len;
-	op.params[2].tmpref.buffer = out;
-	op.params[2].tmpref.size   = out_len;
-	return invoke(t, TA_PQCHSM_CMD_KDF_DERIVE, &op, &origin);
-}
+/* ============================================================================
+ * 【已删除的三个 shim：kdf / wrap / unwrap（PS-22 / PS-24）】
+ * ============================================================================
+ * 对应的 TA 命令 1/3/4 已经删掉（理由见 pqchsm_ta_proto.h 的墓碑注释）。
+ * 这一侧一并删干净，而不是留一个"调用必失败"的空壳 —— 留着的话，
+ * 将来有人为了让它"能用"再把 TA 那边补回去，就等于把洞挖回来。
+ * 全仓 grep 过：产品路径一处都没用过它们。
+ */
 
 int pqchsm_ta_kek_set(pqchsm_ta *t, const uint8_t *salt, size_t salt_len)
 {
@@ -102,58 +92,6 @@ int pqchsm_ta_kek_set(pqchsm_ta *t, const uint8_t *salt, size_t salt_len)
 	op.params[0].tmpref.buffer = (void *)salt;
 	op.params[0].tmpref.size   = salt_len;
 	return invoke(t, TA_PQCHSM_CMD_KEK_SET, &op, &origin);
-}
-
-int pqchsm_ta_wrap(pqchsm_ta *t,
-                   const uint8_t *aad, size_t aad_len,
-                   const uint8_t *pt, size_t pt_len,
-                   uint8_t *blob, size_t cap, size_t *blob_len)
-{
-	TEEC_Operation op;
-	uint32_t       origin;
-	int            rc;
-
-	if (!blob || !blob_len)
-		return -1;
-	memset(&op, 0, sizeof(op));
-	op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_TEMP_INPUT,
-	                                 TEEC_MEMREF_TEMP_INPUT,
-	                                 TEEC_MEMREF_TEMP_INOUT, TEEC_NONE);
-	op.params[0].tmpref.buffer = (void *)aad;
-	op.params[0].tmpref.size   = aad_len;
-	op.params[1].tmpref.buffer = (void *)pt;
-	op.params[1].tmpref.size   = pt_len;
-	op.params[2].tmpref.buffer = blob;
-	op.params[2].tmpref.size   = cap;
-	rc = invoke(t, TA_PQCHSM_CMD_WRAP, &op, &origin);
-	*blob_len = op.params[2].tmpref.size;
-	return rc;
-}
-
-int pqchsm_ta_unwrap(pqchsm_ta *t,
-                     const uint8_t *aad, size_t aad_len,
-                     const uint8_t *blob, size_t blob_len,
-                     uint8_t *pt, size_t cap, size_t *pt_len)
-{
-	TEEC_Operation op;
-	uint32_t       origin;
-	int            rc;
-
-	if (!blob || !pt_len)
-		return -1;
-	memset(&op, 0, sizeof(op));
-	op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_TEMP_INPUT,
-	                                 TEEC_MEMREF_TEMP_INPUT,
-	                                 TEEC_MEMREF_TEMP_INOUT, TEEC_NONE);
-	op.params[0].tmpref.buffer = (void *)aad;
-	op.params[0].tmpref.size   = aad_len;
-	op.params[1].tmpref.buffer = (void *)blob;
-	op.params[1].tmpref.size   = blob_len;
-	op.params[2].tmpref.buffer = pt;
-	op.params[2].tmpref.size   = cap;
-	rc = invoke(t, TA_PQCHSM_CMD_UNWRAP, &op, &origin);
-	*pt_len = op.params[2].tmpref.size;
-	return rc;
 }
 
 int pqchsm_ta_keygen(pqchsm_ta *t, uint32_t alg,
