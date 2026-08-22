@@ -358,6 +358,10 @@ if(Python3_Interpreter_FOUND)
     ${CMAKE_CURRENT_SOURCE_DIR}/hardware/model/ntt_oracle.py)
 endif()
 
+# ⚠️ 全套 + Icarus，约 40 分钟。**这是关卡，不是迭代循环** ——
+# 迭代请用 tools/rtl_sim_fast.sh（分模块 + Verilator，分钟级）。
+# 它不可替代的地方只有一个：Icarus 传播 X，Verilator 不传播；
+# "端口悬空 / 输入没人驱动 / 读没写过的 BRAM"这一类只在这里现形。
 add_test(NAME rtl_sim COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/rtl_sim.sh)
 
 # 原语计数的自检：海绵与 hashlib 对拍 + 计数与手推解析式对拍（含反证）

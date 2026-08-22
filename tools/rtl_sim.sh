@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
-# 跑全部 cocotb 对拍
+# 跑全部 cocotb 对拍（**Icarus，解释型，约 40 分钟**）
+#
+# ⚠️ **别拿它当迭代循环。** 改一处就跑一次全套，一天里绝大部分时间花在重跑
+#    没被碰过的模块上。迭代用 **tools/rtl_sim_fast.sh**：分模块 + Verilator
+#    （编译型），同一批用例从几十分钟降到分钟级（mldsa_axi 32 条：
+#    这里 ~15–20 分钟 → 那边 92 秒）。
+#
+#    本脚本的定位是**合并 / 出定版前的那一次**。它不可替代的地方只有一个：
+#    Icarus 传播 X，Verilator 是二值仿真、不传播。本轮就有三个 bug 只在
+#    Icarus 下现形（新加的端口悬空、输入端口没人驱动、读没写过的 BRAM），
+#    在 Verilator 下它们安静地显示 0、用例照过。
+#    分工：**内环求快用 fast，关卡求准用这个。**
 #
 # 前置：iverilog（brew install icarus-verilog）
 #       cocotb（本仓库用 .venv-rtl 虚拟环境 —— PEP 668 禁止往系统 Python 装包）
