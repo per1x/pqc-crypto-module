@@ -190,7 +190,22 @@ module mldsa_engine (
     // 那些**寄存器**里的秘密（BRAM 靠上面的 B 口逐地址写 0）。
     wire        core_wipe = (state == S_WIPE);
     wire [12:0] core_wipe_addr = wipe_addr[12:0];
-    wire        core_rst_n = rst_n && !core_wipe;
+    // ⚠️ **单独用一个寄存器产生核的工作复位，不是 rst_n 与 core_wipe 的组合。**
+    // core_wipe 是对**寄存器状态**的译码，译码在状态跳变那一拍会有毛刺；
+    // 把它组合进异步复位网络正是 Vivado 会报 DRC 的那种写法
+    // （trng_top.v 里 cond_rst_n 的同一条规矩，ML-KEM 三个核也是这么做的 ——
+    //  两边不一致才是最容易日后出事的形状）。
+    //
+    // 用 zeroize 与 S_WIPE 的**或**而不是只看 state：zeroize 到来那一拍
+    // state 还没跳到 S_WIPE（同一个时钟沿才赋值），只看 state 的话核会多跑
+    // 一拍 —— 那一拍它可能正往自己的 BRAM 里写，与刚开始的擦除赛跑。
+    // 现在复位与擦除**同一拍**生效。
+    reg core_rst_q;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) core_rst_q <= 1'b0;
+        else        core_rst_q <= !(zeroize || (state == S_WIPE));
+    end
+    wire        core_rst_n = core_rst_q;
     assign busy   = (state != S_IDLE) && (state != S_DONE);
     assign done   = done_r;
 
