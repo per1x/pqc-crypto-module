@@ -33,7 +33,8 @@ int pqchsm_mlk1024_enc_derand(uint8_t *ct, uint8_t *ss, const uint8_t *pk,
                               const uint8_t m[32]);
 int pqchsm_mlk1024_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
 
-/* ML-DSA：seed = 32B (ξ)；sign 为 hedged（rnd 内部取自 TA 随机源） */
+/* ML-DSA：seed = 32B (ξ)。sign 为 hedged（rnd 内部取自随机源）；
+ * sign_rnd 显式给 rnd —— ACVP 的确定性 siggen 条目要它。 */
 int pqchsm_mld44_keypair(uint8_t *pk, uint8_t *sk);
 int pqchsm_mld44_keypair_internal(uint8_t *pk, uint8_t *sk,
                                   const uint8_t seed[32]);
@@ -41,6 +42,11 @@ int pqchsm_mld44_sign(uint8_t *sig, size_t *siglen,
                       const uint8_t *m, size_t mlen,
                       const uint8_t *ctx, size_t ctxlen,
                       const uint8_t *sk);
+/* 带显式 rnd 的签名：ACVP 确定性条目（rnd = 0³²）必须走它 */
+int pqchsm_mld44_sign_rnd(uint8_t *sig, size_t *siglen,
+                          const uint8_t *m, size_t mlen,
+                          const uint8_t *ctx, size_t ctxlen,
+                          const uint8_t rnd[32], const uint8_t *sk);
 int pqchsm_mld44_verify(const uint8_t *sig, size_t siglen,
                         const uint8_t *m, size_t mlen,
                         const uint8_t *ctx, size_t ctxlen,
@@ -53,6 +59,11 @@ int pqchsm_mld65_sign(uint8_t *sig, size_t *siglen,
                       const uint8_t *m, size_t mlen,
                       const uint8_t *ctx, size_t ctxlen,
                       const uint8_t *sk);
+/* 带显式 rnd 的签名：ACVP 确定性条目（rnd = 0³²）必须走它 */
+int pqchsm_mld65_sign_rnd(uint8_t *sig, size_t *siglen,
+                          const uint8_t *m, size_t mlen,
+                          const uint8_t *ctx, size_t ctxlen,
+                          const uint8_t rnd[32], const uint8_t *sk);
 int pqchsm_mld65_verify(const uint8_t *sig, size_t siglen,
                         const uint8_t *m, size_t mlen,
                         const uint8_t *ctx, size_t ctxlen,
@@ -65,9 +76,22 @@ int pqchsm_mld87_sign(uint8_t *sig, size_t *siglen,
                       const uint8_t *m, size_t mlen,
                       const uint8_t *ctx, size_t ctxlen,
                       const uint8_t *sk);
+/* 带显式 rnd 的签名：ACVP 确定性条目（rnd = 0³²）必须走它 */
+int pqchsm_mld87_sign_rnd(uint8_t *sig, size_t *siglen,
+                          const uint8_t *m, size_t mlen,
+                          const uint8_t *ctx, size_t ctxlen,
+                          const uint8_t rnd[32], const uint8_t *sk);
 int pqchsm_mld87_verify(const uint8_t *sig, size_t siglen,
                         const uint8_t *m, size_t mlen,
                         const uint8_t *ctx, size_t ctxlen,
                         const uint8_t *pk);
+
+/* ---- 库自己算出来的尺寸（供上层与长度表对拍，见各 .c 里的说明）---- */
+void pqchsm_mlk512_sizes(size_t *pk, size_t *sk, size_t *ct, size_t *ss);
+void pqchsm_mlk768_sizes(size_t *pk, size_t *sk, size_t *ct, size_t *ss);
+void pqchsm_mlk1024_sizes(size_t *pk, size_t *sk, size_t *ct, size_t *ss);
+void pqchsm_mld44_sizes(size_t *pk, size_t *sk, size_t *sig, size_t *seed);
+void pqchsm_mld65_sizes(size_t *pk, size_t *sk, size_t *sig, size_t *seed);
+void pqchsm_mld87_sizes(size_t *pk, size_t *sk, size_t *sig, size_t *seed);
 
 #endif /* PQCHSM_TA_PQC_LOW_H */

@@ -201,7 +201,7 @@ static int st_keypair(pqc_alg_t alg, const uint8_t *seed, size_t seed_len,
                       const uint8_t *want_digest)
 {
 	const pqc_alg_info_t *info = pqc_alg_info(alg);
-	const pqc_backend_t  *be   = pqc_backend_liboqs();
+	const pqc_backend_t  *be   = pqc_backend_native();
 	if (!info || !be || !be->keypair_from_seed || seed_len != info->seed_len) {
 		return -1;
 	}

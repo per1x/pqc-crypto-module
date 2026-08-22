@@ -41,7 +41,7 @@ static void test_backend_equivalence(void)
 		uint8_t *pk_a = malloc(info->pk_len), *sk_a = malloc(info->sk_len);
 		uint8_t *pk_b = malloc(info->pk_len), *sk_b = malloc(info->sk_len);
 
-		pqc_set_backend(pqc_backend_liboqs());
+		pqc_set_backend(pqc_backend_native());
 		CHECK_EQ_INT(pqc_keypair_from_seed(algs[i], seed, info->seed_len, pk_a, sk_a),
 		             PQC_OK);
 		pqc_set_backend(pqc_backend_accel());
@@ -63,7 +63,7 @@ static void test_backend_equivalence(void)
 		uint8_t *ct_a = malloc(info->ct_len), *ct_b = malloc(info->ct_len);
 		uint8_t ss_a[64], ss_b[64], ss_d[64];
 
-		pqc_set_backend(pqc_backend_liboqs());
+		pqc_set_backend(pqc_backend_native());
 		CHECK_EQ_INT(pqc_keypair_from_seed(PQC_ALG_ML_KEM_768, seed, 64, pk, sk), PQC_OK);
 		CHECK_EQ_INT(pqc_encaps_derand(PQC_ALG_ML_KEM_768, pk, m, 32, ct_a, ss_a), PQC_OK);
 
@@ -93,7 +93,7 @@ static void test_backend_equivalence(void)
 		uint8_t rnd[PQC_SIG_RND_LEN];
 		memset(rnd, 0xA7, sizeof(rnd));
 
-		pqc_set_backend(pqc_backend_liboqs());
+		pqc_set_backend(pqc_backend_native());
 		CHECK_EQ_INT(pqc_keypair_from_seed(PQC_ALG_ML_DSA_65, seed, 32, pk, sk), PQC_OK);
 		CHECK_EQ_INT(pqc_sign(PQC_ALG_ML_DSA_65, sk, msg, sizeof(msg), ctx, sizeof(ctx),
 		                      rnd, s_a, &la), PQC_OK);

@@ -41,6 +41,13 @@ repository.
 | Remote call (**mTLS**) | full nine-section demo from another machine (KEM / ML-DSA at all three parameter sets / four block modes / SM3 / stale-handle counter-proof); **a client certificate from a different CA is refused**, measured against the real board | `tools/demo_remote.sh`, `service/sdf_demo.c` |
 | The mTLS layer itself | 4 / 4 — one positive plus three negatives (foreign CA / no client certificate / CN not in the ACL). **The negatives are the point**; "it connects" only proves the configuration is not broken | `tools/tls_regress.sh` |
 | Two P0 concurrency defects | each is demonstrably **red before the fix**: liboqs RNG cross-talk 849/3000 times, self-test gate inconsistent 852 862 times | `tests/unit/test_crypto_concurrent.c` |
+
+> ⚠️ The "liboqs RNG cross-talk" figure is **historical**: the liboqs
+> dependency has since been removed entirely (the vendored
+> mlkem-native / mldsa-native is used instead, see
+> `src/crypto/pqc_native.c`), taking the process-global RNG and its
+> lock with it. The test stays — the property it checks (no cross-talk
+> between the two paths under concurrency) must still hold.
 | Session-close ABA | before the fix, four threads closing one handle succeeded 311 times (should be 300) and a bystander's session was wiped twice | `tests/unit/test_slot_concurrent.c` |
 | Keystore fail-closed | a corrupt or unreadable keystore makes the daemon refuse to start **without touching the file** | `tools/daemon_failclosed.sh` |
 | Security state survives power loss | PIN failure counts, lockout and unlock are **on disk without any save call** (simulated pull-the-plug, then reload) | `tests/unit/test_keystore.c` |

@@ -87,7 +87,11 @@ brew install icarus-verilog verilator      # or your distro's packages
 ./tools/rtl_synth_check.sh  # Yosys synthesisability
 ```
 
-构建主机软件及其 PKCS#11 模块（CMake ≥ 3.20、OpenSSL 3、liboqs）：
+构建主机软件及其 PKCS#11 模块（CMake ≥ 3.20、OpenSSL 3）：
+
+> PQC 算法用仓内 vendored 的 mlkem-native / mldsa-native
+> （`third_party/pqc-native/`，与 OP-TEE 的 TA 共用同一棵源码树），
+> **不再需要 liboqs**。
 
 ```bash
 ./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j

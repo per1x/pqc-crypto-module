@@ -507,7 +507,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 	}
 	/* ---- 熵源：PQCHSM_HWRNG=sdfe 时改由 FPGA 供随机数 ----
 	 *
-	 * 装上之后 pqc_random_bytes()（以及 liboqs 的随机源）走
+	 * 装上之后 pqc_random_bytes()（以及 PQC 后端的随机源）走
 	 *   本模块 → libsdfe → pqchsm_fpgad → /dev/secmmio → EL3 → trng_axi
 	 * 也就是说 C_GenerateRandom 与所有密钥生成的随机性都来自 PL 里的环振
 	 * 噪声源，不再是 OpenSSL。

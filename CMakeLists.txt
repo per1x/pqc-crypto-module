@@ -28,17 +28,40 @@ endif()
 message(STATUS "构建形态 PQC_PROFILE: ${PQC_PROFILE}")
 
 # ---- 依赖 -------------------------------------------------------------------
-# liboqs：PQC 算法（最终版 FIPS 203/204）。见 README「技术栈选择理由」。
 # OpenSSL 3：AES-256-GCM 包裹、SHA3/KMAC256、安全清零。
 find_package(OpenSSL 3.0 REQUIRED)
 find_package(Threads REQUIRED)
 
-find_path(LIBOQS_INCLUDE_DIR oqs/oqs.h HINTS /opt/homebrew/opt/liboqs/include /usr/local/include)
-find_library(LIBOQS_LIBRARY NAMES oqs HINTS /opt/homebrew/opt/liboqs/lib /usr/local/lib)
-if(NOT LIBOQS_INCLUDE_DIR OR NOT LIBOQS_LIBRARY)
-  message(FATAL_ERROR "找不到 liboqs。macOS: brew install liboqs")
+# ⚠️ **liboqs 已经不是依赖了**（FINAL-PLAN §8 第 10 项）。
+# 这里以前有一段 find_path/find_library + "找不到就 FATAL_ERROR"。
+# PQC 算法现在用 vendored 的 mlkem-native / mldsa-native
+# （third_party/pqc-native/），与 OP-TEE 的 TA **共用同一棵源码树** ——
+# 以前主库走 liboqs、TA 走 native，"两边算出来一样"只能靠 KAT 巧合成立。
+# 顺带没了的还有 liboqs 那个进程级全局随机源（原 src/crypto/oqs_rng.c）：
+# native 把去随机化做成显式参数，确定性与随机两条路在类型上就分开了。
+set(PQC_NATIVE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pqc-native)
+if(NOT EXISTS ${PQC_NATIVE_DIR}/mlkem/kem.c)
+  message(FATAL_ERROR "third_party/pqc-native 不完整 —— 它是仓内 vendored 源码，"
+                      "不是外部依赖；检查一下是不是漏了 git checkout")
 endif()
-message(STATUS "liboqs: ${LIBOQS_LIBRARY}")
+message(STATUS "PQC 后端: mlkem-native / mldsa-native（仓内 vendored，无外部依赖）")
+
+# 六个参数集各自是一个编译单元（整棵 vendor 树 #include 进去 + 命名空间前缀），
+# 加调度层与它依赖的 Keccak/随机源。这批 .c 物理上在 tee/ta/ 下 —— 那是有意的：
+# TA 由 OP-TEE 的 dev kit 构建，那套构建的相对路径最脆弱，而它是板上唯一能验
+# 的一侧。与其为目录好看去动它，不如让这边把同一批源码编进来。
+# **一份源码、两套构建。**
+set(PQC_NATIVE_SRCS
+  tee/ta/ta_pqc.c
+  tee/ta/ta_mlkem512.c  tee/ta/ta_mlkem768.c  tee/ta/ta_mlkem1024.c
+  tee/ta/ta_mldsa44.c   tee/ta/ta_mldsa65.c   tee/ta/ta_mldsa87.c
+  tee/ta/ta_fips202.c
+  tee/ta/ta_random.c)
+set(PQC_NATIVE_INCS
+  ${CMAKE_CURRENT_SOURCE_DIR}/tee/ta
+  ${CMAKE_CURRENT_SOURCE_DIR}/tee/ta/config
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+  ${CMAKE_CURRENT_SOURCE_DIR}/tee/include)
 
 # ---- Verilator 仿真后端 -----------------------------------------------------
 # 把 hardware/rtl/ 下的算法核仿真成可被 C 调用的"加速器"，经 accel_transport_t
@@ -114,8 +137,8 @@ endif()
 # ---- 核心库 -----------------------------------------------------------------
 add_library(pqchsm
   src/crypto/pqc.c
-  src/crypto/pqc_liboqs.c
-  src/crypto/oqs_rng.c
+  src/crypto/pqc_native.c
+  ${PQC_NATIVE_SRCS}
   src/crypto/kdf.c
   src/crypto/kdr.c
   src/crypto/profile.c
@@ -153,13 +176,13 @@ add_library(pqchsm
 )
 target_include_directories(pqchsm
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${LIBOQS_INCLUDE_DIR}
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${PQC_NATIVE_INCS}
           ${CMAKE_CURRENT_SOURCE_DIR}/service
 )
 # ⚠️ 远程口是 mTLS（service/pqcs_tls.c），所以除了 Crypto 还要 SSL。
 #    少了它的症状是链接期一堆 SSL_* 未定义 —— 而那些符号只有走远程的调用方
 #    才会用到，本机路径完全正常，很容易以为是别的问题。
-target_link_libraries(pqchsm PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads PRIVATE ${LIBOQS_LIBRARY})
+target_link_libraries(pqchsm PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 if(VERILATOR_BIN)
   target_compile_definitions(pqchsm PRIVATE PQCHSM_HAVE_VERILATOR=1)
   target_link_libraries(pqchsm PUBLIC pqchsm-vsim)
@@ -212,7 +235,7 @@ function(pqchsm_test name src)
   add_executable(${name} ${src})
   target_link_libraries(${name} PRIVATE pqchsm)
   target_include_directories(${name} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/tests ${CMAKE_CURRENT_SOURCE_DIR}/src ${LIBOQS_INCLUDE_DIR})
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests ${CMAKE_CURRENT_SOURCE_DIR}/src ${PQC_NATIVE_INCS})
   target_compile_definitions(${name} PRIVATE PQCHSM_VECTOR_DIR="${PQCHSM_VECTOR_DIR}")
 endfunction()
 
@@ -256,12 +279,12 @@ pqchsm_test(test_inject    tests/unit/test_inject.c)
 # 线格式的**定义**已经收进 include/pqchsm/pwrp_format.h 一处，但**实现**
 # 是否跑偏只能靠对拍钉住。漂移的症状是"跨世界那一次认证失败"，
 # 与密钥不对/文件被改分不开，所以必须有这条。
+# ⚠️ ta_fips202.c / ta_random.c **不在这里重复编** —— 它们已经进了 libpqchsm
+# （PQC_NATIVE_SRCS）。重复编会同名符号重定义。只补这条用例独有的两个。
 add_executable(test_cross_world
   tests/unit/test_cross_world.c
   tee/ta/ta_kdf.c
-  tee/ta/ta_fips202.c
-  tee/ta/ta_wrap.c
-  tee/ta/ta_random.c)
+  tee/ta/ta_wrap.c)
 target_link_libraries(test_cross_world PRIVATE pqchsm OpenSSL::Crypto)
 target_include_directories(test_cross_world PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/tests

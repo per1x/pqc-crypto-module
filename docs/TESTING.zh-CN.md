@@ -40,6 +40,11 @@
 | 远程调用（**mTLS**） | 另一台机器完成完整九节演示（KEM / 三个参数集的 ML-DSA / 四种分组模式 / SM3 / 句柄失效反证）；**别家 CA 签的客户端证书被拒**，实测于真板子 | `tools/demo_remote.sh`、`service/sdf_demo.c` |
 | mTLS 层本身 | 4 / 4 —— 一条正例 + 三条否定（别家 CA / 不出示证书 / CN 不在 ACL）。**否定是主体**："能连上"只证明配置没写错 | `tools/tls_regress.sh` |
 | 两条 P0 并发缺陷 | 各自在修复前**确实会红**：liboqs 随机源串扰 849/3000 次、自测闸门 85 万次不自洽 | `tests/unit/test_crypto_concurrent.c` |
+
+> ⚠️ 那条"liboqs 随机源串扰"是**历史**：liboqs 依赖后来整个去掉了
+> （改用仓内 vendored 的 mlkem-native / mldsa-native，见
+> `src/crypto/pqc_native.c`），那个进程级全局随机源与它的锁一起消失。
+> 用例保留 —— 它测的"并发下两条路互不串扰"这条性质仍然要成立。
 | 会话 close 的 ABA | 修复前同一句柄被 4 线程 close 成功 311 次（应为 300），且旁观线程的会话被误抹 2 次 | `tests/unit/test_slot_concurrent.c` |
 | 密钥库 fail-closed | 库损坏/读不了时 daemon 拒绝启动，**且原文件一字节不改** | `tools/daemon_failclosed.sh` |
 | 安全状态抗掉电 | PIN 失败计数、锁定、解锁**不经任何 save 也在盘上**（模拟拔电后重载） | `tests/unit/test_keystore.c` |

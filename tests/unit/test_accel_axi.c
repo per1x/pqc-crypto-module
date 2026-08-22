@@ -211,7 +211,7 @@ static void test_unsupported_modes(const accel_transport_t *axi)
 	free(pk);
 	free(sk);
 
-	pqc_set_backend(pqc_backend_liboqs());
+	pqc_set_backend(pqc_backend_native());
 }
 
 int main(void)

@@ -66,7 +66,7 @@ static void vault_reset(void)
 
 static const pqc_backend_t *sw(void)
 {
-	return pqc_backend_liboqs();
+	return pqc_backend_native();
 }
 
 static pqc_status_t stub_keypair_hw(pqc_alg_t alg, uint8_t *pk, uint32_t *hw)
@@ -261,7 +261,7 @@ static void test_has_hw_keys_kind(void)
 	CHECK_EQ_INT(pqc_backend_has_hw_keys_kind(PQC_KIND_SIG), 0);
 
 	/* 软件后端：一类都没有 */
-	pqc_set_backend(pqc_backend_liboqs());
+	pqc_set_backend(pqc_backend_native());
 	CHECK_EQ_INT(pqc_backend_has_hw_keys_kind(PQC_KIND_KEM), 0);
 	CHECK_EQ_INT(pqc_backend_has_hw_keys_kind(PQC_KIND_SIG), 0);
 	CHECK_EQ_INT(pqc_backend_has_hw_keys(), 0);
@@ -285,7 +285,7 @@ static void test_sign_hw_wrapper(void)
 	TCASE("pqc_sign_hw 包装层的校验");
 
 	/* 后端没有这一项 → UNSUPPORTED，而不是崩在空指针上 */
-	pqc_set_backend(pqc_backend_liboqs());
+	pqc_set_backend(pqc_backend_native());
 	CHECK_EQ_INT(pqc_sign_hw(PQC_ALG_ML_DSA_65, 0, (const uint8_t *)"m", 1,
 	                         NULL, 0, NULL, sig, &sig_len),
 	             PQC_ERR_UNSUPPORTED);
@@ -381,7 +381,7 @@ static void test_hw_resident_sign_roundtrip(void)
 	CHECK_EQ_INT(g_rnd_was_nonnull, 0);
 
 	/* 换回软件后端再验 —— 用同一个后端验自己签的东西什么也证明不了 */
-	pqc_set_backend(pqc_backend_liboqs());
+	pqc_set_backend(pqc_backend_native());
 	CHECK_EQ_INT(pqc_verify(PQC_ALG_ML_DSA_65, pk, msg, sizeof(msg), NULL, 0,
 	                        sig, sig_len), PQC_OK);
 	msg[0] ^= 0x01;

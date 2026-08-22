@@ -140,6 +140,6 @@ cd tee/tests && cc -O2 -I../ta -I../ta/config -I../include \
 1. `tee/ta/out/4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3.ta` 放入根fs
    `/lib/optee_armtz/`（Buildroot 包 `tee/` 目录或手动进镜像）。
 2. 普通世界侧：`optee_client` 的 libteec + `tee/host/pqchsm_ta_client.c`，
-   槽位管理器把后端从 `pqc_backend_liboqs()` 切到 TA 客户端。
+   槽位管理器把后端从 `pqc_backend_native()` 切到 TA 客户端。
 3. 自检顺序：GET_INFO → KEK_SET → KEYGEN(512) → DECAPS 往返 →
    SIGN/VERIFY（验签在普通世界用软件后端做）。

@@ -95,8 +95,11 @@ brew install icarus-verilog verilator      # or your distro's packages
 ./tools/rtl_synth_check.sh  # Yosys synthesisability
 ```
 
-To build the host software and its PKCS#11 module (CMake ≥ 3.20, OpenSSL 3,
-liboqs):
+To build the host software and its PKCS#11 module (CMake ≥ 3.20, OpenSSL 3):
+
+> The PQC algorithms come from the vendored mlkem-native / mldsa-native in
+> `third_party/pqc-native/` — the same source tree the OP-TEE TA compiles.
+> **liboqs is no longer a dependency.**
 
 ```bash
 ./tools/fetch_vectors.sh && cmake -S . -B build && cmake --build build -j

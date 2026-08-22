@@ -8,7 +8,7 @@
 
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -Werror
-CPPFLAGS += -I../ta -I../ta/config -I../include -I../../include
+CPPFLAGS += -I../ta -I../ta/config -I../include -I../../include -I../../third_party
 
 # ---- OpenSSL：只用来做对拍参照，不是被测代码 ----------------------------
 # macOS 上它不在默认搜索路径里（brew keg-only），不问 pkg-config 的话

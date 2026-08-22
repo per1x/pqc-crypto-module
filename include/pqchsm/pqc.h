@@ -4,7 +4,7 @@
  * 备份恢复 / PKCS#11）**只通过本接口**做密码运算，从而在把算法核搬到 FPGA 时
  * "上层一行不改"。
  *
- * 当前实现：pqc_backend_liboqs()  —— liboqs 0.16 软件实现
+ * 当前实现：pqc_backend_native()  —— mlkem-native / mldsa-native 软件实现
  * 已备接口：pqc_backend_accel()   —— AXI-Lite 寄存器驱动 PL 硬件核
  *
  * 注意「硬件核」不是设想：ML-KEM 512/768/1024 已在 PL 里跑通并对 NIST ACVP
@@ -149,7 +149,12 @@ typedef struct pqc_backend {
 	                        uint8_t *sig, size_t *sig_len);
 } pqc_backend_t;
 
-const pqc_backend_t *pqc_backend_liboqs(void);
+/* 软件后端：vendored 的 mlkem-native / mldsa-native
+ * （third_party/pqc-native/，与 OP-TEE TA 共用**同一棵源码树**）。
+ * ⚠️ 它以前叫 pqc_backend_native()。改名不是洁癖：那个名字会一直告诉读者
+ *    "这里连着 liboqs"，而整个依赖已经去掉了 —— 一个说谎的函数名比没有
+ *    注释更贵。 */
+const pqc_backend_t *pqc_backend_native(void);
 
 /* 经密码机服务（pqchsm_fpgad）打 FPGA 的后端。
  * 本机走 UNIX socket；设了 PQCHSM_SDFE_HOST + PQCHSM_SDFE_PKI 就走 TCP（**mTLS**）。

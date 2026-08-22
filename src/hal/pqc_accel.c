@@ -3,7 +3,7 @@
  * 这是"算法核搬到 FPGA"的那条缝的上半截：它只会写寄存器、送数据、轮询 DONE，
  * **完全不知道**下面接的是软件桩、Verilator 仿真还是真 PL。
  *
- * 与 pqc_backend_liboqs() 可互换：
+ * 与 pqc_backend_native() 可互换：
  *     pqc_set_backend(pqc_backend_accel());
  * 换完之后槽位管理器、密钥库、备份恢复、PKCS#11 全都照常工作 ——
  * tests/unit/test_accel.c 就是把整套 crypto 测试在这个后端下再跑一遍。
