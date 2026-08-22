@@ -49,9 +49,12 @@
 /* 与 boot/atf/patch_atf_secmmio.py 里的定义一一对应 */
 #define SIP_PL_RD   0x8200ff12UL
 #define SIP_PL_WR   0x8200ff13UL
+/* 种子装载：EL3 自己取熵、自己写进 PL，这边只发命令、只收返回码。
+ * 普通世界（包括本模块）从头到尾接触不到种子明文。 */
+#define SIP_PQC_SEED 0x8200ff14UL
 
 static int armed;
-static unsigned long n_rd, n_wr, n_refused;
+static unsigned long n_rd, n_wr, n_seed, n_refused;
 static u32 last_refused_addr;
 
 static int sec_rd(u32 addr, u32 *out)
@@ -68,6 +71,15 @@ static int sec_wr(u32 addr, u32 val)
 	struct arm_smccc_res res;
 
 	arm_smccc_smc(SIP_PL_WR, (u64)addr, (u64)val, 0, 0, 0, 0, 0, &res);
+	return (int)(s32)(u32)res.a0;
+}
+
+static int sec_seed(u32 target, u32 *world)
+{
+	struct arm_smccc_res res;
+
+	arm_smccc_smc(SIP_PQC_SEED, (u64)target, 0, 0, 0, 0, 0, 0, &res);
+	*world = (u32)res.a1;
 	return (int)(s32)(u32)res.a0;
 }
 
@@ -110,6 +122,22 @@ static long secmmio_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		}
 		n_wr++;
 		return 0;
+
+	case SECMMIO_SEED: {
+		struct secmmio_seed sd;
+
+		if (copy_from_user(&sd, (void __user *)arg, sizeof(sd)))
+			return -EFAULT;
+		ret = sec_seed(sd.target, &sd.world);
+		if (ret) {
+			n_refused++;
+			return -EIO;
+		}
+		n_seed++;
+		if (copy_to_user((void __user *)arg, &sd, sizeof(sd)))
+			return -EFAULT;
+		return 0;
+	}
 
 	default:
 		return -ENOTTY;

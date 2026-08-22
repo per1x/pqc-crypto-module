@@ -426,6 +426,14 @@ module mlkem_axi #(
     // ⚠️ DEBUG_BANK 恒为 0：多项式存储的读口在这里根本没有引出来。
     wire zeroize_all = zero_pulse || tamper || fw_tampered;
 
+    // 三个核各自的擦除进度。**要一起等完**：只等本层那台擦除机，会在核还没
+    // 擦干净时就放行启动与读出（与 mldsa_axi 的 wiping_any 同一条理由）。
+    wire u_kg_wiping, u_en_wiping, u_de_wiping;
+    wire core_wiping = u_kg_wiping || u_en_wiping || u_de_wiping;
+    // 本层的擦除机 + 三个核的，**要一起等完**。声明放在这里而不是 r_status
+    // 旁边：Icarus 要求先声明后使用，而 rd_outdata 那一行在它前面。
+    wire wiping_any  = wiping || core_wiping;
+
     reg  kg_start, en_start, de_start;
     wire kg_done, en_done, de_done, de_hash_ok;
     wire kg_ov, en_ov, de_ov;
@@ -437,7 +445,11 @@ module mlkem_axi #(
     wire out_rdy = (state == S_RUN);
 
     mlkem_keygen #(.DEBUG_BANK(0)) u_kg (
-        .clk(clk), .rst_n(rst_n && !zeroize_all),
+        // ⚠️ 复位改回**纯 rst_n**：核现在有真的擦除口了，
+        // 就不该再拿复位充数 —— 复位本来也擦不掉 BRAM，那种写法只是
+        // 看起来像擦了。擦除走 zeroize，核擦完把 wiping 落下。
+        .clk(clk), .rst_n(rst_n),
+        .zeroize(zeroize_all), .wiping(u_kg_wiping),
         .param_set(pset), .d_in(seed_a), .z_in(seed_b),
         .start(kg_start), .done(kg_done),
         .out_valid(kg_ov), .out_ready(out_rdy && (mode == M_KEYGEN)),
@@ -445,7 +457,11 @@ module mlkem_axi #(
         .dbg_addr(12'd0), .dbg_data());
 
     mlkem_encaps #(.DEBUG_BANK(0)) u_en (
-        .clk(clk), .rst_n(rst_n && !zeroize_all),
+        // ⚠️ 复位改回**纯 rst_n**：核现在有真的擦除口了，
+        // 就不该再拿复位充数 —— 复位本来也擦不掉 BRAM，那种写法只是
+        // 看起来像擦了。擦除走 zeroize，核擦完把 wiping 落下。
+        .clk(clk), .rst_n(rst_n),
+        .zeroize(zeroize_all), .wiping(u_en_wiping),
         .param_set(pset), .m_in(seed_a),
         .start(en_start), .done(en_done),
         .ek_valid(fb_v && (mode == M_ENCAPS) && (fp >= 13'd32)),
@@ -455,7 +471,11 @@ module mlkem_axi #(
         .dbg_addr(12'd0), .dbg_data());
 
     mlkem_decaps #(.DEBUG_BANK(0)) u_de (
-        .clk(clk), .rst_n(rst_n && !zeroize_all),
+        // ⚠️ 复位改回**纯 rst_n**：核现在有真的擦除口了，
+        // 就不该再拿复位充数 —— 复位本来也擦不掉 BRAM，那种写法只是
+        // 看起来像擦了。擦除走 zeroize，核擦完把 wiping 落下。
+        .clk(clk), .rst_n(rst_n),
+        .zeroize(zeroize_all), .wiping(u_de_wiping),
         .param_set(pset),
         .start(de_start), .done(de_done),
         .dk_valid(fb_v && (mode == M_DECAPS) && ({1'b0, fp} <  dklen)),
@@ -526,14 +546,14 @@ module mlkem_axi #(
     // 擦除期间一律不给输出：out_len 这时已经是 0，但不靠它 ——
     // 靠一个显式条件，免得哪天 out_len 的清零时机变了就漏出去。
     wire rd_outdata = f_arvalid && f_arready && (f_araddr[5:2] == A_OUTDATA)
-                      && !wiping && ({1'b0, out_rd} < {1'b0, out_len});
+                      && !wiping_any && ({1'b0, out_rd} < {1'b0, out_len});
 
     // [0] BUSY  [1] DONE  [2] HASH_OK  [3] TAMPER  [4] WIPING  [5] PARAM_ERR
     // [6] SEED_ERR —— 要走暂存种子，而 START 那一刻暂存里没有备好的一份。
     //     与 PARAM_ERR 分开是因为处置不同：PARAM_ERR 是软件写错了参数，
     //     SEED_ERR 是**安全世界那一侧没把种子送进来**（或者被 SEED_CLR 作废了），
     //     重试同一条命令没有意义，要回去看 SiP 那一端。
-    wire [31:0] r_status = {25'd0, seed_err, param_err, wiping, fw_tampered,
+    wire [31:0] r_status = {25'd0, seed_err, param_err, wiping_any, fw_tampered,
                             de_hash_ok,
                             (state == S_IDLE) && run_done, (state != S_IDLE)};
 
@@ -708,7 +728,7 @@ module mlkem_axi #(
                         // START 只在空闲时有效，且要放在最后判 ——
                         // 同一拍写 IN_RST|START 的语义是"清指针再启动"
                         if (wr_data[0] && (state == S_IDLE) && !zeroize_all
-                            && !wiping) begin
+                            && !wiping_any) begin
                             if (!params_ok || !len_ok || !slot_ok
                                 || !seed_gate_ok) begin
                                 // 参数非法**或输入没喂够**：置错误位，
@@ -807,7 +827,7 @@ module mlkem_axi #(
                 A_MODE:    f_rdata <= {21'd0, seed_staged, slot,
                                        dk_from_slot, dk_to_slot, pset, mode};
                 A_INPTR:   f_rdata <= {19'd0, in_ptr};
-                A_OUTDATA: f_rdata <= wiping ? 32'd0 : {24'd0, outb_dout};
+                A_OUTDATA: f_rdata <= wiping_any ? 32'd0 : {24'd0, outb_dout};
                 A_OUTLEN:  f_rdata <= {19'd0, out_len};
                 A_OUTRD:   f_rdata <= {19'd0, out_rd};
                 A_VIOL:    f_rdata <= {viol_rd_count, viol_wr_count};

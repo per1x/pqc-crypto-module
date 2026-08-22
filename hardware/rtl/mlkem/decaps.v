@@ -65,6 +65,18 @@ module mlkem_decaps #(
     input  wire        clk,
     input  wire        rst_n,
 
+    // ---- 擦除（登记表 Z-03：核内 BRAM 以前**根本没有擦除口**）----
+    // zeroize 是脉冲：拉起就进擦除态，把核内每一块 ram_dp 逐地址写 0，
+    // 期间 wiping=1、本核按在复位里（寄存器里的中间态一并清掉）。
+    // **逐地址写，不是靠复位** —— ram_dp 是 BRAM 推断模板，存储阵列没有
+    // 复位口（那个文件头写着这一条），靠复位"擦"等于没擦。
+    //
+    // 上一版这里什么都没有：每跑完一次 KeyGen/Decaps，ŝ、ê、多项式银行里
+    // 的私钥系数就原样留在 BRAM 里，直到下一次运算碰巧覆盖同一个地址。
+    // 而 mlkem_axi 那一层的 ZEROIZE 只擦它自己的输入输出缓冲，报告"擦完了"。
+    input  wire        zeroize,
+    output wire        wiping,
+
     input  wire [1:0]  param_set,    // 0=512 1=768 2=1024
 
     input  wire        start,        // 脉冲
@@ -130,10 +142,59 @@ module mlkem_decaps #(
     reg  signed [15:0] ba_din, bb_din;
     wire signed [15:0] ba_dout, bb_dout;
 
+
+    // ================= 擦除机 =================
+    // 上升沿启动（zeroize 是脉冲，但上层可能给电平，两种都吃得下）。
+    // 计数器宽度取本核最大的一块存储；比它小的块地址取低位，于是被写好几遍
+    // —— 写几遍 0 和写一遍没有区别，为此再加计数器不值得。
+    reg              wipe_run;
+    reg  [10:0]  wipe_addr;
+    reg              zero_d;
+    wire             wipe = wipe_run;
+
+    // 本核 + 内层封装核，两台擦除机都落下才算擦完
+    wire enc_wiping;
+    assign wiping = wipe_run || enc_wiping;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wipe_run <= 1'b0; wipe_addr <= 11'd0; zero_d <= 1'b0;
+        end else begin
+            zero_d <= zeroize;
+            if (zeroize && !zero_d) begin
+                wipe_run  <= 1'b1;
+                wipe_addr <= 11'd0;
+            end else if (wipe_run) begin
+                // 最后一个地址那一拍 b_we 仍为高（组合自 wipe），
+                // 所以顶到头的那一格也真的被写了 0。
+                if (&wipe_addr) wipe_run <= 1'b0;
+                else            wipe_addr <= wipe_addr + 11'd1;
+            end
+        end
+    end
+
+    // 本核的工作复位：擦除期间按在复位里，寄存器中的中间态一拍带走。
+    // BRAM 交给上面那台擦除机（复位擦不掉它）。
+    //
+    // ⚠️ **单独用一个寄存器产生它，而不是 `rst_n && !wipe_run`。** 两条理由：
+    //  ① 组合出来的异步复位网络有毛刺风险，Vivado 会就此报 DRC，Verilator
+    //     报 SYNCASYNCNET（wipe_run 既被同步读、又进了异步复位网络）。
+    //     这与 trng_top.v 里 cond_rst_n 的处理是同一条规矩。
+    //  ② 用 `zeroize || wipe_run` 而不是只看 wipe_run：zeroize 那一拍
+    //     wipe_run 还没起来（它是同一个时钟沿赋的值），只看 wipe_run 的话
+    //     核会多跑一拍 —— 那一拍它可能正往 BRAM 里写，与刚开始的擦除赛跑。
+    //     现在复位与擦除**同一拍**生效。
+    reg rst_work_q;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) rst_work_q <= 1'b0;
+        else        rst_work_q <= !(zeroize || wipe_run);
+    end
+    wire rst_work_n = rst_work_q;
+
     ram_dp #(.DW(16), .AW(11)) u_bank (
         .clk(clk),
         .a_we(ba_we), .a_addr(ba_addr), .a_din(ba_din), .a_dout(ba_dout),
-        .b_we(bb_we), .b_addr(bb_addr), .b_din(bb_din), .b_dout(bb_dout));
+        .b_we(wipe | (bb_we)), .b_addr(wipe ? wipe_addr[10:0] : (bb_addr)), .b_din(wipe ? 16'd0 : (bb_din)), .b_dout(bb_dout));
 
     // ================= 字节缓冲 =================
     // 两块都是 A 口写、B 口读：写在输入阶段，读在处理阶段，时间上不重叠，
@@ -147,7 +208,7 @@ module mlkem_decaps #(
     ram_dp #(.DW(8), .AW(11)) u_ekbuf (
         .clk(clk),
         .a_we(eka_we), .a_addr(eka_addr), .a_din(eka_din), .a_dout(),
-        .b_we(1'b0),   .b_addr(ekb_addr), .b_din(8'd0),    .b_dout(ekb_dout));
+        .b_we(wipe),   .b_addr(wipe ? wipe_addr[10:0] : (ekb_addr)), .b_din(wipe ? 8'd0 : (8'd0)),    .b_dout(ekb_dout));
 
     reg         cba_we;
     reg  [10:0] cba_addr;
@@ -158,7 +219,7 @@ module mlkem_decaps #(
     ram_dp #(.DW(8), .AW(11)) u_cbuf (
         .clk(clk),
         .a_we(cba_we), .a_addr(cba_addr), .a_din(cba_din), .a_dout(),
-        .b_we(1'b0),   .b_addr(cbb_addr), .b_din(8'd0),    .b_dout(cbb_dout));
+        .b_we(wipe),   .b_addr(wipe ? wipe_addr[10:0] : (cbb_addr)), .b_din(wipe ? 8'd0 : (8'd0)),    .b_dout(cbb_dout));
 
     // ================= 状态机 =================
     localparam [4:0]
@@ -205,9 +266,9 @@ module mlkem_decaps #(
     wire [7:0]  sha_out_data;
 
     sha3_core u_sha3 (
-        .clk(clk), .rst_n(rst_n),
+        .clk(clk), .rst_n(rst_work_n),
         .rate_bytes(sha_rate), .suffix(sha_suffix),
-        .start(sha_start), .zeroize(1'b0),
+        .start(sha_start), .zeroize(wipe_run),   /* Z-04：以前接死 1'b0 */
         .in_valid(sha_in_valid), .in_ready(sha_in_ready), .in_data(sha_in_data),
         .in_flush(sha_in_flush),
         .out_valid(sha_out_valid), .out_ready(sha_out_ready), .out_data(sha_out_data),
@@ -223,7 +284,7 @@ module mlkem_decaps #(
     wire signed [15:0] ntt_rd_data;
 
     ntt_core u_ntt (
-        .clk(clk), .rst_n(rst_n),
+        .clk(clk), .rst_n(rst_work_n),
         .start(ntt_start), .inverse(ntt_inverse), .done(ntt_done),
         .wr_en(ntt_wr_en), .wr_addr(ntt_wr_addr), .wr_data(ntt_wr_data),
         .rd_addr(ntt_rd_addr), .rd_data(ntt_rd_data));
@@ -240,7 +301,7 @@ module mlkem_decaps #(
     wire [3:0] bu_d = v_phase ? dv : du;
 
     mlkem_bitunpack u_bu (
-        .clk(clk), .rst_n(rst_n), .d(bu_d),
+        .clk(clk), .rst_n(rst_work_n), .d(bu_d),
         // .in_ready() 有意留空：喂字节的节奏由本核的状态机定死，不看反压
         .in_valid(bu_in_valid), .in_ready(), .in_data(bu_in_data),
         .out_valid(bu_out_valid), .out_ready(bu_out_ready), .out_data(bu_out_data));
@@ -310,7 +371,11 @@ module mlkem_decaps #(
     wire enc_ek_valid = ekb_v && (state == S_RE_RUN);
 
     mlkem_encaps #(.DEBUG_BANK(0)) u_enc (
-        .clk(clk), .rst_n(rst_n),
+        .clk(clk), .rst_n(rst_work_n),
+        // 内层封装核也有自己的多项式银行，重加密时 m′ 派生的中间态就在里面
+        // —— 擦除必须一起传下去。它自带擦除机，把 wiping 收上来 OR 进本核的
+        // wiping，父层才会等到两台都擦完。
+        .zeroize(zeroize), .wiping(enc_wiping),
         .param_set(ps_r), .m_in(m_r),
         // .done() / .out_last() 有意留空：重加密的进度由本核自己数密文字节
         // （cbcnt），封装核报的完成与末字节标志都用不上。
@@ -513,8 +578,8 @@ module mlkem_decaps #(
     end
 
     // ================= 时序 =================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+    always @(posedge clk or negedge rst_work_n) begin
+        if (!rst_work_n) begin
             state <= S_IDLE; done <= 1'b0; dk_hash_ok <= 1'b0;
             ps_r <= 2'd1; k_r <= 3'd3; d11_r <= 1'b0;
             h_r <= 256'd0; z_r <= 256'd0; hek_r <= 256'd0;

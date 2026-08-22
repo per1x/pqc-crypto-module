@@ -34,7 +34,18 @@ keygen/decaps/sign、KDR/KEK 派生、PWRP 包裹）搬进 OP-TEE 可信应用�
   ss 是会话密钥不是长期私钥；若后续要求 ss 也不出 TA，在协议上加
   "TA 内派生会话密钥"命令即可，不动现有命令。
 - KDR 取自 OP-TEE system PTA 的 `PTA_SYSTEM_DERIVE_TA_UNIQUE_KEY`
-  （HUK + TA UUID 派生，HUK 不出芯片，REE 拿不到同源材料）。
+  （HUK + TA UUID 派生，REE 拿不到同源材料）。
+
+> **⚠️ 别把这写成"HUK 不出芯片"**（登记表 DOC-2）。在**本项目当前这种未供给
+> 形态**下，上游 `core/drivers/zynqmp_huk.c` 看 CSU STATUS 的 AUTH 位，位为 0
+> 就**静默降级**成 development HUK = 纯 `SHA-256(Device DNA)`，而 DNA 从 EL1
+> 经 SMC 读得到（本项目就是这么读到的）。所以它给的是**设备绑定/防克隆**，
+> 不是"密钥受硬件保护"。
+>
+> 同样别把这条写成硅的属性：供给到位后 HUK 走 CSU AES-GCM + device key，
+> 那才是真的硬件保护。弱的是"红线不烧 eFUSE、因而认证启动与秘密根都未启用"
+> 这个**形态**，不是这颗片子。口径与 `src/crypto/kdr_dna.c`、
+> `include/pqchsm/profile.h` 保持一致，三处改动要同步。
 
 ## 2. 密钥体系
 

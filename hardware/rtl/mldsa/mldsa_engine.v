@@ -57,10 +57,26 @@
 // zeroize 拉起 → wiping 置位 → 把输入缓冲逐地址写 0 → wiping 落下。
 // **逐地址写，不是靠复位** —— BRAM 的存储阵列不因复位清零（ram_dp 文件头也写了
 // 这一条），靠复位"擦"等于没擦。
-// ⚠️ 本期只擦 engine 自己的输入缓冲：三个核内部的存储（s₁/s₂/t₀、y、z、c、
-//    以及它们自己的 sk/msg 缓冲）没有擦除口，要覆盖到它们必须给核加口，
-//    那属于"动核内部"，与本期范围冲突。**这是一条已知缺口，写在这里免得
-//    日后误以为已经覆盖。**
+//
+// 【那条已知缺口现在补上了：一台擦除机广播三个核】（登记表 Z-01 / Z-02）
+// 以前这里只擦 engine 自己的输入缓冲，三个核内部的存储（s₁/s₂/t₀、y、z、c、
+// 以及它们各自的 sk/msg/pk/sig 缓冲）**根本没有擦除口**。后果不是理论上的：
+//
+//   每跑完一次 Sign，展开态的私钥就原样留在 PL 的 BRAM 里，直到下一次运算
+//   碰巧覆盖到同一个地址为止。ZEROIZE 报告"擦完了"，而 sk 派生量一个字节
+//   没少 —— 这正是"把目录页撕了而正文还在"，而且是在最要紧的那块存储上。
+//
+// 现在：**engine 里这一台擦除机同时广播三个核**（wipe 电平 + wipe_addr 计数）。
+//   · 每个核里每一块 ram_dp 的 B 口在 wipe 期间被强制成 addr=wipe_addr、
+//     we=1、din=0 —— B 口本来就是读口（ML-KEM 那边有例外，见其文件头），
+//     擦除期间核在复位里，不会有人跟它抢；
+//   · 核的复位改成 `rst_n && !wipe`，于是**寄存器里的**那些秘密
+//     （sign.v 的 key_out/tr_out/mu/rhopp/ctilde，登记表 Z-02）一拍带走。
+//     它们以前只在 !rst_n 时清，也就是只有整块 PL 复位才清得掉。
+//
+// 计数器为什么不用另开一个：输入缓冲是 32 KB（15 位），而核里最大的一块是
+// AW=13（8 KB）。同一个计数器跑一遍，核那边的地址取低 13 位 —— 于是每块被
+// 写了 4 遍 0。写 4 遍和写 1 遍没有区别，为此再加一个计数器不值得。
 `default_nettype none
 
 // ⚠️ **运行时选参数集**：pset 在 start 那一拍锁存，engine 与三个核都按它译码
@@ -170,6 +186,11 @@ module mldsa_engine (
     wire start_ok = (msg_len <= MSGMAX[15:0]) && (ctx_len <= 16'd255);
 
     assign wiping = (state == S_WIPE);
+    // 广播给三个核：电平 + 地址。core_rst_n 把核按在复位里，顺带清掉核内
+    // 那些**寄存器**里的秘密（BRAM 靠上面的 B 口逐地址写 0）。
+    wire        core_wipe = (state == S_WIPE);
+    wire [12:0] core_wipe_addr = wipe_addr[12:0];
+    wire        core_rst_n = rst_n && !core_wipe;
     assign busy   = (state != S_IDLE) && (state != S_DONE);
     assign done   = done_r;
 
@@ -210,7 +231,8 @@ module mldsa_engine (
     assign sha_out_ready= sel_kg ? kg_sor : sel_sg ? sg_sor : vf_sor;
 
     mldsa_keygen u_kg (
-        .clk(clk), .rst_n(rst_n), .pset(pset_r),
+        .clk(clk), .rst_n(core_rst_n), .pset(pset_r),
+        .wipe(core_wipe), .wipe_addr(core_wipe_addr),
         .start(kg_start), .xi(xi_r), .done(kg_done),
         .sha_start(kg_ss), .sha_rate(kg_sr), .sha_suffix(kg_su),
         .sha_in_valid(kg_siv), .sha_in_data(kg_sid), .sha_in_flush(kg_sif),
@@ -223,7 +245,8 @@ module mldsa_engine (
         .sk_addr(kg_sk_addr), .sk_data(kg_sk_data));
 
     mldsa_sign u_sg (
-        .clk(clk), .rst_n(rst_n), .pset(pset_r),
+        .clk(clk), .rst_n(core_rst_n), .pset(pset_r),
+        .wipe(core_wipe), .wipe_addr(core_wipe_addr),
         .start(sg_start),
         .sk_wr_en(sk_we),  .sk_wr_addr(seg_addr),  .sk_wr_data(seg_data),
         .msg_wr_en(msg_we_s), .msg_wr_addr(seg_addr), .msg_wr_data(seg_data),
@@ -240,7 +263,8 @@ module mldsa_engine (
         .sig_addr(sg_sig_addr), .sig_data(sg_sig_data));
 
     mldsa_verify u_vf (
-        .clk(clk), .rst_n(rst_n), .pset(pset_r),
+        .clk(clk), .rst_n(core_rst_n), .pset(pset_r),
+        .wipe(core_wipe), .wipe_addr(core_wipe_addr),
         .start(vf_start),
         .pk_wr_en(pk_we),   .pk_wr_addr(seg_addr),  .pk_wr_data(seg_data),
         .sig_wr_en(sig_we), .sig_wr_addr(seg_addr), .sig_wr_data(seg_data),

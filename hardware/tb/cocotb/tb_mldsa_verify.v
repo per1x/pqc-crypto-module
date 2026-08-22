@@ -46,6 +46,10 @@ module tb_mldsa_verify #(
     localparam [1:0] PSET_FROM_K = (K == 4) ? 2'd0 : (K == 6) ? 2'd1 : 2'd2;
 
     mldsa_verify u_ver (
+        // 擦除广播口：本 testbench 直接例化核，没有 engine 那一层驱动它们。
+        // **必须显式接 0** —— 悬空在 Icarus 下是 X，X 一进 B 口的地址复用
+        // 就让所有读出变成 X，看起来像算法坏了。
+        .wipe(1'b0), .wipe_addr(13'd0),
         .clk(clk), .rst_n(rst_n), .pset(PSET_FROM_K), .start(start),
         .pk_wr_en(pk_wr_en), .pk_wr_addr(pk_wr_addr), .pk_wr_data(pk_wr_data),
         .sig_wr_en(sig_wr_en), .sig_wr_addr(sig_wr_addr), .sig_wr_data(sig_wr_data),

@@ -2,6 +2,17 @@
 
 # Security policy (draft)
 
+> **⚠️ Form note (batch 1, in progress).** Parts of the implementation this
+> document describes have moved: the ML-KEM/ML-DSA key seeds are now generated
+> and held in EL3 rather than in the normal-world daemon, and the PL cores have
+> a real erase machine. **None of it is verified on the board yet.** The body
+> below is deliberately left describing the *previous* form — rewriting a
+> submission-shaped document ahead of the evidence would promise a capability
+> that has not been delivered. See
+> [FINAL-PLAN.zh-CN.md](FINAL-PLAN.zh-CN.md) §8 for what changed and what is
+> still pending on silicon.
+
+
 > **This is a draft written against a research prototype.** It follows the
 > structure a FIPS 140-3 (ISO/IEC 19790:2012) non-proprietary security policy
 > takes, and maps onto the corresponding clauses of GM/T 0028-2014, so that the
@@ -276,11 +287,21 @@ document is not read as a statement of readiness.
 8. **Unkeyed Shamir share checksums.** They detect corruption, not tampering.
 9. **SO PIN lockout not enforced.** Failures are counted but the slot is not
    locked, because locking it would brick the device; recovery is by M-of-N.
-10. **No whole-core hardware implementation of ML-DSA.** ML-KEM 512/768/1024
-    KeyGen/Encaps/Decaps run in programmable logic and match NIST ACVP vectors
-    byte-for-byte on silicon; so do the symmetric cores (AES-128/256, SM4, SM3)
-    against their standard vectors. ML-DSA has operators only (13 modules, checked
-    against the reference model), not chained into whole operations.
+10. ~~**No whole-core hardware implementation of ML-DSA.**~~ **Closed — this
+    entry was wrong** (registry DOC-1). ML-DSA 44/65/87 KeyGen/Sign/Verify have
+    whole cores behind `mldsa_axi` (slot 6) and match the NIST ACVP vectors
+    byte-for-byte **on silicon** (32/32 on the board; see `board/logs/` and
+    `docs/TESTING.md`). ML-KEM 512/768/1024 and the symmetric cores
+    (AES-128/256, SM4, SM3) likewise match their standard vectors on silicon.
+
+    > The stale wording said "operators only, not chained into whole
+    > operations", which was true of an earlier stage and contradicted the
+    > README, `TESTING.md` and the board logs. Three further copies of it are
+    > fixed alongside (`docs/ARCHITECTURE.md`, the Chinese security policy, and
+    > `zynq-port.zh-CN.md` §B.5). Understating what has been demonstrated is a
+    > smaller sin than overstating it, but in a submission-shaped document it is
+    > still a false statement — and this one would have invited the reviewer to
+    > ask for evidence that already exists.
 
 ## Mapping to GM/T 0028-2014
 

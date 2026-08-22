@@ -206,6 +206,12 @@ decode, the erase machine and the TRNG sampling FIFO:
   109.2 µs (8192 cycles @ 75 MHz; the difference is polling overhead), and
   *(that measurement predates the on-chip key vault; the wipe now covers a
   third, 16 KB block and takes 16384 cycles ≈ 218 µs — re-measurement pending)*
+  > **⚠️ Both figures are stale.** The vault is 16 slots / 64 KB, so the wipe
+  > counter is 16 bits and this layer runs **65536 cycles** (≈ 874 µs at
+  > 75 MHz); since batch 1 the three ML-KEM cores have their own erase
+  > machines on top. `REGISTERS.md` is the single source for that number.
+  > The measurements above are kept as the record of what was actually timed,
+  > **on an older bitstream** — re-measurement is board-pending.
   afterwards `OUT_LEN = IN_PTR = 0` with the same input reproducing 2432
   identical bytes.
 - *TRNG*, 3/3 — `DROPS = 0` with `BLOCKS = 17892` absorbed while nobody was

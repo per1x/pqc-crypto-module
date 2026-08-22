@@ -37,7 +37,11 @@ module tb_mldsa_keygen #(
     localparam [1:0] PSET_FROM_K = (K == 4) ? 2'd0 : (K == 6) ? 2'd1 : 2'd2;
 
     mldsa_keygen u_kg (
-        .clk(clk), .rst_n(rst_n), .pset(PSET_FROM_K),
+        .clk(clk), .rst_n(rst_n),
+        // 擦除广播口：本 testbench 直接例化核，没有 engine 那一层来驱动它们。
+        // **必须显式接 0** —— 悬空在 Icarus 下是 X，X 一进 B 口的地址复用就
+        // 让所有读出变成 X（换掉那些"看起来是算法坏了"的假象）。
+        .wipe(1'b0), .wipe_addr(13'd0), .pset(PSET_FROM_K),
         .start(start), .xi(xi), .done(done),
         .sha_start(ss), .sha_rate(sr), .sha_suffix(su),
         .sha_in_valid(siv), .sha_in_data(sid), .sha_in_flush(sif),

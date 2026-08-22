@@ -1161,3 +1161,93 @@ async def test_mode_reads_back_all_fields(dut):
         assert got == word, f"MODE 回读 0x{got:03x}，写进去的是 0x{word:03x}"
 
     dut._log.info("MODE 的 11 个位全部可回读")
+
+
+# ============================================================================
+# 核内 BRAM 的擦除（登记表 Z-03 / Z-04）—— 这以前**根本没有**
+# ============================================================================
+# 上一版的 zeroize 只擦 mlkem_axi 自己那两块 8 KB 缓冲与 16 槽金库。三个核
+# **内部**的多项式银行（ŝ、ê、Â、重加密中间态）一个字节都没擦 —— 那些核连
+# zeroize 端口都没有。于是每跑完一次 KeyGen/Decaps，私钥系数就原样留在核里，
+# 直到下一次运算碰巧覆盖同一个地址为止，而 ZEROIZE 报告"擦完了"。
+#
+# 判据只能是**直接读那块存储**（cocotb 的层次化访问），不能靠 STATUS：
+# 一个只把 WIPING 拉一下就落下的假实现，从寄存器看和真的一模一样。
+# 这与本文件上面 test_zeroize_really_wipes_bram 的口径一致 ——
+# "OUT_LEN 变 0"只证明目录页被撕了。
+@cocotb.test()
+async def test_zeroize_wipes_core_internal_bram(dut):
+    """跑一次 KeyGen 让核内多项式银行装满，ZEROIZE 之后逐字读回必须全 0"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-512"
+    d, z = bytes([0x5C] * 32), bytes([0x6D] * 32)
+
+    # 先跑一次：核内的多项式银行这时装着 ŝ / ê / Â（都是私钥派生量）
+    got = await run_op(dut, M_KEYGEN, name, d + z)
+    assert got == b"".join(mlkem_keygen(d, z, name)), "KeyGen 这一步就不对"
+
+    banks = (("u_kg", dut.u_kg.u_bank.mem),
+             ("u_en", dut.u_en.u_bank.mem),
+             ("u_de", dut.u_de.u_bank.mem))
+
+    # 反证：KeyGen 核那块**必须**先是脏的，否则这条用例什么都没测
+    bad, _ = _mem_nonzero(banks[0][1])
+    assert bad > 0, (
+        "KeyGen 跑完之后核内多项式银行居然是全 0 —— 这条用例失去意义了"
+        "（多半是层次路径写错，读到了别的东西）")
+    dut._log.info("跑完 KeyGen：核内多项式银行有 %d 个非零字，确认是脏的", bad)
+
+    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
+    await _wait_wipe(dut)
+
+    for label, mem in banks:
+        bad, first = _mem_nonzero(mem)
+        assert bad == 0, (
+            f"{label} 的核内多项式银行擦除之后还有 {bad}/{len(mem)} 个非零，"
+            f"第一个在 [{first[0]}] = 0x{first[1]:04x} —— "
+            "展开态的私钥系数还留在 PL 里")
+
+    # 擦完之后还能照常再跑（擦除不能把核弄坏）
+    got = await run_op(dut, M_KEYGEN, name, d + z)
+    assert got == b"".join(mlkem_keygen(d, z, name)), "擦除之后再跑结果不对"
+
+    dut._log.info("三个核的内部多项式银行 zeroize 后逐字读回，全为 0")
+
+
+@cocotb.test()
+async def test_wiping_covers_the_cores_not_just_this_layer(dut):
+    """STATUS.WIPING 必须**盖住核里那几台擦除机**，不能只报本层那台
+
+    这一条单列，是因为漏掉它的后果很具体：软件轮询到 WIPING 落下就去发下一次
+    START，而核里还在擦 —— 那一趟运算读到的是半擦的多项式银行，出来的是一个
+    **看起来完全合法**的错结果。ML-DSA 那边同样的坑写在 mldsa_axi 的
+    wiping_any 上。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
+
+    # 采样 WIPING 的持续时间。本层那台擦 64 KB 金库要 65536 拍；核里那三台
+    # 各自 4096/2048 字。判据不是"恰好多少拍"（那会把用例钉死在实现细节上），
+    # 而是**核的 wiping 确实被算进去了** —— 直接看那三根线。
+    saw_core_wiping = False
+    for _ in range(80000):
+        if int(dut.core_wiping.value):
+            saw_core_wiping = True
+        st, _ = await rd(dut, STATUS)
+        if not (st & ST_WIPING):
+            break
+    else:
+        raise AssertionError("WIPING 一直不落")
+
+    assert saw_core_wiping, (
+        "整个擦除过程里三个核的 wiping 一次都没起来 —— "
+        "核内 BRAM 根本没被擦，STATUS.WIPING 报的只是本层那台")
+    # 落下的那一刻，核里也必须已经擦完
+    assert int(dut.core_wiping.value) == 0, \
+        "本层报擦完了，核里还在擦 —— 下一次 START 会读到半擦的存储"
+
+    dut._log.info("WIPING 覆盖了核里那三台擦除机，且三台都落下之后才报完成")
