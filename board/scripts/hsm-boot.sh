@@ -205,6 +205,21 @@ if [ -x "$D/pqchsm_fpgad" ]; then
     #
     # ⚠️ 代价说清楚：闩锁只有**重新装载位流**才解得开，而 ACVP 的 KeyGen 向量
     #    需要核对 dk。所以跑那套 KAT 之前要先重启（或重装位流）并且不带 -lock。
+    # ⚠️⚠️ **批 1 之后这个 daemon 有两个新的前置，上板前先确认，别在板上现查。**
+    #
+    #  ① **BOOT.BIN 里的 BL31 必须带种子 SiP**（0x8200ff14，
+    #     boot/atf/patch_atf_secmmio.py）。KeyGen 现在的种子由 EL3 生成并
+    #     直接写进 PL —— 旧 BL31 上这条 SMC 是未知的，ATF 回 SMC_UNK，
+    #     症状是"daemon 起来了、ping 通了、一做 KeyGen 就 HARDFAIL"。
+    #     daemon 启动时会探一次内核模块认不认这个 ioctl，但**服务本身在不在
+    #     要到第一次 KeyGen 才确证**（非法目标被拒与服务不存在回的都是 EIO）。
+    #  ② **位流必须是带种子暂存口的那一版**（mlkem_axi 0x38 / mldsa_axi 0x34）。
+    #     旧位流上那个偏移不存在，写进去石沉大海，KeyGen 会因为
+    #     SEED_ERR 被拒 —— 这一条倒是吵的，STATUS 上看得见。
+    #  ③ **内核模块要重新编**（board/kmod，新增 SECMMIO_SEED ioctl）。
+    #
+    # 三样是一套，换其中一样不换另外两样都会失败。顺序：
+    #   先证明能 JTAG 救援 → 换位流 → 换 BOOT.BIN → 重编内核模块 → 起 daemon。
     setsid $D/pqchsm_fpgad -lock >> $LOG 2>&1 < /dev/null &
     sleep 2
     if [ -S /tmp/pqchsm_fpgad.sock ]; then   # 见 service/wire.h

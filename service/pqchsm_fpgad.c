@@ -1380,6 +1380,42 @@ int main(int argc, char **argv)
 		logf_("自检通过：TRNG VERSION = 0x%08x，EL3 通路可用", ver);
 	}
 
+	/* ---- 自检之二：EL3 的种子服务在不在 ----
+	 *
+	 * KeyGen 现在**依赖**它（种子由 BL31 生成并直接写进 PL）。而一块烧着旧
+	 * BOOT.BIN 的板子上它根本不存在 —— 那时 ATF 对未知 SMC 回 SMC_UNK，
+	 * 症状是"daemon 起来了、ping 通了、一做 KeyGen 就 HARDFAIL"，
+	 * 而失败点离原因隔着好几层。这与本文件开头记的那次
+	 * "BL31 没带 SiP 却照常 READY=yes" 是同一类坑，所以照同样的办法在启动
+	 * 时就判掉。
+	 *
+	 * ⚠️ 探测用一个**非法目标**，不是真去要一份种子：真要一份的话它会留在
+	 *    PL 的暂存口里，而那份种子谁也不会用 —— 白白消耗熵，还让
+	 *    SEED_STAT 上来就是"已备好"，把后面的状态判断搅浑。
+	 *    非法目标的正确回答是 EBADTGT(2)；服务不存在时回的是 SMC_UNK
+	 *    （内核模块把它翻成 -EIO），两者分得开。 */
+	{
+		struct secmmio_seed probe = { .target = 0xFFFFFFFFu, .world = 0 };
+
+		if (ioctl(sec_fd, SECMMIO_SEED, &probe) == 0) {
+			logf_("自检失败：EL3 种子服务对**非法目标**回了成功 —— "
+			      "它多半不是我们以为的那个服务，拒绝启动");
+			return 2;
+		}
+		if (errno == ENOTTY) {
+			logf_("自检失败：/dev/secmmio 不认 SECMMIO_SEED —— "
+			      "内核模块是旧的。KeyGen 依赖它，拒绝启动。");
+			return 2;
+		}
+		/* EIO = SiP 回了非零。非法目标本来就该被拒，所以这条是**正常**的；
+		 * 但"服务不存在"回的也是 EIO，两者在这一层分不开 —— 真正分得开的
+		 * 地方是下面第一次 KeyGen。这里能挡住的是内核模块旧掉那一类。
+		 * 如实写清楚，不假装这条自检比它实际的更强。 */
+		logf_("自检通过：/dev/secmmio 认 SECMMIO_SEED（EL3 种子服务的存在性"
+		      "要到第一次 KeyGen 才能确证 —— 非法目标被拒与服务不存在"
+		      "在这一层回的都是 EIO）");
+	}
+
 	/* ---- 可选：把私钥外泄闩锁置上（-lock）----
 	 *
 	 * 置上之后 ML-KEM 的 KeyGen **在硬件里**就不再把 dk 送出总线，
