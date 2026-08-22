@@ -137,6 +137,7 @@ static void pick(const uint8_t *all, const size_t *all_lens, const int *idx, int
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	snprintf(g_path, sizeof(g_path), "/tmp/pqchsm_bk_%d.bin", (int)getpid());
 
 	uint8_t pk0[4096];

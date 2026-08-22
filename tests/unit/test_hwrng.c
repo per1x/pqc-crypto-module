@@ -19,6 +19,7 @@
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	uint8_t buf[64];
 	uint8_t zero[64] = {0};
 
@@ -104,16 +105,41 @@ int main(void)
 	CHECK_EQ_INT(hwrng_selftest(), HWRNG_OK);
 	CHECK_EQ_INT(hwrng_bytes(buf, sizeof(buf)), HWRNG_OK);
 
-	TCASE("pqc_random_bytes 真的走硬件熵源");
+	/* ====================================================================
+	 * 【PS-25：pqc_random_bytes 的判据是 is_hardware，不是 available】
+	 * ====================================================================
+	 * 这两条以前是反的 —— 老实现用 hwrng_available()，而**桩 transport 也让
+	 * 它返回真**。于是装了桩的进程会绕开 OpenSSL、改用桩那条没有经过任何
+	 * 熵源评估的路径去产密钥材料，同时让"我们走硬件熵源"这句话看起来成立。
+	 *
+	 * 现在分两段验：装桩时**不走**它（下面这条），装真硬件时才走（再下面）。
+	 */
+	TCASE("装的是桩 transport 时，pqc_random_bytes 不碰它（PS-25）");
 	const hwrng_transport_t *tr = hwrng_get_transport();
+	CHECK(hwrng_available());          /* 装了 */
+	CHECK(!hwrng_is_hardware());       /* 但不是硬件 */
 	uint32_t before = tr->read_reg(HWRNG_REG_WORDS);
 	CHECK_EQ_INT(pqc_random_bytes(buf, 32), 0);
-	uint32_t after = tr->read_reg(HWRNG_REG_WORDS);
-	CHECK_EQ_INT(after - before, 8);   /* 32 字节正好弹 8 个字 */
+	CHECK_EQ_INT(tr->read_reg(HWRNG_REG_WORDS) - before, 0);
+
+	/* 同一个桩，只把 is_hardware 那一位翻成 1 —— 于是"走不走它"这件事
+	 * 被单独隔离出来了：行为一模一样，只有那一位不同。 */
+	static hwrng_transport_t fake_hw;
+	fake_hw = *hwrng_transport_stub();
+	fake_hw.is_hardware = 1;
+	hwrng_set_transport(&fake_hw);
+	CHECK_EQ_INT(hwrng_selftest(), HWRNG_OK);
+
+	TCASE("transport 自称是硬件时，pqc_random_bytes 真的走它");
+	CHECK(hwrng_is_hardware());
+	before = fake_hw.read_reg(HWRNG_REG_WORDS);
+	CHECK_EQ_INT(pqc_random_bytes(buf, 32), 0);
+	CHECK_EQ_INT(fake_hw.read_reg(HWRNG_REG_WORDS) - before, 8);   /* 32 B = 8 字 */
 
 	TCASE("熵源故障时绝不回退到软件源");
 	hwrng_stub_force_alarm(1);
 	CHECK_EQ_INT(pqc_random_bytes(buf, 32), -1);
+	hwrng_stub_force_alarm(0);
 
 	TCASE("卸掉 transport 后回到软件源");
 	hwrng_set_transport(NULL);

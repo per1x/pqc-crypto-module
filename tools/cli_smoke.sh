@@ -10,7 +10,8 @@ set -uo pipefail
 BUILD="${1:-$(cd "$(dirname "$0")/.." && pwd)/build}"
 D="$BUILD/pqchsmd"
 C="$BUILD/pqchsm-cli"
-for f in "$D" "$C"; do
+A="$BUILD/pqchsm-admin"
+for f in "$D" "$C" "$A"; do
   [ -x "$f" ] || { echo "找不到 $f —— 先 cmake --build build"; exit 2; }
 done
 
@@ -103,6 +104,36 @@ ck "销毁后旧句柄失效"           err CLI destroy "$S" "$H"
 ck "非 SO 不能清零"             err CLI zeroize "$S" 0
 ck "关会话"                    ok  CLI session-close "$S"
 ck "已关闭的会话不可用"          err CLI logout "$S"
+
+# ============================================================================
+# 审计日志：**正式路径**上真的写了没有
+# ============================================================================
+# 这一段是回归 D10 的：hsm_token_attach_audit 以前只在单元测试里被调用，
+# 正式路径上 tok->audit 恒 NULL，槽位层每一条事件都被静默丢弃。
+# 那种缺陷单元测试永远抓不到 —— 它们自己把钩子挂上了。
+#
+# 判据必须落在**这个进程外的、由 daemon 自己开的那份日志**上：
+#   ① 文件确实生成了（daemon 默认开在 <keystore>.audit）；
+#   ② 条数 > 0 —— 上面这一串 init-token / login / generate / destroy
+#      本来就该留下记录；
+#   ③ 哈希链自洽（pqchsm-admin audit-verify 走完整条链）。
+# 只查①②不够：一个只 append 不更新文件头的实现也能过，而那种日志
+# 一验就散。
+AUDIT="$KS.audit"
+if [ -s "$AUDIT" ]; then
+  echo "  ✓ 审计日志已生成（$(wc -c < "$AUDIT" | tr -d ' ') 字节）"; pass=$((pass+1))
+else
+  echo "  ✗ 审计日志没生成 —— tok->audit 多半还是 NULL"; fail=$((fail+1))
+fi
+# 文件布局恒等式：64 + 96*count。条数由它反推，不用另开一个解析器。
+ASZ=$(wc -c < "$AUDIT" 2>/dev/null | tr -d ' ' || echo 0)
+ACNT=$(( (ASZ - 64) / 96 ))
+if [ "$ASZ" -gt 64 ] && [ $(( (ASZ - 64) % 96 )) -eq 0 ] && [ "$ACNT" -gt 0 ]; then
+  echo "  ✓ 审计日志有 $ACNT 条记录"; pass=$((pass+1))
+else
+  echo "  ✗ 审计日志里一条记录都没有（大小 ${ASZ}）"; fail=$((fail+1))
+fi
+ck "审计链自洽（audit-verify）" ok "$A" -k "$KS" audit-verify "$AUDIT"
 
 echo
 echo "通过 ${pass}，失败 $fail"

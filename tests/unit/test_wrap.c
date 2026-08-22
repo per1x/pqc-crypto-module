@@ -11,6 +11,7 @@
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	uint8_t kek[PQC_KEK_LEN], kek2[PQC_KEK_LEN];
 	uint8_t salt[16] = { 1, 2, 3, 4 };
 	CHECK_EQ_INT(pqc_kek_derive(salt, sizeof(salt), kek), 0);

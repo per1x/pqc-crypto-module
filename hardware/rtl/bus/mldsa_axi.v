@@ -127,6 +127,49 @@
 // 同一条理由也用在海绵上：`sha3_core` **本来就带 zeroize 口**，却一直接的
 //    1'b0、靠复位擦。它的状态里过过 sk 的派生量（ρ′/K/μ 那一路），所以现在
 //    接真 zeroize。
+//
+// ============================================================================
+// 【安全世界暂存的种子：CODE-1 的 PL 侧落点（与 mlkem_axi 同一套机制）】
+// ============================================================================
+// KeyGen 的 ξ 原来只有一条来路：软件往 IN_DATA 灌 32 字节，也就是种子在
+// **普通世界 daemon 的栈上**待过一趟。ξ 完全决定 sk，所以有 root 的人能读到它
+// （= 读到私钥），更能**换**掉它 —— 灌一个自己知道的 ξ，此后这块板签出来的
+// 每一份签名他都能伪造，而板子照常工作、ACVP 照常过。
+//
+// 现在多一条来路：**SEED_DATA 暂存口**。安全世界（今天是 BL31 的 EL3 SiP，
+// 批 2 之后是 OP-TEE 的 TA）在自己那一侧生成 ξ，经这个口写进来 8 个 32 位字；
+// `MODE.SEED_STAGED` 置位的 KeyGen 就把这 32 字节逐字节写进 engine 输入存储的
+// [0,32)，**不看 IN_DATA**。普通世界只发一条命令，看不到种子明文。
+//
+// 这是朝着 TEE 主线的过渡态：保管方是安全世界，PL 只收下、展开、算完即弃。
+// 批 2 把保管从 EL3 上移到 TA 时这一侧一个字都不用改 —— 换的只是谁在写它。
+// 所以这里没有、也不该有"种子由 PL 自己生成并常驻 PL"的东西。
+//
+// 四件配套的事（与 mlkem_axi 逐条对应，完整理由见那个文件头）：
+//  ① SEED_DATA **永远只认安全世界事务**（AxPROT[1]==0），与 SECURE_ONLY 无关；
+//     被拒的写计入 SEED_STAT[31:16] 并回 SLVERR，不静默。
+//     ⚠️ 它挡不住"root 经 EL3 通用 PL_WR 转一手"—— 那一半在 BL31 的白名单里
+//        （boot/atf/patch_atf_secmmio.py 要把这个偏移排除）。少了任一边都白做。
+//  ② SEED_DATA **没有读回路径**；SEED_STAT 只报字数与闩锁，不报种子字节。
+//  ③ **用一次就作废**：START 那一刻清字计数（此后 SEED_READY 落下、这份 ξ
+//     再也不可能被第二次 START 用上），字节在 S_SEED 把它搬完 engine 的那一拍
+//     清零。分两步是因为搬运本身要 32 拍 —— "不可再用"必须立刻，"字节已清"
+//     最快只能等搬完。中途被 zeroize 打断时字节由 zeroize 那一支带走。
+//  ④ `CTRL.SEED_LOCK` 一次性闩锁：置上之后 KeyGen 永远走暂存口。只有复位
+//     整块 PL 能放开；**它不是熔丝**，掉电/重配即回到未闩状态，不在红线内。
+//     ⚠️ **不与 SK_LOCK 连动**：SK_LOCK 守的是"私钥留在 PL"，而最终架构
+//        （FINAL-PLAN §7 V-04）要删掉它；SEED_LOCK 守的是"种子只能来自安全
+//        世界"，与最终架构同向。别把一条待删的机制焊得更死。
+//
+// ⚠️ 批 1 挡不住的两件事，与 mlkem_axi 逐条相同，写在那个文件头里：
+//    ① **降级**（MODE 仍由普通世界写，root 可以不置 SEED_STAGED 退回老路）；
+//    ② PL 金库还在的形态下，ξ 进 EL3 只有**同时用 SK_TO_SLOT** 才完整
+//       —— sk 里含 K 与由 ξ 派生的 (s1,s2)。批 2 删掉金库后这条自然消失。
+//
+// ⚠️ 这条通路**只管 KeyGen 的 ξ**。Sign 的 rnd（32 字节 hedged 随机数）仍由
+//    软件送 —— 它不决定私钥，泄露它不泄露 sk（最坏是把 hedged 签名降级成
+//    确定性签名）。不顺手一起做，是因为那要动 Sign 的输入排布，风险与收益
+//    不成比例；这条残留在 docs/SECURITY.md 的限制表里如实记着。
 `default_nettype none
 
 module mldsa_axi #(
@@ -176,11 +219,14 @@ module mldsa_axi #(
     //   0x18 OUT_DATA R   0x1C OUT_PTR RW   0x20 OUT_LEN R
     //   0x24 MSG_LEN  RW  0x28 CTX_LEN RW
     //   0x2C KEYSTAT  R   0x30 VIOL    R
+    //   0x34 SEED_DATA W  安全世界写 8 个字暂存 ξ；**读恒 0**
+    //   0x38 SEED_STAT R  只报字数/闩锁/被拒计数，不报种子字节
     localparam [3:0] A_VERSION = 4'h0, A_CTRL    = 4'h1, A_MODE   = 4'h2,
                      A_STATUS  = 4'h3, A_INDATA  = 4'h4, A_INPTR  = 4'h5,
                      A_OUTDATA = 4'h6, A_OUTPTR  = 4'h7, A_OUTLEN = 4'h8,
                      A_MSGLEN  = 4'h9, A_CTXLEN  = 4'hA, A_KEYSTAT = 4'hB,
-                     A_VIOL    = 4'hC;
+                     A_VIOL    = 4'hC,
+                     A_SEEDDATA = 4'hD, A_SEEDSTAT = 4'hE;
 
     localparam [1:0] OP_KEYGEN = 2'd0, OP_SIGN = 2'd1, OP_VERIFY = 2'd2;
 
@@ -249,10 +295,22 @@ module mldsa_axi #(
     // 一次性闩锁：写 1 置上，**没有清零路径**（见文件头）
     reg        sk_lock;
 
+    // ================= 安全世界暂存的种子 =================
+    // 8 个 32 位字 = ξ(32 字节)。字 i 落在 [32i +: 32]，字内小端 ——
+    // 于是"第 j 个字节"就是 seed_stage[8j +: 8]，与软件往 IN_DATA 灌 ξ 时
+    // 第 j 个字节落在 engine 输入存储地址 j 是**同一种解释**。
+    reg [255:0] seed_stage;
+    reg [3:0]   seed_wcnt;              // 已收下几个字，0..8
+    reg         seed_lock;              // 一次性闩锁（连带置 sk_lock）
+    reg         seed_err;               // 上一次 START 因暂存种子没备好被拒
+    reg [15:0]  seed_viol;              // 非安全世界写种子口的次数（饱和）
+    wire        seed_ready = (seed_wcnt == 4'd8);
+
     // ================= 控制寄存器 =================
     reg [1:0]  op, pset;
     reg        sk_to_slot, sk_from_slot;
     reg [3:0]  slot;
+    reg        seed_staged;
     reg [15:0] in_ptr, out_ptr, out_len_r, msg_len, ctx_len;
     reg        run_done, verify_ok_r, param_err, len_err;
     reg        zero_pulse;
@@ -312,12 +370,20 @@ module mldsa_axi #(
     wire take_sk  = (op == OP_SIGN)   && sk_from_slot;
     wire store_sk = (op == OP_KEYGEN) && (sk_to_slot || sk_lock);
 
+    // ---- 本次 KeyGen 走不走暂存的种子。闩上之后软件说了不算 ----
+    wire use_staged = (op == OP_KEYGEN) && (seed_staged || seed_lock);
+    // 走暂存种子就必须真的有一份备好的（8 个字全到齐）。不查这一条的后果
+    // 不是报错，是拿一份只灌了一半、其余是残留的 ξ 去派生私钥 —— 出来的
+    // 密钥对与签名看起来完全合法。与"喂不够"是同一类安静错误，判法也一样：
+    // 在 START 那一刻挡住，且不启动 engine。
+    wire seed_gate_ok = !use_staged || seed_ready;
+
     // ---- 软件必须写够多少字节（见文件头【START 前的校验】）----
-    //   KeyGen : ξ(32)
+    //   KeyGen : ξ(32)（走暂存种子那一趟是 0 —— 软件一个字节都不用送）
     //   Sign   : rnd(32) + ctx + msg，再加 sk（**除非从金库取**）
     //   Verify : pk + sig + ctx + msg
     wire [17:0] var_len = {2'd0, ctx_len} + {2'd0, msg_len};
-    wire [17:0] need_sw = (op == OP_KEYGEN) ? 18'd32
+    wire [17:0] need_sw = (op == OP_KEYGEN) ? (use_staged ? 18'd0 : 18'd32)
                         : (op == OP_SIGN)   ? (18'd32 + var_len
                                                + (take_sk ? 18'd0 : {5'd0, sk_len}))
                         :                     (var_len + {5'd0, pk_len}
@@ -391,9 +457,12 @@ module mldsa_axi #(
     //   S_RUN   等 done
     //   S_STORE engine 输出 → 金库（SK_TO_SLOT / sk_lock）
     //   S_FIN   落 OUT_LEN、标槽有效、报 DONE
+    //   S_SEED  暂存的 ξ → engine 输入存储 [0,32)（走暂存种子那一趟）
     localparam [2:0] S_IDLE = 3'd0, S_LOAD = 3'd1, S_KICK = 3'd2,
-                     S_RUN  = 3'd3, S_STORE = 3'd4, S_FIN = 3'd5;
+                     S_RUN  = 3'd3, S_STORE = 3'd4, S_FIN = 3'd5,
+                     S_SEED = 3'd6;
     reg [2:0]  state;
+    reg [5:0]  seed_addr;   // 搬到 engine 输入存储的第几个字节（0..31）
     reg [12:0] cp;          // 搬运计数（最大 sk 4896）
     reg        cp_wait;     // 同步读要等一拍
     // start 是非阻塞赋值，下一拍才真正拉高；而 engine 的 done 是**电平**，
@@ -414,6 +483,7 @@ module mldsa_axi #(
     // ================= 写通道 =================
     reg aw_got, w_got;
     reg [7:0]  aw_addr_r;
+    reg [2:0]  aw_prot_r;
     reg [31:0] w_data_r;
     reg [3:0]  w_strb_r;
 
@@ -423,8 +493,19 @@ module mldsa_axi #(
     wire wr_now = (aw_got || (f_awvalid && f_awready))
                   && (w_got || (f_wvalid && f_wready)) && !f_bvalid;
     wire [7:0]  wr_addr = (f_awvalid && f_awready) ? f_awaddr : aw_addr_r;
+    wire [2:0]  wr_prot = (f_awvalid && f_awready) ? f_awprot : aw_prot_r;
     wire [31:0] wr_data = (f_wvalid  && f_wready)  ? f_wdata  : w_data_r;
     wire [3:0]  wr_strb = (f_wvalid  && f_wready)  ? f_wstrb  : w_strb_r;
+
+    // ---- 种子暂存口：**永远只认安全世界事务，与 SECURE_ONLY 无关** ----
+    // 理由与 mlkem_axi 那一段逐字相同（见本文件头①）。
+    wire wr_seed_addr = wr_now && wr_strb[0] && (wr_addr[5:2] == A_SEEDDATA)
+                        && !wiping_any;
+    wire wr_seed_sec  = (wr_prot[1] == 1'b0);
+    wire wr_seed      = wr_seed_addr && wr_seed_sec && !seed_ready;
+    wire wr_seed_deny = wr_seed_addr && !wr_seed_sec;
+    // 收满 8 个字之后还写：回 SLVERR，不静默吃掉。要重写先 CTRL.SEED_CLR。
+    wire wr_seed_full = wr_seed_addr && wr_seed_sec && seed_ready;
 
     // 输入存储写满了就不再收：不加这条的话 in_ptr 会绕回 0 覆盖已经写好的
     // 前半段，而软件看到的是一路 OKAY。
@@ -459,13 +540,25 @@ module mldsa_axi #(
     wire rd_outdata = f_arvalid && f_arready && (f_araddr[5:2] == A_OUTDATA)
                       && !wiping_any && (out_ptr < out_len_r);
 
-    wire [31:0] r_status = {25'd0, wiping_any, fw_tampered,
+    // [0]BUSY [1]DONE [2]VERIFY_OK [3]PARAM_ERR [4]LEN_ERR [5]TAMPER [6]WIPING
+    // [7] SEED_ERR —— 要走暂存种子，而 START 那一刻暂存里没有备好的一份。
+    //     与 PARAM_ERR 分开：那是软件写错参数，这是安全世界那一侧没把种子
+    //     送进来（或被 SEED_CLR 作废了），重试同一条命令没有意义。
+    wire [31:0] r_status = {24'd0, seed_err, wiping_any, fw_tampered,
                             len_err, param_err, verify_ok_r,
                             (state == S_IDLE) && run_done, (state != S_IDLE)};
 
-    // KEYSTAT：[7:0] 哪些槽装了东西；[8] 私钥外泄闩锁；
+    // KEYSTAT：[7:0] 哪些槽装了东西；[8] 私钥外泄闩锁；[9] 种子闩锁；
     //          [31:16] 每槽 2 位的参数集（8 槽 16 位，附加信息，与上层无关）
-    wire [31:0] r_keystat = {slot_pset, 7'd0, sk_lock, slot_valid};
+    // ⚠️ [8] 与 [9] **互相独立**：两把闩守的方向相反（见文件头④），
+    //    四种组合都合法，别在软件里假设蕴含关系。
+    wire [31:0] r_keystat = {slot_pset, 6'd0, seed_lock, sk_lock, slot_valid};
+
+    // SEED_STAT：**一个种子字节都不出现在这里**。
+    //   [3:0] 已收下的字数（0..8）  [8] READY  [9] LOCK  [10] STAGED
+    //   [31:16] 非安全世界写种子口被拒的次数（饱和）
+    wire [31:0] r_seedstat = {seed_viol, 5'd0, seed_staged, seed_lock,
+                              seed_ready, 4'd0, seed_wcnt};
 
     // ================= 端口归属（组合）=================
     always @(*) begin
@@ -522,13 +615,17 @@ module mldsa_axi #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             aw_got <= 1'b0; w_got <= 1'b0;
-            aw_addr_r <= 8'd0; w_data_r <= 32'd0; w_strb_r <= 4'd0;
+            aw_addr_r <= 8'd0; aw_prot_r <= 3'd0;
+            w_data_r <= 32'd0; w_strb_r <= 4'd0;
             f_bvalid <= 1'b0; f_bresp <= RESP_OKAY;
             f_rvalid <= 1'b0; f_rresp <= RESP_OKAY; f_rdata <= 32'd0;
             op <= 2'd0; pset <= 2'd0;
             sk_to_slot <= 1'b0; sk_from_slot <= 1'b0; slot <= 4'd0;
+            seed_staged <= 1'b0;
             slot_valid <= 8'd0; slot_pset <= 16'd0;
-            sk_lock <= 1'b0;              // 复位是唯一能放开闩锁的事件
+            sk_lock <= 1'b0; seed_lock <= 1'b0;   // 复位是唯一能放开闩锁的事件
+            seed_stage <= 256'd0; seed_wcnt <= 4'd0; seed_addr <= 6'd0;
+            seed_err <= 1'b0; seed_viol <= 16'd0;
             in_ptr <= 16'd0; out_ptr <= 16'd0; out_len_r <= 16'd0;
             msg_len <= 16'd0; ctx_len <= 16'd0;
             run_done <= 1'b0; verify_ok_r <= 1'b0;
@@ -563,12 +660,17 @@ module mldsa_axi #(
                 in_ptr <= 16'd0; out_ptr <= 16'd0; out_len_r <= 16'd0;
                 slot_valid <= 8'd0; slot_pset <= 16'd0;
                 state <= S_IDLE; run_done <= 1'b0; verify_ok_r <= 1'b0;
-                param_err <= 1'b0; len_err <= 1'b0;
+                param_err <= 1'b0; len_err <= 1'b0; seed_err <= 1'b0;
                 cp <= 13'd0; cp_wait <= 1'b0;
+                // 暂存的那份 ξ 也是秘密，zeroize 当然要擦掉。
+                // **seed_lock 不在这里** —— 擦秘密不等于撤防线。
+                seed_stage <= 256'd0; seed_wcnt <= 4'd0; seed_addr <= 6'd0;
             end
 
             // ---------- 写 ----------
-            if (f_awvalid && f_awready) begin aw_got <= 1'b1; aw_addr_r <= f_awaddr; end
+            if (f_awvalid && f_awready) begin
+                aw_got <= 1'b1; aw_addr_r <= f_awaddr; aw_prot_r <= f_awprot;
+            end
             if (f_wvalid  && f_wready)  begin w_got  <= 1'b1; w_data_r  <= f_wdata;
                                               w_strb_r <= f_wstrb; end
             if (wr_now) begin
@@ -582,7 +684,14 @@ module mldsa_axi #(
                              || (wr_strb[0] && (wr_addr[5:2] == A_INDATA)
                                  && (state == S_IDLE) && in_full)
                              || wr_inptr_bad
+                             || wr_seed_deny || wr_seed_full
                              || wr_busy_reject) ? RESP_SLVERR : RESP_OKAY;
+                // 非安全世界写种子口：留痕（出口在 SEED_STAT[31:16]）。
+                // RAZ/WI 之后被拒的访问什么都不留，而这一条恰恰最该留 ——
+                // 它意味着有人在试着自己塞种子。
+                if (wr_seed_deny && (seed_viol != 16'hFFFF)) begin
+                    seed_viol <= seed_viol + 16'd1;
+                end
                 if (wr_strb[0] && !wiping_any) begin
                     case (wr_addr[5:2])
                     A_CTRL: begin
@@ -598,6 +707,15 @@ module mldsa_axi #(
                         // [4] SK_LOCK：一次性闩锁，写 1 置上，**没有清零路径**。
                         // 想解开只能复位整块 PL。ZEROIZE 都不清它。
                         if (wr_data[4]) sk_lock <= 1'b1;
+                        // [5] SEED_LOCK：同样一次性、同样没有清零路径。
+                        // ⚠️ **不连动 SK_LOCK**（文件头④）：两把闩守的方向相反。
+                        if (wr_data[5]) seed_lock <= 1'b1;
+                        // [6] SEED_CLR：作废暂存的那份 ξ。给安全世界一条显式的
+                        // "这份不要了"的路 —— 否则它只能靠再写满 8 个字来覆盖。
+                        if (wr_data[6]) begin
+                            seed_stage <= 256'd0;
+                            seed_wcnt  <= 4'd0;
+                        end
                         // START 放在最后判：同一拍写 CLEAR|START 的语义是
                         // "清干净再启动"。
                         //
@@ -622,7 +740,8 @@ module mldsa_axi #(
                             verify_ok_r <= 1'b0;
                             out_len_r <= 16'd0;
                             out_ptr   <= 16'd0;
-                            if (!params_ok || !slot_ok || !cap_ok || !len_ok) begin
+                            if (!params_ok || !slot_ok || !cap_ok || !len_ok
+                                || !seed_gate_ok) begin
                                 // 不启动这一点比报错更要紧 —— 启动了再报错的话，
                                 // engine 已经按一份对不上号的输入开始算了。
                                 // PARAM_ERR 是"这次 START 被拒"的总括位，
@@ -632,12 +751,30 @@ module mldsa_axi #(
                                 // msg_len 超上限也算在"长度"这一类里：软件靠
                                 // LEN_ERR 分得清是参数写错了还是字节的事。
                                 len_err   <= (!len_ok || !cap_ok || !msg_ok);
+                                // 种子没备好那一类另外点亮 SEED_ERR（处置不同）
+                                seed_err  <= !seed_gate_ok;
                             end else begin
                                 param_err <= 1'b0;
                                 len_err   <= 1'b0;
+                                seed_err  <= 1'b0;
                                 cp        <= 13'd0;
                                 cp_wait   <= 1'b1;   // 让同步读跟上一拍
-                                state     <= take_sk ? S_LOAD : S_KICK;
+                                seed_addr <= 6'd0;
+                                // ⚠️ **字计数在 START 当场清零**，不是等
+                                // S_SEED 搬完再清。这一拍之后 SEED_READY 就
+                                // 落下，这份 ξ 再也不可能被第二次 START 用上。
+                                //
+                                // 暂存的**字节**还要在 seed_stage 里多留 32 拍
+                                // （S_SEED 正在逐字节把它搬进 engine），搬完
+                                // 那一拍立刻清零。ML-KEM 那边是一拍并行搬完，
+                                // 所以两件事在同一拍；这里搬运本身要 32 拍，
+                                // 就必须把"不可再用"和"字节已清"分成两步 ——
+                                // 前者必须立刻，后者最快只能等搬完。
+                                // 中途被 zeroize 打断时 seed_stage 由 zeroize
+                                // 那一支清掉，不存在残留窗口。
+                                if (use_staged) seed_wcnt <= 4'd0;
+                                state     <= use_staged ? S_SEED
+                                           : take_sk    ? S_LOAD : S_KICK;
                             end
                         end
                     end
@@ -647,6 +784,7 @@ module mldsa_axi #(
                         sk_to_slot   <= wr_data[4];
                         sk_from_slot <= wr_data[5];
                         slot         <= wr_data[9:6];
+                        seed_staged  <= wr_data[10];
                         // ⚠️ 写 MODE 就把写指针清零。MODE 决定软件字节落在
                         // engine 的哪个偏移（SK_FROM_SLOT 那趟要让开前面的 sk），
                         // 所以"先灌字节再改 MODE"必须变成一个**吵闹**的错误：
@@ -659,6 +797,12 @@ module mldsa_axi #(
                         in_addr <= sw_addr;
                         in_data <= wr_data[7:0];
                         in_ptr  <= in_ptr + 16'd1;
+                    end
+                    // 种子暂存口。到这里的写已经过了 wr_seed 的三道判定
+                    // （地址、AxPROT[1]==0、还没收满）。
+                    A_SEEDDATA: if (wr_seed) begin
+                        seed_stage[seed_wcnt[2:0]*32 +: 32] <= wr_data;
+                        seed_wcnt <= seed_wcnt + 4'd1;
                     end
                     // 只认写 0（理由见 wr_inptr_bad 处）
                     A_INPTR:  if (wr_data == 32'd0) in_ptr <= 16'd0;
@@ -679,8 +823,8 @@ module mldsa_axi #(
                 case (f_araddr[5:2])
                 A_VERSION: f_rdata <= VERSION;
                 A_STATUS:  f_rdata <= r_status;
-                A_MODE:    f_rdata <= {22'd0, slot, sk_from_slot, sk_to_slot,
-                                       pset, op};
+                A_MODE:    f_rdata <= {21'd0, seed_staged, slot,
+                                       sk_from_slot, sk_to_slot, pset, op};
                 A_INPTR:   f_rdata <= {16'd0, in_ptr};
                 // ⚠️ **只有 rd_outdata 成立时才把字节交出去**，别的情况一律回 0。
                 // 这不是保守，是必须的：engine 的输出口是共用的，搬 sk 进金库
@@ -695,6 +839,12 @@ module mldsa_axi #(
                 A_CTXLEN:  f_rdata <= {16'd0, ctx_len};
                 A_KEYSTAT: f_rdata <= r_keystat;
                 A_VIOL:    f_rdata <= {viol_rd_count, viol_wr_count};
+                A_SEEDSTAT: f_rdata <= r_seedstat;
+                // ⚠️ SEED_DATA **没有读回路径**。写出来是为了让"读它恒为 0"
+                // 是一句可以指着代码看的话，而不是靠 default 兜底。
+                // ξ 的字节在本模块里只存在于 seed_stage 上，它不出现在任何
+                // f_rdata 的赋值里。
+                A_SEEDDATA: f_rdata <= 32'd0;
                 default:   f_rdata <= 32'd0;
                 endcase
                 if (rd_outdata) out_ptr <= out_ptr + 16'd1;
@@ -705,6 +855,30 @@ module mldsa_axi #(
             if (!zeroize_all) begin
                 case (state)
                 S_IDLE: ;
+
+                // ---- 暂存的 ξ → engine 输入存储 [0,32) ----
+                // 每拍一个字节，32 拍走完。engine 看到的与"软件往 IN_DATA 灌
+                // 32 字节"**逐字节相同** —— 它不知道、也不需要知道这 32 个字节
+                // 是谁送的，正如 S_LOAD 那趟的 sk。
+                //
+                // 时序与 S_LOAD 同构：最后一个字节的 in_we 在进入 S_KICK 的
+                // 那一拍仍为高（in_we 是寄存器，S_KICK 里没有再赋值给它），
+                // 而 eng_start 要再晚一拍才起来，所以第 32 个字节一定写进去了。
+                //
+                // 搬完当场作废暂存（文件头③）：一份 ξ 只生一把密钥。
+                S_SEED: begin
+                    in_we   <= 1'b1;
+                    in_addr <= {9'd0, seed_addr};
+                    in_data <= seed_stage[seed_addr[4:0]*8 +: 8];
+                    if (seed_addr == 6'd31) begin
+                        // 字节搬完即清。字计数在 START 那一刻就清过了
+                        // （见那里的⚠️），这里不再动它。
+                        seed_stage <= 256'd0;
+                        state      <= S_KICK;
+                    end else begin
+                        seed_addr <= seed_addr + 6'd1;
+                    end
+                end
 
                 // 金库 → engine：sk 从来不经过总线，engine 也不知道它是谁送的
                 S_LOAD: begin
@@ -785,7 +959,8 @@ module mldsa_axi #(
     // eng_busy 没接：BUSY 报的是**本层的状态机**在不在跑（它还包含搬 sk 进出
     // 金库那两段，那时 engine 已经空闲了）。用 engine 的 busy 会让软件在
     // 搬运途中看到 BUSY=0 而去读输出。
-    wire _unused = &{1'b0, f_awprot, f_arprot, wr_strb[3:1], eng_busy, 1'b0};
+    wire _unused = &{1'b0, f_arprot, wr_prot[2], wr_prot[0], wr_strb[3:1],
+                     eng_busy, 1'b0};
 
 endmodule
 

@@ -23,6 +23,7 @@
  * C_Initialize 载入密钥库，任何改动状态的操作立刻存回。
  *   PQCHSM_KEYSTORE  密钥库路径（默认 $HOME/.pqchsm/keystore.bin）
  *   PQCHSM_SLOTS     槽位数（默认 4）
+ *   PQCHSM_AUDIT     审计日志路径（默认 <keystore>.audit；写 off 明确关掉）
  *
  * 【范围】
  * 实现的是**能把 pkcs11-tool 常用流程跑通**的子集，其余返回
@@ -36,6 +37,7 @@
 #include "p11_config.h"
 
 #include "pqchsm/hwrng.h"
+#include "pqchsm/audit.h"
 #include "pqchsm/keystore.h"
 #include "pqchsm/slot.h"
 #include "pqchsm/util.h"
@@ -89,6 +91,11 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static hsm_token_t    *g_tok;
 static int             g_init;
 static char            g_ks_path[512];
+/* 审计日志。以前 hsm_token_attach_audit **只在测试里被调用过**，正式路径上
+ * tok->audit 恒为 NULL，槽位层每一条事件都被静默丢弃 —— 也就是说"有审计"
+ * 这句话在交付形态下是假的。现在默认开在密钥库旁边，见 C_Initialize。 */
+static audit_log_t    *g_audit;
+static char            g_audit_path[600];
 static CK_ULONG        g_n_slots = DEFAULT_SLOTS;
 
 /* 可增长的字节缓冲 —— 多段签名的累积用 */
@@ -568,6 +575,14 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 				rv = CKR_DEVICE_ERROR;
 				goto out;
 			}
+		} else if (pqc_kdr_install_stub() != 0) {
+			/* ⚠️ 这一支以前是空的 —— 什么都不装，靠 kdr.c 在 DEV 形态下
+			 * **悄悄回退到桩**。那条回退已经删掉了（PS-04），所以默认这一支
+			 * 现在必须自己把桩装上，而且这一行本身就是"本进程的信任根是一个
+			 * 公开常量"的书面记录。
+			 * PRODUCTION 形态下桩不进二进制，装不上 → 拒绝初始化。 */
+			rv = CKR_DEVICE_ERROR;
+			goto out;
 		}
 	}
 
@@ -589,6 +604,31 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 			goto out;
 		}
 	}
+	/* ---- 审计日志（PQCHSM_AUDIT）----
+	 * 默认开在密钥库旁边；PQCHSM_AUDIT=off 明确关掉。
+	 * **打不开就失败**，与密钥库那条同一个 fail-closed 纪律：审计悄悄没写
+	 * 在事后查不出来 —— "日志文件不存在"和"这段时间什么都没发生"长得一样。
+	 * 不需要留痕是正当需求，那就显式写 off。 */
+	{
+		const char *ap = getenv("PQCHSM_AUDIT");
+
+		if (!(ap && !strcmp(ap, "off"))) {
+			if (ap && *ap) {
+				snprintf(g_audit_path, sizeof(g_audit_path), "%s", ap);
+			} else {
+				snprintf(g_audit_path, sizeof(g_audit_path), "%s.audit",
+				         g_ks_path);
+			}
+			g_audit = audit_open(g_audit_path);
+			if (!g_audit) {
+				hsm_token_free(g_tok);
+				g_tok = NULL;
+				rv = CKR_DEVICE_ERROR;
+				goto out;
+			}
+			hsm_token_attach_audit(g_tok, g_audit);
+		}
+	}
 	memset(g_sessions, 0, sizeof(g_sessions));
 	g_init = 1;
 out:
@@ -607,6 +647,12 @@ CK_DEFINE_FUNCTION(CK_RV, C_Finalize)(CK_VOID_PTR pReserved)
 		rv = CKR_CRYPTOKI_NOT_INITIALIZED;
 	} else {
 		persist();
+		/* ⚠️ 先摘钩子再关日志：反过来的话，hsm_token_free 里任何一条还会
+		 * 走到 slot_audit 的路径都会拿着已经 free 的 audit_log_t 去 append。
+		 * 今天它不落审计，但那是实现细节，不该被这里依赖。 */
+		hsm_token_attach_audit(g_tok, NULL);
+		audit_close(g_audit);
+		g_audit = NULL;
 		hsm_token_free(g_tok);
 		g_tok = NULL;
 		for (int i = 0; i < MAX_P11_SESSIONS; i++) {

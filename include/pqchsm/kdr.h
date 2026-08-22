@@ -102,7 +102,15 @@ int pqc_kdr_install_device_dna_raw(const uint8_t *dna, size_t len);
 
 /* 设置/查询当前 provider。p == NULL 恢复默认（stub）。 */
 void                       pqc_kdr_set_provider(const pqc_kdr_provider_t *p);
+/* **没装就返回 NULL —— 没有任何自动回退**（PS-04）。
+ * 以前 DEV 形态下这里会悄悄回退到桩，于是"忘了装 provider"与"故意用桩"
+ * 在行为上完全无法区分。想用桩请显式调 pqc_kdr_install_stub()。 */
 const pqc_kdr_provider_t  *pqc_kdr_get_provider(void);
+
+/* 显式装上桩 provider（公开常量根，**不是**硬件保证的根）。
+ * DEV 形态返回 0；PRODUCTION 形态那段常量根本没编进二进制，返回 -1。
+ * 调用它本身就是一条书面记录：这个进程的信任根是一个人人可得的常量。 */
+int pqc_kdr_install_stub(void);
 
 /* 便捷判定：当前根密钥是否有硬件保证。
  * 启动自检（POST）里应当检查它 —— 之后为 0 就说明信任根没落地。 */

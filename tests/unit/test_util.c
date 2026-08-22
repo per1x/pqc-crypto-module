@@ -3,6 +3,7 @@
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	uint8_t buf[8];
 	char hex[32];
 

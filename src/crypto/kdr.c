@@ -81,16 +81,38 @@ void pqc_kdr_set_provider(const pqc_kdr_provider_t *p)
 	g_provider = p;
 }
 
+/* ============================================================================
+ * 【没有任何自动回退（PS-04）】
+ * ============================================================================
+ * 这里以前在 DEV 形态下有一句 `if (!g_provider) g_provider = &g_stub;` ——
+ * 也就是"谁都没装 provider 的话，就悄悄用那个编译进去的公开常量当信任根"。
+ *
+ * 它的问题不是 DEV 下用桩（那本来就允许），而是**这件事没有任何人做过决定**：
+ *   · 一个忘了装 provider 的**正式**入口，行为与"故意用桩"完全一样；
+ *   · 症状是零 —— keystore 照常开、密钥照常生成、日志里也只有那句
+ *     DEV 通用告警，而它在真的装了桩时也一样会打。
+ *   · 于是"这台机器的信任根是什么"这个问题，答案取决于有没有人记得。
+ *
+ * 现在：**没装就是 NULL**，两种形态都一样。想用桩就显式调
+ * pqc_kdr_install_stub()（演示、单元测试、KAT 都该这么写），
+ * 那一行本身就是"我知道这是个公开常量"的书面记录。
+ * 入口拿不到 provider 时按各自的 fail-closed 纪律拒绝启动。
+ */
 const pqc_kdr_provider_t *pqc_kdr_get_provider(void)
 {
-#if PQC_PROFILE != PQC_PROFILE_PRODUCTION
-	if (!g_provider) {
-		g_provider = &g_stub;   /* DEV：没装就用桩，并由 profile 闸门告警 */
-	}
-#endif
-	/* PRODUCTION：没装 provider 就是 NULL。**不回退到任何东西** ——
-	 * 一个"看起来能用、其实根本没有信任根"的密码机比起不来更糟。 */
 	return g_provider;
+}
+
+int pqc_kdr_install_stub(void)
+{
+#if PQC_PROFILE != PQC_PROFILE_PRODUCTION
+	g_provider = &g_stub;
+	return 0;
+#else
+	/* 生产形态里这段常量根本没编进来，装不了 —— 返回失败，让调用方按
+	 * 自己的 fail-closed 纪律处理，而不是给它一个派生不出东西的壳。 */
+	return -1;
+#endif
 }
 
 int pqc_kdr_is_hardware_backed(void)

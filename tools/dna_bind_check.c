@@ -86,7 +86,9 @@ int main(int argc, char **argv)
 	}
 	printf("   （公开值，不是密钥）\n");
 
-	pqc_kdr_set_provider(NULL);   /* 桩 */
+	/* 显式装桩：库里已经没有"没装就悄悄用桩"那条回退了（PS-04），
+	 * set_provider(NULL) 现在的含义是"一个都没装"，派生会直接失败。 */
+	pqc_kdr_install_stub();
 	if (pqc_kdr_derive("demo/bind", NULL, 0, k_stub, sizeof(k_stub)) != 0) {
 		printf("桩根派生失败\n");
 		goto out;
@@ -117,6 +119,6 @@ out:
 	if (dev) {
 		SDFE_CloseDevice(dev);
 	}
-	pqc_kdr_set_provider(NULL);
+	pqc_kdr_install_stub();
 	return ret;
 }

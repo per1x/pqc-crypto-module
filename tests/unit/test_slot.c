@@ -439,6 +439,7 @@ static void test_state_gating(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	test_init_and_login();
 	test_acl();
 	test_usage_exclusive();

@@ -19,6 +19,7 @@ static const char *OQS_NAME[] = {
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	TCASE("按名字查算法");
 	CHECK_EQ_INT(pqc_alg_by_name("ML-KEM-768"), PQC_ALG_ML_KEM_768);
 	CHECK_EQ_INT(pqc_alg_by_name("ML-DSA-87"), PQC_ALG_ML_DSA_87);

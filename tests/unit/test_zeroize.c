@@ -487,6 +487,7 @@ static void test_no_residue_after_free(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	test_struct_wiped();
 	test_struct_fully_wiped();
 	test_zeroize_from_every_state();

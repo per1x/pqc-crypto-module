@@ -24,9 +24,25 @@
  * CMD_SAVE / CMD_ROTATE_KEK 时写盘，于是"试三次 PIN → 拔电 → 再试三次"
  * 能无限试下去。
  *
- * 用法：pqchsmd [-p 端口] [-s 槽位数] [-k 密钥库路径] [-1]
+ * 【审计日志：现在真的接上了】
+ * 槽位层一直有完整的审计钩子（slot_audit → audit_append），但
+ * hsm_token_attach_audit **只在测试里被调用过** —— 正式路径上 tok->audit
+ * 恒为 NULL，于是每一条 LOGIN/GENERATE/DESTROY/ZEROIZE 事件都被静默丢弃。
+ * 也就是说"本机有审计"这句话在交付形态下是假的。
+ *
+ * 现在：给了密钥库就默认在它旁边开一份 `<keystore>.audit`；也可以用
+ * -a 显式指定，或 -a off 明确关掉。
+ *
+ * **打不开就拒绝启动（fail-closed）。** 理由与密钥库那条相同：一台记不下
+ * 事的密码机不该对外声称自己是密码机，而"审计悄悄没写"在事后是查不出来的
+ * —— 日志文件不存在和"这段时间什么都没发生"长得一模一样。
+ * 想跑一个不留痕的实例是正当需求，那就显式写 -a off。
+ *
+ * 用法：pqchsmd [-p 端口] [-s 槽位数] [-k 密钥库路径] [-a 审计日志|off] [-1]
  *   -1  处理完一个连接就退出（给测试脚本用）
  */
+#include "pqchsm/audit.h"
+#include "pqchsm/kdr.h"
 #include "pqchsm/keystore.h"
 #include "pqchsm/profile.h"
 #include "pqchsm/proto.h"
@@ -120,6 +136,9 @@ int main(int argc, char **argv)
 	int port = 9711, once = 0;
 	size_t n_slots = 4;
 	const char *ks = NULL;
+	const char *audit_arg = NULL;      /* -a：路径，或 "off" */
+	char        audit_path[1024];
+	audit_log_t *alog = NULL;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-p") && i + 1 < argc) {
@@ -128,10 +147,14 @@ int main(int argc, char **argv)
 			n_slots = (size_t)atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "-k") && i + 1 < argc) {
 			ks = argv[++i];
+		} else if (!strcmp(argv[i], "-a") && i + 1 < argc) {
+			audit_arg = argv[++i];
 		} else if (!strcmp(argv[i], "-1")) {
 			once = 1;
 		} else {
-			fprintf(stderr, "用法: %s [-p 端口] [-s 槽位数] [-k 密钥库] [-1]\n", argv[0]);
+			fprintf(stderr,
+			        "用法: %s [-p 端口] [-s 槽位数] [-k 密钥库] "
+			        "[-a 审计日志|off] [-1]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -149,6 +172,36 @@ int main(int argc, char **argv)
 		sigaction(SIGTERM, &sa, NULL);
 	}
 	signal(SIGPIPE, SIG_IGN);
+
+	/* ---- 信任根：**显式**装上，库里没有自动回退了（PS-04）----
+	 *
+	 * 以前这里什么都不写也能跑：kdr.c 在 DEV 形态下会悄悄回退到那个编译
+	 * 进去的公开常量。于是"忘了装 provider"与"故意用桩"在行为上完全一样，
+	 * 而这台机器的信任根是什么，取决于有没有人记得。
+	 *
+	 * 现在必须写出来。默认装桩（DEV 演示形态本来就是这样），
+	 * PQCHSM_KDR=device-dna 则改装设备 DNA 那个 —— 与 PKCS#11 模块同一个
+	 * 环境变量、同一条纪律：**显式要了却拿不到就失败，绝不静默回退到桩**。
+	 * 要设备绑定却悄悄给了个人人相同的根，比不给更糟。 */
+	{
+		const char *kdr = getenv("PQCHSM_KDR");
+
+		if (kdr && !strcmp(kdr, "device-dna")) {
+			if (pqc_kdr_install_device_dna() != 0) {
+				fprintf(stderr,
+				        "PQCHSM_KDR=device-dna 但装不上设备 DNA 根 —— "
+				        "拒绝启动，不静默回退到桩。\n");
+				return 1;
+			}
+		} else if (pqc_kdr_install_stub() != 0) {
+			/* PRODUCTION 形态里桩根本没编进来。这条路上没有可用的根，
+			 * 下面的形态闸门也会拦，但这里先给一句准确的原因。 */
+			fprintf(stderr,
+			        "装不上桩 KDR（PRODUCTION 形态下它不进二进制）——"
+			        "本形态没有可用的信任根，拒绝启动。\n");
+			return 1;
+		}
+	}
 
 	/* 形态闸门：PRODUCTION 下没有硬件保证的 KDR 就拒绝启动；
 	 * DEV 下放行，但把"信任根是个公开常量"这句话打出来。
@@ -204,11 +257,48 @@ int main(int argc, char **argv)
 		 * 才允许往盘上写。 */
 		hsm_token_set_persist_hook(tok, persist_keystore, (void *)ks);
 	}
+
+	/* ---- 审计日志（见文件头）----
+	 * 路径优先级：-a 显式给的 > 密钥库旁边的 <keystore>.audit > 不开。
+	 * "不开"只在既没有 -a 也没有 -k 时发生（那种实例本来就不落任何盘）。 */
+	{
+		const char *want = NULL;
+
+		if (audit_arg) {
+			if (strcmp(audit_arg, "off") != 0) {
+				want = audit_arg;
+			}
+		} else if (ks) {
+			snprintf(audit_path, sizeof(audit_path), "%s.audit", ks);
+			want = audit_path;
+		}
+
+		if (want) {
+			alog = audit_open(want);
+			if (!alog) {
+				fprintf(stderr,
+				        "打不开审计日志 %s：%s —— 拒绝启动（fail-closed）。\n"
+				        "一台记不下事的密码机不该对外声称自己是密码机；"
+				        "确实不需要留痕就显式写 -a off。\n",
+				        want, strerror(errno));
+				hsm_token_free(tok);
+				return 1;
+			}
+			hsm_token_attach_audit(tok, alog);
+			fprintf(stderr, "审计日志 %s（已有 %llu 条）\n",
+			        want, (unsigned long long)audit_count(alog));
+		} else {
+			fprintf(stderr, "未开审计日志（没有 -a，也没有 -k）\n");
+		}
+	}
+
 	pqc_proto_ctx_t ctx = { .tok = tok, .keystore_path = ks };
 
 	int srv = socket(AF_INET, SOCK_STREAM, 0);
 	if (srv < 0) {
 		perror("socket");
+		hsm_token_attach_audit(tok, NULL);
+		audit_close(alog);
 		hsm_token_free(tok);
 		return 1;
 	}
@@ -222,6 +312,8 @@ int main(int argc, char **argv)
 	if (bind(srv, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(srv, 8) != 0) {
 		perror("bind/listen");
 		close(srv);
+		hsm_token_attach_audit(tok, NULL);
+		audit_close(alog);
 		hsm_token_free(tok);
 		return 1;
 	}
@@ -233,6 +325,8 @@ int main(int argc, char **argv)
 	if (!req || !resp) {
 		fprintf(stderr, "内存不足\n");
 		close(srv);
+		hsm_token_attach_audit(tok, NULL);
+		audit_close(alog);
 		hsm_token_free(tok);
 		free(req);
 		free(resp);
@@ -259,6 +353,11 @@ int main(int argc, char **argv)
 	free(req);
 	free(resp);
 	close(srv);
+	/* ⚠️ 先摘钩子再关日志。反过来的话 hsm_token_free 里任何一条还会走到
+	 * slot_audit 的路径都会拿着一个已经 free 掉的 audit_log_t 去 append。
+	 * 今天 hsm_token_free 不落审计，但那是**实现细节**，不该被这里依赖。 */
+	hsm_token_attach_audit(tok, NULL);
+	audit_close(alog);
 	hsm_token_free(tok);
 	return 0;
 }

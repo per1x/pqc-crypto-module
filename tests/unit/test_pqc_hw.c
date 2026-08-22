@@ -479,6 +479,7 @@ static void test_kem_only_backend_splits_correctly(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	test_has_hw_keys_kind();
 	test_sign_hw_wrapper();
 	test_hw_resident_sign_roundtrip();

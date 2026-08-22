@@ -363,6 +363,7 @@ static void test_keccak_mode(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	TCASE("默认 transport 是软件桩，且明确标记为非硬件");
 	const accel_transport_t *t = accel_get_transport();
 	CHECK(t != NULL);

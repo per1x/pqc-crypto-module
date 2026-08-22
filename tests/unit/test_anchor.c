@@ -94,6 +94,7 @@ static audit_log_t *make_log(int n)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	int pid = (int)getpid();
 	snprintf(g_log, sizeof(g_log), "/tmp/pqchsm_anc_%d.log", pid);
 	snprintf(g_anc, sizeof(g_anc), "/tmp/pqchsm_anc_%d.anchor", pid);

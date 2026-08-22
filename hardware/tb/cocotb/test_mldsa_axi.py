@@ -899,6 +899,14 @@ async def test_sk_lock_is_one_way(dut):
         ks, _ = await rd(dut, KEYSTAT)
         assert ks & KS_LOCK, f"{label} 之后闩锁掉了（KEYSTAT=0x{ks:08x}）"
 
+    # ⚠️ "CTRL 写全 1"**也把 SEED_LOCK（[5]）置上了**，那同样是一次性闩锁。
+    # 这是设计使然，不是意外，所以在这里明说并断言 —— 顺带把"两把闩互相
+    # 独立"这句话在**另一个方向**上钉一遍：SK_LOCK 先置、SEED_LOCK 后置，
+    # 两者都在，谁也没被对方带掉。
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & KS_SEED_LOCK, "写全 1 应当也把 SEED_LOCK 置上"
+    assert ks & KS_LOCK, "SEED_LOCK 置上把 SK_LOCK 带掉了"
+
     # ZEROIZE 也不行 —— 擦秘密不等于撤防线
     assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
     await _wait_wipe(dut)
@@ -906,8 +914,14 @@ async def test_sk_lock_is_one_way(dut):
     assert ks & KS_LOCK, "ZEROIZE 把闩锁清掉了 —— 它不该有这个能力"
     assert (ks & 0xFF) == 0, "ZEROIZE 之后槽的有效位应当全清"
 
-    # 擦完之后闩锁仍然在管事
-    n = await run_op(dut, OP_KEYGEN, xi, slot=2)
+    # 擦完之后闩锁仍然在管事。
+    # ⚠️ 此刻 SEED_LOCK 也已经闩上（见上），所以 ξ 必须走暂存口送 —— 灌
+    # IN_DATA 那条老路已经被闩死了。这正是两把闩**同时**在管事的样子。
+    await stage_xi(dut, xi)
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, slot=2)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    assert await start_and_wait(dut), "两把闩都在时 KeyGen 跑不起来"
+    n, _ = await rd(dut, OUT_LEN)
     assert n == PKL, "ZEROIZE 之后闩锁不管事了"
 
     dut._log.info("闩锁一次性生效：12 种写法 + ZEROIZE 都撤不回来，擦完仍然在管事")
@@ -1441,3 +1455,298 @@ async def test_tamper_wipes_vault_and_closes_bus(dut):
         f"第一个在 [{first[0]}] = 0x{first[1]:02x}")
 
     dut._log.info("tamper 触发一次完整擦除，64 KB 金库读回全 0，总线全程被拒")
+
+
+# ============================================================================
+# 安全世界暂存的种子（CODE-1 的 PL 侧落点）—— 与 mlkem_axi 同一套判据
+# ============================================================================
+# 四条，缺一条这个口就是装饰品（RTL 文件头逐条写了理由）：
+#   ① 暂存口送的 ξ 与灌 IN_DATA 的同一份 ξ，pk‖sk 逐字节相同（对 ACVP）；
+#   ② 非安全事务写种子口进不去，字计数一步不动；
+#   ③ 读种子口恒 0，整个寄存器窗口都扫不出种子字节；
+#   ④ 用一次即作废，且**在 START 那一刻**就清（不是跑完才清）。
+SEED_DATA, SEED_STAT = 0x34, 0x38
+C_SEED_LOCK, C_SEED_CLR = 1 << 5, 1 << 6
+M_SEED_STAGED = 1 << 10
+ST_SEED_ERR = 1 << 7
+SS_READY, SS_LOCK = 1 << 8, 1 << 9
+KS_SEED_LOCK = 1 << 9
+
+
+async def stage_xi(dut, xi: bytes, prot=PROT_SECURE):
+    """把 32 字节 ξ 按 8 个小端 32 位字写进暂存口"""
+    assert len(xi) == 32
+    for i in range(8):
+        w = int.from_bytes(xi[4 * i:4 * i + 4], "little")
+        r = await wr(dut, SEED_DATA, w, prot=prot)
+        if prot != PROT_SECURE:
+            return r
+    return RESP_OKAY
+
+
+@cocotb.test()
+async def test_staged_xi_matches_acvp(dut):
+    """①：暂存口送的 ξ 跑出来的 pk‖sk 逐字节对上 ACVP
+
+    判据直接用官方向量而不是"和 IN_DATA 那条路比"—— 更强：它同时证明了
+    暂存口接对了、字节序对了、以及整条链路仍然是那条已经过硅的链路。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    xi, pk_w, sk_w = kat_keygen()[0]
+
+    await stage_xi(dut, xi)
+    ss, _ = await rd(dut, SEED_STAT)
+    assert (ss & 0xF) == 8 and (ss & SS_READY), \
+        f"8 个字写完了 SEED_STAT=0x{ss:08x}"
+
+    # **一个字节都不写 IN_DATA**
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN) | M_SEED_STAGED) == RESP_OKAY
+    assert await wr(dut, MSG_LEN, 0) == RESP_OKAY
+    assert await wr(dut, CTX_LEN, 0) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    assert await start_and_wait(dut), "走暂存 ξ 的 KeyGen 被拒了"
+
+    n, _ = await rd(dut, OUT_LEN)
+    assert n == PKL + SKL, f"OUT_LEN={n}，应当是 {PKL}+{SKL}"
+    got_pk = await out_bytes(dut, 0, PKL)
+    assert got_pk == pk_w, diff(got_pk, pk_w, f"{ALG} pk（暂存 ξ）与 ACVP")
+    got_sk = await out_bytes(dut, PKL, SKL)
+    assert got_sk == sk_w, diff(got_sk, sk_w, f"{ALG} sk（暂存 ξ）与 ACVP")
+
+    dut._log.info("暂存口送的 ξ：pk‖sk 逐字节对上 ACVP")
+
+
+@cocotb.test()
+async def test_xi_port_refuses_nonsecure(dut):
+    """②：非安全事务写不进种子口 —— 两种 SECURE_ONLY 形态下都不行
+
+    形态差异与 mlkem_axi 那条完全相同（那里写了完整理由）：
+    SECURE_ONLY=1 时防火墙先 RAZ/WI 掉，SECURE_ONLY=0 时才轮到种子口自己
+    那道门回 SLVERR。**共同要证的是字计数一步不动。**
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    secure_only = int(os.environ.get("PARAM_SECURE_ONLY", "1"))
+
+    for i in range(3):
+        r = await wr(dut, SEED_DATA, 0xCAFE0000 + i, prot=PROT_NONSEC)
+        if secure_only:
+            assert r == RESP_REFUSED, f"第 {i} 笔回了 {r}"
+        else:
+            assert r == RESP_SLVERR, \
+                f"演示形态下非安全写种子口回了 {r}，应当是 SLVERR"
+
+    ss, _ = await rd(dut, SEED_STAT)
+    assert (ss & 0xF) == 0, "被拒的写居然把字计数推上去了 —— 种子口漏了"
+    if secure_only:
+        assert (ss >> 16) == 0, "被防火墙拦下的访问不该计进种子口的计数"
+    else:
+        assert (ss >> 16) == 3, f"种子口被拒计数 = {ss >> 16}，应当是 3"
+
+    # 拒绝没有副作用：之后仍然能正常 staging
+    await stage_xi(dut, bytes([0x3C] * 32))
+    ss, _ = await rd(dut, SEED_STAT)
+    assert ss & SS_READY, "被拒的写留下了副作用"
+
+    dut._log.info("SECURE_ONLY=%d：非安全写种子口进不去", secure_only)
+
+
+@cocotb.test()
+async def test_xi_port_never_reads_back(dut):
+    """③：读种子口恒 0，整个寄存器窗口都扫不出 ξ 的任何一个字"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    xi = bytes((0x40 + i) & 0xFF for i in range(32))
+    await stage_xi(dut, xi)
+
+    for _ in range(4):
+        v, resp = await rd(dut, SEED_DATA)
+        assert resp == RESP_OKAY and v == 0, \
+            f"读 SEED_DATA 得到 0x{v:08x} —— 种子口不该有任何读回路径"
+
+    words = {int.from_bytes(xi[4 * i:4 * i + 4], "little") for i in range(8)}
+    for off in range(0x00, 0x40, 4):
+        # OUT_DATA 跳过：engine 的输出口，这一刻没跑过运算，读出来是 X。
+        # 它装的是 pk/sig，与种子暂存是两块存储（sk 那条路另有用例把关）。
+        if off == OUT_DATA:
+            continue
+        v, _ = await rd(dut, off)
+        assert v not in words, \
+            f"寄存器 0x{off:02x} 读出 0x{v:08x}，那是 ξ 的一个字"
+
+    dut._log.info("整个寄存器窗口扫过：ξ 的 8 个字一个都读不到")
+
+
+@cocotb.test()
+async def test_staged_xi_consumed_at_start(dut):
+    """④：用一次即作废，且**在 START 那一刻**就清
+
+    "跑完才清"与"START 就清"的差别不是洁癖：清在 S_FIN 的话，一次半途被
+    zeroize 或被参数错打断的运行会把 ξ **留在暂存里**，而安全世界那边已经
+    把它忘了。判据只能在 BUSY 期间查。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    xi, _, _ = kat_keygen()[0]
+    await stage_xi(dut, xi)
+
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN) | M_SEED_STAGED) == RESP_OKAY
+    assert await wr(dut, MSG_LEN, 0) == RESP_OKAY
+    assert await wr(dut, CTX_LEN, 0) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
+
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_BUSY, "START 之后立刻查却已经不 BUSY —— 判据失效"
+    ss, _ = await rd(dut, SEED_STAT)
+    assert (ss & 0xF) == 0 and not (ss & SS_READY), \
+        f"运行途中 SEED_STAT=0x{ss:08x} —— 暂存不是在 START 那一刻清的"
+
+    for _ in range(40_000):
+        st, _ = await rd(dut, STATUS)
+        if st & ST_DONE:
+            break
+        await Timer(2_000, unit="ns")
+    else:
+        raise AssertionError("一直没完成")
+
+    # 第二次：没有备好的 ξ → 当场拒绝并点亮 SEED_ERR
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    ok = await start_and_wait(dut, limit=200, gap_ns=0)
+    assert ok is False, "同一份暂存 ξ 居然生出了第二把密钥"
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_SEED_ERR, "ξ 没备好却没报 SEED_ERR"
+    assert st & ST_PARAMERR, "SEED_ERR 时总括位 PARAM_ERR 也该亮"
+
+    dut._log.info("暂存 ξ 在 START 当场作废，第二次 START 报 SEED_ERR")
+
+
+@cocotb.test()
+async def test_xi_seed_clr_partial_and_overfull(dut):
+    """半份 ξ 不许开跑；收满后多写回 SLVERR；SEED_CLR 能作废"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    for i in range(4):
+        assert await wr(dut, SEED_DATA, 0x01020304 + i) == RESP_OKAY
+    ss, _ = await rd(dut, SEED_STAT)
+    assert (ss & 0xF) == 4 and not (ss & SS_READY)
+
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN) | M_SEED_STAGED) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    ok = await start_and_wait(dut, limit=200, gap_ns=0)
+    assert ok is False, "半份 ξ 居然跑起来了"
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_SEED_ERR
+
+    for i in range(4):
+        assert await wr(dut, SEED_DATA, 0x0A0B0C0D + i) == RESP_OKAY
+    ss, _ = await rd(dut, SEED_STAT)
+    assert ss & SS_READY
+    assert await wr(dut, SEED_DATA, 0xFFFFFFFF) == RESP_SLVERR, \
+        "收满之后的多余写应当回 SLVERR"
+
+    assert await wr(dut, CTRL, C_SEED_CLR) == RESP_OKAY
+    ss, _ = await rd(dut, SEED_STAT)
+    assert (ss & 0xF) == 0 and not (ss & SS_READY), "SEED_CLR 没清掉暂存"
+
+    dut._log.info("半份 ξ 被拒；收满后多写 SLVERR；SEED_CLR 生效")
+
+
+@cocotb.test()
+async def test_xi_seed_lock_independent_of_sk_lock(dut):
+    """SEED_LOCK 一次性、zeroize 撤不回，且**不连动 SK_LOCK**
+
+    最后半条是有意验的：SK_LOCK 与 SEED_LOCK 守的方向相反
+    （FINAL-PLAN §7 V-04 要删掉前者），两者必须互相独立。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    xi, pk_w, _ = kat_keygen()[0]
+
+    assert await wr(dut, CTRL, C_SEED_LOCK) == RESP_OKAY
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & KS_SEED_LOCK, "SEED_LOCK 没置上"
+    assert not (ks & KS_LOCK), \
+        "SEED_LOCK 顺手把 SK_LOCK 也置上了 —— 两把闩方向相反，不能连动"
+
+    # 闩上之后：**不带 SEED_STAGED 的 MODE 字**也必须走暂存口
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    await fill(dut, xi)                      # 灌 IN_DATA 的 ξ 应当被无视
+    ok = await start_and_wait(dut, limit=200, gap_ns=0)
+    assert ok is False, "闩锁之后居然还能退回 IN_DATA 那条老路"
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_SEED_ERR
+
+    # 备好就能跑，且结果仍对 ACVP
+    await stage_xi(dut, xi)
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    assert await start_and_wait(dut), "备好 ξ 之后仍然跑不起来"
+    got_pk = await out_bytes(dut, 0, PKL)
+    assert got_pk == pk_w, diff(got_pk, pk_w, "闩锁后走暂存口的 pk")
+
+    # zeroize 撤不回
+    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
+    for _ in range(40_000):
+        st, _ = await rd(dut, STATUS)
+        if not (st & ST_WIPING):
+            break
+        await Timer(2_000, unit="ns")
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & KS_SEED_LOCK, "zeroize 把 SEED_LOCK 清掉了"
+
+    dut._log.info("SEED_LOCK 一次性、撤不回、与 SK_LOCK 互相独立")
+
+
+@cocotb.test()
+async def test_zeroize_wipes_staged_xi(dut):
+    """zeroize 要把暂存的 ξ 一起擦掉 —— 它也是秘密"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    await stage_xi(dut, bytes([0x99] * 32))
+    ss, _ = await rd(dut, SEED_STAT)
+    assert ss & SS_READY
+
+    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
+    for _ in range(40_000):
+        st, _ = await rd(dut, STATUS)
+        if not (st & ST_WIPING):
+            break
+        await Timer(2_000, unit="ns")
+    else:
+        raise AssertionError("WIPING 一直不落")
+
+    ss, _ = await rd(dut, SEED_STAT)
+    assert (ss & 0xF) == 0 and not (ss & SS_READY), "zeroize 之后暂存的 ξ 还在"
+
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN) | M_SEED_STAGED) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    ok = await start_and_wait(dut, limit=200, gap_ns=0)
+    assert ok is False, "zeroize 之后居然还能拿残留的 ξ 生成密钥"
+
+    dut._log.info("zeroize 把暂存的 ξ 一起擦掉了")
+
+
+@cocotb.test()
+async def test_mldsa_mode_reads_back_all_fields(dut):
+    """MODE 整字回读（DOC-3）—— 原来 SK_TO_SLOT/SK_FROM_SLOT/SLOT 读不回来"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    for word in (mode_word(OP_SIGN, from_slot=True, slot=6),
+                 mode_word(OP_KEYGEN, to_slot=True, slot=3) | M_SEED_STAGED,
+                 mode_word(OP_VERIFY)):
+        assert await wr(dut, MODE, word) == RESP_OKAY
+        got, _ = await rd(dut, MODE)
+        assert got == word, f"MODE 回读 0x{got:03x}，写进去的是 0x{word:03x}"
+
+    dut._log.info("MODE 的 11 个位全部可回读")

@@ -58,6 +58,7 @@ static void roundtrip_ok(const char *what, const uint8_t *secret, size_t secret_
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	uint8_t secret[SHAMIR_MAX_SECRET];
 	uint8_t got[SHAMIR_MAX_SECRET];
 	size_t got_len = 0;

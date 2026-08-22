@@ -51,6 +51,7 @@ static int count_op(const char *path, uint32_t want_op, uint64_t n)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	int pid = (int)getpid();
 	snprintf(g_log, sizeof(g_log), "/tmp/pqchsm_ai_%d.log", pid);
 	snprintf(g_ks, sizeof(g_ks), "/tmp/pqchsm_ai_%d.ks", pid);

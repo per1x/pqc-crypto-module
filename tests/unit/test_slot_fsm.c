@@ -20,6 +20,7 @@ static const slot_state_t EXPECT[SLOT_ST__COUNT][SLOT_EV__COUNT] = {
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	/* ---- 5 状态 × 9 事件 = 45 种组合，逐一断言 ---- */
 	int legal = 0, illegal = 0;
 	for (int s = 0; s < SLOT_ST__COUNT; s++) {

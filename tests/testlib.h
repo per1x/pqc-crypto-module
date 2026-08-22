@@ -46,6 +46,22 @@ static const char *g_case = "";
 	}                                                                   \
 } while (0)
 
+/* ---- 单元测试的信任根：**显式**装桩 ----------------------------------- */
+/* 库里已经没有"没装 provider 就悄悄用桩"那条自动回退了（PS-04），所以这一行
+ * 不是仪式：不调它，任何走 KDR 的用例都会在第一次派生时拿到 NULL provider。
+ *
+ * 写成一个要在 main() 里显式调的具名函数，而不是藏进构造函数或 testlib 的
+ * 初始化里 —— 藏起来的话就等于把刚删掉的那个"没有人做过决定"原样搬进测试。
+ * 每个 main() 顶上那一行，本身就是"这个进程的根是一个公开常量"的书面记录。 */
+#include "pqchsm/kdr.h"
+static inline void test_use_stub_kdr(void)
+{
+	if (pqc_kdr_install_stub() != 0) {
+		fprintf(stderr, "装不上桩 KDR（PRODUCTION 形态？）—— 用例无法运行\n");
+		exit(2);
+	}
+}
+
 static inline int test_report(const char *suite)
 {
 	if (g_fails) {

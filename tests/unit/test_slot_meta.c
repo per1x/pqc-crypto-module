@@ -32,6 +32,7 @@ static slot_meta_t base_meta(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	uint8_t tag[SLOT_META_TAG_LEN], tag2[SLOT_META_TAG_LEN];
 
 	TCASE("序列化是确定性的、定长的");

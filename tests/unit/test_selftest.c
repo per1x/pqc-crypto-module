@@ -120,6 +120,7 @@ static void test_repeatable(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	test_all_pass();
 	test_names_are_distinct();
 	test_error_state_blocks_operations();

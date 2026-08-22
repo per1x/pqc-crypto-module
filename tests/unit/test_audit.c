@@ -115,6 +115,7 @@ static audit_log_t *make_log(int n)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	snprintf(g_path, sizeof(g_path), "/tmp/pqchsm_audit_%d.log", (int)getpid());
 
 	/* ---- 基本追加与读回 ---- */

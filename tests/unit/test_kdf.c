@@ -35,6 +35,7 @@ static void expect_hex(const char *hex, uint8_t *out, size_t n)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	uint8_t key[32];
 	uint8_t data200[200];
 	uint8_t small_data[4] = { 0x00, 0x01, 0x02, 0x03 };

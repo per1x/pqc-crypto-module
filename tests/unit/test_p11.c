@@ -53,6 +53,7 @@ static CK_ATTRIBUTE mk_ulong(CK_ATTRIBUTE_TYPE t, CK_ULONG *v)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	snprintf(g_ks, sizeof(g_ks), "/tmp/pqchsm_p11_%d.ks", (int)getpid());
 	unlink(g_ks);
 	setenv("PQCHSM_KEYSTORE", g_ks, 1);
