@@ -361,12 +361,13 @@ RPC 回普通世界写文件，性能和信任模型都变差。
 | **7** | **接上审计日志**（D10） | `cli/pqchsmd.c` + `src/p11/p11_module.c`：调 `hsm_token_attach_audit`；定一个默认日志路径与开关 | `ctest -R "audit|anchor|e2e"` —— **纯 host 可验** ✅ | 否 |
 | **8** | **软件三条收口**（PS-04/07/25） | `src/crypto/kdr.c`（删自动回退到桩）、`src/slot/slot.c`（安全 profile 拒绝 `SEED_STORAGE`）、`src/util/util.c`（判定改 `hwrng_is_hardware()`） | `ctest -R "kdr|slot|keystore|profile_no_stub_kdr|hwrng"` —— **纯 host 可验** ✅ | 否 |
 | **9** | **TA 两颗地雷**（PS-22/24） | `tee/ta/pqchsm_ta.c`：`CMD_KDF_DERIVE` 改为只接受白名单 label（或整条删）；`CMD_KEK_SET`+`CMD_UNWRAP` 收紧；session 打开的 login type 从 `TEEC_LOGIN_PUBLIC` 换掉 | `tee/tests` 原生构建（x86 native，不需要板子）—— **纯 host 可验** ✅ | 否 |
-| **10** | **去 liboqs**（复用收敛） | `src/crypto/pqc_liboqs.c`(266) → 改用已 vendored 的 `tee/ta/vendor/` 的 mlkem-native/mldsa-native；连带删 `src/crypto/oqs_rng.c`(185) 的全局 RNG 临界区 | `ctest -R "pqc_roundtrip|pqc_meta|selftest|kat_parse|e2e"` —— **纯 host 可验** ✅ | 否 |
+| **10** | **去 liboqs**（复用收敛） | ⚠️ **先解决构建位置**：vendored 的 mlkem-native/mldsa-native 现在只在 `tee/ta/vendor/` 下、**只被 OP-TEE 的 `tee/ta/sub.mk`（`srcs-y +=`）引用，根 CMakeLists 完全够不到**。第一步是把它挪到共享位置（如 `third_party/`）并让两套构建都能用。然后 `src/crypto/pqc_liboqs.c`(266) 改接它；连带删 `src/crypto/oqs_rng.c`(185) 的全局 RNG 临界区；**并删掉 `CMakeLists.txt:38-39` 找不到 liboqs 就 `FATAL_ERROR` 那段**（去掉外部 brew 依赖才算真去成） | `ctest -R "pqc_roundtrip|pqc_meta|selftest|kat_parse|e2e"` —— **纯 host 可验** ✅ | 否 |
 | **11** | **文档口径**（PLAN-01/05/06 + E 组） | 本文 D2 已改；`ARCHITECTURE-TARGET.md` §2/§7.3 三处**同时**降级；送检级材料（`docs/SECURITY.md`、`security-policy.md`）**只在文首加形态标注、正文不动** | `ctest -R shell_var_braces`（脚本类）；文档本身人工复核 | 否 |
 | **12** | **REGISTERS 与 RTL 对齐**（DOC-3） | `docs/REGISTERS.md`(+zh)：16 槽（非 4）、`KEYSTAT` 布局、独立 `0x34 KEYPSET`、`MODE` 缺的三个字段；并统一三处互相矛盾的擦除周期数（8192/16384/65536） | 人工对照 RTL；建议加一条 CI 检查把寄存器表与 RTL localparam 对拍 | 否 |
+| **13** | **消除两处跨世界重复实现**（防漂移） | ① **PWRP 包裹格式两份实现**：`tee/ta/ta_wrap.c`(277) 与 `src/store/wrap.c`(211) 是**同一个线格式**写了两遍。**不要求合并实现**（TA 侧用 `TEE_` API、host 侧用 OpenSSL，后端本就不同），要求**格式定义只有一处**：把 magic/版本/字段偏移/AAD 组装抽成一个共享头，两边都 include。② **KMAC256 两份**：`tee/ta/ta_kdf.c`(94，自带 `ta_fips202.c` 海绵) 与 `src/crypto/kdf.c`(105，OpenSSL EVP)——同样不合并（TA 里没有 OpenSSL，自实现是**正当的**），但必须加一组**跨实现 KAT 对拍**，钉死两边对同一 `(ikm,salt,label,len)` 输出逐字节一致 | 新增一个 host 侧对拍测试（把 TA 的 `ta_fips202`/`ta_kdf` 以原生方式编进测试目标，`tee/tests` 已有原生构建先例）；`ctest -R "wrap|kdf"` —— **纯 host 可验** ✅ | 否 |
 
-**建议执行顺序**：先做 7/8/9/10（纯 host、可立即验、风险最低）→ 再做 1/2（RTL，可仿真）→
-再做 4/6（RTL + 需与 EL3 配套）→ 5（EL3，主体待上板）→ 3（daemon，待上板）→ 11/12（文档收尾）。
+**建议执行顺序**：先做 7/8/9/13（纯 host、可立即验、风险最低）→ 10（去 liboqs，**先挪 vendor 目录再改接口**）
+→ 1/2（RTL，可仿真）→ 4/6（RTL + 需与 EL3 配套）→ 5（EL3，主体待上板）→ 3（daemon，待上板）→ 11/12（文档收尾）。
 
 **上板前的既有纪律不变**：先证明能 JTAG 救援再上板；位流可运行时换、断电回黄金槽；
 `plharness.sh` 那套（不在前台 SSH 里做、退出时无条件恢复网络）。
