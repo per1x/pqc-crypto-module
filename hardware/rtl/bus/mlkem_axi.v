@@ -195,6 +195,27 @@ module mlkem_axi #(
                      // 0x3C SEED_STAT  R  只报字数/闩锁/被拒计数，不报种子字节
                      A_SEEDDATA = 4'hE, A_SEEDSTAT = 4'hF;
 
+    // ================= 4 字节打包口（D11）=================
+    // 0x40 IN_DATA4   W  一笔写 4 个字节，小端：wdata[7:0] 落 in_ptr+0
+    // 0x44 OUT_DATA4  R  一笔读 4 个字节，小端：rdata[7:0] 是 out_rd+0
+    //
+    // 【为什么值得做】交付路径上每一笔核访问都经 EL3（ioctl + SMC），
+    // 一个字节一笔。实测时间随**传输字节数**线性走而不随计算量走
+    // （KeyGen 512/768/1024 = 1 : 1.53 : 2.10，正好是输出字节数之比 1 : 1.48
+    // : 1.96；算力需求按 k² 应是 1 : 2.25 : 4）。也就是说量到的是管子不是核。
+    // 打包 4 字节 = 同样的字节数少发 3/4 的 ioctl 与 SMC。
+    //
+    // 【为什么是新地址而不是 MODE 里的一位】一位模式开关会让"同一个地址
+    // 读出几个字节"取决于一个可能陈旧的状态位 —— 写错了不报错，只是从某个
+    // 字节起整段错位，而错位后的密文/公钥看起来完全合法。新地址是**无状态**
+    // 的：一笔事务自己说清楚要几个字节。
+    //
+    // 【尾巴归尾巴】OUT_DATA4 只在**还剩 ≥4 字节**时给数据，否则回 0 且不推进。
+    // 长度不是 4 的倍数的情形真的存在（ML-DSA-87 的 σ 是 4627 字节），
+    // 软件读到剩 <4 就退回逐字节的 OUT_DATA。判据是软件自己算得出来的
+    // （它知道 OUT_LEN），不需要额外的状态位。
+    localparam [5:0] A6_INDATA4 = 6'h10, A6_OUTDATA4 = 6'h11;
+
     localparam [1:0] M_KEYGEN = 2'd0, M_ENCAPS = 2'd1, M_DECAPS = 2'd2;
 
     // ================= 防火墙 =================
@@ -212,7 +233,11 @@ module mlkem_axi #(
     axi4lite_firewall #(
         .AW(8), .SECURE_ONLY(SECURE_ONLY), .PRIV_ONLY(0),
         .ALLOW_WRITE(1), .ALLOW_READ(1),
-        .ADDR_BASE(32'h0000_0000), .ADDR_MASK(32'h0000_00C0)
+        // ⚠️ 窗口从 0x3F 放到 0x7F：打包口 IN_DATA4/OUT_DATA4 在 0x40/0x44。
+        // 0x00~0x3F 那 16 个寄存器已经排满（SEED_STAT 占到 0xF），而**不想**
+        // 用 MODE 里的一位来切换打包 —— 那会让"同一个地址读出几个字节"
+        // 取决于一个可能陈旧的状态位，错了不报错、只是数据错位。
+        .ADDR_BASE(32'h0000_0000), .ADDR_MASK(32'h0000_0080)
     ) u_fw (
         .clk(clk), .rst_n(rst_n), .tamper(tamper),
         .s_awaddr(s_axi_awaddr), .s_awprot(s_axi_awprot),
@@ -322,6 +347,26 @@ module mlkem_axi #(
     reg [3:0]  slot;
     reg        seed_staged;
     reg [12:0] in_ptr, out_len, out_rd;
+
+    // ---- IN_DATA4 的 4 拍写出机 ----
+    // 输入缓冲是 8 位宽的 BRAM，一拍只写得进一个字节。所以一笔打包写在
+    // 总线上是一次事务，在 PL 里摊成 4 拍：第 0 拍就地写掉最低那个字节，
+    // 余下 3 个字节由这台小机器接着写。
+    // ⚠️ 期间必须**挡住下一笔写**（wr_now 里加 !pkw_run），否则第二笔会和
+    //    这台机器抢 ina_* 那三根线，表现是缓冲区里某几个字节静默变成别人的。
+    reg        pkw_run;
+    reg [1:0]  pkw_i;
+    reg [23:0] pkw_data;
+    reg [12:0] pkw_addr;
+
+    // ---- OUT_DATA4 的 4 拍读入机 ----
+    // ram_dp 的 B 口是**同步读、慢一拍**（b_dout <= mem[b_addr]），所以逐字节
+    // 那条路一直靠"空闲时地址就停在 out_rd 上"来让数据提前备好。打包读沿用
+    // 这个性质：握手那一拍 outb_dout 已经是 out_rd 那个字节，直接收下，
+    // 同时把地址推到 out_rd+1，此后每拍收一个。四个字节齐了才给 RVALID。
+    reg        pkr_run;
+    reg [2:0]  pkr_i;
+    reg [23:0] pkr_d;
     reg [13:0] ocnt;        // 本次运行核已经吐出的字节总数（含进金库的那部分）
     reg        zero_pulse;
 
@@ -525,15 +570,25 @@ module mlkem_axi #(
     assign f_awready = !aw_got && !f_bvalid;
     assign f_wready  = !w_got  && !f_bvalid;
 
+    // ⚠️ !pkw_run：IN_DATA4 摊成 4 拍写，期间不接新的写事务（见 pkw_run 处）。
+    // 顺带一个好性质：写响应因此发生在**四个字节都落地之后**。
     wire wr_now = (aw_got || (f_awvalid && f_awready))
-                  && (w_got || (f_wvalid && f_wready)) && !f_bvalid;
+                  && (w_got || (f_wvalid && f_wready)) && !f_bvalid && !pkw_run;
     wire [7:0]  wr_addr = (f_awvalid && f_awready) ? f_awaddr : aw_addr_r;
     wire [2:0]  wr_prot = (f_awvalid && f_awready) ? f_awprot : aw_prot_r;
     wire [31:0] wr_data = (f_wvalid  && f_wready)  ? f_wdata  : w_data_r;
     wire [3:0]  wr_strb = (f_wvalid  && f_wready)  ? f_wstrb  : w_strb_r;
 
-    wire wr_indata = wr_now && wr_strb[0] && (wr_addr[5:2] == A_INDATA)
+    wire wr_indata = wr_now && wr_strb[0] && !wr_addr[6]
+                     && (wr_addr[5:2] == A_INDATA)
                      && (state == S_IDLE) && !wiping;
+
+    // 打包写：与逐字节那条**同样的四个前提**（空闲、没在擦、strb 有效），
+    // 只是一笔进 4 个字节。不加任何额外许可 —— 打包不是一条新的权限路径，
+    // 只是同一条路上少发几笔事务。
+    wire wr_indata4 = wr_now && wr_strb[0]
+                      && (wr_addr[7:2] == A6_INDATA4)
+                      && (state == S_IDLE) && !wiping;
 
     // ---- 种子暂存口：**永远只认安全世界事务，与 SECURE_ONLY 无关** ----
     // 前面那道防火墙的 SECURE_ONLY 是可配的（演示位流是 0），种子口不跟它走：
@@ -560,11 +615,24 @@ module mlkem_axi #(
     wire wr_seed_full = wr_seed_addr && wr_seed_sec && seed_ready;
 
     // ================= 读通道 =================
-    assign f_arready = !f_rvalid;
+    // ⚠️ !pkr_run：OUT_DATA4 要花 4 拍把字节收齐，期间 f_rvalid 还是 0，
+    // 少了这一条 arready 会保持为高、放第二笔读进来，两笔一起用 outb_addr
+    // 那一根地址线，结果是两笔都读到错位的字节。
+    assign f_arready = !f_rvalid && !pkr_run;
     // 擦除期间一律不给输出：out_len 这时已经是 0，但不靠它 ——
     // 靠一个显式条件，免得哪天 out_len 的清零时机变了就漏出去。
-    wire rd_outdata = f_arvalid && f_arready && (f_araddr[5:2] == A_OUTDATA)
+    wire rd_outdata = f_arvalid && f_arready && !f_araddr[6]
+                      && (f_araddr[5:2] == A_OUTDATA)
                       && !wiping_any && ({1'b0, out_rd} < {1'b0, out_len});
+
+    // 打包读只在**还剩至少 4 个字节**时给数据。剩得不够就回 0 且不推进 ——
+    // 软件知道 OUT_LEN，自己算得出什么时候该退回逐字节的 OUT_DATA。
+    // 不做"零填充并推进到末尾"那种半吊子语义：那会让 out_rd 越过 out_len，
+    // 而 out_rd 是下一次读的起点，越界之后再读什么都说不清。
+    wire rd_out4 = f_arvalid && f_arready
+                   && (f_araddr[7:2] == A6_OUTDATA4)
+                   && !wiping_any
+                   && ({1'b0, out_rd} + 14'd4 <= {1'b0, out_len});
 
     // [0] BUSY  [1] DONE  [2] HASH_OK  [3] TAMPER  [4] WIPING  [5] PARAM_ERR
     // [6] SEED_ERR —— 要走暂存种子，而 START 那一刻暂存里没有备好的一份。
@@ -593,8 +661,15 @@ module mlkem_axi #(
             ina_we   = 1'b1;
             ina_addr = wipe_addr[12:0];
             ina_din  = 8'd0;
+        end else if (pkw_run) begin
+            // 打包写的第 1..3 个字节。优先级在逐字节之上是没有歧义的：
+            // wr_now 里已经有 !pkw_run，这两条不可能同时成立。
+            ina_we   = 1'b1;
+            ina_addr = pkw_addr;
+            ina_din  = pkw_data[7:0];
         end else begin
-            ina_we   = wr_indata;
+            // 打包写的第 0 个字节就地写掉，与逐字节走同一条线。
+            ina_we   = wr_indata || wr_indata4;
             ina_addr = in_ptr;
             ina_din  = wr_data[7:0];
         end
@@ -622,8 +697,15 @@ module mlkem_axi #(
             outa_din  = core_od;
         end
 
-        // 同步读要提前一拍：这一拍读命中就把地址推到下一个
-        outb_addr = out_rd + {12'd0, rd_outdata};
+        // 同步读要提前一拍：这一拍读命中就把地址推到下一个。
+        // 打包读期间地址由那台小机器给（out_rd + 已收下的个数）。
+        // ⚠️ 地址要**领先一拍**：B 口慢一拍，这一拍驱动的地址是下一拍才拿得到
+        // 的字节。pkr_i 是"已经收下几个"，所以要驱动的是 out_rd + pkr_i + 1。
+        // 第一版写成 out_rd + pkr_i，于是第 1 个字节被读了两遍、第 3 个从来
+        // 没被读到 —— 输出整段错位，而错位后的 ek 看起来完全合法。
+        outb_addr = pkr_run ? (out_rd + {9'd0, pkr_i} + 13'd1)
+                  : rd_out4 ? (out_rd + 13'd1)
+                            : (out_rd + {12'd0, rd_outdata});
 
         // ---- 金库的两个口 ----
         // 写：擦除时归擦除机；否则只在"存 dk 且已经过了 ek 那一段"时写。
@@ -659,6 +741,8 @@ module mlkem_axi #(
             seed_stage <= 512'd0; seed_wcnt <= 5'd0;
             seed_err <= 1'b0; seed_viol <= 16'd0; seed_ovf <= 1'b0;
             in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0; ocnt <= 14'd0;
+            pkw_run <= 1'b0; pkw_i <= 2'd0; pkw_data <= 24'd0; pkw_addr <= 13'd0;
+            pkr_run <= 1'b0; pkr_i <= 3'd0; pkr_d <= 24'd0;
             zero_pulse <= 1'b0;
             wiping <= 1'b0; wipe_addr <= 16'd0; zall_d <= 1'b0;
             param_err <= 1'b0;
@@ -689,6 +773,12 @@ module mlkem_axi #(
                 // 指针与并行寄存器一拍清掉；BRAM 交给上面那台擦除机。
                 in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0;
                 ocnt   <= 14'd0;
+                // ⚠️ 两台打包机也要当场停。漏了它们的后果是：擦除已经开始、
+                // in_ptr 已经清零，而 pkw 还按旧地址把剩下几个字节写进刚被
+                // 擦过的缓冲区 —— 擦完之后缓冲区里躺着三个字节的旧输入。
+                // pkr 那边则会在擦除中途把读到的字节拼出来交给软件。
+                pkw_run <= 1'b0; pkw_i <= 2'd0; pkw_data <= 24'd0;
+                pkr_run <= 1'b0; pkr_i <= 3'd0; pkr_d <= 24'd0;
                 // 槽的有效位跟着 BRAM 一起作废。**dk_lock 不在这里** ——
                 // 它是一次性的方向，擦秘密不等于撤防线。
                 dkv_valid <= 16'd0; dkv_pset <= 32'd0;
@@ -699,6 +789,19 @@ module mlkem_axi #(
                 state  <= S_IDLE; run_done <= 1'b0;
                 param_err <= 1'b0; seed_err <= 1'b0;
                 fb_v <= 1'b0; fb_wait <= 1'b0;
+            end
+
+            // ---------- IN_DATA4 的写出机（4 拍）----------
+            // ⚠️ **必须在 `if (wr_now)` 之外**。wr_now 里有 !pkw_run，
+            // 所以这台机器一旦跑起来 wr_now 就恒为假 —— 把推进写在里面的话
+            // 它一步也走不动，第 1..3 个字节永远写不进去，而第 0 个已经进了
+            // 缓冲、in_ptr 也已经 +4：表现是**每 4 个字节里有 3 个是旧内容**，
+            // 长度校验还照样通过。（第一版就是这么写的。）
+            if (pkw_run) begin
+                pkw_data <= {8'd0, pkw_data[23:8]};
+                pkw_addr <= pkw_addr + 13'd1;
+                pkw_i    <= pkw_i + 2'd1;
+                if (pkw_i == 2'd2) pkw_run <= 1'b0;   // 刚写完第 3 个字节
             end
 
             // ---------- 写 ----------
@@ -730,7 +833,21 @@ module mlkem_axi #(
                 if (wr_seed_full) begin
                     seed_ovf <= 1'b1;
                 end
-                if (wr_strb[0] && !wiping) begin
+                // ---- IN_DATA4：起一趟 4 拍的写 ----
+                // 放在 case 之外，因为 case 判的是 wr_addr[5:2]，而 0x40 的
+                // [5:2] 是 0（A_VERSION）—— 落进 case 只会什么都不做。
+                if (wr_indata4) begin
+                    // in_ptr 一次推进 4：len_ok 与 IN_PTR 回读要立刻反映
+                    // "这 4 个字节已经算数了"。真正的写由 pkw 接着做，
+                    // 而 wr_now 的 !pkw_run 保证这期间没有别的写能插进来。
+                    in_ptr   <= in_ptr + 13'd4;
+                    pkw_run  <= 1'b1;
+                    pkw_i    <= 2'd0;
+                    pkw_data <= wr_data[31:8];
+                    pkw_addr <= in_ptr + 13'd1;
+                end
+
+                if (wr_strb[0] && !wiping && !wr_addr[6]) begin
                     case (wr_addr[5:2])
                     A_CTRL: begin
                         if (wr_data[1]) zero_pulse <= 1'b1;
@@ -841,8 +958,35 @@ module mlkem_axi #(
             if (f_bvalid && f_bready) f_bvalid <= 1'b0;
 
             // ---------- 读 ----------
+            // ---------- OUT_DATA4 的读入机（4 拍）----------
+            // 与写那台同理，**必须在 AR 握手之外**：arready 里有 !pkr_run。
+            if (pkr_run) begin
+                pkr_i <= pkr_i + 3'd1;
+                case (pkr_i)
+                3'd1: pkr_d[15:8]  <= outb_dout;
+                3'd2: pkr_d[23:16] <= outb_dout;
+                default: begin
+                    // pkr_i == 3：这一拍 outb_dout 是第 4 个字节，齐了。
+                    f_rdata  <= {outb_dout, pkr_d[23:0]};
+                    f_rvalid <= 1'b1;
+                    f_rresp  <= RESP_OKAY;
+                    out_rd   <= out_rd + 13'd4;
+                    pkr_run  <= 1'b0;
+                end
+                endcase
+            end
+
             if (f_arvalid && f_arready) begin
-                f_rvalid <= 1'b1; f_rresp <= RESP_OKAY;
+                // 打包读这一拍**不给 RVALID** —— 字节还没收齐。
+                f_rvalid <= !rd_out4; f_rresp <= RESP_OKAY;
+                if (rd_out4) begin
+                    // B 口是慢一拍的同步读，而空闲时地址就停在 out_rd 上，
+                    // 所以此刻 outb_dout 已经是第 0 个字节，直接收下。
+                    // 同一拍组合逻辑已经把地址推到 out_rd+1。
+                    pkr_d[7:0] <= outb_dout;
+                    pkr_run    <= 1'b1;
+                    pkr_i      <= 3'd1;
+                end
                 case (f_araddr[5:2])
                 A_VERSION: f_rdata <= VERSION;
                 A_STATUS:  f_rdata <= r_status;
@@ -879,6 +1023,12 @@ module mlkem_axi #(
                 A_SEEDDATA: f_rdata <= 32'd0;
                 default:   f_rdata <= 32'd0;
                 endcase
+                // ⚠️ 0x40/0x44 的 [5:2] 分别是 0 与 1，会撞上 A_VERSION 与
+                // A_CTRL。这一行把打包窗口那两个地址的 f_rdata 覆盖掉：
+                // IN_DATA4 是只写口，读它回 0；OUT_DATA4 的值由上面那台
+                // 读入机在第 4 拍给，这里先压成 0，免得握手这一拍先把
+                // VERSION/CTRL 的值放进去（RVALID 那时还没抬，但压掉更省事）。
+                if (f_araddr[6]) f_rdata <= 32'd0;
                 if (rd_outdata) out_rd <= out_rd + 13'd1;
             end
             if (f_rvalid && f_rready) f_rvalid <= 1'b0;

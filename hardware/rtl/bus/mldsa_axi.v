@@ -232,6 +232,13 @@ module mldsa_axi #(
                      A_VIOL    = 4'hC,
                      A_SEEDDATA = 4'hD, A_SEEDSTAT = 4'hE;
 
+    // ================= 4 字节打包口（D11）=================
+    // 0x40 IN_DATA4   W  一笔写 4 个字节，小端
+    // 0x44 OUT_DATA4  R  一笔读 4 个字节，小端；剩不足 4 字节时回 0 且不推进
+    // 理由见 mlkem_axi 的同名段落（交付路径上每字节一次 ioctl+SMC，量到的是
+    // 管子不是核）。这里只记**与 mlkem 不同的那一点**，见下面 pkr 的说明。
+    localparam [5:0] A6_INDATA4 = 6'h10, A6_OUTDATA4 = 6'h11;
+
     localparam [1:0] OP_KEYGEN = 2'd0, OP_SIGN = 2'd1, OP_VERIFY = 2'd2;
 
     // engine 的输入存储深度（in_addr 是 15 位）
@@ -256,7 +263,8 @@ module mldsa_axi #(
     axi4lite_firewall #(
         .AW(8), .SECURE_ONLY(SECURE_ONLY), .PRIV_ONLY(0),
         .ALLOW_WRITE(1), .ALLOW_READ(1),
-        .ADDR_BASE(32'h0000_0000), .ADDR_MASK(32'h0000_00C0)
+        // 窗口从 0x3F 放到 0x7F：打包口在 0x40/0x44（理由与 mlkem_axi 同）。
+        .ADDR_BASE(32'h0000_0000), .ADDR_MASK(32'h0000_0080)
     ) u_fw (
         .clk(clk), .rst_n(rst_n), .tamper(tamper),
         .s_awaddr(s_axi_awaddr), .s_awprot(s_axi_awprot),
@@ -317,6 +325,28 @@ module mldsa_axi #(
     reg [3:0]  slot;
     reg        seed_staged;
     reg [15:0] in_ptr, out_ptr, out_len_r, msg_len, ctx_len;
+
+    // ---- IN_DATA4 的 4 拍写出机（与 mlkem_axi 同构）----
+    reg        pkw_run;
+    reg [1:0]  pkw_i;
+    reg [23:0] pkw_data;
+    reg [14:0] pkw_addr;
+
+    // ---- OUT_DATA4 的读入机 ----
+    // ⚠️ **这里比 mlkem_axi 多一个相位，不是抄漏了。**
+    // engine 的输出口是 `out_data = (out_addr < PKLEN) ? pk : sk`：
+    // **选择器用本拍的 out_addr，而数据是上一拍地址取出来的**（同步读）。
+    // 本文件 out_addr 处那一大段注释记的就是这个坑：只要把地址提前一拍，
+    // 段边界上就会稳定地读错一个字节 —— 而别的字节全对，最难查的那种。
+    //
+    // 所以打包读**不提前地址**，改成"换了地址先等一拍，第二拍地址与数据
+    // 同相时再采"。代价是 7 拍而不是 4 拍；而打包省的是**事务数**
+    // （每笔都是一次 ioctl + SMC），PL 里多几拍无关紧要。
+    reg        pkr_run;
+    reg [1:0]  pkr_i;
+    reg        pkr_ph;       // 0 = 刚换地址，数据还没到；1 = 同相，可以采
+    reg [14:0] pkr_addr;
+    reg [23:0] pkr_d;
     reg        run_done, verify_ok_r, param_err, len_err;
     reg        zero_pulse;
 
@@ -495,8 +525,9 @@ module mldsa_axi #(
     assign f_awready = !aw_got && !f_bvalid;
     assign f_wready  = !w_got  && !f_bvalid;
 
+    // !pkw_run：IN_DATA4 摊成 4 拍写，期间不接新的写事务。
     wire wr_now = (aw_got || (f_awvalid && f_awready))
-                  && (w_got || (f_wvalid && f_wready)) && !f_bvalid;
+                  && (w_got || (f_wvalid && f_wready)) && !f_bvalid && !pkw_run;
     wire [7:0]  wr_addr = (f_awvalid && f_awready) ? f_awaddr : aw_addr_r;
     wire [2:0]  wr_prot = (f_awvalid && f_awready) ? f_awprot : aw_prot_r;
     wire [31:0] wr_data = (f_wvalid  && f_wready)  ? f_wdata  : w_data_r;
@@ -516,8 +547,17 @@ module mldsa_axi #(
     // 输入存储写满了就不再收：不加这条的话 in_ptr 会绕回 0 覆盖已经写好的
     // 前半段，而软件看到的是一路 OKAY。
     wire in_full = ({2'd0, in_ptr} >= IN_CAP);
-    wire wr_indata = wr_now && wr_strb[0] && (wr_addr[5:2] == A_INDATA)
+    wire wr_indata = wr_now && wr_strb[0] && !wr_addr[6]
+                     && (wr_addr[5:2] == A_INDATA)
                      && (state == S_IDLE) && !wiping_any && !in_full;
+
+    // 打包写：与逐字节**同样的四个前提**，外加"剩余容量至少 4 个字节"。
+    // 容量这一条不能只按 in_full 判：那是"已经满了"，而打包一笔进 4 个，
+    // 差 1 到 3 个字节时按 in_full 还没满，写下去就绕回 0 覆盖开头。
+    wire in_room4 = ({2'd0, in_ptr} + 18'd4 <= IN_CAP);
+    wire wr_indata4 = wr_now && wr_strb[0]
+                      && (wr_addr[7:2] == A6_INDATA4)
+                      && (state == S_IDLE) && !wiping_any && in_room4;
     // IN_PTR 只接受写 0。**不给"任意设置写指针"这个能力**是有意的：
     // 那等于给了一条绕过喂够校验的路（把指针推到需要的长度，实际字节是残留），
     // 而这正是上面那条校验要挡的东西。非零的写回 SLVERR，不是静默忽略。
@@ -540,11 +580,22 @@ module mldsa_axi #(
                               || (wr_addr[5:2] == A_INDATA));
 
     // ================= 读通道 =================
-    assign f_arready = !f_rvalid;
+    // !pkr_run：打包读要花几拍收齐，期间 f_rvalid 还是 0；
+    // 少了这一条会放第二笔读进来，两笔一起用 out_addr 那一根线。
+    assign f_arready = !f_rvalid && !pkr_run;
     // 读 OUT_DATA 的唯一闸门：out_ptr < OUT_LEN。存 sk 那一趟 OUT_LEN 只到
     // pk 的长度，于是 sk 那一段的地址根本不会被摆到 engine 的 out_addr 上。
-    wire rd_outdata = f_arvalid && f_arready && (f_araddr[5:2] == A_OUTDATA)
+    wire rd_outdata = f_arvalid && f_arready && !f_araddr[6]
+                      && (f_araddr[5:2] == A_OUTDATA)
                       && !wiping_any && (out_ptr < out_len_r);
+
+    // 打包读只在**还剩至少 4 个字节**时给数据（剩不够回 0 且不推进）。
+    // 这一条同时兜住了段边界：存 sk 那一趟 out_len_r 只到 pk_len，
+    // 于是打包读驱动的地址永远不会越过 pk_len。
+    wire rd_out4 = f_arvalid && f_arready
+                   && (f_araddr[7:2] == A6_OUTDATA4)
+                   && !wiping_any
+                   && ({1'b0, out_ptr} + 17'd4 <= {1'b0, out_len_r});
 
     // [0]BUSY [1]DONE [2]VERIFY_OK [3]PARAM_ERR [4]LEN_ERR [5]TAMPER [6]WIPING
     // [7] SEED_ERR —— 要走暂存种子，而 START 那一刻暂存里没有备好的一份。
@@ -613,6 +664,10 @@ module mldsa_axi #(
         //       踩不到上面那个坑。两条路的写法不同是有理由的，别顺手统一。
         if (state == S_STORE)
             out_addr = {2'd0, pk_len} + {2'd0, cp} + {14'd0, !cp_wait};
+        else if (pkr_run)
+            // 打包读：地址由读入机给，且**采样那一拍地址与数据同相**
+            // （见 pkr_run 声明处；提前一拍会在 pk/sk 边界读错一个字节）。
+            out_addr = pkr_addr;
         else
             out_addr = out_ptr[14:0];
     end
@@ -641,6 +696,9 @@ module mldsa_axi #(
             state <= S_IDLE; cp <= 13'd0; cp_wait <= 1'b0; kickdly <= 2'd0;
             eng_start <= 1'b0;
             in_we <= 1'b0; in_addr <= 15'd0; in_data <= 8'd0;
+            pkw_run <= 1'b0; pkw_i <= 2'd0; pkw_data <= 24'd0; pkw_addr <= 15'd0;
+            pkr_run <= 1'b0; pkr_i <= 2'd0; pkr_ph <= 1'b0;
+            pkr_addr <= 15'd0; pkr_d <= 24'd0;
         end else begin
             zero_pulse <= 1'b0;
             eng_start  <= 1'b0;
@@ -671,6 +729,44 @@ module mldsa_axi #(
                 // 暂存的那份 ξ 也是秘密，zeroize 当然要擦掉。
                 // **seed_lock 不在这里** —— 擦秘密不等于撤防线。
                 seed_stage <= 256'd0; seed_wcnt <= 4'd0; seed_addr <= 6'd0;
+                // 两台打包机当场停。漏了它们的后果：擦除已经开始、in_ptr 已经
+                // 清零，而 pkw 还按旧地址把剩下几个字节写进刚擦过的存储。
+                pkw_run <= 1'b0; pkw_i <= 2'd0; pkw_data <= 24'd0;
+                pkr_run <= 1'b0; pkr_i <= 2'd0; pkr_ph <= 1'b0; pkr_d <= 24'd0;
+            end
+
+            // ---------- IN_DATA4 的写出机（4 拍）----------
+            // ⚠️ **必须在 `if (wr_now)` 之外**：wr_now 里有 !pkw_run，
+            // 写在里面的话这台机器一步也走不动，每 4 个字节只有第 0 个真的
+            // 落地，而长度校验照样通过。
+            if (pkw_run) begin
+                in_we    <= 1'b1;
+                in_addr  <= pkw_addr;
+                in_data  <= pkw_data[7:0];
+                pkw_data <= {8'd0, pkw_data[23:8]};
+                pkw_addr <= pkw_addr + 15'd1;
+                pkw_i    <= pkw_i + 2'd1;
+                if (pkw_i == 2'd2) pkw_run <= 1'b0;
+            end
+
+            // ---------- OUT_DATA4 的读入机 ----------
+            // 换了地址先等一拍（pkr_ph=0），第二拍地址与数据同相时再采。
+            if (pkr_run && pkr_ph) begin
+                case (pkr_i)
+                2'd1: begin pkr_d[15:8]  <= out_data; pkr_addr <= pkr_addr + 15'd1;
+                            pkr_i <= 2'd2; pkr_ph <= 1'b0; end
+                2'd2: begin pkr_d[23:16] <= out_data; pkr_addr <= pkr_addr + 15'd1;
+                            pkr_i <= 2'd3; pkr_ph <= 1'b0; end
+                default: begin
+                    f_rdata  <= {out_data, pkr_d[23:0]};
+                    f_rvalid <= 1'b1;
+                    f_rresp  <= RESP_OKAY;
+                    out_ptr  <= out_ptr + 16'd4;
+                    pkr_run  <= 1'b0;
+                end
+                endcase
+            end else if (pkr_run) begin
+                pkr_ph <= 1'b1;
             end
 
             // ---------- 写 ----------
@@ -687,8 +783,15 @@ module mldsa_axi #(
                 // WIPING。写满与非零写 IN_PTR 同理，也回 SLVERR。
                 f_bvalid <= 1'b1;
                 f_bresp  <= (wiping
-                             || (wr_strb[0] && (wr_addr[5:2] == A_INDATA)
+                             || (wr_strb[0] && !wr_addr[6]
+                                 && (wr_addr[5:2] == A_INDATA)
                                  && (state == S_IDLE) && in_full)
+                             // 打包写在"剩余容量不足 4 个字节"时同样回 SLVERR。
+                             // 判的是 in_room4 而不是 in_full：差 1~3 个字节时
+                             // in_full 还不成立，而一笔打包写下去就绕回 0 覆盖
+                             // 开头 —— 软件看到的是一路 OKAY。
+                             || (wr_strb[0] && (wr_addr[7:2] == A6_INDATA4)
+                                 && (state == S_IDLE) && !in_room4)
                              || wr_inptr_bad
                              /* ⚠️ 种子口的两种拒绝**不在这里** —— 它们回 OKAY，
                                 见文件头①（posted 写的 SLVERR = SError = 断电） */
@@ -702,7 +805,21 @@ module mldsa_axi #(
                 if (wr_seed_full) begin
                     seed_ovf <= 1'b1;
                 end
-                if (wr_strb[0] && !wiping_any) begin
+                // IN_DATA4：起一趟 4 拍的写。放在 case 之外 —— case 判的是
+                // wr_addr[5:2]，0x40 的 [5:2] 是 0（A_VERSION），落进去什么
+                // 都不会发生。
+                if (wr_indata4) begin
+                    in_we    <= 1'b1;
+                    in_addr  <= sw_addr;
+                    in_data  <= wr_data[7:0];
+                    in_ptr   <= in_ptr + 16'd4;
+                    pkw_run  <= 1'b1;
+                    pkw_i    <= 2'd0;
+                    pkw_data <= wr_data[31:8];
+                    pkw_addr <= sw_addr + 15'd1;
+                end
+
+                if (wr_strb[0] && !wiping_any && !wr_addr[6]) begin
                     case (wr_addr[5:2])
                     A_CTRL: begin
                         if (wr_data[1]) begin
@@ -829,7 +946,17 @@ module mldsa_axi #(
 
             // ---------- 读 ----------
             if (f_arvalid && f_arready) begin
-                f_rvalid <= 1'b1; f_rresp <= RESP_OKAY;
+                // 打包读这一拍**不给 RVALID** —— 字节还没收齐。
+                f_rvalid <= !rd_out4; f_rresp <= RESP_OKAY;
+                if (rd_out4) begin
+                    // 此刻 out_addr 还停在 out_ptr 上、out_data 与它同相，
+                    // 所以第 0 个字节直接收下（不提前地址，见 pkr 的说明）。
+                    pkr_d[7:0] <= out_data;
+                    pkr_addr   <= out_ptr[14:0] + 15'd1;
+                    pkr_i      <= 2'd1;
+                    pkr_ph     <= 1'b0;
+                    pkr_run    <= 1'b1;
+                end
                 case (f_araddr[5:2])
                 A_VERSION: f_rdata <= VERSION;
                 A_STATUS:  f_rdata <= r_status;
@@ -857,6 +984,9 @@ module mldsa_axi #(
                 A_SEEDDATA: f_rdata <= 32'd0;
                 default:   f_rdata <= 32'd0;
                 endcase
+                // 0x40/0x44 的 [5:2] 是 0 与 1，会撞上 A_VERSION 与 A_CTRL。
+                // IN_DATA4 是只写口读回 0；OUT_DATA4 的值由读入机在最后一拍给。
+                if (f_araddr[6]) f_rdata <= 32'd0;
                 if (rd_outdata) out_ptr <= out_ptr + 16'd1;
             end
             if (f_rvalid && f_rready) f_rvalid <= 1'b0;

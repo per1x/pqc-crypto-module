@@ -1278,3 +1278,157 @@ async def test_wiping_covers_the_cores_not_just_this_layer(dut):
         "本层报擦完了，核里还在擦 —— 下一次 START 会读到半擦的存储"
 
     dut._log.info("WIPING 覆盖了核里那三台擦除机，且三台都落下之后才报完成")
+
+
+# ============================================================================
+# 4 字节打包口（D11）
+# ============================================================================
+# 判据只有一条真正要紧：**打包路径与逐字节路径的字节必须逐字节相同**。
+# 打包省的是事务数，一个字节都不许省、也不许换位置。字节序装反是这类改动
+# 最典型的错法，而它不会报错 —— 出来的 ek/密文完全合法，只是错的。
+IN_DATA4, OUT_DATA4 = 0x40, 0x44
+
+
+async def run_op_packed(dut, mode, name, payload: bytes, limit=400_000):
+    """与 run_op 同样的一趟，但输入走 IN_DATA4、输出走 OUT_DATA4。
+
+    尾巴（不足 4 字节的那一截）退回逐字节口 —— 这正是要一起测的语义。
+    """
+    assert await wr(dut, MODE, mode | (PSET[name] << 2)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
+    i = 0
+    while i + 4 <= len(payload):
+        w = int.from_bytes(payload[i:i + 4], "little")
+        assert await wr(dut, IN_DATA4, w) == RESP_OKAY
+        i += 4
+    while i < len(payload):                       # 输入的尾巴走逐字节
+        assert await wr(dut, IN_DATA, payload[i]) == RESP_OKAY
+        i += 1
+    p, _ = await rd(dut, IN_PTR)
+    assert p == len(payload), f"打包写之后 IN_PTR = {p}，应当是 {len(payload)}"
+
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
+    for _ in range(limit):
+        st, _ = await rd(dut, STATUS)
+        if st & ST_DONE:
+            break
+    else:
+        raise AssertionError(f"{name} mode={mode}：一直没完成")
+
+    n, _ = await rd(dut, OUT_LEN)
+    out = bytearray()
+    while len(out) + 4 <= n:
+        d, _ = await rd(dut, OUT_DATA4)
+        out += (d & 0xFFFFFFFF).to_bytes(4, "little")
+    while len(out) < n:                           # 输出的尾巴走逐字节
+        d, _ = await rd(dut, OUT_DATA)
+        out.append(d & 0xFF)
+    return bytes(out)
+
+
+@cocotb.test()
+async def test_packed_io_matches_bytewise(dut):
+    """打包 I/O 与逐字节 I/O 的结果**逐字节相同**（三个参数集、两种模式）
+
+    这是这一项唯一的硬判据。分开测"打包写对不对""打包读对不对"没有意义 ——
+    真正会出的错是字节序或错位，而那只有拿逐字节那条（已被 ACVP 钉死的）
+    路对拍才看得出来。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    for name in ("ML-KEM-512", "ML-KEM-768", "ML-KEM-1024"):
+        seed = bytes((i * 7 + 3) & 0xFF for i in range(64))
+        a = await run_op(dut, M_KEYGEN, name, seed)
+        await reset(dut)
+        b = await run_op_packed(dut, M_KEYGEN, name, seed)
+        assert a == b, (f"KeyGen-{name}：打包与逐字节不一致\n"
+                        f"  逐字节 {a[:16].hex()}…（{len(a)} 字节）\n"
+                        f"  打包　 {b[:16].hex()}…（{len(b)} 字节）")
+        dut._log.info(f"KeyGen-{name}：{len(a)} 字节，打包与逐字节逐字节相同")
+
+        # Encaps 走一遍：它的输入是 m‖ek，长度不是 64 这种整齐数字，
+        # 正好把"输入尾巴退回逐字节"那条路一起走到。
+        ek_ref, _ = mlkem_keygen(seed[:32], seed[32:], name)
+        ek = a[:len(ek_ref)]
+        assert ek == ek_ref, f"{name}：逐字节那条自己就与黄金模型不一致"
+        m = bytes((i * 11 + 5) & 0xFF for i in range(32))
+        await reset(dut)
+        c = await run_op(dut, M_ENCAPS, name, m + ek)
+        await reset(dut)
+        d = await run_op_packed(dut, M_ENCAPS, name, m + ek)
+        assert c == d, f"Encaps-{name}：打包与逐字节不一致"
+        dut._log.info(f"Encaps-{name}：{len(c)} 字节，打包与逐字节逐字节相同")
+        await reset(dut)
+
+
+@cocotb.test()
+async def test_packed_read_refuses_short_tail(dut):
+    """OUT_DATA4 在**剩不足 4 字节**时回 0 且不推进 OUT_RD
+
+    不做"零填充并推进到末尾"那种语义：那会让 OUT_RD 越过 OUT_LEN，
+    而 OUT_RD 是下一次读的起点，越界之后再读什么都说不清。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    seed = bytes((i * 3 + 1) & 0xFF for i in range(64))
+    out = await run_op(dut, M_KEYGEN, "ML-KEM-512", seed)
+    n = len(out)
+
+    # 把 OUT_RD 推到只剩 2 个字节
+    assert await wr(dut, CTRL, C_OUT_RST) == RESP_OKAY
+    for _ in range(n - 2):
+        await rd(dut, OUT_DATA)
+    rdp, _ = await rd(dut, OUT_RD)
+    assert rdp == n - 2, f"OUT_RD = {rdp}，应当是 {n - 2}"
+
+    v, resp = await rd(dut, OUT_DATA4)
+    assert resp == RESP_OKAY, "剩不足 4 字节时应当回 OKAY（RAZ），不是总线错误"
+    assert v == 0, f"剩 2 字节时 OUT_DATA4 读到 0x{v:08x}，应当是 0"
+    rdp2, _ = await rd(dut, OUT_RD)
+    assert rdp2 == n - 2, f"被拒的打包读推进了 OUT_RD：{rdp} → {rdp2}"
+
+    # 退回逐字节仍然读得到那两个字节，且与原来那趟一致
+    tail = bytearray()
+    for _ in range(2):
+        d, _ = await rd(dut, OUT_DATA)
+        tail.append(d & 0xFF)
+    assert bytes(tail) == out[-2:], "退回逐字节读到的尾巴不对"
+    dut._log.info("剩不足 4 字节时 OUT_DATA4 回 0、不推进；逐字节仍读得到尾巴")
+
+
+@cocotb.test()
+async def test_packed_write_refused_while_wiping(dut):
+    """擦除期间 IN_DATA4 与逐字节 IN_DATA 一样被拒，且**不留下半截字节**
+
+    打包写在 PL 里摊成 4 拍。如果擦除开始时那台写出机还在跑，就会出现
+    "擦完之后缓冲区里躺着三个字节旧输入"——擦除的判据是"一个字节都不留"，
+    这种残留正好把它破掉。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
+    for i in range(8):
+        assert await wr(dut, IN_DATA4, 0xA5A50000 | i) == RESP_OKAY
+    p, _ = await rd(dut, IN_PTR)
+    assert p == 32, f"IN_PTR = {p}，应当是 32"
+
+    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
+    await RisingEdge(dut.clk)
+    st, _ = await rd(dut, STATUS)
+    assert st & ST_WIPING, "ZEROIZE 之后 WIPING 没起来"
+
+    # 擦除期间的打包写：与逐字节同样回 SLVERR，且 IN_PTR 不动
+    assert await wr(dut, IN_DATA4, 0xDEADBEEF) == RESP_SLVERR, \
+        "擦除期间 IN_DATA4 应当回 SLVERR（与逐字节 IN_DATA 同一条纪律）"
+
+    await _wait_wipe(dut)
+    p2, _ = await rd(dut, IN_PTR)
+    assert p2 == 0, f"擦完之后 IN_PTR = {p2}，应当是 0"
+    bad, first = _mem_nonzero(dut.u_inbuf.mem)
+    assert bad == 0, (
+        f"擦完之后输入缓冲里还有 {bad} 个非零字节，第一个在 "
+        f"[{first[0]}] = 0x{first[1]:02x} —— 多半是打包写出机在擦除中途又写了几个")
+    dut._log.info("擦除期间 IN_DATA4 被拒，擦完之后缓冲区一个非零字节都没有")

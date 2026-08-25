@@ -33,10 +33,10 @@ axi4lite_xbar 文件头里写的那个坑 —— 改一处忘另一处，而且�
     槽 0  0x8000_0000  trng_axi        0x00-0x3C   读 写
     槽 1  0x8001_0000  key_vault_axi   0x00-0x3C   读 写
     槽 2  0x8002_0000  sym_axi         0x00-0x7C   读 写
-    槽 3  0x8003_0000  mlkem_axi       0x00-0x3C   读 写
+    槽 3  0x8003_0000  mlkem_axi       0x00-0x44   读 写
     槽 4  0x8004_0000  金丝雀           0x00-0x3C   读 ——   （对照，写它没有用途）
     槽 5  0x8005_0000  fan_ctrl_axi    ——   ——     整核排除
-    槽 6  0x8006_0000  mldsa_axi       0x00-0x3C   读 写
+    槽 6  0x8006_0000  mldsa_axi       0x00-0x44   读 写
 
 另有一个**不在 PL 里**的只读窗口：
 
@@ -303,10 +303,10 @@ static const uint32_t pl_off_max[PL_NSLOT] = {
 \t0x3C,\t/* 0 trng_axi       araddr[5:2]        */
 \t0x3C,\t/* 1 key_vault_axi  ADDR_MASK 0xC0     */
 \t0x7C,\t/* 2 sym_axi        ADDR_MASK 0x80     */
-\t0x3C,\t/* 3 mlkem_axi      ADDR_MASK 0xC0     */
+\t0x44,\t/* 3 mlkem_axi      ADDR_MASK 0x80     */
 \t0x3C,\t/* 4 金丝雀（只读，对照用）            */
 \t0x00,\t/* 5 fan_ctrl_axi   整核排除           */
-\t0x3C,\t/* 6 mldsa_axi      ADDR_MASK 0xC0     */
+\t0x44,\t/* 6 mldsa_axi      ADDR_MASK 0x80     */
 };
 static const uint8_t pl_rd_ok[PL_NSLOT] = { 1, 1, 1, 1, 1, 0, 1 };
 static const uint8_t pl_wr_ok[PL_NSLOT] = { 1, 1, 1, 1, 0, 0, 1 };
@@ -337,7 +337,17 @@ static int pl_permit(uint64_t a, int is_write)
 \t\treturn 0;
 \tslot = (uint32_t)(rel >> PL_SLOT_SHIFT);
 \toff = rel & 0xFFFFULL;
-\t/* 这一条同时收掉了 addr[15:8] != 0：上界最大也只有 0x7C */
+\t/* 这一条同时收掉了 addr[15:8] != 0：上界最大也只有 0x7C
+\t *
+\t * ⚠️ 槽 3/6 的上界 2026-08-25 从 0x3C 放到 **0x44**：D11 的 4 字节打包口
+\t * 在 0x40（IN_DATA4）与 0x44（OUT_DATA4），两个核的防火墙窗口也同时从
+\t * 0x3F 放到了 0x7F。**只放到 0x44 而不是 0x7C** —— 白名单永远取"该核实际
+\t * 存在的寄存器"，不取"防火墙允许的最大范围"。
+\t *
+\t * 这一条漏掉的症状实测过一次：位流已经带打包口、daemon 也改成打包搬运，
+\t * 但**经 EL3 那条路**每一笔打包写都被 EL3 拒掉 —— 表现是 IN_PTR 对不上、
+\t * 每次运算返回 -1。而**同一份位流经 /dev/mem 直连完全正常**，于是很容易
+\t * 去怀疑 RTL。两处策略各说各话，就是要让这种漏配变成吵闹的失败。 */
 \tif (off > (uint64_t)pl_off_max[slot])
 \t\treturn 0;
 \t/* ⚠️ **种子暂存口从通用读写里整个排除** —— 读写都不放行。

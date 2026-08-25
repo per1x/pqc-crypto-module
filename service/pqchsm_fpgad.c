@@ -140,6 +140,12 @@
 #define MK_STATUS (S_MLKEM + 0x08)
 #define MK_MODE   (S_MLKEM + 0x0C)
 #define MK_INDATA (S_MLKEM + 0x10)
+/* 4 字节打包口（D11）。**同一条路上少发 3/4 的事务** —— 交付形态下每一笔核
+ * 访问都是一次 ioctl + 一次 SMC，而实测时间随传输字节数线性走、不随计算量走
+ * （KeyGen 512/768/1024 = 1 : 1.53 : 2.10，正是输出字节数之比；算力需求按 k²
+ * 应当是 1 : 2.25 : 4）。也就是说量到的是管子不是核。 */
+#define MK_INDATA4  (S_MLKEM + 0x40)
+#define MK_OUTDAT4  (S_MLKEM + 0x44)
 #define MK_INPTR  (S_MLKEM + 0x14)
 #define MK_OUTDAT (S_MLKEM + 0x18)
 #define MK_OUTLEN (S_MLKEM + 0x1C)
@@ -183,6 +189,8 @@
 #define MD_MODE    (S_MLDSA + 0x08)
 #define MD_STATUS  (S_MLDSA + 0x0C)
 #define MD_INDATA  (S_MLDSA + 0x10)
+#define MD_INDATA4 (S_MLDSA + 0x40)
+#define MD_OUTDAT4 (S_MLDSA + 0x44)
 #define MD_INPTR   (S_MLDSA + 0x14)
 #define MD_OUTDAT  (S_MLDSA + 0x18)
 #define MD_OUTPTR  (S_MLDSA + 0x1C)
@@ -442,17 +450,58 @@ static void mlkem_len(uint32_t pset, uint32_t *ek, uint32_t *dk, uint32_t *ct)
 }
 
 /* 通用：灌输入 → 启动 → 等完成 → 取输出 */
+/* ============================================================================
+ * 【4 字节打包的搬运：尾巴一定要退回逐字节】
+ * ============================================================================
+ * 打包口只在**整 4 个字节**时有效：写口要剩余容量够 4，读口要还剩 ≥4 字节。
+ * 不足 4 的那一截退回逐字节口。
+ *
+ * ⚠️ 长度不是 4 的倍数的情形是真的：ML-DSA-87 的 σ 是 4627 字节。
+ *    少了退回那一段，最后 3 个字节会静默地读不出来 —— 而签名少 3 个字节
+ *    不会报错，只是验不过。
+ *
+ * ⚠️ 字节序是小端：第一个字节落最低位。这一条与 RTL 里 seed_stage 的解释、
+ *    与 IN_DATA 逐字节那条路**必须是同一种**，否则同一份数据有两种读法。
+ *    RTL 侧有一条"打包与逐字节结果逐字节相同"的对拍用例钉着它。
+ */
+static void feed_packed(unsigned reg4, unsigned reg1, const uint8_t *in, uint32_t n)
+{
+	uint32_t i = 0;
+
+	for (; i + 4 <= n && !hw_fault; i += 4) {
+		wr(reg4, (uint32_t)in[i] | ((uint32_t)in[i + 1] << 8)
+			 | ((uint32_t)in[i + 2] << 16) | ((uint32_t)in[i + 3] << 24));
+	}
+	for (; i < n && !hw_fault; i++)
+		wr(reg1, in[i]);
+}
+
+static void drain_packed(unsigned reg4, unsigned reg1, uint8_t *out, uint32_t n)
+{
+	uint32_t i = 0;
+	uint32_t v;
+
+	for (; i + 4 <= n && !hw_fault; i += 4) {
+		v = rd(reg4);
+		out[i]     = (uint8_t)(v & 0xFF);
+		out[i + 1] = (uint8_t)((v >> 8) & 0xFF);
+		out[i + 2] = (uint8_t)((v >> 16) & 0xFF);
+		out[i + 3] = (uint8_t)((v >> 24) & 0xFF);
+	}
+	for (; i < n && !hw_fault; i++)
+		out[i] = (uint8_t)rd(reg1);
+}
+
 static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 		     const uint8_t *in, uint32_t in_len,
 		     uint8_t *out, uint32_t out_cap, uint32_t *out_len)
 {
-	uint32_t i, n, st;
+	uint32_t n, st;
 	long spin;
 
 	wr(MK_MODE, mode | (pset << 2) | mode_extra);
 	wr(MK_CTRL, MKC_INRST);
-	for (i = 0; i < in_len; i++)
-		wr(MK_INDATA, in[i]);
+	feed_packed(MK_INDATA4, MK_INDATA, in, in_len);
 	if (rd(MK_INPTR) != in_len) {
 		logf_("IN_PTR 对不上：%u vs %u", rd(MK_INPTR), in_len);
 		return -1;
@@ -472,8 +521,7 @@ static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 	n = rd(MK_OUTLEN);
 	if (n > out_cap)
 		return -4;
-	for (i = 0; i < n; i++)
-		out[i] = (uint8_t)rd(MK_OUTDAT);
+	drain_packed(MK_OUTDAT4, MK_OUTDAT, out, n);
 	*out_len = n;
 	return 0;
 }
@@ -550,8 +598,7 @@ static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
 	wr(MD_OUTPTR, 0);
 	wr(MD_MSGLEN, msg_len);
 	wr(MD_CTXLEN, ctx_len);
-	for (i = 0; i < in_len && !hw_fault; i++)
-		wr(MD_INDATA, in[i]);
+	feed_packed(MD_INDATA4, MD_INDATA, in, in_len);
 	if (hw_fault)
 		return -3;
 	if (rd(MD_INPTR) != in_len) {
@@ -586,8 +633,7 @@ static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
 	n = rd(MD_OUTLEN);
 	if (n > out_cap)
 		return -4;
-	for (i = 0; i < n && !hw_fault; i++)
-		out[i] = (uint8_t)rd(MD_OUTDAT);
+	drain_packed(MD_OUTDAT4, MD_OUTDAT, out, n);
 	if (hw_fault)
 		return -3;
 	*out_len = n;

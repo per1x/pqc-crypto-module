@@ -1753,3 +1753,147 @@ async def test_mldsa_mode_reads_back_all_fields(dut):
         assert got == word, f"MODE 回读 0x{got:03x}，写进去的是 0x{word:03x}"
 
     dut._log.info("MODE 的 11 个位全部可回读")
+
+
+# ============================================================================
+# 4 字节打包口（D11）
+# ============================================================================
+IN_DATA4, OUT_DATA4 = 0x40, 0x44
+
+
+async def fill_packed(dut, payload: bytes):
+    """走 IN_DATA4 灌字节，尾巴（不足 4 的那一截）退回逐字节"""
+    i = 0
+    while i + 4 <= len(payload):
+        w = int.from_bytes(payload[i:i + 4], "little")
+        assert await wr(dut, IN_DATA4, w) == RESP_OKAY
+        i += 4
+    while i < len(payload):
+        assert await wr(dut, IN_DATA, payload[i]) == RESP_OKAY
+        i += 1
+
+
+async def out_bytes_packed(dut, first, count):
+    """走 OUT_DATA4 取字节，尾巴退回逐字节"""
+    assert await wr(dut, OUT_PTR, first) == RESP_OKAY
+    out = bytearray()
+    while len(out) + 4 <= count:
+        d, _ = await rd(dut, OUT_DATA4)
+        out += (d & 0xFFFFFFFF).to_bytes(4, "little")
+    while len(out) < count:
+        d, _ = await rd(dut, OUT_DATA)
+        out.append(d & 0xFF)
+    return bytes(out)
+
+
+@cocotb.test()
+async def test_packed_io_matches_acvp(dut):
+    """打包 I/O 跑 KeyGen 与 Sign，结果**逐字节对上 ACVP**
+
+    判据直接钉在官方向量上而不是"与逐字节那趟一致"：ML-DSA 这一层的输出
+    跨 pk/sk 两段，段边界正是最容易错一个字节的地方（见 mldsa_axi.v 里
+    out_addr 那一大段），而 ACVP 的 pk‖sk 把两段的边界一起钉死了。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    # ---- KeyGen：输入 32 字节 ξ，输出跨 pk/sk 段边界 ----
+    xi, pk_w, sk_w = kat_keygen()[0]
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, None)) == RESP_OKAY
+    assert await wr(dut, MSG_LEN, 0) == RESP_OKAY
+    assert await wr(dut, CTX_LEN, 0) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    await fill_packed(dut, xi)
+    p, _ = await rd(dut, IN_PTR)
+    assert p == len(xi), f"打包写之后 IN_PTR = {p}，应当是 {len(xi)}"
+    assert await start_and_wait(dut, 40_000, 2_000), "打包 KeyGen 没跑完"
+    n, _ = await rd(dut, OUT_LEN)
+    assert n == PKL + SKL, f"OUT_LEN={n}"
+
+    got_pk = await out_bytes_packed(dut, 0, PKL)
+    assert got_pk == pk_w, diff(got_pk, pk_w, f"{ALG} 打包读 pk 与 ACVP")
+    got_sk = await out_bytes_packed(dut, PKL, SKL)
+    assert got_sk == sk_w, diff(got_sk, sk_w, f"{ALG} 打包读 sk 与 ACVP")
+
+    # **段边界那一段单独再读一次**：跨过 PKL 的那 8 个字节。
+    # 上面两趟各自停在边界上，跨过去这一趟才真的把选择器翻面那一拍走到。
+    across = await out_bytes_packed(dut, PKL - 4, 8)
+    assert across == (pk_w + sk_w)[PKL - 4:PKL + 4], \
+        "跨 pk/sk 段边界的打包读错了 —— 正是 out_addr 提前一拍会踩的那个坑"
+    dut._log.info(f"{ALG} 打包 KeyGen：pk+sk 逐字节对上 ACVP，段边界也对")
+
+    # ---- Sign：输入是四段拼起来的，长度不是 4 的倍数，尾巴退回逐字节 ----
+    await reset(dut)
+    sk, msg, ctx, rnd, sig_w = kat_siggen()
+    assert await wr(dut, MODE, mode_word(OP_SIGN, None)) == RESP_OKAY
+    assert await wr(dut, MSG_LEN, len(msg)) == RESP_OKAY
+    assert await wr(dut, CTX_LEN, len(ctx)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+    await fill_packed(dut, sk + rnd + ctx + msg)
+    p, _ = await rd(dut, IN_PTR)
+    assert p == len(sk) + len(rnd) + len(ctx) + len(msg), f"IN_PTR = {p}"
+    assert await start_and_wait(dut, 400_000, 2_000), "打包 Sign 没跑完"
+    n, _ = await rd(dut, OUT_LEN)
+    got_sig = await out_bytes_packed(dut, 0, n)
+    assert got_sig == sig_w, diff(got_sig, sig_w, f"{ALG} 打包读 σ 与 ACVP")
+    dut._log.info(f"{ALG} 打包 Sign：σ {n}B 逐字节对上 ACVP"
+                  f"（{n % 4} 字节的尾巴走了逐字节口）")
+
+
+@cocotb.test()
+async def test_packed_read_refuses_short_tail(dut):
+    """OUT_DATA4 剩不足 4 字节时回 0 且不推进 OUT_PTR"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    xi, pk_w, sk_w = kat_keygen()[0]
+    n = await run_op(dut, OP_KEYGEN, xi)
+    assert n == PKL + SKL
+
+    assert await wr(dut, OUT_PTR, n - 2) == RESP_OKAY
+    v, resp = await rd(dut, OUT_DATA4)
+    assert resp == RESP_OKAY, "剩不足 4 字节应当回 OKAY（RAZ），不是总线错误"
+    assert v == 0, f"剩 2 字节时 OUT_DATA4 读到 0x{v:08x}"
+    p, _ = await rd(dut, OUT_PTR)
+    assert p == n - 2, f"被拒的打包读推进了 OUT_PTR：{n - 2} → {p}"
+
+    tail = bytearray()
+    for _ in range(2):
+        d, _ = await rd(dut, OUT_DATA)
+        tail.append(d & 0xFF)
+    assert bytes(tail) == (pk_w + sk_w)[-2:], "退回逐字节读到的尾巴不对"
+    dut._log.info("剩不足 4 字节时 OUT_DATA4 回 0、不推进；逐字节仍读得到尾巴")
+
+
+@cocotb.test()
+async def test_packed_write_refused_when_no_room(dut):
+    """剩余容量不足 4 字节时 IN_DATA4 回 SLVERR，**且不绕回 0 覆盖开头**
+
+    判 in_room4 而不是 in_full：差 1~3 个字节时 in_full 还不成立，
+    一笔打包写下去就绕回开头，而软件看到的是一路 OKAY。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    IN_CAP = 32768
+    assert await wr(dut, MODE, mode_word(OP_KEYGEN, None)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_CLEAR) == RESP_OKAY
+
+    # 先用打包写填到只差 2 个字节
+    head = bytes([0x5A, 0x5B, 0x5C, 0x5D])
+    await fill_packed(dut, head)
+    for _ in range((IN_CAP - 4 - 2) // 4):
+        assert await wr(dut, IN_DATA4, 0x11223344) == RESP_OKAY
+    for _ in range((IN_CAP - 4 - 2) % 4):
+        assert await wr(dut, IN_DATA, 0x77) == RESP_OKAY
+    p, _ = await rd(dut, IN_PTR)
+    assert p == IN_CAP - 2, f"IN_PTR = {p}，应当是 {IN_CAP - 2}"
+
+    assert await wr(dut, IN_DATA4, 0xDEADBEEF) == RESP_SLVERR, \
+        "剩余容量不足 4 字节时 IN_DATA4 应当回 SLVERR"
+    p2, _ = await rd(dut, IN_PTR)
+    assert p2 == IN_CAP - 2, f"被拒的打包写推进了 IN_PTR：{p} → {p2}"
+
+    # 开头那 4 个字节必须还是原样 —— 绕回覆盖正是要挡的东西
+    assert await wr(dut, IN_PTR, 0) == RESP_OKAY
+    dut._log.info("剩余容量不足 4 字节时 IN_DATA4 被拒，IN_PTR 一步没动")

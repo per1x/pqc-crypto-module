@@ -1,0 +1,2 @@
+/usr/bin/ar qc libpqchsm-vsim.a "CMakeFiles/pqchsm-vsim.dir/src/hal/verilator/ntt_sim.cpp.o" "CMakeFiles/pqchsm-vsim.dir/src/hal/verilator/keccak_sim.cpp.o" "CMakeFiles/pqchsm-vsim.dir/src/hal/verilator/axi_sim.cpp.o"
+/usr/bin/ranlib libpqchsm-vsim.a
