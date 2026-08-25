@@ -100,7 +100,7 @@ run_round() {   # $1 标签  $2 daemon 路径
         fail=1
         return
     fi
-    echo "  ✓ 本轮由 PID $OWNER（$(basename $2)）提供服务" | tee -a $OUT
+    echo "  ✓ 本轮由 PID ${OWNER}（$(basename $2)）提供服务" | tee -a $OUT
 
     $D/sdf_demo > $D/sdf_$1.txt 2>&1
     echo "  sdf_demo rc=$?  ✅ 计数 $(grep -c '✅' $D/sdf_$1.txt 2>/dev/null)" | tee -a $OUT
