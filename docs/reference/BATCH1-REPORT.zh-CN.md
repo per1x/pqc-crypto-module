@@ -83,8 +83,11 @@ Decaps 只快 1.18×（`/dev/mem`），说明它那 1.67 ms 里已有相当一�
 
 ## 3. 回归
 
-- **主机 `ctest`**：56 项
-- **RTL 全套 `tools/rtl_sim.sh`（Icarus）**：定版关卡，见 `rtl_sim` 一项
+- **主机 `ctest`：56/56 通过**（2026-08-26 定版跑）
+- **RTL 全套 `tools/rtl_sim.sh`（Icarus）**：作为 `ctest` 的 `rtl_sim` 一项跑完，
+  **通过，2007.74 秒**（33.5 分钟）—— 这就是定版关卡那一次
+- 那一轮里 `shell_var_braces` 曾报一处（`pay_syzero.sh` 的 `$OWNER` 紧跟全角括号），
+  改成 `${OWNER}` 后复跑通过
 - 迭代期用 `tools/rtl_sim_fast.sh`（分模块 + Verilator）—— ⚠️ Verilator 是二值仿真、
   不传播 X，本轮有三个 bug 正是靠 Icarus 的 X 暴露的，所以它**不能替代**全套
 - 新增/扩充的 RTL 用例：`test_mlkem_axi` 26 条、`test_mldsa_axi` 35 条

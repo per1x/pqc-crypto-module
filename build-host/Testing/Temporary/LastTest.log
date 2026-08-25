@@ -1,3 +1,20 @@
-Start testing: Aug 26 00:14 CST
+Start testing: Aug 26 00:48 CST
 ----------------------------------------------------------
-End testing: Aug 26 00:14 CST
+32/56 Testing: shell_var_braces
+32/56 Test: shell_var_braces
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_shell_vars.py"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"shell_var_braces" start time: Aug 26 00:48 CST
+Output:
+----------------------------------------------------------
+  ✓ 自测通过（能抓、不误报）
+  ✓ 没有 $VAR 紧跟多字节字符的写法（扫了 135 个文件）
+<end of output>
+Test time =   0.10 sec
+----------------------------------------------------------
+Test Passed.
+"shell_var_braces" end time: Aug 26 00:48 CST
+"shell_var_braces" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Aug 26 00:48 CST
