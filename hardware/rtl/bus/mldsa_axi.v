@@ -147,7 +147,11 @@
 //
 // 四件配套的事（与 mlkem_axi 逐条对应，完整理由见那个文件头）：
 //  ① SEED_DATA **永远只认安全世界事务**（AxPROT[1]==0），与 SECURE_ONLY 无关；
-//     被拒的写计入 SEED_STAT[31:16] 并回 SLVERR，不静默。
+//     被拒的写**丢弃 + 计入 SEED_STAT[31:16]，响应仍是 OKAY**。
+//     ⚠️ 绝不回 SLVERR：AXI 的写是 posted 的，错误以 SError 打回来，内核只能
+//        panic（代价是一次断电），而从 EL3 发的那一笔更糟 —— SError 在 EL3 里
+//        没有处理器，核当场卡死。完整理由见 mlkem_axi.v 文件头①与
+//        axi4lite_firewall.v 的文件头。可核对性由计数器提供，不由总线错误提供。
 //     ⚠️ 它挡不住"root 经 EL3 通用 PL_WR 转一手"—— 那一半在 BL31 的白名单里
 //        （boot/atf/patch_atf_secmmio.py 要把这个偏移排除）。少了任一边都白做。
 //  ② SEED_DATA **没有读回路径**；SEED_STAT 只报字数与闩锁，不报种子字节。
@@ -304,6 +308,7 @@ module mldsa_axi #(
     reg         seed_lock;              // 一次性闩锁（连带置 sk_lock）
     reg         seed_err;               // 上一次 START 因暂存种子没备好被拒
     reg [15:0]  seed_viol;              // 非安全世界写种子口的次数（饱和）
+    reg         seed_ovf;               // 收满之后还有人写（安全世界那侧的 bug）
     wire        seed_ready = (seed_wcnt == 4'd8);
 
     // ================= 控制寄存器 =================
@@ -503,8 +508,9 @@ module mldsa_axi #(
                         && !wiping_any;
     wire wr_seed_sec  = (wr_prot[1] == 1'b0);
     wire wr_seed      = wr_seed_addr && wr_seed_sec && !seed_ready;
+    // 被拒的写：**丢弃 + 计数，响应 OKAY**（绝不 SLVERR，理由见文件头①）
     wire wr_seed_deny = wr_seed_addr && !wr_seed_sec;
-    // 收满 8 个字之后还写：回 SLVERR，不静默吃掉。要重写先 CTRL.SEED_CLR。
+    // 收满 8 个字之后还写：同样丢弃 + 记一位。要重写先 CTRL.SEED_CLR。
     wire wr_seed_full = wr_seed_addr && wr_seed_sec && seed_ready;
 
     // 输入存储写满了就不再收：不加这条的话 in_ptr 会绕回 0 覆盖已经写好的
@@ -556,8 +562,8 @@ module mldsa_axi #(
 
     // SEED_STAT：**一个种子字节都不出现在这里**。
     //   [3:0] 已收下的字数（0..8）  [8] READY  [9] LOCK  [10] STAGED
-    //   [31:16] 非安全世界写种子口被拒的次数（饱和）
-    wire [31:0] r_seedstat = {seed_viol, 5'd0, seed_staged, seed_lock,
+    //   [11] OVF（收满之后还有人写，锁存）  [31:16] 非安全写被拒次数（饱和）
+    wire [31:0] r_seedstat = {seed_viol, 4'd0, seed_ovf, seed_staged, seed_lock,
                               seed_ready, 4'd0, seed_wcnt};
 
     // ================= 端口归属（组合）=================
@@ -625,7 +631,7 @@ module mldsa_axi #(
             slot_valid <= 8'd0; slot_pset <= 16'd0;
             sk_lock <= 1'b0; seed_lock <= 1'b0;   // 复位是唯一能放开闩锁的事件
             seed_stage <= 256'd0; seed_wcnt <= 4'd0; seed_addr <= 6'd0;
-            seed_err <= 1'b0; seed_viol <= 16'd0;
+            seed_err <= 1'b0; seed_viol <= 16'd0; seed_ovf <= 1'b0;
             in_ptr <= 16'd0; out_ptr <= 16'd0; out_len_r <= 16'd0;
             msg_len <= 16'd0; ctx_len <= 16'd0;
             run_done <= 1'b0; verify_ok_r <= 1'b0;
@@ -684,13 +690,17 @@ module mldsa_axi #(
                              || (wr_strb[0] && (wr_addr[5:2] == A_INDATA)
                                  && (state == S_IDLE) && in_full)
                              || wr_inptr_bad
-                             || wr_seed_deny || wr_seed_full
+                             /* ⚠️ 种子口的两种拒绝**不在这里** —— 它们回 OKAY，
+                                见文件头①（posted 写的 SLVERR = SError = 断电） */
                              || wr_busy_reject) ? RESP_SLVERR : RESP_OKAY;
                 // 非安全世界写种子口：留痕（出口在 SEED_STAT[31:16]）。
                 // RAZ/WI 之后被拒的访问什么都不留，而这一条恰恰最该留 ——
                 // 它意味着有人在试着自己塞种子。
                 if (wr_seed_deny && (seed_viol != 16'hFFFF)) begin
                     seed_viol <= seed_viol + 16'd1;
+                end
+                if (wr_seed_full) begin
+                    seed_ovf <= 1'b1;
                 end
                 if (wr_strb[0] && !wiping_any) begin
                     case (wr_addr[5:2])

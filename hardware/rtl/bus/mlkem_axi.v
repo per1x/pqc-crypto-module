@@ -91,6 +91,20 @@
 //     整块从机的防火墙参数是可配的（演示位流 SECURE_ONLY=0），但种子写口
 //     **永远**只认安全事务 —— 演示形态下普通世界经 /dev/mem 也写不进来。
 //     被拒的写计入 SEED_STAT[31:16]，不静默。
+//
+//     ⚠️⚠️ **被拒的写回 OKAY 并丢弃（RAZ/WI），绝不回 SLVERR。**
+//     第一版这里回的是 SLVERR，理由是"静默丢弃最危险，写的人会以为进去了"。
+//     那个理由本身没错，但它被一个更大的问题压过去了，而这个问题本仓库
+//     已经用几次断电换过教训（axi4lite_firewall.v 文件头写着全过程）：
+//
+//       **AXI 的写是 posted 的。** 错误响应过一会儿才以 **SError** 打回来，
+//       SError 不属于任何一条指令，aarch64 的内核只能 panic。
+//       于是"往种子口写一次"的代价是**一次断电** —— 而触发它的不必是攻击者，
+//       一个探测寄存器的脚本就够了。防火墙当初正是为这个从 DECERR 改成 RAZ/WI。
+//       更糟的是从 EL3 发的那一笔：SError 在 EL3 里根本没有处理器，核当场卡死。
+//
+//     所以补偿改成与防火墙同一套：**丢弃 + 计数**。写的人查 SEED_STAT 就知道
+//     字数一步没动、被拒计数涨了一格。"可核对"由计数器提供，不由总线错误提供。
 //     ⚠️ 这一条挡的是"普通世界自己发事务"。它**挡不住**"root 经 EL3 的通用
 //        PL_WR SiP 转一手"—— 那条要在 BL31 的白名单里把这个偏移排除掉
 //        （boot/atf/patch_atf_secmmio.py），两边合起来才成立。少了任一边，
@@ -294,6 +308,7 @@ module mlkem_axi #(
     reg         seed_lock;              // 一次性闩锁（连带置 dk_lock）
     reg         seed_err;               // 上一次 START 因暂存种子没备好被拒
     reg [15:0]  seed_viol;              // 非安全世界写种子口的次数（饱和）
+    reg         seed_ovf;               // 收满之后还有人写（安全世界那侧的 bug）
     wire        seed_ready = (seed_wcnt == 5'd16);
 
     // ================= 控制寄存器 =================
@@ -532,12 +547,15 @@ module mlkem_axi #(
                         && !wiping;
     wire wr_seed_sec  = (wr_prot[1] == 1'b0);
     wire wr_seed      = wr_seed_addr && wr_seed_sec && !seed_ready;
-    // 被拒的（非安全世界发起的）种子写：计数，且**明确回 SLVERR**。
-    // 静默丢弃在这里是最坏的选项 —— 写的人会以为种子进去了。
+    // 被拒的（非安全世界发起的）种子写：**丢弃 + 计数，响应仍是 OKAY**。
+    // 绝不回 SLVERR —— posted 写的错误以 SError 回来，内核只能 panic，
+    // 代价是一次断电（完整理由见文件头①）。可核对性由计数器提供。
     wire wr_seed_deny = wr_seed_addr && !wr_seed_sec;
-    // 已经收满 16 个字还继续写：同样回 SLVERR，不静默吃掉。
+    // 已经收满 16 个字还继续写：同样丢弃 + 计数，不回总线错误。
     // 写第 17 个字只可能是安全世界那边的 bug（多写、或忘了 START 就重写），
-    // 而"安静地忽略"会让那个 bug 变成"种子不是我以为的那一份"。
+    // 而它恰恰是**从 EL3 发的** —— SError 在 EL3 里没有处理器，核会当场卡死，
+    // 比在内核里 panic 还糟。所以这一条更不能回错误。
+    // 判据留在 SEED_STAT：字数停在 16、overfull 计数涨。
     // 要重写就先 CTRL.SEED_CLR 作废旧的。
     wire wr_seed_full = wr_seed_addr && wr_seed_sec && seed_ready;
 
@@ -562,8 +580,9 @@ module mlkem_axi #(
     //   [8]     SEED_READY   16 个字齐了
     //   [9]     SEED_LOCK    闩锁已置（KeyGen 永远走暂存口）
     //   [10]    SEED_STAGED  MODE 里那一位的回读
+    //   [11]    SEED_OVF     收满之后还有人写（安全世界那侧的 bug，锁存）
     //   [31:16] 非安全世界写种子口被拒的次数（饱和）
-    wire [31:0] r_seedstat = {seed_viol, 5'd0, seed_staged, seed_lock,
+    wire [31:0] r_seedstat = {seed_viol, 4'd0, seed_ovf, seed_staged, seed_lock,
                               seed_ready, 3'd0, seed_wcnt};
 
     // ================= 端口归属 =================
@@ -638,7 +657,7 @@ module mlkem_axi #(
             // 复位是唯一能把两个闩锁放开的事件。
             dk_lock <= 1'b0; seed_lock <= 1'b0;
             seed_stage <= 512'd0; seed_wcnt <= 5'd0;
-            seed_err <= 1'b0; seed_viol <= 16'd0;
+            seed_err <= 1'b0; seed_viol <= 16'd0; seed_ovf <= 1'b0;
             in_ptr <= 13'd0; out_len <= 13'd0; out_rd <= 13'd0; ocnt <= 14'd0;
             zero_pulse <= 1'b0;
             wiping <= 1'b0; wipe_addr <= 16'd0; zall_d <= 1'b0;
@@ -695,14 +714,21 @@ module mlkem_axi #(
                 // 实际 in_ptr 一步没动，接着按错误的长度启动 —— 出来的是
                 // 一个安静的错误结果。读仍然放行，否则软件没法轮询 WIPING。
                 f_bvalid <= 1'b1;
-                f_bresp  <= (wiping || wr_seed_deny || wr_seed_full)
-                            ? RESP_SLVERR : RESP_OKAY;
+                // ⚠️ 种子口的两种拒绝**不进这个表达式** —— 它们回 OKAY。
+                // 只有"擦除期间写"仍回 SLVERR，那是既有行为：软件本来就
+                // 被要求先轮询 WIPING 再写，而它是**读**得出来的。
+                f_bresp  <= wiping ? RESP_SLVERR : RESP_OKAY;
                 // 非安全世界写种子口：留痕。RAZ/WI 之后被拒的访问在总线上
                 // 什么都不留，而这一条恰恰是最该留下的 —— 它意味着有人在
                 // 试着自己塞种子。计数出口在 SEED_STAT[31:16]，
                 // 本从机 SECURE_ONLY=1 时只有安全世界读得到。
+                // 两种被拒的种子写都留痕：非安全世界那类进 SEED_STAT[31:16]，
+                // 收满后多写那类进 SEED_STAT[11]（一位就够，它只该是 bug）。
                 if (wr_seed_deny && (seed_viol != 16'hFFFF)) begin
                     seed_viol <= seed_viol + 16'd1;
+                end
+                if (wr_seed_full) begin
+                    seed_ovf <= 1'b1;
                 end
                 if (wr_strb[0] && !wiping) begin
                     case (wr_addr[5:2])

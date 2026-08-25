@@ -698,6 +698,13 @@ def main():
     if '#include <lib/mmio.h>' not in s:
         s = s.replace('#include <common/runtime_svc.h>',
                       '#include <common/runtime_svc.h>\n#include <lib/mmio.h>', 1)
+    # is_caller_secure() 在 include/lib/smccc.h（这棵树上核对过）。
+    # runtime_svc.h 大概率间接带进来，但**不要赌**：漏了它的表现是
+    # "隐式声明"警告 + 在 -Werror 下整个 BL31 编不过，而那时错误信息指向的是
+    # 这段补丁而不是缺 include。显式写上，重复 include 有 guard，代价为零。
+    if '#include <lib/smccc.h>' not in s:
+        s = s.replace('#include <common/runtime_svc.h>',
+                      '#include <common/runtime_svc.h>\n#include <lib/smccc.h>', 1)
     open(SIP, 'w', encoding='utf-8').write(s)
     print('SiP：已装 PL_RD/PL_WR；PROT_READ 与 PL_SECREAD 已删除')
 

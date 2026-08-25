@@ -12,8 +12,23 @@
 ------------------------------------------------------------------------------
 md5                               板上                        板外对应（构建机）
 --------------------------------  --------------------------  ------------------------------------------------
-c4c99e2e5516879e11b7c1364b21f2fa  BOOT.BIN                    /home/build/wdt_patch/images/BOOT_SECMMIO.BIN
+0ea6e4437698abc7b44b3a235b49ce78  BOOT.BIN                    /home/build/wdt_patch/images/BOOT_SECMMIO_XMPU.BIN
                                                               （当前 golden：DNA 只读窗口 + 保护单元只读窗口 + XMPU 配置）
+
+  ⚠️ **2026-08-25 更正：这一行以前指错了文件，也记错了 md5。**
+  原来写的是 `c4c99e2e… → BOOT_SECMMIO.BIN`。今天在板上重新量（先
+  `echo 3 > /proc/sys/vm/drop_caches`），BOOT.BIN 实际是 **0ea6e443…**，
+  而构建机上与它逐字节相同的是 **BOOT_SECMMIO_XMPU.BIN**；
+  `BOOT_SECMMIO.BIN` 本身是 `12c3fc8e…`、6082796 字节，与板上那份**不是**
+  同一个文件（大小都不一样：板上 6070508）。
+  行末那句"XMPU 配置"其实一直在描述 XMPU 那一版，只是文件名没跟着改。
+
+  为什么值得单独记：这份清单存在的唯一理由是"golden 有没有被写坏这个问题
+  必须能离线回答"。**指错文件的清单比没有清单更危险** —— 真要恢复 golden
+  时会拿 `BOOT_SECMMIO.BIN` 去覆盖，而那是另一份镜像。
+  今天顺带复核了另外两份，都完好：
+    BOOT0001.BIN = bb3402ea…（BOOT_OPTEE_FIXQ）
+    BOOT0002.BIN = BOOT_GOLDEN.BIN = 8d42d1a5…（BOOT_FAN2，兜底 golden）
 8d42d1a58b62c8ca95501bf486fbb45d  BOOT0002.BIN                /home/build/BOOT_FAN2.BIN
                                   = BOOT_GOLDEN.BIN           （**兜底 golden**，厂家形态 + 风扇静音）
 24a790dc51091d816c254c4d2f7e06a1  BOOT_PRE_DNA.BIN            /home/build/bbram_ws/BOOT_BBRAM_PLAIN.BIN

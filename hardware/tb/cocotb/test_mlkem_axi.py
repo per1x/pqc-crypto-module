@@ -262,15 +262,33 @@ async def test_firewall_and_zeroize(dut):
     got = await run_op(dut, M_KEYGEN, name, d + z)
     assert got == ek + dk
 
-    # non-secure：读写都 DECERR
-    rv, r = await rd(dut, OUT_LEN, PROT_NONSEC)
-    assert r == RESP_REFUSED and rv == 0, f"non-secure 读没被拦：0x{rv:08x}"
-    assert await wr(dut, CTRL, C_ZEROIZE, PROT_NONSEC) == RESP_REFUSED, \
-        "non-secure 写没被拦"
-
-    # 被拦的那笔没有副作用：输出还在，还读得出来
-    n, _ = await rd(dut, OUT_LEN)
-    assert n == len(ek) + len(dk), "non-secure 的写把输出缓冲清掉了"
+    # non-secure 访问 —— ⚠️ **这一段按形态分岔，别把它当成恒成立的断言。**
+    # 防火墙的 AxPROT 门是 SECURE_ONLY 参数控制的：
+    #   · SECURE_ONLY=1（送检位流）：非安全读写都被 RAZ/WI 拦掉；
+    #   · SECURE_ONLY=0（演示位流）：**门是故意敞开的**，普通世界本来就该读得到。
+    # 以前这条用例只在默认参数（=1）下跑过，所以写成了无条件断言。
+    # 加了 PARAM_SECURE_ONLY=0 那一遍之后它必然失败 —— 失败的是**用例的前提**，
+    # 不是 RTL。分岔写出来，两种形态各断言各自该成立的那句话。
+    secure_only = int(os.environ.get("PARAM_SECURE_ONLY", "1"))
+    if secure_only:
+        rv, r = await rd(dut, OUT_LEN, PROT_NONSEC)
+        assert r == RESP_REFUSED and rv == 0, f"non-secure 读没被拦：0x{rv:08x}"
+        assert await wr(dut, CTRL, C_ZEROIZE, PROT_NONSEC) == RESP_REFUSED, \
+            "non-secure 写没被拦"
+        # 被拦的那笔没有副作用：输出还在，还读得出来
+        n, _ = await rd(dut, OUT_LEN)
+        assert n == len(ek) + len(dk), "non-secure 的写把输出缓冲清掉了"
+    else:
+        # 演示形态：普通世界读得到 —— 这正是这份位流存在的理由。
+        # 断言它**读得到**，而不是跳过：跳过的话，哪天门被误设成关掉，
+        # 这条用例会一声不吭地"通过"。
+        rv, r = await rd(dut, OUT_LEN, PROT_NONSEC)
+        assert r == RESP_OKAY and rv == len(ek) + len(dk), \
+            f"演示形态下普通世界读 OUT_LEN 得到 0x{rv:08x}，应当读得到 " \
+            f"{len(ek) + len(dk)} —— 这份位流的门本来就该是开的"
+        # ⚠️ 演示形态下**不去发那笔 non-secure 的 ZEROIZE**：它会真的生效，
+        # 把上面刚验完的输出擦掉，后面的断言就失去对象。要验"门是开的"，
+        # 上面那次读已经够了。
 
     # 越界地址
     rv, r = await rd(dut, 0x80)
@@ -831,6 +849,7 @@ M_SEED_STAGED = 1 << 10
 ST_SEED_ERR = 1 << 6
 SS_READY = 1 << 8
 SS_LOCK  = 1 << 9
+SS_OVF   = 1 << 11
 
 
 async def stage_seed(dut, seed64: bytes, prot=PROT_SECURE):
@@ -904,12 +923,15 @@ async def test_seed_port_refuses_nonsecure(dut):
 
     for i in range(3):
         r = await wr(dut, SEED_DATA, 0xDEADBEEF + i, prot=PROT_NONSEC)
-        if secure_only:
-            # 防火墙的 RAZ/WI：不产生总线错误（理由见文件头 RESP_REFUSED）
-            assert r == RESP_REFUSED, f"第 {i} 笔回了 {r}"
-        else:
-            assert r == RESP_SLVERR, \
-                f"演示形态下非安全写种子口回了 {r}，应当是 SLVERR"
+        # ⚠️ **两种形态都必须是 OKAY，不是 SLVERR。** 这一条改过：第一版让
+        # 种子口回 SLVERR（"静默丢弃会让写的人以为进去了"）。那个理由没错，
+        # 但 **AXI 的写是 posted 的** —— 错误以 SError 打回来，内核只能 panic，
+        # 一次探测寄存器的脚本就够让板子要断电；从 EL3 发的那一笔更糟，
+        # SError 在 EL3 里没有处理器。防火墙当初正是为这个从 DECERR 改成
+        # RAZ/WI，种子口没有理由自成一格。
+        # **可核对性由计数器提供，不由总线错误提供。**
+        assert r == RESP_OKAY, \
+            f"第 {i} 笔非安全写种子口回了 {r}；必须是 OKAY（丢弃 + 计数）"
 
     ss, _ = await rd(dut, SEED_STAT)
     assert (ss & 0x1F) == 0, "被拒的写居然把字计数推上去了 —— 种子口漏了"
@@ -1054,9 +1076,14 @@ async def test_seed_clr_and_partial_seed_refused(dut):
     ss, _ = await rd(dut, SEED_STAT)
     assert ss & SS_READY
 
-    # 收满之后再写：SLVERR，不静默吃掉
-    assert await wr(dut, SEED_DATA, 0xFFFFFFFF) == RESP_SLVERR, \
-        "收满之后的多余写应当回 SLVERR"
+    # 收满之后再写：**丢弃 + 锁存 OVF 位，响应仍是 OKAY**。
+    # 这一笔在真机上是从 EL3 发的，回 SLVERR 会让 SError 打在一个没有处理器
+    # 的异常级上，核当场卡死 —— 比在内核里 panic 更糟。
+    assert await wr(dut, SEED_DATA, 0xFFFFFFFF) == RESP_OKAY, \
+        "收满之后的多余写必须回 OKAY（丢弃），不能回总线错误"
+    ss, _ = await rd(dut, SEED_STAT)
+    assert ss & SS_OVF, "收满之后多写没有留下 OVF 痕迹"
+    assert (ss & 0x1F) == 16, "多余的那一笔居然把字计数推过 16 了"
 
     # SEED_CLR 作废
     assert await wr(dut, CTRL, C_SEED_CLR) == RESP_OKAY

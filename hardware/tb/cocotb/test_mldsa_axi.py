@@ -1469,7 +1469,7 @@ SEED_DATA, SEED_STAT = 0x34, 0x38
 C_SEED_LOCK, C_SEED_CLR = 1 << 5, 1 << 6
 M_SEED_STAGED = 1 << 10
 ST_SEED_ERR = 1 << 7
-SS_READY, SS_LOCK = 1 << 8, 1 << 9
+SS_READY, SS_LOCK, SS_OVF = 1 << 8, 1 << 9, 1 << 11
 KS_SEED_LOCK = 1 << 9
 
 
@@ -1533,11 +1533,11 @@ async def test_xi_port_refuses_nonsecure(dut):
 
     for i in range(3):
         r = await wr(dut, SEED_DATA, 0xCAFE0000 + i, prot=PROT_NONSEC)
-        if secure_only:
-            assert r == RESP_REFUSED, f"第 {i} 笔回了 {r}"
-        else:
-            assert r == RESP_SLVERR, \
-                f"演示形态下非安全写种子口回了 {r}，应当是 SLVERR"
+        # ⚠️ 两种形态都必须 OKAY：posted 写的 SLVERR 会以 SError 打回来，
+        # 内核只能 panic（从 EL3 发的那一笔更糟，EL3 里没有处理器）。
+        # 完整理由见 mlkem_axi.py 同名用例与 mlkem_axi.v 文件头①。
+        assert r == RESP_OKAY, \
+            f"第 {i} 笔非安全写种子口回了 {r}；必须是 OKAY（丢弃 + 计数）"
 
     ss, _ = await rd(dut, SEED_STAT)
     assert (ss & 0xF) == 0, "被拒的写居然把字计数推上去了 —— 种子口漏了"
@@ -1648,8 +1648,11 @@ async def test_xi_seed_clr_partial_and_overfull(dut):
         assert await wr(dut, SEED_DATA, 0x0A0B0C0D + i) == RESP_OKAY
     ss, _ = await rd(dut, SEED_STAT)
     assert ss & SS_READY
-    assert await wr(dut, SEED_DATA, 0xFFFFFFFF) == RESP_SLVERR, \
-        "收满之后的多余写应当回 SLVERR"
+    assert await wr(dut, SEED_DATA, 0xFFFFFFFF) == RESP_OKAY, \
+        "收满之后的多余写必须回 OKAY（丢弃），不能回总线错误"
+    ss, _ = await rd(dut, SEED_STAT)
+    assert ss & SS_OVF, "收满之后多写没有留下 OVF 痕迹"
+    assert (ss & 0xF) == 8, "多余的那一笔居然把字计数推过 8 了"
 
     assert await wr(dut, CTRL, C_SEED_CLR) == RESP_OKAY
     ss, _ = await rd(dut, SEED_STAT)
