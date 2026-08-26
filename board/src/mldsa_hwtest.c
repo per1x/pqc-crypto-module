@@ -100,9 +100,12 @@
 #define OP_KEYGEN 0u
 #define OP_SIGN   1u
 #define OP_VERIFY 2u
-#define M_SK_TO_SLOT   (1u << 4)
-#define M_SK_FROM_SLOT (1u << 5)
-#define M_SLOT(s)      (((unsigned)(s) & 15u) << 6)
+/* 批 2：槽位 ABI 已删（V-02/V-05）。MODE[4] 现在是 CHAIN ——
+ * 本次运算先从**暂存的 ξ** 展开 sk、再做 OP、算完无条件擦。
+ * 它替代的正是 SK_TO_SLOT/SK_FROM_SLOT/SLOT 那一组：私钥不再按槽跨命令
+ * 引用，而是每条命令自己现展开一份。 */
+#define M_CHAIN        (1u << 4)
+#define M_SEED_STAGED  (1u << 10)
 
 #define KS_LOCK   (1u << 8)      /* KEYSTAT[8] */
 
@@ -157,23 +160,30 @@ static long now_ms(void)
 }
 
 /* ---- 记分板 ---- */
-static int n_pass, n_fail;
+static int n_pass, n_fail, n_skip;
 
+/* good：1 = 通过，0 = 失败，**-1 = 跳过**。
+ * ⚠️ 跳过必须与通过分开计数、分开打标。第一版把跳过写成 res(-1, ...)，
+ * 而判据是 `good ? "✅" : "❌"` —— -1 是真值，于是**跳过被打成通过、
+ * 还进了 n_pass**。一个"跳过被当成通过"的报告比没有报告更危险。 */
 static void res(int good, int pset, const char *op, int tc, const char *fmt, ...)
 {
     va_list ap;
 
-    fprintf(rep, "%s %-10s %-7s tcId=%-4d ", good ? "✅" : "❌",
+    fprintf(rep, "%s %-10s %-7s tcId=%-4d ",
+            good > 0 ? "✅" : (good < 0 ? "⏭ " : "❌"),
             MLDSA_SET_NAME[pset], op, tc);
     va_start(ap, fmt);
     vfprintf(rep, fmt, ap);
     va_end(ap);
     fputc('\n', rep);
     fflush(rep);
-    if (good)
+    if (good > 0)
         n_pass++;
-    else
+    else if (good == 0)
         n_fail++;
+    else
+        n_skip++;
 }
 
 /* 逐字节比较；相同返回 NULL，不同把"第一个不同在哪"写进 buf。
@@ -553,7 +563,7 @@ static void test_vault(void)
 
         /* ---- ① KeyGen → 槽：sk 不出总线 ---- */
         if (md_run(OP_KEYGEN, (unsigned)v->pset,
-                   M_SK_TO_SLOT | M_SLOT(slot), v->xi, 32, 0, 0,
+                   0, v->xi, 32, 0, 0,
                    outbuf, sizeof outbuf, &n, NULL, &ms, why, sizeof why)) {
             res(0, v->pset, "Vault", v->tc, "存槽 KeyGen 失败：%s", why);
             continue;
@@ -584,26 +594,32 @@ static void test_vault(void)
             continue;
         }
 
-        /* ---- ③ KEYSTAT：槽有效 + 槽里记的参数集对 ---- */
+        /* ---- ③ 原来这里查"槽有效位 + 槽里记的参数集"----
+         * 批 2 之后 KEYSTAT 只剩健康位（V-06）：槽没有了，那两条判据的
+         * **对象**也就没有了。这不是把检查删掉，是把需要检查的状态删掉了。
+         * 换成一条对等的：展开区不该在这时候还在擦。 */
         ks = rd(MD_KEYSTAT);
-        if (!(ks & (1u << slot))) {
+        if (ks & 1u) {
             res(0, v->pset, "Vault", v->tc,
-                "槽 %u 没被标成有效（KEYSTAT=0x%08x）", slot, ks);
-            continue;
-        }
-        if ((int)(((ks >> 16) >> (2 * slot)) & 3u) != v->pset) {
-            res(0, v->pset, "Vault", v->tc,
-                "槽 %u 里记的参数集不对（KEYSTAT=0x%08x）", slot, ks);
+                "KeyGen 刚回来展开区却还在擦（KEYSTAT=0x%08x）", ks);
             continue;
         }
 
-        /* ---- ④ 按槽签：软件只送 rnd‖ctx‖msg，一个 sk 字节都不送 ---- */
+        /* ---- ④ 链式签：软件只送 rnd‖ctx‖msg，一个 sk 字节都不送 ----
+         * 私钥由 PL 在同一条命令里从暂存的 ξ 现展开，算完即擦。
+         * ⚠️ 前提是 ξ 已经在暂存口里 —— 这个工具是普通世界程序，
+         * **写不进那个口**（只认安全事务）。所以这一节在批 2 之后
+         * 只能由 daemon 那条路（经 TA）覆盖，这里如实跳过。 */
+        res(-1, v->pset, "Vault", v->tc,
+            "链式签名要安全世界先送 ξ，普通世界的工具做不到 —— 跳过，"
+            "覆盖在 daemon 那条路与 cocotb 的 test_chained_sign_from_staged_xi");
+        continue;
         in_len = 0;
         memcpy(inbuf + in_len, RND0, sizeof RND0);  in_len += sizeof RND0;
         memcpy(inbuf + in_len, ctx, sizeof ctx);    in_len += sizeof ctx;
         memcpy(inbuf + in_len, msg, sizeof msg);    in_len += sizeof msg;
         if (md_run(OP_SIGN, (unsigned)v->pset,
-                   M_SK_FROM_SLOT | M_SLOT(slot), inbuf, in_len,
+                   M_CHAIN | M_SEED_STAGED, inbuf, in_len,
                    sizeof msg, sizeof ctx,
                    outbuf, sizeof outbuf, &n, NULL, &ms, why, sizeof why)) {
             res(0, v->pset, "Vault", v->tc, "按槽签失败：%s", why);
@@ -768,7 +784,7 @@ static void probe(int readonly)
             "（busy=%d wiping=%d tamper=%d）\n",
             base_addr, (unsigned)ver, st, !!(st & ST_BUSY),
             !!(st & ST_WIPING), !!(st & ST_TAMPER));
-    fprintf(rep, "KEYSTAT=0x%08x（槽有效位=0x%02x sk_lock=%d）  "
+    fprintf(rep, "KEYSTAT=0x%08x（[0]EXP_WIPING=%d [1]SEED_LOCK=%d）  "
             "VIOL=0x%08x（写违规=%u 读违规=%u）\n",
             ks, ks & 0xFFu, !!(ks & KS_LOCK), viol,
             viol & 0xFFFFu, viol >> 16);
@@ -881,7 +897,8 @@ int main(int argc, char **argv)
             fprintf(rep, "⚠️ 擦完之后还有槽被标成有效 —— 擦除没做干净。\n");
     }
 
-    fprintf(rep, "\n总计：%d 通过 / %d 失败\n", n_pass, n_fail);
+    fprintf(rep, "\n总计：%d 通过 / %d 失败 / %d 跳过\n",
+            n_pass, n_fail, n_skip);
     if (n_fail)
         fprintf(rep, "有失败 —— **不许说 ML-DSA 已在硬件上验证通过**。\n");
     fflush(rep);
