@@ -290,22 +290,29 @@ module mldsa_axi #(
         .viol_first_is_write(), .tamper_latched(fw_tampered));
 
     // ================= 片内私钥金库 =================
-    reg         skv_we;   reg [15:0] skv_waddr; reg [7:0] skv_din;
-    reg  [15:0] skv_raddr; wire [7:0] skv_dout;
-    ram_dp #(.DW(8), .AW(16)) u_skvault (
+    // ---- 单操作展开区（原 8 槽 × 8 KB 的 sk 金库）----
+    // 批 2 的重定位，理由与 mlkem_axi 那块逐字相同（登记表 V-02/V-04/V-05/V-06、
+    // §7.2 四条）：没有槽号、没有 valid 位、S_FIN 无条件擦、擦除期间拒绝 START。
+    // 8192 字节够放最大的 sk（ML-DSA-87 = 4896）。
+    reg         exp_we;   reg [12:0] exp_waddr; reg [7:0] exp_din;
+    reg  [12:0] exp_raddr; wire [7:0] exp_dout;
+    ram_dp #(.DW(8), .AW(13)) u_expand (
         .clk(clk),
-        .a_we(skv_we), .a_addr(skv_waddr), .a_din(skv_din), .a_dout(),
-        .b_we(1'b0),   .b_addr(skv_raddr), .b_din(8'd0),    .b_dout(skv_dout));
+        .a_we(exp_we), .a_addr(exp_waddr), .a_din(exp_din), .a_dout(),
+        .b_we(1'b0),   .b_addr(exp_raddr), .b_din(8'd0),    .b_dout(exp_dout));
+
+    // 展开区的专用擦除机：S_FIN 无条件启动，8192 拍走完（≈109 µs）。
+    reg        exp_wiping;
+    reg [12:0] exp_waddr_w;
 
     // 每个槽：有没有装东西 + 装的是哪个参数集。
     // pset 必须跟着存 —— Sign 的 sk 长度由它算，软件报一个和存进去时不同的
     // pset，搬进 engine 的字节数就全错，而错法是"签出来一个看起来合法、
     // 但用的私钥不对"的安静错误。所以在 START 那一刻就判掉。
-    reg [7:0]  slot_valid;
-    reg [15:0] slot_pset;     // 每槽 2 位，8 槽正好 16 位
+
 
     // 一次性闩锁：写 1 置上，**没有清零路径**（见文件头）
-    reg        sk_lock;
+
 
     // ================= 安全世界暂存的种子 =================
     // 8 个 32 位字 = ξ(32 字节)。字 i 落在 [32i +: 32]，字内小端 ——
@@ -313,7 +320,7 @@ module mldsa_axi #(
     // 第 j 个字节落在 engine 输入存储地址 j 是**同一种解释**。
     reg [255:0] seed_stage;
     reg [3:0]   seed_wcnt;              // 已收下几个字，0..8
-    reg         seed_lock;              // 一次性闩锁（连带置 sk_lock）
+    reg         seed_lock;              // 一次性闩锁（KeyGen 永远走暂存口）
     reg         seed_err;               // 上一次 START 因暂存种子没备好被拒
     reg [15:0]  seed_viol;              // 非安全世界写种子口的次数（饱和）
     reg         seed_ovf;               // 收满之后还有人写（安全世界那侧的 bug）
@@ -321,8 +328,10 @@ module mldsa_axi #(
 
     // ================= 控制寄存器 =================
     reg [1:0]  op, pset;
-    reg        sk_to_slot, sk_from_slot;
-    reg [3:0]  slot;
+    // MODE 现在只剩 OP / PSET / CHAIN / SEED_STAGED（V-05：槽位 ABI 已删）。
+    // CHAIN：本次 Sign 先从暂存的 ξ 展开 sk，再签，算完无条件擦。
+    reg        chain;
+    reg        chain_ph;
     reg        seed_staged;
     reg [15:0] in_ptr, out_ptr, out_len_r, msg_len, ctx_len;
 
@@ -352,7 +361,7 @@ module mldsa_axi #(
 
     // ---- 金库擦除机 ----
     reg        wiping;
-    reg [15:0] wipe_addr;
+    reg [12:0] wipe_addr;
     reg        zall_d;
     wire       zeroize_all = zero_pulse || tamper || fw_tampered;
     // engine 自己的擦除进度（它内部也有 sk 派生量）。**两台擦除机要一起等完**：
@@ -396,29 +405,47 @@ module mldsa_axi #(
     // 安静回绕 —— 回绕算出来的是一个长度、格式全对但内容错的签名。
     wire msg_ok = (msg_len <= MSGMAX);
 
-    wire params_ok = op_ok && (pset != 2'd3) && pset_ok && (slot < 4'd8)
+    wire params_ok = op_ok && (pset != 2'd3) && pset_ok
                      // FIPS 204：|ctx| ≤ 255。超了在这里判，不要送进 engine
                      && (ctx_len <= 16'd255)
                      && msg_ok;
 
-    // 本次要从金库取 sk / 把 sk 收进金库
-    wire take_sk  = (op == OP_SIGN)   && sk_from_slot;
-    wire store_sk = (op == OP_KEYGEN) && (sk_to_slot || sk_lock);
+    // ---- 链式：先展开、再运算 ----
+    // 只有 Sign 需要私钥，所以只有它有链式形态。
+    wire chain_run = chain && (op == OP_SIGN);
+    // 相位 0 跑 KeyGen（把 sk 展开进展开区），相位 1 跑真正的 Sign。
+    wire [1:0] op_eff = (chain_run && !chain_ph) ? OP_KEYGEN : op;
+
+    // take_sk **与相位无关**：它决定软件数据在 engine 输入里的落点
+    // （sw_base），而那个落点在 START 那一刻就要定下来。
+    wire take_sk  = chain_run;
+    // 展开相位把 sk 收进展开区。收不收由 chain_run 决定，不再有软件位。
+    wire store_sk = (op_eff == OP_KEYGEN) && chain_run;
 
     // ---- 本次 KeyGen 走不走暂存的种子。闩上之后软件说了不算 ----
-    wire use_staged = (op == OP_KEYGEN) && (seed_staged || seed_lock);
+    wire use_staged_src = seed_staged || seed_lock;
+    wire use_staged = (op_eff == OP_KEYGEN) && use_staged_src;
     // 走暂存种子就必须真的有一份备好的（8 个字全到齐）。不查这一条的后果
     // 不是报错，是拿一份只灌了一半、其余是残留的 ξ 去派生私钥 —— 出来的
     // 密钥对与签名看起来完全合法。与"喂不够"是同一类安静错误，判法也一样：
     // 在 START 那一刻挡住，且不启动 engine。
     wire seed_gate_ok = !use_staged || seed_ready;
 
+    // ⚠️ **链式运算必须有一份备好的暂存种子。**
+    // 少了这条判据，展开相位会退回"从 IN_DATA 读种子"那条路 —— 而软件送的
+    // 字节落在 sw_base 之后，那 32/64 个字节是残留（冷启动全 0）。结果是
+    // **静默地展开出另一把密钥**，签出来的 σ / 解出来的 K 完全合法，只是
+    // 对不上任何人的公钥。与"喂不满让 z=0"是同一类安静错误，判法也一样：
+    // 在 START 那一刻挡住，且不启动任何核。
+    wire chain_gate_ok = !chain_run || (use_staged_src && seed_ready);
+
     // ---- 软件必须写够多少字节（见文件头【START 前的校验】）----
     //   KeyGen : ξ(32)（走暂存种子那一趟是 0 —— 软件一个字节都不用送）
     //   Sign   : rnd(32) + ctx + msg，再加 sk（**除非从金库取**）
     //   Verify : pk + sig + ctx + msg
     wire [17:0] var_len = {2'd0, ctx_len} + {2'd0, msg_len};
-    wire [17:0] need_sw = (op == OP_KEYGEN) ? (use_staged ? 18'd0 : 18'd32)
+    wire [17:0] need_sw = (op_eff == OP_KEYGEN && !chain_run)
+                                            ? (use_staged ? 18'd0 : 18'd32)
                         : (op == OP_SIGN)   ? (18'd32 + var_len
                                                + (take_sk ? 18'd0 : {5'd0, sk_len}))
                         :                     (var_len + {5'd0, pk_len}
@@ -429,10 +456,9 @@ module mldsa_axi #(
     wire len_ok  = ({2'd0, in_ptr} >= need_sw);
     wire cap_ok  = (need_tot <= IN_CAP);
 
-    // 从金库取 sk 还要求：那个槽真的装了东西，而且装的时候是同一个参数集
-    wire [1:0] this_slot_pset = slot_pset[slot[2:0]*2 +: 2];
-    wire       slot_ok = !take_sk
-                         || (slot_valid[slot[2:0]] && (this_slot_pset == pset));
+    // 原来这里判"那个槽装了东西吗、参数集对得上吗"。**槽没有了，这条判据也就
+    // 不存在了** —— 链式运算里 sk 是同一条命令自己展开的，参数集必然一致。
+    wire       slot_ok = 1'b1;
 
     // ================= engine 与它自带的 SHA-3 =================
     // ⚠️ ML-DSA **自带一份 sha3_core**，不与 ML-KEM 那边共享。跨从机仲裁会动到
@@ -458,7 +484,7 @@ module mldsa_axi #(
     mldsa_engine u_eng (
         .clk(clk), .rst_n(rst_n),
         .zeroize(zeroize_all), .wiping(eng_wiping),
-        .start(eng_start), .op(op), .pset(pset),
+        .start(eng_start), .op(op_eff), .pset(pset),
         .busy(eng_busy), .done(eng_done), .verify_ok(eng_vok),
         .in_we(in_we), .in_addr(in_addr), .in_data(in_data),
         .msg_len(msg_len), .ctx_len(ctx_len),
@@ -609,7 +635,11 @@ module mldsa_axi #(
     //          [31:16] 每槽 2 位的参数集（8 槽 16 位，附加信息，与上层无关）
     // ⚠️ [8] 与 [9] **互相独立**：两把闩守的方向相反（见文件头④），
     //    四种组合都合法，别在软件里假设蕴含关系。
-    wire [31:0] r_keystat = {slot_pset, 6'd0, seed_lock, sk_lock, slot_valid};
+    // KEYSTAT 现在只报与密钥无关的健康位（V-06）：
+    //   [0] EXP_WIPING   [1] SEED_LOCK
+    // 原来这里有 8 位"哪些槽装了东西"+ 每槽的参数集 + sk_lock —— 那是
+    // "PL 有状态且状态可查"的对外暴露。槽没有了，这些位也就没有了。
+    wire [31:0] r_keystat = {30'd0, seed_lock, exp_wiping};
 
     // SEED_STAT：**一个种子字节都不出现在这里**。
     //   [3:0] 已收下的字数（0..8）  [8] READY  [9] LOCK  [10] STAGED
@@ -621,20 +651,21 @@ module mldsa_axi #(
     always @(*) begin
         // ---- 金库写口：擦除机 > 搬运 ----
         if (wiping) begin
-            skv_we    = 1'b1;
-            skv_waddr = wipe_addr;
-            skv_din   = 8'd0;
+            exp_we    = 1'b1;
+            exp_waddr = wipe_addr;
+            exp_din   = 8'd0;
         end else begin
-            skv_we    = (state == S_STORE) && !cp_wait;
-            skv_waddr = {slot[2:0], cp};
-            skv_din   = out_data;
+            // 展开区的擦除机优先级最高（S_FIN 无条件启动）
+            exp_we    = exp_wiping || ((state == S_STORE) && !cp_wait);
+            exp_waddr = exp_wiping ? exp_waddr_w : cp;
+            exp_din   = exp_wiping ? 8'd0 : out_data;
         end
         // 金库读口：S_LOAD 逐字节取 sk。
         // ⚠️ 地址要**比 cp 提前一个**：ram_dp 是同步读，这一拍摆的地址下一拍
         //    才出数。cp_wait 那一拍摆 cp 本身（第一个字节），之后每一拍都摆
         //    cp+1 —— 少了这个提前量，每个字节会被读两遍、sk 从第二个字节起
         //    整个错位，而"搬进去了 sk_len 个字节"这件事看起来完全正常。
-        skv_raddr = {slot[2:0], cp + (cp_wait ? 13'd0 : 13'd1)};
+        exp_raddr = cp + (cp_wait ? 13'd0 : 13'd1);
 
         // engine 输出口的地址。S_STORE 那一趟由搬运用（要提前一个：同步读），
         // 其余时间**就是读游标本身，不提前**。
@@ -681,10 +712,10 @@ module mldsa_axi #(
             f_bvalid <= 1'b0; f_bresp <= RESP_OKAY;
             f_rvalid <= 1'b0; f_rresp <= RESP_OKAY; f_rdata <= 32'd0;
             op <= 2'd0; pset <= 2'd0;
-            sk_to_slot <= 1'b0; sk_from_slot <= 1'b0; slot <= 4'd0;
+            chain <= 1'b0; chain_ph <= 1'b0;
+            exp_wiping <= 1'b0; exp_waddr_w <= 13'd0;
             seed_staged <= 1'b0;
-            slot_valid <= 8'd0; slot_pset <= 16'd0;
-            sk_lock <= 1'b0; seed_lock <= 1'b0;   // 复位是唯一能放开闩锁的事件
+            seed_lock <= 1'b0;   // 复位是唯一能放开闩锁的事件（sk_lock 已随 V-04 删除）
             seed_stage <= 256'd0; seed_wcnt <= 4'd0; seed_addr <= 6'd0;
             seed_err <= 1'b0; seed_viol <= 16'd0; seed_ovf <= 1'b0;
             in_ptr <= 16'd0; out_ptr <= 16'd0; out_len_r <= 16'd0;
@@ -692,7 +723,7 @@ module mldsa_axi #(
             run_done <= 1'b0; verify_ok_r <= 1'b0;
             param_err <= 1'b0; len_err <= 1'b0;
             zero_pulse <= 1'b0;
-            wiping <= 1'b0; wipe_addr <= 16'd0; zall_d <= 1'b0;
+            wiping <= 1'b0; wipe_addr <= 13'd0; zall_d <= 1'b0;
             state <= S_IDLE; cp <= 13'd0; cp_wait <= 1'b0; kickdly <= 2'd0;
             eng_start <= 1'b0;
             in_we <= 1'b0; in_addr <= 15'd0; in_data <= 8'd0;
@@ -710,19 +741,19 @@ module mldsa_axi #(
             zall_d <= zeroize_all;
             if (zeroize_all && !zall_d) begin
                 wiping    <= 1'b1;
-                wipe_addr <= 16'd0;
+                wipe_addr <= 13'd0;
             end else if (wiping) begin
                 // 最后一个地址那一拍 skv_we 仍为高（组合自 wiping），
                 // 所以 0xFFFF 也真的被写了 0，一个字节都不留。
-                if (wipe_addr == 16'hFFFF) wiping <= 1'b0;
-                else                       wipe_addr <= wipe_addr + 16'd1;
+                if (wipe_addr == 13'h1FFF) wiping <= 1'b0;
+                else                       wipe_addr <= wipe_addr + 13'd1;
             end
 
             if (zeroize_all) begin
                 // 指针、有效位一拍清掉；BRAM 交给上面那台擦除机。
                 // **sk_lock 不在这里** —— 它是一次性的方向，擦秘密不等于撤防线。
                 in_ptr <= 16'd0; out_ptr <= 16'd0; out_len_r <= 16'd0;
-                slot_valid <= 8'd0; slot_pset <= 16'd0;
+                chain_ph <= 1'b0; exp_wiping <= 1'b0;
                 state <= S_IDLE; run_done <= 1'b0; verify_ok_r <= 1'b0;
                 param_err <= 1'b0; len_err <= 1'b0; seed_err <= 1'b0;
                 cp <= 13'd0; cp_wait <= 1'b0;
@@ -733,6 +764,12 @@ module mldsa_axi #(
                 // 清零，而 pkw 还按旧地址把剩下几个字节写进刚擦过的存储。
                 pkw_run <= 1'b0; pkw_i <= 2'd0; pkw_data <= 24'd0;
                 pkr_run <= 1'b0; pkr_i <= 2'd0; pkr_ph <= 1'b0; pkr_d <= 24'd0;
+            end
+
+            // ---------- 展开区擦除机（S_FIN 无条件启动，8192 拍）----------
+            if (exp_wiping) begin
+                if (exp_waddr_w == 13'h1FFF) exp_wiping <= 1'b0;
+                else                         exp_waddr_w <= exp_waddr_w + 13'd1;
             end
 
             // ---------- IN_DATA4 的写出机（4 拍）----------
@@ -833,7 +870,8 @@ module mldsa_axi #(
                         if (wr_data[2]) zero_pulse <= 1'b1;
                         // [4] SK_LOCK：一次性闩锁，写 1 置上，**没有清零路径**。
                         // 想解开只能复位整块 PL。ZEROIZE 都不清它。
-                        if (wr_data[4]) sk_lock <= 1'b1;
+                        /* [4] 原来是 SK_LOCK。**已随 V-04 删除** ——
+                         * 它守在与"密钥归 TEE"相反的方向。 */
                         // [5] SEED_LOCK：同样一次性、同样没有清零路径。
                         // ⚠️ **不连动 SK_LOCK**（文件头④）：两把闩守的方向相反。
                         if (wr_data[5]) seed_lock <= 1'b1;
@@ -867,8 +905,14 @@ module mldsa_axi #(
                             verify_ok_r <= 1'b0;
                             out_len_r <= 16'd0;
                             out_ptr   <= 16'd0;
+                            /* ⚠️ exp_wiping 走**这条拒绝路径**，不放外层守卫：
+                             * 放外层会让一次 START 被静默丢弃，而上一次的 DONE
+                             * 与 OUT_LEN 还留着 —— 软件读到的是上一次的结果。
+                             * 展开区现在每次运算后都擦（8192 拍），"紧接着再发
+                             * 一条命令"是常态。mlkem 那边第一版就踩了这个。 */
                             if (!params_ok || !slot_ok || !cap_ok || !len_ok
-                                || !seed_gate_ok) begin
+                                || exp_wiping
+                                || !seed_gate_ok || !chain_gate_ok) begin
                                 // 不启动这一点比报错更要紧 —— 启动了再报错的话，
                                 // engine 已经按一份对不上号的输入开始算了。
                                 // PARAM_ERR 是"这次 START 被拒"的总括位，
@@ -908,9 +952,7 @@ module mldsa_axi #(
                     // 运行途中改参数一律不认（回 SLVERR，见 wr_busy_reject）
                     A_MODE: if (state == S_IDLE) begin
                         op   <= wr_data[1:0]; pset <= wr_data[3:2];
-                        sk_to_slot   <= wr_data[4];
-                        sk_from_slot <= wr_data[5];
-                        slot         <= wr_data[9:6];
+                        chain        <= wr_data[4];
                         seed_staged  <= wr_data[10];
                         // ⚠️ 写 MODE 就把写指针清零。MODE 决定软件字节落在
                         // engine 的哪个偏移（SK_FROM_SLOT 那趟要让开前面的 sk），
@@ -960,8 +1002,8 @@ module mldsa_axi #(
                 case (f_araddr[5:2])
                 A_VERSION: f_rdata <= VERSION;
                 A_STATUS:  f_rdata <= r_status;
-                A_MODE:    f_rdata <= {21'd0, seed_staged, slot,
-                                       sk_from_slot, sk_to_slot, pset, op};
+                A_MODE:    f_rdata <= {21'd0, seed_staged, 4'd0,
+                                       1'b0, chain, pset, op};
                 A_INPTR:   f_rdata <= {16'd0, in_ptr};
                 // ⚠️ **只有 rd_outdata 成立时才把字节交出去**，别的情况一律回 0。
                 // 这不是保守，是必须的：engine 的输出口是共用的，搬 sk 进金库
@@ -1023,11 +1065,11 @@ module mldsa_axi #(
                 // 金库 → engine：sk 从来不经过总线，engine 也不知道它是谁送的
                 S_LOAD: begin
                     if (cp_wait) begin
-                        cp_wait <= 1'b0;         // skv_dout 这一拍还没跟上
+                        cp_wait <= 1'b0;         // exp_dout 这一拍还没跟上
                     end else begin
                         in_we   <= 1'b1;
                         in_addr <= sk_base + {2'd0, cp};
-                        in_data <= skv_dout;
+                        in_data <= exp_dout;
                         if ({1'b0, cp} + 14'd1 == {1'b0, sk_len}) begin
                             state <= S_KICK;
                         end else begin
@@ -1079,15 +1121,25 @@ module mldsa_axi #(
                                      ? {3'd0, pk_len} : eng_out_len;
                     else
                         out_len_r <= eng_out_len;
-                    // 槽到这里才标成有效：**中途失败的运行不该留下一个
-                    // "看起来可用"的槽**，那会让后面的 Sign 拿半截 sk 去签，
-                    // 出来的是一个安静的错误结果。
-                    if (store_sk) begin
-                        slot_valid[slot[2:0]] <= 1'b1;
-                        slot_pset[slot[2:0]*2 +: 2] <= pset;
+                    if (chain_run && !chain_ph) begin
+                        // ---- 展开相位跑完，接着跑签名相位 ----
+                        // **不擦展开区**：里面正是签名相位要用的那份 sk。
+                        // 走 S_LOAD 把它搬进 engine 输入，与原来"从金库取"
+                        // 逐字节相同 —— engine 不知道、也不需要知道谁送的。
+                        chain_ph <= 1'b1;
+                        cp       <= 13'd0;
+                        cp_wait  <= 1'b1;
+                        state    <= S_LOAD;
+                    end else begin
+                        // ---- 一次运算真正结束：展开区无条件擦（§7.2 条件①）----
+                        // 由硬件在这里触发，不由任何软件决定。
+                        // ⚠️ 只擦展开区，不碰 engine 的输出（软件还没读走结果）。
+                        chain_ph    <= 1'b0;
+                        exp_wiping  <= 1'b1;
+                        exp_waddr_w <= 13'd0;
+                        run_done <= 1'b1;
+                        state    <= S_IDLE;
                     end
-                    run_done <= 1'b1;
-                    state    <= S_IDLE;
                 end
 
                 default: state <= S_IDLE;

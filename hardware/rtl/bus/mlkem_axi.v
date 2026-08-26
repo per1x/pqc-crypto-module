@@ -406,7 +406,8 @@ module mlkem_axi #(
     wire [1:0] mode_eff  = (chain_run && !chain_ph) ? M_KEYGEN : mode;
 
     // 本次 KeyGen 走不走暂存的种子。闩上之后软件说了不算。
-    wire       use_staged = (mode_eff == M_KEYGEN) && (seed_staged || seed_lock);
+    wire use_staged_src = seed_staged || seed_lock;
+    wire       use_staged = (mode_eff == M_KEYGEN) && use_staged_src;
 
     // ---- 由 param_set 算出来的长度（软件不用报，也就报不错）----
     wire [2:0]  k    = (pset == 2'd0) ? 3'd2 : (pset == 2'd1) ? 3'd3 : 3'd4;
@@ -492,6 +493,14 @@ module mlkem_axi #(
     // 这与 need_len 处那条"喂不满让 z=0"是同一类安静错误，判法也一样：
     // 在 START 那一刻挡住，且不启动任何核。
     wire        seed_gate_ok = !use_staged || seed_ready;
+
+    // ⚠️ **链式运算必须有一份备好的暂存种子。**
+    // 少了这条判据，展开相位会退回"从 IN_DATA 读种子"那条路 —— 而软件送的
+    // 字节落在 sw_base 之后，那 32/64 个字节是残留（冷启动全 0）。结果是
+    // **静默地展开出另一把密钥**，签出来的 σ / 解出来的 K 完全合法，只是
+    // 对不上任何人的公钥。与"喂不满让 z=0"是同一类安静错误，判法也一样：
+    // 在 START 那一刻挡住，且不启动任何核。
+    wire chain_gate_ok = !chain_run || (use_staged_src && seed_ready);
 
     // 从金库取 dk 还要求：那个槽真的装了东西，而且**装的时候用的是同一个
     // 参数集**。pset 不一致时长度全错，表现是"喂不满、BUSY 一直不落"，
@@ -913,7 +922,7 @@ module mlkem_axi #(
                              * 这个 bug 第一版就踩了：链式 Decaps 的 K 对不上、
                              * 而"同一份种子生出第二把密钥"—— 同一个成因。 */
                             if (!params_ok || !len_ok || !slot_ok
-                                || !seed_gate_ok || exp_wiping) begin
+                                || !seed_gate_ok || exp_wiping || !chain_gate_ok) begin
                                 // 参数非法**或输入没喂够**：置错误位，
                                 // **不启动任何核**。
                                 // 不启动这一点比报错更要紧 —— 启动了再报错
