@@ -1,0 +1,23 @@
+=== A+C 合流：私钥归 TEE 保管、PL 无状态（2026-08-26 上板）===
+
+--- 启动槽 ---
+  CSU_MULTI_BOOT                         @0xffca0010 = 0x00000006  （成功）
+--- 位流/daemon/TA ---
+e76a2321408fde73218ab785c5034f66  /media/sd-mmcblk1p2/hsm/zu3eg_hsm_dev.bit
+2d7d24689e37492479bb5f634f90e811  /media/sd-mmcblk1p2/hsm/pqchsm_fpgad
+1c9cbcfbd830656c6a8fd90a04cd651c  /lib/optee_armtz/4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3.ta
+--- daemon 自检（-lock 已废弃 + 两面都验）---
+[22:13:01] 忽略 -lock：私钥闩锁已随 V-04/D-02 删除，「私钥出不出得来」现在由结构保证，不由闩锁保证
+[22:13:01] 自检通过：TRNG VERSION = 0x00010000，EL3 通路可用
+[22:13:01] 自检：普通世界触发 EL3 种子装载已被拒（errno=5）—— 这是批 2 期望的形态
+[22:13:01] 自检通过：TA → PTA → EL3 → PL 这条种子路通了（world=1） —— 自检那份已发 SEED_CLR 作废
+--- KEYSTAT 只剩健康位（槽位 ABI 在寄存器面上没有了）---
+MK_KEYSTAT=0x00000000  MK_KEYPSET=0x00000000  MD_KEYSTAT=0x00000000
+--- ta_keyops（TA 侧密钥操作仍然对）---
+    ✓ 两边共享密钥逐字节一致 —— 一次完整的 KEM 在 TA 里跑通
+
+ta_keyops: 全部通过 —— TA 里的 PQC 算得对，且明文私钥从未出过安全世界
+--- golden ---
+0ea6e4437698abc7b44b3a235b49ce78  /media/sd-mmcblk1p1/BOOT.BIN
+bb3402ea4efae7e1062a65632fe684b4  /media/sd-mmcblk1p1/BOOT0001.BIN
+8d42d1a58b62c8ca95501bf486fbb45d  /media/sd-mmcblk1p1/BOOT0002.BIN
