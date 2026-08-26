@@ -1,0 +1,34 @@
+=== 批 2 硬门槛：OP-TEE TA 上板会话（2026-08-26）===
+
+--- dmesg（OP-TEE 侧）---
+[    3.763168] optee: probing for conduit method from DT.
+[    3.768057] optee: revision 3.8 (af141c61)
+[    3.768433] optee: initialized driver
+--- 设备节点 ---
+crw-------    1 root     root      248,   0 Aug 18 19:41 /dev/tee0
+crw-------    1 root     root      248,  16 Aug 18 19:41 /dev/teepriv0
+--- tee-supplicant ---
+  658 root      0:00 /usr/sbin/tee-supplicant
+  894 root      0:00 sh -c  echo "--- dmesg（OP-TEE 侧）---"; dmesg | grep -iE "optee"  echo "--- 设备节点 ---"; ls -l /dev/tee0 /dev/teepriv0 echo "--- tee-supplicant ---"; ps | grep "[t]ee-supplicant" echo "--- TA 文件 ---"; ls -l /lib/optee_armtz/; md5sum /lib/optee_armtz/*.ta echo "--- CSU_MULTI_BOOT ---"; grep MULTI_BOOT /proc/pmsec 2>/dev/null echo echo "--- ta_probe ---" /media/sd-mmcblk1p2/hsm/ta_probe; echo "rc=$?"
+--- TA 文件 ---
+total 156
+-rwxr-xr-x    1 root     root        158672 Aug 26 03:12 4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3.ta
+b1cfffe0041a2ab046b886b5de937460  /lib/optee_armtz/4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3.ta
+--- CSU_MULTI_BOOT ---
+  CSU_MULTI_BOOT                         @0xffca0010 = 0x00000006  （成功）
+
+--- ta_probe ---
+=== 批 2 门槛：pqc-hsm TA 上板会话 ===
+TA UUID = 4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3
+✓ [1] TEEC_InitializeContext —— 上下文建起来了
+✓ [2a] 匿名登录被拒：0xffff0001（ACCESS_DENIED），origin = TA（TA 自己返回的）
+        origin = TA 这一点很要紧：它意味着 **TA 已经被找到、加载、
+        并且执行到了自己的 open-session 入口** —— 是它主动拒的。
+✓ [2b] TEEC_OpenSession(LOGIN_USER) —— **TA 已加载并建立实例**
+✓ [3] CMD_GET_INFO —— TA 里的代码执行过并返回：
+        version  = 0x00010000（编译进 TA 的 PQCHSM_TA_PROTO_VERSION）
+        features = 0x0000000c
+✓ 版本与 host 一致 —— 板上跑的就是这次编出来的那份 TA
+
+ta_probe: 通过 —— **TEE 主线的前置死结不成立，OP-TEE TA 在这块板上跑通了**
+rc=0
