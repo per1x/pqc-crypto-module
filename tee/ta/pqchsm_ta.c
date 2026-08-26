@@ -395,37 +395,19 @@ void TA_CloseSessionEntryPoint(void *session_ctx __maybe_unused)
  *     路（那要另一条 SiP），所以**失败时不返回成功**，由调用方发 CTRL.SEED_CLR
  *     作废 —— daemon 那侧做了这件事。
  */
-static TEE_Result cmd_seed_to_pl(uint32_t param_types, TEE_Param params[4])
+/* 把一份种子逐字送进 PL 的暂存口。**只往里写，没有读回路径。**
+ * 路径：TA(S-EL0) → pqchsm_seed.pta(S-EL1) → SMC 0x8200ff15 → EL3 → PL。 */
+static TEE_Result seed_push(uint32_t tgt, const uint8_t *seed, uint32_t words)
 {
 	static const TEE_UUID pta_uuid = PTA_PQCHSM_SEED_UUID;
-	uint32_t sess = 0;
-	uint32_t eorig = 0;
-	uint8_t  seed[64];
-	uint32_t words, i;
-	uint32_t tgt;
+	uint32_t sess = 0, eorig = 0, i;
 	TEE_Result res;
 	TEE_Param  p[TEE_NUM_PARAMS];
-
-	if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INOUT,
-	                                   TEE_PARAM_TYPE_NONE,
-	                                   TEE_PARAM_TYPE_NONE,
-	                                   TEE_PARAM_TYPE_NONE))
-		return TEE_ERROR_BAD_PARAMETERS;
-
-	tgt = params[0].value.a;
-	if (tgt == TA_SEED_TGT_MLKEM)
-		words = 16U;            /* d‖z = 64 字节 */
-	else if (tgt == TA_SEED_TGT_MLDSA)
-		words = 8U;             /* ξ = 32 字节 */
-	else
-		return TEE_ERROR_BAD_PARAMETERS;
 
 	res = TEE_OpenTASession(&pta_uuid, TEE_TIMEOUT_INFINITE, 0, NULL,
 	                        &sess, &eorig);
 	if (res != TEE_SUCCESS)
 		return res;
-
-	pqchsm_randombytes(seed, words * 4U);
 
 	for (i = 0; i < words; i++) {
 		/* 小端：第一个字节在最低位 —— 与 PL 那侧 seed_stage 的解释、
@@ -445,22 +427,128 @@ static TEE_Result cmd_seed_to_pl(uint32_t param_types, TEE_Param params[4])
 		                                          TEE_PARAM_TYPE_NONE,
 		                                          TEE_PARAM_TYPE_NONE),
 		                          p, &eorig);
-		/* w 是种子的一部分，和 seed[] 一样要擦 */
-		w = 0;
+		w = 0;               /* w 是种子的一部分，和 seed[] 一样要擦 */
 		if (res != TEE_SUCCESS)
 			break;
 	}
-
-	/* ①② 无论成败都当场擦 */
-	memset(seed, 0, sizeof(seed));
 	TEE_CloseTASession(sess);
+	return res;
+}
 
+static int seed_words(uint32_t tgt, uint32_t *words, uint32_t *bytes)
+{
+	if (tgt == TA_SEED_TGT_MLKEM) {
+		*words = 16U; *bytes = TA_SEED_LEN_MLKEM;   /* d‖z */
+	} else if (tgt == TA_SEED_TGT_MLDSA) {
+		*words = 8U;  *bytes = TA_SEED_LEN_MLDSA;   /* ξ */
+	} else {
+		return -1;
+	}
+	return 0;
+}
+
+/* ============================================================================
+ * 【CMD_SEED_TO_PL / _NEW / _REPLAY：种子由 TA 保管，PL 每次现展开】
+ * ============================================================================
+ * 这是 A 组与 C 组合流的地方：PL 那侧没有槽了，"这把私钥"的载体只能是种子，
+ * 而种子的保管方是 TA。普通世界拿到的只有 PWRP blob。
+ *
+ * ⚠️ 三件必须一起做的事：
+ *  ① 本地那份种子用完当场擦 —— 不是"离开作用域就没了"，栈上的字节还在。
+ *  ② **中途失败也要擦。** 失败路径比成功路径更容易漏，而漏在失败路径上的
+ *     秘密同样是秘密。
+ *  ③ 送了一半就失败的话，PL 的暂存口里躺着半份种子。这里没有直接清 PL 的路
+ *     （那要另一条 SiP，多一条就多一份面），所以**失败时不返回成功**，
+ *     由调用方发 CTRL.SEED_CLR 作废 —— daemon 那侧做了这件事。
+ */
+static TEE_Result seed_new_or_to_pl(uint32_t param_types, TEE_Param params[4],
+                                    int want_blob)
+{
+	uint8_t  seed[64];
+	uint32_t words = 0, nbytes = 0, tgt;
+	TEE_Result res;
+
+	tgt = params[0].value.a;
+	if (seed_words(tgt, &words, &nbytes) != 0)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	if (want_blob) {
+		if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INOUT,
+		                                   TEE_PARAM_TYPE_MEMREF_OUTPUT,
+		                                   TEE_PARAM_TYPE_NONE,
+		                                   TEE_PARAM_TYPE_NONE))
+			return TEE_ERROR_BAD_PARAMETERS;
+		if (!g_kek_ready)
+			return TEE_ERROR_BAD_STATE;
+	} else if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INOUT,
+	                                          TEE_PARAM_TYPE_NONE,
+	                                          TEE_PARAM_TYPE_NONE,
+	                                          TEE_PARAM_TYPE_NONE)) {
+		return TEE_ERROR_BAD_PARAMETERS;
+	}
+
+	pqchsm_randombytes(seed, nbytes);
+	res = seed_push(tgt, seed, words);
+
+	if ((res == TEE_SUCCESS) && want_blob) {
+		size_t blen = 0;
+
+		if (ta_wrap_seal(g_kek, NULL, 0, seed, nbytes,
+		                 params[1].memref.buffer,
+		                 params[1].memref.size, &blen) != 0) {
+			res = TEE_ERROR_SHORT_BUFFER;
+		} else {
+			params[1].memref.size = blen;
+		}
+	}
+
+	memset(seed, 0, sizeof(seed));      /* ①② 成败都擦 */
 	if (res != TEE_SUCCESS)
 		return res;
 
 	params[0].value.b = words;
 	return TEE_SUCCESS;
 }
+
+static TEE_Result cmd_seed_replay(uint32_t param_types, TEE_Param params[4])
+{
+	uint8_t  seed[64];
+	size_t   plen = 0;
+	uint32_t words = 0, nbytes = 0, tgt;
+	TEE_Result res;
+
+	if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INOUT,
+	                                   TEE_PARAM_TYPE_MEMREF_INPUT,
+	                                   TEE_PARAM_TYPE_NONE,
+	                                   TEE_PARAM_TYPE_NONE))
+		return TEE_ERROR_BAD_PARAMETERS;
+	if (!g_kek_ready)
+		return TEE_ERROR_BAD_STATE;
+
+	tgt = params[0].value.a;
+	if (seed_words(tgt, &words, &nbytes) != 0)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	if (ta_wrap_open(g_kek, NULL, 0,
+	                 params[1].memref.buffer, params[1].memref.size,
+	                 seed, sizeof(seed), &plen) != 0)
+		return TEE_ERROR_MAC_INVALID;
+	if (plen != nbytes) {
+		/* blob 里装的不是这个目标的种子 —— 长度对不上就当场拒，
+		 * 别把一份 ML-DSA 的 ξ 当成 ML-KEM 的 d‖z 送进去。 */
+		memset(seed, 0, sizeof(seed));
+		return TEE_ERROR_BAD_PARAMETERS;
+	}
+
+	res = seed_push(tgt, seed, words);
+	memset(seed, 0, sizeof(seed));      /* ①② 成败都擦 */
+	if (res != TEE_SUCCESS)
+		return res;
+
+	params[0].value.b = words;
+	return TEE_SUCCESS;
+}
+
 
 TEE_Result TA_InvokeCommandEntryPoint(void *session_ctx __maybe_unused,
                                       uint32_t cmd_id, uint32_t param_types,
@@ -485,7 +573,11 @@ TEE_Result TA_InvokeCommandEntryPoint(void *session_ctx __maybe_unused,
 	case TA_PQCHSM_CMD_SIGN:
 		return cmd_sign(param_types, params);
 	case TA_PQCHSM_CMD_SEED_TO_PL:
-		return cmd_seed_to_pl(param_types, params);
+		return seed_new_or_to_pl(param_types, params, 0);
+	case TA_PQCHSM_CMD_SEED_NEW:
+		return seed_new_or_to_pl(param_types, params, 1);
+	case TA_PQCHSM_CMD_SEED_REPLAY:
+		return cmd_seed_replay(param_types, params);
 	default:
 		return TEE_ERROR_NOT_SUPPORTED;
 	}

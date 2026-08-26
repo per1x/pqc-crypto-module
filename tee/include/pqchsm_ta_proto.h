@@ -143,6 +143,38 @@
  */
 #define TA_PQCHSM_CMD_SEED_TO_PL      9
 
+/*
+ * CMD_SEED_NEW / CMD_SEED_REPLAY —— **A+C 合流的落点**。
+ *
+ * PL 那侧批 2 之后是**无状态**的：没有槽、没有 valid 位，展开区在每次运算的
+ * S_FIN 无条件擦。于是"这把私钥"这件事的载体只能是**种子**，而种子的保管方
+ * 是 TA。普通世界拿到的只有一个 PWRP blob（TA 内 KEK 包裹，KEK 没有出口）。
+ *
+ *   CMD_SEED_NEW(target) → 生成种子、送进 PL 暂存口、**并把种子包成 blob 返回**
+ *       params[0].value.a = 目标（0 = ML-KEM，1 = ML-DSA）
+ *       params[1] = memref_output：blob
+ *     调用方随后发一条 SEED_STAGED 的 KeyGen，拿到公钥；blob 就是这把密钥
+ *     在普通世界的全部形态。
+ *
+ *   CMD_SEED_REPLAY(target, blob) → 解开 blob、把同一份种子再送进 PL 暂存口
+ *       params[0].value.a = 目标
+ *       params[1] = memref_input：blob
+ *     调用方随后发一条 CHAIN 的 Decaps/Sign，PL 现展开私钥、算完即擦。
+ *
+ * ⚠️ **两条命令都不回、也不收任何种子字节。** blob 是密文，解不开的人拿到的
+ *    是一段随机数据；解得开的只有这个 TA（KEK 由 KDR 派生，不出 TA）。
+ *
+ * ⚠️ **CMD_SEED_REPLAY 不是解包谕言机。** 它解开之后**只往 PL 的暂存口写**，
+ *    没有任何把明文交回调用方的路径 —— 这正是批 1 删掉 CMD_UNWRAP 的理由，
+ *    这里不能把它以另一个名字放回来。
+ */
+#define TA_PQCHSM_CMD_SEED_NEW        10
+#define TA_PQCHSM_CMD_SEED_REPLAY     11
+
+/* 种子长度：ML-KEM 的 d‖z = 64，ML-DSA 的 ξ = 32 */
+#define TA_SEED_LEN_MLKEM   64U
+#define TA_SEED_LEN_MLDSA   32U
+
 /* 种子目标，与 EL3 的 PQCHSM_SEED_TGT_* 同值 */
 #define TA_SEED_TGT_MLKEM   0U
 #define TA_SEED_TGT_MLDSA   1U

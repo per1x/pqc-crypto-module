@@ -1,8 +1,8 @@
 // pqchsm_fpgad —— 密码机服务 daemon：把标准接口的请求落到 FPGA 密码核上
 //
-//   pqchsm_fpgad [-f] [-lock]
+//   pqchsm_fpgad [-f]
 //     -f      前台运行（板上调试用）
-//     -lock   启动时置上私钥外泄闩锁：ML-KEM 的 dk 在**硬件里**再也送不出总线。
+//     -lock   **已废弃**（V-04/D-02），接受但忽略。
 //             交付/演示形态用它；跑 ACVP 的 KeyGen 向量时不能用（那要核对 dk），
 //             而闩锁只有重新装载位流才解得开。
 //
@@ -153,18 +153,22 @@
 #define MK_OUTLEN (S_MLKEM + 0x1C)
 #define MKC_START 1u
 #define MKC_INRST 4u
-#define MKC_DKLOCK 0x10u                 /* CTRL[4]：一次性闩锁 */
+/* CTRL[4] 原来是 DK_LOCK（一次性闩锁）。**已随 V-04 删除** —— 它守在与
+ * 「密钥归 TEE」相反的方向。关闭私钥导出的闸门改落 TEE 策略侧。 */
 #define MKC_ZEROIZE 2u                   /* CTRL[1]：擦金库（见 mlkem_axi.v A_CTRL） */
 #define MKC_SEEDCLR 0x40u                /* CTRL[6]：作废暂存的那份种子 */
+#define MKS_EXPWIPE 0x1u                 /* KEYSTAT[0]：展开区正在擦 */
 #define MK_KEYSTAT (S_MLKEM + 0x30)
 #define MK_KEYPSET (S_MLKEM + 0x34)
-/* MODE 里控制片内私钥金库的三个字段 */
-#define MKM_DK_TO_SLOT   0x10u           /* KeyGen：dk 进金库，不出总线 */
+/* MODE[4]：CHAIN —— 本次运算先从暂存种子展开私钥、再做 OP、算完无条件擦。
+ * 它替代的正是原来的 DK_TO_SLOT/DK_FROM_SLOT/SLOT 那一组（V-05）：
+ * 私钥不再按槽跨命令引用，而是每条命令自己现展开一份。 */
+#define MKM_CHAIN        0x10u
 /* MODE[10]：d‖z 取自 EL3 写进来的种子暂存口，不看 IN_DATA（CODE-1 修复） */
 #define MKM_SEED_STAGED  0x400u
-#define MKM_DK_FROM_SLOT 0x20u           /* Decaps：dk 从金库取 */
-#define MKM_SLOT(s)      (((s) & 15u) << 6)   /* MODE[9:6]，16 个槽 */
-#define PL_KEY_SLOTS     16              /* 金库有 16 个槽（64 KB / 4096） */
+/* 句柄数不再受 PL 槽数限制 —— PL 里已经没有槽了。这个上限现在纯粹是本进程
+ * 句柄表的大小，改大改小都不影响硬件。 */
+#define PL_KEY_SLOTS     16
 #define MKS_DONE  (1u << 1)
 #define MKS_PARER (1u << 5)
 #define MKS_WIPING (1u << 4)   /* r_status 位序见 mlkem_axi.v:411 */
@@ -200,11 +204,12 @@
 #define MD_OUTLEN  (S_MLDSA + 0x20)
 #define MD_MSGLEN  (S_MLDSA + 0x24)
 #define MD_CTXLEN  (S_MLDSA + 0x28)
-#define MD_KEYSTAT (S_MLDSA + 0x2C)   /* {sk_lock, slot_valid[7:0]} */
+#define MD_KEYSTAT (S_MLDSA + 0x2C)   /* 只剩健康位：[0] EXP_WIPING [1] SEED_LOCK */
+#define MDS_EXPWIPE 0x1u
 
 #define MDC_START  0x01u              /* CTRL[0] */
 #define MDC_CLEAR  0x02u              /* CTRL[1] */
-#define MDC_SKLOCK 0x10u              /* CTRL[4]：一次性闩锁 */
+/* CTRL[4] 原来是 SK_LOCK。**已随 V-04 删除**（同 mlkem 那条）。 */
 #define MDC_ZEROIZE 0x04u             /* CTRL[2]：擦金库（见 mldsa_axi.v A_CTRL） */
 
 #define MDS_BUSY   (1u << 0)
@@ -214,16 +219,14 @@
 #define MDS_LENER  (1u << 4)
 #define MDS_WIPING (1u << 6)   /* r_status 位序见 mldsa_axi.v:462 */
 
-/* MODE：[1:0]=OP [3:2]=PSET [4]=SK_TO_SLOT [5]=SK_FROM_SLOT [9:6]=SLOT */
+/* MODE：[1:0]=OP [3:2]=PSET [4]=CHAIN [10]=SEED_STAGED */
 #define MDO_KEYGEN 0u
 #define MDO_SIGN   1u
 #define MDO_VERIFY 2u
-#define MDM_SK_TO_SLOT   0x10u
+#define MDM_CHAIN        0x10u
 /* MODE[10]：ξ 取自 EL3 写进来的种子暂存口，不看 IN_DATA（CODE-1 修复） */
 #define MDM_SEED_STAGED  0x400u
-#define MDM_SK_FROM_SLOT 0x20u
-#define MDM_SLOT(s)      (((s) & 15u) << 6)
-#define MLDSA_KEY_SLOTS  8            /* 签名私钥金库 8 个槽（比 ML-KEM 的 16 少） */
+#define MLDSA_KEY_SLOTS  8            /* 本进程句柄表大小，与 PL 无关 */
 
 static int sec_fd = -1;
 static int fg;
@@ -372,56 +375,135 @@ static int hw_rd_abs(uint32_t addr, uint32_t *v)
  *    这一条不能指望 TA 做 —— TA 那侧没有直接清 PL 的路（那要另一条 SiP，
  *    而多一条 SiP 就多一份攻击面）。
  */
-static int ta_seed_load(uint32_t target, uint32_t *world)
+/* ---- 与 TA 的长连接 ----
+ * 每次运算都开一次 TEE 上下文+会话太贵（一次运算现在要发两条 TA 命令）。
+ * 开机时开一次、KEK_SET 一次，之后一直用。
+ * ⚠️ 会话是**本进程独占**的：daemon 一次只服务一个连接（硬件序列必须串行化），
+ *    所以不需要锁。 */
+static TEEC_Context g_tee_ctx;
+static TEEC_Session g_tee_sess;
+static int          g_tee_open;
+
+static int tee_session_open(void)
 {
-	TEEC_Context ctx;
-	TEEC_Session sess;
 	TEEC_Operation op;
 	TEEC_UUID uuid = TA_PQCHSM_UUID;
 	uint32_t origin = 0;
 	TEEC_Result r;
+	/* KEK 的 salt：本设备固定值。它不是秘密（PWRP 的 salt 本来就是公开的），
+	 * 秘密性由 TA 内的 KDR 提供。写死是有意的 —— 让它可配就多了一条
+	 * "换个 salt 就解不开旧 blob"的运维陷阱。 */
+	static const uint8_t kek_salt[16] = {
+		'p','q','c','h','s','m','-','b','2','-','k','e','k','-','v','1'
+	};
 
-	r = TEEC_InitializeContext(NULL, &ctx);
+	if (g_tee_open)
+		return 0;
+
+	r = TEEC_InitializeContext(NULL, &g_tee_ctx);
 	if (r != TEEC_SUCCESS) {
 		logf_("TEEC_InitializeContext 失败 0x%08x —— OP-TEE 驱动没起来？", r);
 		return -1;
 	}
 	memset(&op, 0, sizeof op);
 	/* 不用 LOGIN_PUBLIC：TA 那侧的 open-session 会拒（PS-22）。 */
-	r = TEEC_OpenSession(&ctx, &sess, &uuid, TEEC_LOGIN_USER, NULL,
-			     &op, &origin);
+	r = TEEC_OpenSession(&g_tee_ctx, &g_tee_sess, &uuid, TEEC_LOGIN_USER,
+			     NULL, &op, &origin);
 	if (r != TEEC_SUCCESS) {
 		logf_("TEEC_OpenSession 失败 0x%08x origin=%u —— "
 		      "TA 不在 /lib/optee_armtz/ 或 tee-supplicant 没跑？",
 		      r, origin);
-		TEEC_FinalizeContext(&ctx);
+		TEEC_FinalizeContext(&g_tee_ctx);
 		return -1;
 	}
 
 	memset(&op, 0, sizeof op);
-	op.paramTypes = TEEC_PARAM_TYPES(TEEC_VALUE_INOUT, TEEC_NONE,
+	op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_TEMP_INPUT, TEEC_NONE,
 					 TEEC_NONE, TEEC_NONE);
-	op.params[0].value.a = target;
-	r = TEEC_InvokeCommand(&sess, TA_PQCHSM_CMD_SEED_TO_PL, &op, &origin);
-	TEEC_CloseSession(&sess);
-	TEEC_FinalizeContext(&ctx);
-
+	op.params[0].tmpref.buffer = (void *)kek_salt;
+	op.params[0].tmpref.size   = sizeof kek_salt;
+	r = TEEC_InvokeCommand(&g_tee_sess, TA_PQCHSM_CMD_KEK_SET, &op, &origin);
 	if (r != TEEC_SUCCESS) {
-		logf_("CMD_SEED_TO_PL 失败 0x%08x origin=%u", r, origin);
+		logf_("CMD_KEK_SET 失败 0x%08x —— 没有 KEK 就包不出种子 blob", r);
+		TEEC_CloseSession(&g_tee_sess);
+		TEEC_FinalizeContext(&g_tee_ctx);
 		return -1;
 	}
+	g_tee_open = 1;
+	return 0;
+}
+
+/* ============================================================================
+ * 【A+C 合流：种子归 TA 保管，PL 每次现展开】
+ * ============================================================================
+ * PL 那侧批 2 之后是**无状态**的：没有槽、没有 valid 位，展开区在每次运算的
+ * S_FIN 无条件擦。于是"这把私钥"这件事的载体只能是**种子**，而种子的保管方
+ * 是 TA。本进程拿到的只有一个 PWRP blob —— 它是密文，本进程解不开
+ * （KEK 由 TA 内的 KDR 派生，没有出口）。
+ *
+ * 一次 KeyGen：ta_seed_new()  → TA 生成种子、送进 PL、把种子包成 blob 交回；
+ *              然后一条 SEED_STAGED 的 KeyGen 拿公钥。
+ * 一次 Decaps/Sign：ta_seed_replay(blob) → TA 解开、把同一份种子再送进 PL；
+ *              然后一条 CHAIN 的命令，PL 现展开私钥、算完即擦。
+ *
+ * **本进程从头到尾没有一个能放种子或私钥明文的缓冲区。**
+ */
+static int ta_seed_cmd(uint32_t cmd, uint32_t target,
+		       void *blob, size_t cap, size_t *blob_len, int is_out)
+{
+	TEEC_Operation op;
+	uint32_t origin = 0;
+	TEEC_Result r;
+
+	if (tee_session_open())
+		return -1;
+
+	memset(&op, 0, sizeof op);
+	if (blob) {
+		op.paramTypes = TEEC_PARAM_TYPES(
+			TEEC_VALUE_INOUT,
+			is_out ? TEEC_MEMREF_TEMP_OUTPUT : TEEC_MEMREF_TEMP_INPUT,
+			TEEC_NONE, TEEC_NONE);
+		op.params[1].tmpref.buffer = blob;
+		op.params[1].tmpref.size   = cap;
+	} else {
+		op.paramTypes = TEEC_PARAM_TYPES(TEEC_VALUE_INOUT, TEEC_NONE,
+						 TEEC_NONE, TEEC_NONE);
+	}
+	op.params[0].value.a = target;
+	r = TEEC_InvokeCommand(&g_tee_sess, cmd, &op, &origin);
+	if (r != TEEC_SUCCESS) {
+		logf_("TA 命令 %u 失败 0x%08x origin=%u", cmd, r, origin);
+		return -1;
+	}
+	if (blob && is_out && blob_len)
+		*blob_len = op.params[1].tmpref.size;
+	return 0;
+}
+
+static int ta_seed_new(uint32_t target, uint8_t *blob, size_t cap, size_t *len)
+{
+	return ta_seed_cmd(TA_PQCHSM_CMD_SEED_NEW, target, blob, cap, len, 1);
+}
+
+static int ta_seed_replay(uint32_t target, const uint8_t *blob, size_t len)
+{
+	return ta_seed_cmd(TA_PQCHSM_CMD_SEED_REPLAY, target,
+			   (void *)blob, len, NULL, 0);
+}
+
+static int sec_seed_load(uint32_t target, uint32_t *world)
+{
+	if (ta_seed_cmd(TA_PQCHSM_CMD_SEED_TO_PL, target, NULL, 0, NULL, 0))
+		return -1;
 	/* 走到这里，种子是安全世界生成并送进去的 —— 世界记 1。
 	 * 这个 1 不是从某个寄存器读回来的，而是**这条路径本身的性质**：
-	 * 普通世界发不了那条 SMC（EL3 无条件拒），所以能成功就只能是 TA 送的。 */
+	 * 普通世界发不了那条 SMC（EL3 无条件拒），能成功就只能是 TA 送的。 */
 	if (world)
 		*world = 1;
 	return 0;
 }
 
-static int sec_seed_load(uint32_t target, uint32_t *world)
-{
-	return ta_seed_load(target, world);
-}
 
 static int hw_wr(unsigned off, uint32_t v)
 {
@@ -555,6 +637,30 @@ static void drain_packed(unsigned reg4, unsigned reg1, uint8_t *out, uint32_t n)
 		out[i] = (uint8_t)rd(reg1);
 }
 
+/* 等展开区擦完再发下一条命令。
+ *
+ * ⚠️ **批 2 新增的纪律。** 展开区在每次运算之后由硬件无条件擦（§7.2 条件①），
+ * 期间 START 会被拒（置 PARAM_ERR 并作废上一次的结果）。不等的后果不是报错，
+ * 是"这一条命令被拒了，而软件读到的是上一条的结果" —— RTL 那侧特意让它
+ * 不静默（走 PARAM_ERR 而不是外层守卫），软件这侧就要真的去等。
+ *
+ * 用**读**来等：写在擦除期间会被拒，而被拒的写从 EL3 回来是 SError（丢板子）。 */
+static int wait_exp_idle(unsigned keystat_reg, uint32_t bit, const char *who)
+{
+	long spin;
+
+	for (spin = 0; spin < 200000L; spin++) {
+		uint32_t ks = rd(keystat_reg);
+
+		if (hw_fault)
+			return -1;
+		if (!(ks & bit))
+			return 0;
+	}
+	logf_("%s 的展开区一直在擦 —— 不再写任何寄存器", who);
+	return -1;
+}
+
 static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 		     const uint8_t *in, uint32_t in_len,
 		     uint8_t *out, uint32_t out_cap, uint32_t *out_len)
@@ -562,6 +668,8 @@ static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 	uint32_t n, st;
 	long spin;
 
+	if (wait_exp_idle(MK_KEYSTAT, MKS_EXPWIPE, "ML-KEM"))
+		return -1;
 	wr(MK_MODE, mode | (pset << 2) | mode_extra);
 	wr(MK_CTRL, MKC_INRST);
 	feed_packed(MK_INDATA4, MK_INDATA, in, in_len);
@@ -656,6 +764,8 @@ static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
 	if (verify_ok)
 		*verify_ok = 0;
 	wr(MD_MODE, op | (pset << 2) | mode_extra);
+	if (wait_exp_idle(MD_KEYSTAT, MDS_EXPWIPE, "ML-DSA"))
+		return -1;
 	wr(MD_CTRL, MDC_CLEAR);
 	wr(MD_INPTR, 0);            /* ⚠️ 不是 CTRL 的某个位 —— 见 MD_* 那段第 ① 条 */
 	wr(MD_OUTPTR, 0);
@@ -716,14 +826,21 @@ static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
  * 换来的是**这个进程的内存里再也没有私钥**。
  */
 #define MAX_KEYS PL_KEY_SLOTS
-static struct { int used; uint32_t pset; } keys[MAX_KEYS];
+/* 句柄表：**只放不透明的 blob**（D-01）。
+ * 原来这里的句柄"就是"PL 金库的槽号 —— 密钥的生命周期管理落在普通世界，
+ * TEE 完全不出现。现在句柄只是本表的下标，表里放的是 TA 包好的种子密文；
+ * 本进程解不开它，也没有任何理由去解。daemon 退化成纯搬运。 */
+#define SEED_BLOB_MAX 128
+static struct { int used; uint32_t pset;
+                uint8_t blob[SEED_BLOB_MAX]; size_t blob_len; } keys[MAX_KEYS];
 
 /* 签名私钥的句柄表。**与上面那张分开**，不是重复代码：
  * 两个核各有自己的金库，槽号空间互不相干（ML-KEM 16 个、ML-DSA 8 个）。
  * 合成一张表就得再引一个"这是哪个核"的字段，而那个字段一旦弄错，
  * 后果是拿签名槽的号去 ML-KEM 的金库里取私钥 —— 恰恰是句柄不做间接映射
  * 要避免的那类错。两张表、各自槽号即句柄，对不上的可能性为零。 */
-static struct { int used; uint32_t pset; } dsa_keys[MLDSA_KEY_SLOTS];
+static struct { int used; uint32_t pset;
+                uint8_t blob[SEED_BLOB_MAX]; size_t blob_len; } dsa_keys[MLDSA_KEY_SLOTS];
 
 static void keys_wipe(void)
 {
@@ -1048,23 +1165,24 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		 * 再逐字节写进 MK_INDATA。现在只发一条命令：EL3 自己取熵、自己写进
 		 * PL 的种子暂存口，KeyGen 用 MODE.SEED_STAGED 去取。
 		 * **这个作用域里已经没有一个能放种子的变量了** —— 那正是判据。 */
-		if (sec_seed_load(SEED_TGT_MLKEM, &world))
-			return SDR_HARDFAIL;
-		/* 先挑槽：句柄**就是**金库的槽号，一一对应。
-		 * 不做映射表是有意的 —— 多一层间接就多一处可能对不上的地方，
-		 * 而这里对不上的后果是"用别人的私钥解自己的密文"。 */
 		for (h = 0; h < MAX_KEYS && keys[h].used; h++)
 			;
 		if (h == MAX_KEYS)
 			return SDR_UNKNOWERR;
 
-		/* DK_TO_SLOT：dk 直接写进 PL 的金库，**不从 OUT_DATA 出来**。
-		 * 所以下面收到的 n 应当恰好是 ek 的长度 —— 这一条要断言，
-		 * 它是"私钥没出硬件"在软件侧唯一能自己核对的证据。 */
+		/* TA 生成种子、送进 PL 的暂存口，**并把种子包成 blob 交回**。
+		 * blob 是这把密钥在普通世界的全部形态 —— 本进程解不开它。 */
+		if (ta_seed_new(SEED_TGT_MLKEM, keys[h].blob,
+				sizeof keys[h].blob, &keys[h].blob_len))
+			return SDR_HARDFAIL;
+		world = 1;
+
 		/* 一个输入字节都不送：种子在 PL 的暂存口里，MODE.SEED_STAGED 让
-		 * KeyGen 去那里取。 */
-		if (mlkem_run(0, q->a0,
-			      MKM_DK_TO_SLOT | MKM_SLOT(h) | MKM_SEED_STAGED,
+		 * KeyGen 去那里取。
+		 * ⚠️ **不带 CHAIN**：这一趟只要公钥。dk 在 PL 里展开出来之后
+		 *    随 S_FIN 一起擦掉，本来就出不了总线 —— 下面那条
+		 *    n == eklen 的断言仍然是"私钥没出硬件"的软件侧证据。 */
+		if (mlkem_run(0, q->a0, MKM_SEED_STAGED,
 			      NULL, 0, buf, sizeof buf, &n))
 			return SDR_HARDFAIL;
 		if (n != eklen) {
@@ -1120,8 +1238,12 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		/* **只送密文**。dk 由 PL 从自己的金库里取，一个字节都不经过总线，
 		 * 也不经过本进程 —— 这里连一个能放 dk 的缓冲区都不存在了。 */
 		memcpy(in, pay, ctlen);
-		if (mlkem_run(2, keys[h].pset,
-			      MKM_DK_FROM_SLOT | MKM_SLOT(h),
+		/* 先请 TA 把这把密钥的种子重放进 PL 的暂存口，然后一条 CHAIN
+		 * 的 Decaps —— PL 现展开 dk、解完即擦。dk 既没经过总线，
+		 * 也没在 PL 里过夜。 */
+		if (ta_seed_replay(SEED_TGT_MLKEM, keys[h].blob, keys[h].blob_len))
+			return SDR_HARDFAIL;
+		if (mlkem_run(2, keys[h].pset, MKM_CHAIN | MKM_SEED_STAGED,
 			      in, ctlen, out, PQCS_MAXPAY, &n))
 			return SDR_HARDFAIL;
 		memset(in, 0, sizeof in);
@@ -1159,12 +1281,14 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		mldsa_len(q->a0, &pklen, &sklen, &siglen);
 		/* ξ 与 ML-KEM 的 d‖z 同一条纪律：**本进程不碰它**（CODE-1）。
 		 * 这个作用域里已经没有 uint8_t xi[32] 了。 */
-		if (sec_seed_load(SEED_TGT_MLDSA, &world))
-			return SDR_HARDFAIL;
 		for (h = 0; h < MLDSA_KEY_SLOTS && dsa_keys[h].used; h++)
 			;
 		if (h == MLDSA_KEY_SLOTS)
 			return SDR_UNKNOWERR;
+		if (ta_seed_new(SEED_TGT_MLDSA, dsa_keys[h].blob,
+				sizeof dsa_keys[h].blob, &dsa_keys[h].blob_len))
+			return SDR_HARDFAIL;
+		world = 1;
 
 		/* SK_TO_SLOT：sk 进片内金库，不从 OUT_DATA 出来。
 		 * 于是 OUT_LEN 应当恰好是 pk 的长度 —— 这一条要断言，
@@ -1172,7 +1296,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		/* 一个输入字节都不送：ξ 在 PL 的暂存口里（EL3 刚写进去的），
 		 * MODE.SEED_STAGED 让 KeyGen 去那里取。 */
 		if (mldsa_run(MDO_KEYGEN, q->a0,
-			      MDM_SK_TO_SLOT | MDM_SLOT(h) | MDM_SEED_STAGED,
+			      MDM_SEED_STAGED,
 			      NULL, 0, 0, 0, out + 4, PQCS_MAXPAY - 4, &n, NULL)) {
 			return SDR_HARDFAIL;
 		}
@@ -1231,8 +1355,11 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 				return SDR_HARDFAIL;
 			}
 			memcpy(sbuf + 32, pay, q->len);
+			if (ta_seed_replay(SEED_TGT_MLDSA, dsa_keys[h].blob,
+					   dsa_keys[h].blob_len))
+				return SDR_HARDFAIL;
 			rv = mldsa_run(MDO_SIGN, dsa_keys[h].pset,
-				       MDM_SK_FROM_SLOT | MDM_SLOT(h),
+				       MDM_CHAIN | MDM_SEED_STAGED,
 				       sbuf, 32u + q->len, q->len, 0,
 				       out, PQCS_MAXPAY, &n, NULL);
 			memset(sbuf, 0, 32u + q->len);
@@ -1438,7 +1565,7 @@ static void conn_close(struct conn *c)
 
 int main(int argc, char **argv)
 {
-	int srv, i, want_lock = 0;
+	int srv, i;
 	struct sockaddr_un sa;
 	char st[64] = {0};
 	FILE *f;
@@ -1447,7 +1574,12 @@ int main(int argc, char **argv)
 		if (!strcmp(argv[i], "-f"))
 			fg = 1;
 		else if (!strcmp(argv[i], "-lock"))
-			want_lock = 1;
+			/* 已废弃（D-02）：交付形态的安全性质不该由普通世界进程的
+			 * 启动参数设置。接受但忽略 —— 现有的 hsm-boot.sh 还在传它，
+			 * 直接报错会让板子开机起不来，而这个参数现在**什么都不做**
+			 * 才是正确行为。 */
+			logf_("忽略 -lock：私钥闩锁已随 V-04/D-02 删除，"
+			      "「私钥出不出得来」现在由结构保证，不由闩锁保证");
 	}
 	(void)fg;
 
@@ -1537,7 +1669,7 @@ int main(int argc, char **argv)
 		 * ⚠️ 这里**真的装一份 ML-KEM 种子**（不像上面用非法目标）——
 		 * 没有别的办法确证整条链路。装完当场发 SEED_CLR 作废，
 		 * 免得它留在暂存口里被后面某次 KeyGen 悄悄用掉。 */
-		if (ta_seed_load(SEED_TGT_MLKEM, &w) != 0) {
+		if (sec_seed_load(SEED_TGT_MLKEM, &w) != 0) {
 			logf_("自检失败：TA 那条种子路不通 —— KeyGen 没有种子可用，"
 			      "拒绝启动。（查 OP-TEE 是否起来、TA 是否在 "
 			      "/lib/optee_armtz/、tee-supplicant 是否在跑）");
@@ -1548,62 +1680,25 @@ int main(int argc, char **argv)
 		      " —— 自检那份已发 SEED_CLR 作废", w);
 	}
 
-	/* ---- 可选：把私钥外泄闩锁置上（-lock）----
+	/* ---- 原来这里是"把私钥外泄闩锁置上（-lock）"----
 	 *
-	 * 置上之后 ML-KEM 的 KeyGen **在硬件里**就不再把 dk 送出总线，
-	 * 无论谁怎么写 MODE 寄存器 —— 包括本 daemon 自己。这把"私钥留在片内"
-	 * 从一句实现承诺变成一条硬件性质。
+	 * **已随 V-04/D-02 整段删除。** 两个理由，都在登记表里：
 	 *
-	 * **默认不置**，因为 ACVP 的 KeyGen 向量要核对 dk：那是出厂验证必须做的
-	 * 事，而闩锁一旦置上只有重新装载位流才能解开。交付/演示形态由
-	 * hsm-boot.sh 传 -lock；跑 KAT 时不传。这个取舍写在 docs 里。 */
-	if (want_lock) {
-		uint32_t ks = 0;
-
-		hw_fault = 0;
-		/* 上一个 daemon 可能刚发过 ZEROIZE 就退出了 —— 那时金库还在擦，
-		 * 而擦除期间写会被拒，被拒的写从 EL3 回来是 SError（丢板子）。
-		 * 先用读等它落下来，等不到就干脆不置闩锁、如实拒绝启动。 */
-		if (wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM") ||
-		    wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA")) {
-			logf_("金库还在擦，拒绝启动 —— 这时候写 CTRL 会 SError");
-			return 2;
-		}
-		wr(MK_CTRL, MKC_DKLOCK);
-		if (hw_rd(MK_KEYSTAT, &ks) || !(ks & (1u << 16))) {
-			logf_("置私钥闩锁失败（KEYSTAT=0x%08x）—— 拒绝启动，"
-			      "免得对外声称私钥出不来而其实出得来", ks);
-			return 2;
-		}
-		logf_("私钥外泄闩锁已置上：KeyGen 不会再把 dk 送出总线");
-
-		/* ML-DSA 那把闩锁同理，但**只在从机确实存在时才置**。
-		 *
-		 * 0x8006_0000 在旧位流/旧白名单下可能是读不到的。对着读不到的地址写
-		 * 会在 EL3 上被拒，而这个启动分支把任何一笔失败都判成"拒绝启动" ——
-		 * 于是加这几行的直接后果会是**板子起不来**，跟 ML-DSA 有没有毫无关系。
-		 *
-		 * 所以先用 VERSION 探一下：读得到约定的常量才认为有从机。
-		 * 探测走 hw_rd 而不是 rd()，因为后者会把失败粘进 hw_fault，
-		 * 让"没有这个从机"这件正常的事污染掉后面的判断。 */
-		uint32_t dver = 0;
-
-		if (hw_rd(MD_VER, &dver) == 0 && dver == CORE_VERSION) {
-			uint32_t dks = 0;
-
-			wr(MD_CTRL, MDC_SKLOCK);
-			if (hw_rd(MD_KEYSTAT, &dks) || !(dks & (1u << 8))) {
-				logf_("置 ML-DSA 私钥闩锁失败（KEYSTAT=0x%08x）—— 拒绝启动",
-				      dks);
-				return 2;
-			}
-			logf_("ML-DSA 私钥外泄闩锁已置上");
-		} else {
-			logf_("0x%08lx 上没有 mldsa_axi（VERSION=0x%08x）——"
-			      " 跳过 ML-DSA 闩锁。**签名这条路今天不在硬件上**",
-			      PL_BASE + S_MLDSA, dver);
-		}
-	}
+	 *  · 闩锁（dk_lock/sk_lock）把"私钥留在 PL"从承诺升级成硬件性质 ——
+	 *    **恰好守在与"密钥归 TEE、PL 无状态"相反的方向**。批 2 之后 PL 里
+	 *    根本不跨操作存私钥，闩锁守的那个东西已经不存在了。
+	 *  · `-lock` 让交付形态的安全性质由**普通世界进程启动时**设置（D-02）。
+	 *    一个能改启动参数的人就能改变这台机器对外声称的性质。
+	 *
+	 * 现在"私钥出不出得来"由结构保证，不由闩锁保证：KeyGen 的 dk/sk 在
+	 * PL 的匿名展开区里出现过，随 S_FIN 无条件擦掉，寄存器面上没有任何
+	 * 能把它读出来的路径。软件侧的自证仍然在 —— KeyGen 之后断言
+	 * n == eklen / n == pklen（多一个字节都不接受）。
+	 *
+	 * ⚠️ 顺带：ACVP 的 KeyGen 向量要核对 dk/sk，那条路（不带 SEED_STAGED、
+	 *    从 IN_DATA 送种子）**仍然留着**（§7.3）—— 能不能用它由门禁决定，
+	 *    不由模式位决定。
+	 */
 
 	/* ---- 远程口的凭据：三样齐了才开 TCP，缺一样就**不开** ----
 	 *
