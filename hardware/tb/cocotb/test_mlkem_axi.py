@@ -141,6 +141,7 @@ async def wr(dut, addr, data, prot=PROT_SECURE):
 
 async def run_op(dut, mode, name, payload: bytes, limit=400_000):
     """灌输入 → 启动 → 等完成 → 取输出。返回输出字节"""
+    await wait_exp_idle(dut)
     assert await wr(dut, MODE, mode | (PSET[name] << 2)) == RESP_OKAY
     assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
     for b in payload:
@@ -675,21 +676,47 @@ async def test_underfill_refused_and_z_not_stale(dut):
 # 片内私钥金库：dk 从头到尾不越过总线
 # ============================================================================
 KEYSTAT = 0x30
-KEYPSET = 0x34          # 16 槽之后 pset 单独一个寄存器
-C_DK_LOCK = 1 << 4          # CTRL 的一次性闩锁
-M_DK_TO_SLOT = 1 << 4       # MODE：KeyGen 把 dk 写进金库
-M_DK_FROM_SLOT = 1 << 5     # MODE：Decaps 从金库取 dk
+KEYPSET = 0x34          # 批 2：槽位删除后恒读 0，留着是为了钉住"它确实是 0"
+
+# ============================================================================
+# 批 2：槽位 ABI 已删除（登记表 V-01/V-04/V-05/V-06）
+# ============================================================================
+# 原来这里有 C_DK_LOCK（CTRL 的一次性闩锁）、M_DK_TO_SLOT / M_DK_FROM_SLOT
+# 与 4 位槽号。它们编码的是"私钥常驻 PL、按槽引用"——与"密钥归 TEE、PL 无状态"
+# 正面冲突。现在 MODE 只剩 OP / PSET / CHAIN / SEED_STAGED。
+#
+# CHAIN 的语义：**本次运算先从暂存种子展开私钥，再做 OP，算完无条件擦**。
+# 它替代的正是 DK_FROM_SLOT ——差别在于 dk 是这条命令自己现展开的，
+# 不是上一条命令留下的。所以它占了原 DK_TO_SLOT 的位置 [4]。
+M_CHAIN = 1 << 4
+
+# KEYSTAT 现在只报与密钥无关的健康位
+KS_EXP_WIPING = 1 << 0
+KS_SEED_LOCK  = 1 << 1
 
 
-def mode_word(mode, name, *, to_slot=False, from_slot=False, slot=0):
-    return (mode | (PSET[name] << 2)
-            | (M_DK_TO_SLOT if to_slot else 0)
-            | (M_DK_FROM_SLOT if from_slot else 0)
-            | (slot << 6))   # SLOT 现在是 4 位 [9:6]
+def mode_word(mode, name, *, chain=False):
+    return (mode & 3) | (PSET[name] << 2) | (M_CHAIN if chain else 0)
 
+
+
+async def wait_exp_idle(dut, limit=20000):
+    """等展开区擦完再发下一条命令。
+
+    ⚠️ **这是批 2 新增的软件纪律，不是测试技巧。** 展开区在每次运算之后由
+    硬件无条件擦（§7.2 条件①），期间 START 会被拒（置 PARAM_ERR 并作废上一次
+    的结果）。所以"跑完一条马上跑下一条"必须先等这个窗口 —— daemon 那侧
+    也是同样的等法。
+    """
+    for _ in range(limit):
+        ks, _ = await rd(dut, KEYSTAT)
+        if not (ks & KS_EXP_WIPING):
+            return
+    raise AssertionError("展开区一直在擦，EXP_WIPING 不落")
 
 async def run_raw(dut, mword, payload, limit=400_000):
     """和 run_op 一样，但 MODE 整字由调用方给（要用到新的那几位）"""
+    await wait_exp_idle(dut)
     assert await wr(dut, MODE, mword) == RESP_OKAY
     assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
     for b in payload:
@@ -712,18 +739,20 @@ async def run_raw(dut, mword, payload, limit=400_000):
 
 
 @cocotb.test()
-async def test_dk_stays_on_chip(dut):
-    """KeyGen 存槽 → Decaps 用槽：dk 一个字节都没经过总线
+async def test_chained_decaps_from_staged_seed(dut):
+    """**批 2 的落点**：一条命令里先从暂存种子展开 dk、再 Decaps、算完就擦
 
-    这条用例的判据分两半，两半都必须成立：
+    这条用例替代了原来的 `test_dk_stays_on_chip`。原来那条证的是
+    "dk 留在 PL 的槽里、Decaps 按槽取"——而那正是登记表 V-01 要消掉的性质。
 
-      · **出不来**：存槽那趟的 OUT_LEN 恰好等于 ek 的长度，一个字节不多。
-        只查"OUT_LEN 变小了"不够 —— 得钉死在 eklen 上，否则少给几个字节
-        也能通过，而那意味着 dk 的前半截仍然出来了。
+    现在要证的是三件事，缺一条这个改动就不成立：
 
-      · **还能用**：拿槽里的 dk 做 Decaps，解出来的 K 与 Encaps 那一端一致。
-        少了这一半，一个"把 dk 直接丢掉"的实现也能通过上一半 ——
-        那才是最容易写出来的错误版本。
+      · **算得对**：链式 Decaps 解出来的 K，与 Encaps 那一端一致。
+        少了这一半，一个"把 dk 丢掉"的实现也能通过下面两条。
+      · **dk 没出总线**：整条链里 OUT_LEN 只有 32（共享秘密），
+        软件一个 dk 字节都读不到。
+      · **算完就擦**：DONE 之后 KEYSTAT.EXP_WIPING 起来过，
+        而且擦除期间拒绝下一次 START。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -732,104 +761,114 @@ async def test_dk_stays_on_chip(dut):
     d, z = bytes([0x21] * 32), bytes([0x22] * 32)
     ek_ref, dk_ref = mlkem_keygen(d, z, name)
 
-    # ---- KeyGen，dk 进槽 2 ----
-    out = await run_raw(dut, mode_word(0, name, to_slot=True, slot=2), d + z)
-    assert out is not None, "存槽的 KeyGen 被拒了"
-    assert len(out) == len(ek_ref), \
-        f"存槽时 OUT_LEN={len(out)}，应当恰好是 ek 的 {len(ek_ref)} 字节"
-    assert out == ek_ref, "ek 与黄金模型不一致"
-    assert dk_ref not in out, "dk 出现在了输出里"
+    # ---- ① 用暂存种子做一次普通 KeyGen，拿到 ek ----
+    await stage_seed(dut, d + z)
+    out = await run_raw(dut, mode_word(M_KEYGEN, name) | M_SEED_STAGED, b"")
+    assert out is not None, "暂存种子的 KeyGen 被拒了"
+    assert out[:len(ek_ref)] == ek_ref, "ek 与黄金模型不一致"
 
-    ks, _ = await rd(dut, KEYSTAT)
-    assert ks & (1 << 2), f"槽 2 没被标成有效：KEYSTAT=0x{ks:08x}"
-    kp, _ = await rd(dut, KEYPSET)
-    assert (kp >> (2 * 2)) & 3 == PSET[name], "槽里记的参数集不对"
+    # ---- ② 普通世界拿 ek 做 Encaps ----
+    enc = await run_raw(dut, mode_word(M_ENCAPS, name), b"\x33" * 32 + ek_ref)
+    assert enc is not None
+    # ⚠️ Encaps 的输出是 **K‖ct**，不是 ct‖K（见 test_chain_keygen_encaps_decaps）。
+    # 切反了不会报错，只会让 Decaps 走隐式拒绝路径、交出一个**合法但不同**的 K，
+    # 表现成"链式解出来的 K 对不上"，指向的却是 RTL —— 第一版就这么误判了一轮。
+    k_enc, ct = enc[:32], enc[32:]
 
-    # ---- Encaps（用刚拿到的 ek）----
-    m = bytes([0x33] * 32)
-    kc = await run_raw(dut, mode_word(1, name), m + ek_ref)
-    assert kc is not None
-    k_enc, ct = kc[:32], kc[32:]
+    # ---- ③ 链式 Decaps：同一份种子重送，PL 现展开 dk 再解 ----
+    await stage_seed(dut, d + z)
+    k_dec = await run_raw(dut, mode_word(M_DECAPS, name, chain=True)
+                          | M_SEED_STAGED, ct)
+    assert k_dec is not None, "链式 Decaps 被拒了"
+    assert len(k_dec) == 32, \
+        f"链式 Decaps 的 OUT_LEN = {len(k_dec)}，应当只有 32 —— dk 漏出来了"
+    assert dk_ref not in k_dec, "dk 出现在了输出里"
+    assert k_dec == k_enc, "链式 Decaps 解出来的 K 与 Encaps 那一端不一致"
 
-    # ---- Decaps：只送 c，dk 由金库供 ----
-    k_dec = await run_raw(dut, mode_word(2, name, from_slot=True, slot=2), ct)
-    assert k_dec is not None, "用槽做 Decaps 被拒了"
-    assert k_dec[:32] == k_enc, "两端共享密钥不一致 —— 金库里的 dk 是坏的"
-
-    dut._log.info(f"dk 全程留在片内：OUT_LEN={len(out)}（正好 ek），"
-                  f"用槽解出的 K 与 Encaps 一致")
-
-
-@cocotb.test()
-async def test_dk_lock_is_one_way(dut):
-    """DK_LOCK 置上之后，软件再怎么写 MODE 都拿不到 dk，而且撤不回来"""
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
-    await reset(dut)
-
-    name = "ML-KEM-512"
-    d, z = bytes([0x41] * 32), bytes([0x42] * 32)
-    ek_ref, _ = mlkem_keygen(d, z, name)
-
-    # 闩锁之前：不设 DK_TO_SLOT 就该拿到 ek‖dk（ACVP 核对靠这条路）
-    out = await run_raw(dut, mode_word(0, name), d + z)
-    assert len(out) > len(ek_ref), "闩锁之前 dk 就出不来了，那 ACVP 没法核对"
-
-    assert await wr(dut, CTRL, C_DK_LOCK) == RESP_OKAY
-    ks, _ = await rd(dut, KEYSTAT)
-    assert ks & (1 << 16), "闩锁没置上"
-
-    # 闩锁之后：**同一个 MODE 字**，dk 不再出来
-    out2 = await run_raw(dut, mode_word(0, name), d + z)
-    assert len(out2) == len(ek_ref), \
-        f"闩锁之后 OUT_LEN={len(out2)}，应当只剩 ek 的 {len(ek_ref)} 字节"
-    assert out2 == ek_ref
-
-    # 撤不回来：CTRL 没有清它的位，zeroize 也不清 —— zeroize 是擦秘密，
-    # 不是撤防线。这两件事分开，是因为「擦完之后防线还在」才是想要的性质。
-    assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
-    for _ in range(20000):
-        st, _ = await rd(dut, STATUS)
-        if not (st & (1 << 4)):
-            break
-    ks, _ = await rd(dut, KEYSTAT)
-    assert ks & (1 << 16), "zeroize 把闩锁清掉了 —— 它不该有这个能力"
-    assert (ks & 0xF) == 0, "zeroize 之后槽的有效位应当全清"
-
-    dut._log.info("闩锁一次性生效：dk 不再出总线，zeroize 也撤不回来")
+    dut._log.info("链式 Decaps：dk 由同一条命令现展开、没出总线，K 对得上")
 
 
 @cocotb.test()
-async def test_decaps_from_empty_slot_refused(dut):
-    """从空槽 / 参数集不匹配的槽做 Decaps：当场拒绝，不是让它跑到超时
+async def test_expansion_area_wiped_after_every_op(dut):
+    """展开区在**每次**运算之后被无条件擦掉，且擦除期间 START 被拒
 
-    这条单列，是因为失败方式很要命：槽不对时长度算错，核会一直等着被喂满，
-    软件看到的是 BUSY 永远不落 —— 和"算得慢"分不开。所以必须在 START
-    那一刻判掉并报 PARAM_ERR。
+    §7.2 的四条里这里管住两条：擦除由硬件在 S_FIN 触发（软件没有任何"不擦"
+    的选项），以及擦除期间不接新请求。
+
+    ⚠️ 两条判据要分开测，不能写在同一个轮询里。第一版把"发 START 看它拒不拒"
+    塞进等 DONE 的循环里，结果那次 START **把上一次的 DONE 作废了**（这正是
+    既有纪律：一次 START 尝试就作废上一次的结果，不管这次是否被接受），
+    于是循环永远等不到 DONE —— 用例自己把自己的判据毁掉了。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
     name = "ML-KEM-512"
-    ctlen = 768
+    d, z = bytes([0x41] * 32), bytes([0x42] * 32)
+    ek_ref, dk_ref = mlkem_keygen(d, z, name)
 
-    r = await run_raw(dut, mode_word(2, name, from_slot=True, slot=1),
-                      bytes(ctlen), limit=5000)
-    assert r is None, "空槽的 Decaps 居然跑起来了"
+    await stage_seed(dut, d + z)
+    out = await run_raw(dut, mode_word(M_KEYGEN, name) | M_SEED_STAGED, b"")
+    assert out is not None and out[:len(ek_ref)] == ek_ref
+    enc = await run_raw(dut, mode_word(M_ENCAPS, name), b"\x55" * 32 + ek_ref)
+    ct = enc[32:]          # K‖ct，见上一条用例的说明
+
+    await stage_seed(dut, d + z)
+    k = await run_raw(dut, mode_word(M_DECAPS, name, chain=True)
+                      | M_SEED_STAGED, ct)
+    assert k is not None and len(k) == 32, "链式 Decaps 没跑通"
+
+    # ---- ① 刚跑完，展开区应当正在擦 ----
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & KS_EXP_WIPING, \
+        "运算刚结束却没有 EXP_WIPING —— 展开区可能根本没擦，dk 会在 PL 里过夜"
+
+    # ---- ② 擦除期间 START 必须被拒（不启动任何核，且点亮 PARAM_ERR）----
+    assert await wr(dut, MODE, mode_word(M_KEYGEN, name)) == RESP_OKAY
+    assert await wr(dut, CTRL, C_START) == RESP_OKAY
     st, _ = await rd(dut, STATUS)
-    assert st & (1 << 5), "空槽应当报 PARAM_ERR"
-    assert not (st & 1), "空槽被拒之后不该还 BUSY"
+    assert not (st & ST_BUSY), \
+        "展开区还在擦，START 却把核启动了 —— 下一次运算会读到半擦的存储"
+    assert st & ST_PARAMERR, \
+        "擦除期间的 START 被**静默**丢弃了 —— 软件会以为它跑起来了"
 
-    # 参数集不匹配：往槽 0 存一个 512 的 dk，再按 768 去用它
-    d, z = bytes([0x51] * 32), bytes([0x52] * 32)
-    out = await run_raw(dut, mode_word(0, name, to_slot=True, slot=0), d + z)
-    assert out is not None
-    r = await run_raw(dut, mode_word(2, "ML-KEM-768", from_slot=True, slot=0),
-                      bytes(1088), limit=5000)
-    assert r is None, "参数集不匹配的槽居然跑起来了"
-    st, _ = await rd(dut, STATUS)
-    assert st & (1 << 5), "参数集不匹配应当报 PARAM_ERR"
+    # ---- ③ 擦完之后展开区一个非零字节都没有 ----
+    await wait_exp_idle(dut)
+    bad, first = _mem_nonzero(dut.u_expand.mem)
+    assert bad == 0, (
+        f"擦除之后展开区还有 {bad} 个字节非零，第一个在 "
+        f"[{first[0]}] = 0x{first[1]:02x} —— 上一次运算的 dk 留在 PL 里过夜了")
+    dut._log.info("展开区每次运算后无条件擦干净，擦除期间 START 被拒且不静默")
 
-    dut._log.info("空槽与参数集不匹配都在 START 处被判掉，没有跑到超时")
+
+@cocotb.test()
+async def test_slot_abi_is_gone(dut):
+    """槽位 ABI 在**寄存器面上**确实没有了（V-05 / V-06）
+
+    判据不是"软件不再用它"，而是**寄存器读回来就是没有**：
+      · MODE 回读里槽号那几位恒 0，写进去也不留；
+      · KEYSTAT 不再有 16 位"哪些槽装了东西"，只剩健康位；
+      · KEYPSET 恒 0。
+
+    为什么值得单独测：只把软件改成不用槽，硬件那条路还在，
+    任何能发 AXI 事务的人照样能用 —— 而那正是这次要消掉的东西。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    # 往原来是 DK_FROM_SLOT / SLOT[9:6] 的位置写满 1
+    assert await wr(dut, MODE, (M_DECAPS & 3) | (PSET["ML-KEM-768"] << 2)
+                    | (1 << 5) | (0xF << 6)) == RESP_OKAY
+    m, _ = await rd(dut, MODE)
+    assert (m >> 5) & 0x1F == 0, \
+        f"MODE 回读 0x{m:08x} —— 槽号/DK_FROM_SLOT 那几位还留着值"
+
+    ks, _ = await rd(dut, KEYSTAT)
+    assert ks & 0xFFFF0000 == 0 and (ks >> 2) == 0, \
+        f"KEYSTAT = 0x{ks:08x} —— 除了健康位还有别的东西"
+    kp, _ = await rd(dut, KEYPSET)
+    assert kp == 0, f"KEYPSET = 0x{kp:08x}，应当恒 0"
+    dut._log.info("槽位 ABI 在寄存器面上确实没有了")
 
 
 # ============================================================================
@@ -1113,9 +1152,11 @@ async def test_seed_lock_is_one_way_and_independent_of_dk_lock(dut):
 
     assert await wr(dut, CTRL, C_SEED_LOCK) == RESP_OKAY
     ks, _ = await rd(dut, KEYSTAT)
-    assert ks & (1 << 17), "SEED_LOCK 没置上"
-    assert not (ks & (1 << 16)), \
-        "SEED_LOCK 顺手把 DK_LOCK 也置上了 —— 两把闩方向相反，不能连动"
+    assert ks & KS_SEED_LOCK, "SEED_LOCK 没置上"
+    # 原来这里还断言 "SEED_LOCK 没顺手把 DK_LOCK 也置上"。DK_LOCK 已随 V-04
+    # 删除，那条断言的对象没有了 —— 换成"KEYSTAT 里除了健康位没有别的"。
+    assert (ks >> 2) == 0, \
+        f"KEYSTAT = 0x{ks:08x} —— 除了 EXP_WIPING/SEED_LOCK 还有别的位"
     ss, _ = await rd(dut, SEED_STAT)
     assert ss & SS_LOCK
 
@@ -1135,7 +1176,7 @@ async def test_seed_lock_is_one_way_and_independent_of_dk_lock(dut):
     assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
     await _wait_wipe(dut)
     ks, _ = await rd(dut, KEYSTAT)
-    assert ks & (1 << 17), "zeroize 把 SEED_LOCK 清掉了 —— 它不该有这个能力"
+    assert ks & KS_SEED_LOCK, "zeroize 把 SEED_LOCK 清掉了 —— 它不该有这个能力"
 
     dut._log.info("SEED_LOCK 一次性生效、zeroize 撤不回、且与 DK_LOCK 互相独立")
 
@@ -1173,21 +1214,22 @@ async def test_zeroize_wipes_staged_seed(dut):
 async def test_mode_reads_back_all_fields(dut):
     """MODE 整字回读（DOC-3）
 
-    原来只回读 mode/pset，DK_TO_SLOT / DK_FROM_SLOT / SLOT 写进去就再也
-    读不回来 —— 驱动没法核对自己写对了没有。
+    原来只回读 mode/pset，别的字段写进去就再也读不回来 —— 驱动没法核对
+    自己写对了没有。批 2 之后 MODE 只剩 OP / PSET / CHAIN / SEED_STAGED，
+    这条用例跟着收窄（槽位那几个字段的"回读"由 test_slot_abi_is_gone 管，
+    判据正好相反：写进去必须**不留**）。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
-    for word in (mode_word(M_DECAPS, "ML-KEM-1024", from_slot=True, slot=13),
-                 mode_word(M_KEYGEN, "ML-KEM-768", to_slot=True, slot=5)
-                 | M_SEED_STAGED,
+    for word in (mode_word(M_DECAPS, "ML-KEM-1024", chain=True),
+                 mode_word(M_KEYGEN, "ML-KEM-768") | M_SEED_STAGED,
                  mode_word(M_ENCAPS, "ML-KEM-512")):
         assert await wr(dut, MODE, word) == RESP_OKAY
         got, _ = await rd(dut, MODE)
         assert got == word, f"MODE 回读 0x{got:03x}，写进去的是 0x{word:03x}"
 
-    dut._log.info("MODE 的 11 个位全部可回读")
+    dut._log.info("MODE 剩下的字段全部可回读")
 
 
 # ============================================================================
@@ -1294,6 +1336,7 @@ async def run_op_packed(dut, mode, name, payload: bytes, limit=400_000):
 
     尾巴（不足 4 字节的那一截）退回逐字节口 —— 这正是要一起测的语义。
     """
+    await wait_exp_idle(dut)
     assert await wr(dut, MODE, mode | (PSET[name] << 2)) == RESP_OKAY
     assert await wr(dut, CTRL, C_IN_RST) == RESP_OKAY
     i = 0
@@ -1432,3 +1475,4 @@ async def test_packed_write_refused_while_wiping(dut):
         f"擦完之后输入缓冲里还有 {bad} 个非零字节，第一个在 "
         f"[{first[0]}] = 0x{first[1]:02x} —— 多半是打包写出机在擦除中途又写了几个")
     dut._log.info("擦除期间 IN_DATA4 被拒，擦完之后缓冲区一个非零字节都没有")
+
