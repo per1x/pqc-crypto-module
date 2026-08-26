@@ -311,7 +311,9 @@ keystore 迁移路径 + 产线密钥保管（Bootgen HSM 模式、XLWPT 需向 A
 
 ### 7.4 落地现实：切主线是多大工程
 
-- **前置死结**：OP-TEE TA **从未上板跑通**（卡在 BL32 入口，§9）。在这解决之前，整条主线是空中楼阁。
+- ~~**前置死结**：OP-TEE TA **从未上板跑通**（卡在 BL32 入口，§9）。在这解决之前，整条主线是空中楼阁。~~
+  **⚠️ 2026-08-26：这条不成立了。** TA 在板上跑通（`board/logs/RESULT_b2_ta_threshold.txt`），
+  批 2 的种子保管也已上移 TA（`RESULT_b2_seed_custody.txt`）。主线不再是空中楼阁。
   第 0 步是让 OP-TEE 真的启动，不是写 TA 逻辑。
 - 现有 `tee/ta/` 是**设计完成、原生（x86）测过、驱动的是软件 liboqs——不驱动 PL**。本路线要的
   "TA 驱动 PL 核经安全 SiP"是**新代码**，不在今天的 TA 里。需要：(a) OP-TEE 启动；(b) 安全世界 PL
@@ -397,7 +399,9 @@ keystore 迁移路径 + 产线密钥保管（Bootgen HSM 模式、XLWPT 需向 A
 
 ## 10. 未决 / 需上板验证（拿不准的，如实标）
 
-- **OP-TEE TA 从未上板跑通**（卡 BL32 入口）——本路线的前置死结。现有 TA 驱动软件 liboqs、不驱动 PL；
+- ~~**OP-TEE TA 从未上板跑通**（卡 BL32 入口）——本路线的前置死结。~~
+  **2026-08-26 已跑通**（见 §9 那条的更新）。另：现有 TA 已改为驱动 vendored
+  mlkem-native/mldsa-native（批 1 去 liboqs），仍不驱动 PL；
   "TA 驱动 PL 经安全 SiP" 是新代码。
 - **HUK = SHA-256(Device DNA)**：仓库内无 OP-TEE 源/补丁可复现，仅散文断言。按"据报告、不可复现"引用。
   **且这是未供给形态的属性，不是硅的属性**——上游 `zynqmp_huk.c` 在 CSU AUTH 位置起时走 CSU AES-GCM +

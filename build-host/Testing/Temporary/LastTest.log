@@ -1,20 +1,1115 @@
-Start testing: Aug 26 00:48 CST
+Start testing: Aug 26 11:31 CST
 ----------------------------------------------------------
-32/56 Testing: shell_var_braces
-32/56 Test: shell_var_braces
+38/55 Testing: p11_demos
+38/55 Test: p11_demos
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/demo_p11.sh" "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/pqchsm-pkcs11.dylib"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"p11_demos" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+== Python (PyKCS11) ==
+  SKIP: 没有 PyKCS11 环境（python3 -m venv .venv-p11 && .venv-p11/bin/pip install PyKCS11）
+
+== Java (JDK FFM) ==
+  ✓ C_Finalize
+
+通过 30，失败 0
+
+demo 全部通过
+<end of output>
+Test time =   0.79 sec
+----------------------------------------------------------
+Test Passed.
+"p11_demos" end time: Aug 26 11:31 CST
+"p11_demos" time elapsed: 00:00:00
+----------------------------------------------------------
+
+40/55 Testing: anchor
+40/55 Test: anchor
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_anchor"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"anchor" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_anchor: 54 断言全部通过
+<end of output>
+Test time =   0.85 sec
+----------------------------------------------------------
+Test Passed.
+"anchor" end time: Aug 26 11:31 CST
+"anchor" time elapsed: 00:00:00
+----------------------------------------------------------
+
+30/55 Testing: tls_regress
+30/55 Test: tls_regress
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/tls_regress.sh"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"tls_regress" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+  ✓ ok
+  ✓ wrongca
+  ✓ nocert
+  ✓ acl
+tls_regress: 四条全过
+<end of output>
+Test time =   0.96 sec
+----------------------------------------------------------
+Test Passed.
+"tls_regress" end time: Aug 26 11:31 CST
+"tls_regress" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/55 Testing: ct_timing
+20/55 Test: ct_timing
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_ct_timing"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"ct_timing" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+    比较长度 4096 字节，每类每轮 20000 次采样，7 轮取中位数，裁掉最慢的 10%
+    反证   leaky_equal（提前退出）     |t| =   1069.0  门限 25
+    被测   pqc_ct_equal                |t| =      0.0  门限 25
+    空对照 两类均随机：leaky |t| =    0.0   ct |t| =    0.0
+test_ct_timing: 12 断言全部通过
+<end of output>
+Test time =   0.24 sec
+----------------------------------------------------------
+Test Passed.
+"ct_timing" end time: Aug 26 11:31 CST
+"ct_timing" time elapsed: 00:00:00
+----------------------------------------------------------
+
+33/55 Testing: cli_smoke
+33/55 Test: cli_smoke
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/cli_smoke.sh" "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"cli_smoke" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+== 命令接口端到端（TCP:30358）==
+  ✓ ping
+  ✓ slots
+  ✓ 槽位数 = 3
+  ✓ 未初始化槽位 info
+  ✓ init-token
+  ✓ 重复 init-token 应失败
+  会话句柄 = 4294967297
+  ✓ 错误 SO PIN 应失败
+  ✓ SO 登录
+  ✓ 设置 User PIN
+  ✓ 登出
+  ✓ 未登录不许生成密钥
+  ✓ User 登录
+  对象句柄 = 1
+  ✓ 取公钥
+  ✓ 签名
+  ✓ 公钥 1952 B（ML-DSA-65）
+  ✓ 签名 3309 B（ML-DSA-65）
+  ✓ 用途互斥：sign 钥不能解封装
+  ✓ info 反映已装载
+    label=mytoken state=LOADED alg=ML-DSA-65 usage=0x4 policy=0x0 use_count=1
+  ✓ 落盘
+  ✓ KEK 轮换
+  ✓ 密钥库文件已生成
+  ✓ 重新签名得到不同签名（hedged 模式）
+  ✓ 两次签名不同（hedged 签名带新鲜随机）
+  ✓ 销毁对象
+  ✓ 销毁后旧句柄失效
+  ✓ 非 SO 不能清零
+  ✓ 关会话
+  ✓ 已关闭的会话不可用
+  ✓ 审计日志已生成（2176 字节）
+  ✓ 审计日志有 22 条记录
+  ✓ 审计链自洽（audit-verify）
+
+通过 31，失败 0
+<end of output>
+Test time =   0.17 sec
+----------------------------------------------------------
+Test Passed.
+"cli_smoke" end time: Aug 26 11:31 CST
+"cli_smoke" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/55 Testing: crypto_concurrent
+13/55 Test: crypto_concurrent
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_crypto_concurrent"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"crypto_concurrent" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_crypto_concurrent: 22 断言全部通过
+<end of output>
+Test time =   0.42 sec
+----------------------------------------------------------
+Test Passed.
+"crypto_concurrent" end time: Aug 26 11:31 CST
+"crypto_concurrent" time elapsed: 00:00:00
+----------------------------------------------------------
+
+32/55 Testing: daemon_failclosed
+32/55 Test: daemon_failclosed
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/daemon_failclosed.sh" "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"daemon_failclosed" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+  ✓ 密钥库不存在时 daemon 正常启动
+  ✓ init-token 之后密钥库已经在盘上（没等到退出才写）
+  ✓ 密钥库损坏时 daemon 拒绝启动（退出码 1）
+  ✓ 拒绝启动之后原文件一字节没改
+  ✓ 日志说清了为什么拒绝
+  ✓ 密钥库读不了时拒绝启动（退出码 1）
+  ✓ 这条路径上文件同样没被改
+daemon_failclosed: 7 通过 / 0 失败
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"daemon_failclosed" end time: Aug 26 11:31 CST
+"daemon_failclosed" time elapsed: 00:00:00
+----------------------------------------------------------
+
+39/55 Testing: p11_smoke
+39/55 Test: p11_smoke
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/p11_smoke.sh" "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/pqchsm-pkcs11.dylib"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"p11_smoke" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+== pqc-hsm PKCS#11 模块 ==
+  ✓ C_GetInfo（--show-info）
+  ✓ C_GetSlotList（--list-slots）
+  ✓ 机制列表
+  ✓ 未初始化时登录应失败
+  ✓ C_InitToken
+  ✓ 错误 SO PIN 应失败
+  ✓ C_InitPIN
+  ✓ 正确 User PIN 登录
+  ✓ 错误 User PIN 应失败
+  ✓ 重复 InitToken 被拒（有意与 SoftHSM 不同）
+  -- token 标志 --
+      token label        : smoke
+      token flags        : login required, rng, token initialized, PIN initialized
+  -- 机制（应当只有 ML-KEM / ML-DSA）--
+      mechtype-0x1C, generate_key_pair
+      ML-DSA, sign, verify
+      mechtype-0xF, generate_key_pair
+      ML-KEM, other flags=0x30000000
+      AES-GCM, keySize={16,32}, encrypt, decrypt
+
+== SoftHSMv2 参考实现（同样的命令序列）==
+  ✓ C_GetInfo
+  ✓ C_GetSlotList
+  ✓ 未初始化时登录应失败
+  ✓ C_InitToken
+  ✓ 错误 SO PIN 应失败
+  ✓ C_InitPIN
+  ✓ 正确 User PIN 登录
+  ✓ 错误 User PIN 应失败
+  注：SoftHSM 允许重复 InitToken，本模块有意拒绝 —— 见脚本顶部说明
+
+通过 18，失败 0
+<end of output>
+Test time =   0.18 sec
+----------------------------------------------------------
+Test Passed.
+"p11_smoke" end time: Aug 26 11:31 CST
+"p11_smoke" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/55 Testing: profile_no_stub_kdr
+14/55 Test: profile_no_stub_kdr
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_profile.sh"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"profile_no_stub_kdr" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+  ✓ DEV 形态里找得到桩根密钥（空对照成立）
+  ✓ PRODUCTION 形态里搜不到桩根密钥
+  ✓ PS-07 闸门在位（PRODUCTION 下拒绝 SEED_STORAGE）
+  ✓ 空对照成立（同一套判据在没有闸门的样本上会报失败）
+check_profile: 通过
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"profile_no_stub_kdr" end time: Aug 26 11:31 CST
+"profile_no_stub_kdr" time elapsed: 00:00:00
+----------------------------------------------------------
+
+27/55 Testing: fuzz
+27/55 Test: fuzz
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/fuzz_standalone" "4000"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"fuzz" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+fuzz（独立驱动）：2 份合法语料，4000 轮
+fuzz 完成：4000 轮，无崩溃
+<end of output>
+Test time =   0.13 sec
+----------------------------------------------------------
+Test Passed.
+"fuzz" end time: Aug 26 11:31 CST
+"fuzz" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/55 Testing: slot_concurrent
+12/55 Test: slot_concurrent
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_slot_concurrent"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"slot_concurrent" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_slot_concurrent: 377 断言全部通过
+<end of output>
+Test time =   0.11 sec
+----------------------------------------------------------
+Test Passed.
+"slot_concurrent" end time: Aug 26 11:31 CST
+"slot_concurrent" time elapsed: 00:00:00
+----------------------------------------------------------
+
+28/55 Testing: ntt_oracle
+28/55 Test: ntt_oracle
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/hardware/model/ntt_oracle.py"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"ntt_oracle" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+NTT 独立预言机
+
+  ✓ 预言机 A：8 组随机多项式，invntt(basemul(ntt(a),ntt(b))) 与 schoolbook 卷积**逐系数相等**
+      （schoolbook 完全不碰 zeta 表 —— 表错一个数、层序错一层，同态就不成立）
+
+  ✓ 预言机 B：用 ref_model.ntt 重建 ML-KEM KeyGen，9 条 NIST ACVP 向量的 ek/dk **逐字节重现**
+      ⇒ ref_model 的 NTT 就是真实 ML-KEM 用的那个 NTT，不只是'某个自洽的 NTT'
+
+两道独立预言机都通过。
+<end of output>
+Test time =   0.12 sec
+----------------------------------------------------------
+Test Passed.
+"ntt_oracle" end time: Aug 26 11:31 CST
+"ntt_oracle" time elapsed: 00:00:00
+----------------------------------------------------------
+
+48/55 Testing: zeroize_check
+48/55 Test: zeroize_check
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_zeroize.py"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"zeroize_check" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+zeroize 结构性检查：63 个源文件，23 个结构体，429 个函数
+
+已覆盖的密钥结构体
+  ✓ p11_secret_t     整体清零 ← secrets_drop_owner
+  ✓ slot_t           5 个密钥字段 ← do_zeroize、slot_wipe_key_material、slot_wipe_pins
+
+豁免（15 条，已审阅并给出理由）
+  service/sdfe_pkenc.c:98  [B 返回路径] SDFE_PKEncrypt() 在 return 时未清零局部密钥缓冲 ss
+      理由：ss 尚未写入（在 encaps 之前）
+  service/sdfe_pkenc.c:147  [B 返回路径] SDFE_PKDecrypt() 在 return 时未清零局部密钥缓冲 ss
+      理由：ss 尚未写入（在 decaps 之前）
+  service/sdfe_pkenc.c:149  [B 返回路径] SDFE_PKDecrypt() 在 return 时未清零局部密钥缓冲 ss
+      理由：ss 尚未写入（在 decaps 之前）
+  service/sdfe_pkenc.c:152  [B 返回路径] SDFE_PKDecrypt() 在 return 时未清零局部密钥缓冲 ss
+      理由：ss 尚未写入（在 decaps 之前）
+  src/audit/audit.c:388  [B 返回路径] audit_verify_file() 的 want 声明为不含密钥材料
+      理由：审计链的哈希覆盖的是非敏感记录，且随文件与锚点一起对外发布
+  src/audit/audit.c:504  [B 返回路径] audit_read() 的 want 声明为不含密钥材料
+      理由：审计链的哈希覆盖的是非敏感记录，且随文件与锚点一起对外发布
+  src/hal/sdfe_conn.c:34  [B 返回路径] sdfe_conn_get() 的 cred_key 声明为不含密钥材料
+      理由：这三个是**文件路径**（.../client.key 这种字符串），
+  src/p11/p11_module.c:152  [A 结构体覆盖] p11_aead_ctx 持有密钥材料，但找不到销毁函数
+      理由：本结构体不含密钥材料。key 是对象句柄（SECRET_BIT|序号），
+  src/p11/p11_module.c:175  [A 结构体覆盖] p11_session_t.sign_key 声明为不含密钥材料
+      理由：这两个是对象句柄（槽位号 + 代数），密钥材料始终留在槽位里
+  src/p11/p11_module.c:175  [A 结构体覆盖] p11_session_t.verify_key 声明为不含密钥材料
+      理由：这两个是对象句柄（槽位号 + 代数），密钥材料始终留在槽位里
+  src/slot/meta.c:89  [B 返回路径] slot_meta_verify() 的 want 声明为不含密钥材料
+      理由：want 是重算出来的元数据标签，与 slot_t.meta_tag 一同落盘，是公开值
+  src/slot/slot_internal.h:31  [A 结构体覆盖] slot_t.meta_tag 声明为不含密钥材料
+      理由：meta_tag 是覆盖非敏感元数据的 KMAC 标签，随密钥库一同落盘
+  src/store/keystore.c:221  [B 返回路径] keystore_save_impl() 的 tag 声明为不含密钥材料
+      理由：tag 是随文件一起落盘的全文件 MAC，本身就是公开值
+  src/store/keystore.c:367  [B 返回路径] hsm_keystore_load() 的 want 声明为不含密钥材料
+      理由：want 是重算出来的全文件 MAC，与文件尾那份逐字节相同，是公开值
+  src/util/selftest.c:196  [B 返回路径] st_aes_gcm() 在 return 时未清零局部密钥缓冲 tag
+      理由：密钥、IV、明文、密文与标签全部来自公开的 GCM 测试用例，
+
+✓ 密钥结构体的销毁路径与局部缓冲的返回路径均已覆盖（豁免 15 条）
+<end of output>
+Test time =   0.11 sec
+----------------------------------------------------------
+Test Passed.
+"zeroize_check" end time: Aug 26 11:31 CST
+"zeroize_check" time elapsed: 00:00:00
+----------------------------------------------------------
+
+46/55 Testing: ct_audit
+46/55 Test: ct_audit
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/ct_audit.py"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"ct_audit" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+常量时间审计：扫描 41 个源文件，规则 R1 比较 / R2 分支 / R3 下标 / R4 除法
+
+白名单（1 条，已审阅并给出理由）
+  src/proto/proto.c:95  [R2 分支] if 的判据依赖秘密数据 tag
+      理由：判据是公开的协议标签，与任何密钥材料无关
+
+✓ 未发现未标注的可疑点（白名单 1 条）
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"ct_audit" end time: Aug 26 11:31 CST
+"ct_audit" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/55 Testing: pqc_roundtrip
+6/55 Test: pqc_roundtrip
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_pqc_roundtrip"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"pqc_roundtrip" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_pqc_roundtrip: 124 断言全部通过
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"pqc_roundtrip" end time: Aug 26 11:31 CST
+"pqc_roundtrip" time elapsed: 00:00:00
+----------------------------------------------------------
+
+31/55 Testing: shell_var_braces
+31/55 Test: shell_var_braces
 Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_shell_vars.py"
 Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
-"shell_var_braces" start time: Aug 26 00:48 CST
+"shell_var_braces" start time: Aug 26 11:31 CST
 Output:
 ----------------------------------------------------------
   ✓ 自测通过（能抓、不误报）
-  ✓ 没有 $VAR 紧跟多字节字符的写法（扫了 135 个文件）
+  ✓ 没有 $VAR 紧跟多字节字符的写法（扫了 138 个文件）
 <end of output>
-Test time =   0.10 sec
+Test time =   0.07 sec
 ----------------------------------------------------------
 Test Passed.
-"shell_var_braces" end time: Aug 26 00:48 CST
+"shell_var_braces" end time: Aug 26 11:31 CST
 "shell_var_braces" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Aug 26 00:48 CST
+45/55 Testing: ct_audit_self_test
+45/55 Test: ct_audit_self_test
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/ct_audit.py" "--self-test"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"ct_audit_self_test" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+常量时间审计规则自检
+  R1 正样本被抓到：是
+  R2 正样本被抓到：是
+  R3 正样本被抓到：是
+  R4 正样本被抓到：是
+  标注后剩余未标注条目：0（应为 0）
+  常量时间写法上的误报：0（应为 0）
+
+✓ 四条规则均有区分能力，白名单标记生效，常量时间写法不误报
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"ct_audit_self_test" end time: Aug 26 11:31 CST
+"ct_audit_self_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/55 Testing: pqc_hw
+7/55 Test: pqc_hw
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_pqc_hw"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"pqc_hw" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_pqc_hw: 52 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"pqc_hw" end time: Aug 26 11:31 CST
+"pqc_hw" time elapsed: 00:00:00
+----------------------------------------------------------
+
+29/55 Testing: prim_count
+29/55 Test: prim_count
+Command: "/usr/bin/python3" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/prim_count.py" "--self-test"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"prim_count" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+  ✓ IncrementalShake 与 hashlib 逐字节一致（4 块 = 672 B）
+  ✓ KeyGen 置换计数 43 与手推解析式相符（1+9+6+27，两条独立推导）
+  ✓ KeyGen NTT 计数 6（ŝ 与 ê 各 k 次）
+  ✓ 反证：换 rate 输出必然不同（断言有效）
+自检通过。
+<end of output>
+Test time =   0.08 sec
+----------------------------------------------------------
+Test Passed.
+"prim_count" end time: Aug 26 11:31 CST
+"prim_count" time elapsed: 00:00:00
+----------------------------------------------------------
+
+54/55 Testing: kat_mldsa_siggen
+54/55 Test: kat_mldsa_siggen
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/kat_runner" "/Volumes/Work/projects/code/pqc-hsm-fpga/vectors/mldsa_siggen.kat"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kat_mldsa_siggen" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+后端: pqc-native(mlkem-native/mldsa-native)
+== mldsa_siggen.kat
+  # SKIPPED: ML-DSA-44 preHash=preHash —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-65 preHash=preHash —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-87 preHash=preHash —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-44 signatureInterface=internal —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-65 signatureInterface=internal —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-87 signatureInterface=internal —— liboqs 后端未暴露该接口
+   pass=90 fail=0 skip=0
+总计: pass=90 fail=0 skip=0
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"kat_mldsa_siggen" end time: Aug 26 11:31 CST
+"kat_mldsa_siggen" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/55 Testing: selftest
+3/55 Test: selftest
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_selftest"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"selftest" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_selftest: 41 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"selftest" end time: Aug 26 11:31 CST
+"selftest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+47/55 Testing: zeroize_check_self_test
+47/55 Test: zeroize_check_self_test
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_zeroize.py" "--self-test"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"zeroize_check_self_test" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+zeroize 检查规则自检
+  检查 A（漏清结构体字段）被抓到：是
+  检查 B（提前 return 未清零）被抓到：是
+  补齐清零后的误报：0（应为 0）
+  标注后剩余未标注条目：0（应为 0）
+
+✓ 两条检查均有区分能力，豁免标记生效，清零到位的写法不误报
+<end of output>
+Test time =   0.04 sec
+----------------------------------------------------------
+Test Passed.
+"zeroize_check_self_test" end time: Aug 26 11:31 CST
+"zeroize_check_self_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/55 Testing: keystore
+16/55 Test: keystore
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_keystore"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"keystore" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_keystore: 131 断言全部通过
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"keystore" end time: Aug 26 11:31 CST
+"keystore" time elapsed: 00:00:00
+----------------------------------------------------------
+
+26/55 Testing: p11
+26/55 Test: p11
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_p11"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"p11" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_p11: 300 断言全部通过
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"p11" end time: Aug 26 11:31 CST
+"p11" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/55 Testing: kdf
+8/55 Test: kdf
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_kdf"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kdf" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_kdf: 55 断言全部通过
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"kdf" end time: Aug 26 11:31 CST
+"kdf" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/55 Testing: pqc_meta
+5/55 Test: pqc_meta
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_pqc_meta"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"pqc_meta" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_pqc_meta: 83 断言全部通过
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"pqc_meta" end time: Aug 26 11:31 CST
+"pqc_meta" time elapsed: 00:00:00
+----------------------------------------------------------
+
+35/55 Testing: accel_axi
+35/55 Test: accel_axi
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_accel_axi"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"accel_axi" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_accel_axi: 296 断言全部通过
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"accel_axi" end time: Aug 26 11:31 CST
+"accel_axi" time elapsed: 00:00:00
+----------------------------------------------------------
+
+53/55 Testing: kat_mldsa_keygen
+53/55 Test: kat_mldsa_keygen
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/kat_runner" "/Volumes/Work/projects/code/pqc-hsm-fpga/vectors/mldsa_keygen.kat"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kat_mldsa_keygen" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+后端: pqc-native(mlkem-native/mldsa-native)
+== mldsa_keygen.kat
+   pass=75 fail=0 skip=0
+总计: pass=75 fail=0 skip=0
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"kat_mldsa_keygen" end time: Aug 26 11:31 CST
+"kat_mldsa_keygen" time elapsed: 00:00:00
+----------------------------------------------------------
+
+43/55 Testing: ta_surface
+43/55 Test: ta_surface
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_ta_surface.py"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"ta_surface" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+  ✓ 自测通过（能抓、不误报）
+  ✓ TA 对外面：三条谕言机命令仍是删掉的，会话不接受匿名登录
+check_ta_surface: 通过
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"ta_surface" end time: Aug 26 11:31 CST
+"ta_surface" time elapsed: 00:00:00
+----------------------------------------------------------
+
+55/55 Testing: kat_mldsa_sigver
+55/55 Test: kat_mldsa_sigver
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/kat_runner" "/Volumes/Work/projects/code/pqc-hsm-fpga/vectors/mldsa_sigver.kat"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kat_mldsa_sigver" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+后端: pqc-native(mlkem-native/mldsa-native)
+== mldsa_sigver.kat
+  # SKIPPED: ML-DSA-44 preHash=preHash —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-65 preHash=preHash —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-87 preHash=preHash —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-44 signatureInterface=internal —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-65 signatureInterface=internal —— liboqs 后端未暴露该接口
+  # SKIPPED: ML-DSA-87 signatureInterface=internal —— liboqs 后端未暴露该接口
+   pass=45 fail=0 skip=0
+总计: pass=45 fail=0 skip=0
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"kat_mldsa_sigver" end time: Aug 26 11:31 CST
+"kat_mldsa_sigver" time elapsed: 00:00:00
+----------------------------------------------------------
+
+37/55 Testing: e2e_p11
+37/55 Test: e2e_p11
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/e2e_p11.sh" "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/pqchsm-pkcs11.dylib"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"e2e_p11" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+SKIP: 没有 PyKCS11 环境
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"e2e_p11" end time: Aug 26 11:31 CST
+"e2e_p11" time elapsed: 00:00:00
+----------------------------------------------------------
+
+44/55 Testing: kdr_no_readback
+44/55 Test: kdr_no_readback
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_no_readback.py" "/Volumes/Work/projects/code/pqc-hsm-fpga/include/pqchsm/kdr.h"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kdr_no_readback" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+✓ kdr.h: 无根密钥读出接口，派生接口存在
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"kdr_no_readback" end time: Aug 26 11:31 CST
+"kdr_no_readback" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/55 Testing: slot_meta
+10/55 Test: slot_meta
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_slot_meta"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"slot_meta" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_slot_meta: 31 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"slot_meta" end time: Aug 26 11:31 CST
+"slot_meta" time elapsed: 00:00:00
+----------------------------------------------------------
+
+42/55 Testing: ta_surface_self_test
+42/55 Test: ta_surface_self_test
+Command: "/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14" "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/check_ta_surface.py" "--self-test"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"ta_surface_self_test" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+  ✓ 自测通过（能抓、不误报）
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"ta_surface_self_test" end time: Aug 26 11:31 CST
+"ta_surface_self_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/55 Testing: backup
+18/55 Test: backup
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_backup"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"backup" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_backup: 65 断言全部通过
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"backup" end time: Aug 26 11:31 CST
+"backup" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/55 Testing: slot_fsm
+9/55 Test: slot_fsm
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_slot_fsm"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"slot_fsm" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_slot_fsm: 94 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"slot_fsm" end time: Aug 26 11:31 CST
+"slot_fsm" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/55 Testing: slot
+11/55 Test: slot
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_slot"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"slot" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_slot: 196 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"slot" end time: Aug 26 11:31 CST
+"slot" time elapsed: 00:00:00
+----------------------------------------------------------
+
+51/55 Testing: kat_mlkem_encaps
+51/55 Test: kat_mlkem_encaps
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/kat_runner" "/Volumes/Work/projects/code/pqc-hsm-fpga/vectors/mlkem_encaps.kat"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kat_mlkem_encaps" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+后端: pqc-native(mlkem-native/mldsa-native)
+== mlkem_encaps.kat
+   pass=75 fail=0 skip=0
+总计: pass=75 fail=0 skip=0
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"kat_mlkem_encaps" end time: Aug 26 11:31 CST
+"kat_mlkem_encaps" time elapsed: 00:00:00
+----------------------------------------------------------
+
+50/55 Testing: kat_mlkem_keygen
+50/55 Test: kat_mlkem_keygen
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/kat_runner" "/Volumes/Work/projects/code/pqc-hsm-fpga/vectors/mlkem_keygen.kat"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kat_mlkem_keygen" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+后端: pqc-native(mlkem-native/mldsa-native)
+== mlkem_keygen.kat
+   pass=75 fail=0 skip=0
+总计: pass=75 fail=0 skip=0
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"kat_mlkem_keygen" end time: Aug 26 11:31 CST
+"kat_mlkem_keygen" time elapsed: 00:00:00
+----------------------------------------------------------
+
+21/55 Testing: audit
+21/55 Test: audit
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_audit"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"audit" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_audit: 177 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"audit" end time: Aug 26 11:31 CST
+"audit" time elapsed: 00:00:00
+----------------------------------------------------------
+
+36/55 Testing: e2e
+36/55 Test: e2e
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_e2e"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"e2e" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_e2e: 67 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"e2e" end time: Aug 26 11:31 CST
+"e2e" time elapsed: 00:00:00
+----------------------------------------------------------
+
+34/55 Testing: accel
+34/55 Test: accel
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_accel"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"accel" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+      Verilator transport 可用：verilator(RTL ntt_core + keccak_f1600; 仅 NTT/Keccak 模式)
+    [stub] ★ 全零态置换 == Keccak 官方公开向量
+    [stub] ★ SHA3/SHAKE（经 accel_shake，置换走该 transport）== OpenSSL
+    [RTL] ★ 全零态置换 == Keccak 官方公开向量
+    [RTL] ★ SHA3/SHAKE（经 accel_shake，置换走该 transport）== OpenSSL
+test_accel: 791 断言全部通过
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"accel" end time: Aug 26 11:31 CST
+"accel" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/55 Testing: inject
+24/55 Test: inject
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_inject"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"inject" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_inject: 77 断言全部通过
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"inject" end time: Aug 26 11:31 CST
+"inject" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/55 Testing: hwrng
+2/55 Test: hwrng
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_hwrng"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"hwrng" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+hwrng: 47 断言全部通过
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"hwrng" end time: Aug 26 11:31 CST
+"hwrng" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/55 Testing: zeroize
+19/55 Test: zeroize
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_zeroize"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"zeroize" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+    观察：普通 memset 那条清零被编译器消除了（栈上仍能找到哨兵）
+    分配器在释放时即清除块内容，观察手段无分辨力，跳过释放后残留观察
+test_zeroize: 108 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"zeroize" end time: Aug 26 11:31 CST
+"zeroize" time elapsed: 00:00:00
+----------------------------------------------------------
+
+52/55 Testing: kat_mlkem_decaps
+52/55 Test: kat_mlkem_decaps
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/kat_runner" "/Volumes/Work/projects/code/pqc-hsm-fpga/vectors/mlkem_decaps.kat"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kat_mlkem_decaps" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+后端: pqc-native(mlkem-native/mldsa-native)
+== mlkem_decaps.kat
+   pass=30 fail=0 skip=0
+总计: pass=30 fail=0 skip=0
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"kat_mlkem_decaps" end time: Aug 26 11:31 CST
+"kat_mlkem_decaps" time elapsed: 00:00:00
+----------------------------------------------------------
+
+1/55 Testing: util
+1/55 Test: util
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_util"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"util" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_util: 21 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"util" end time: Aug 26 11:31 CST
+"util" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/55 Testing: kdr
+22/55 Test: kdr
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_kdr"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kdr" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_kdr: 78 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"kdr" end time: Aug 26 11:31 CST
+"kdr" time elapsed: 00:00:00
+----------------------------------------------------------
+
+49/55 Testing: audit_integration
+49/55 Test: audit_integration
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_audit_integration"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"audit_integration" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_audit_integration: 49 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"audit_integration" end time: Aug 26 11:31 CST
+"audit_integration" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/55 Testing: wrap
+15/55 Test: wrap
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_wrap"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"wrap" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_wrap: 330 断言全部通过
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"wrap" end time: Aug 26 11:31 CST
+"wrap" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/55 Testing: kat_parse
+4/55 Test: kat_parse
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_kat_parse"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"kat_parse" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_kat_parse: 22 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"kat_parse" end time: Aug 26 11:31 CST
+"kat_parse" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/55 Testing: shamir
+17/55 Test: shamir
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_shamir"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"shamir" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_shamir: 846 断言全部通过
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"shamir" end time: Aug 26 11:31 CST
+"shamir" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/55 Testing: proto
+23/55 Test: proto
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_proto"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"proto" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_proto: 106 断言全部通过
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"proto" end time: Aug 26 11:31 CST
+"proto" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/55 Testing: cross_world
+25/55 Test: cross_world
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/test_cross_world"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"cross_world" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+test_cross_world: 48 断言全部通过
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"cross_world" end time: Aug 26 11:31 CST
+"cross_world" time elapsed: 00:00:00
+----------------------------------------------------------
+
+41/55 Testing: tee_native
+41/55 Test: tee_native
+Command: "/Volumes/Work/projects/code/pqc-hsm-fpga/tools/tee_native_tests.sh"
+Directory: /Volumes/Work/projects/code/pqc-hsm-fpga/build-host
+"tee_native" start time: Aug 26 11:31 CST
+Output:
+----------------------------------------------------------
+ok   sha3_256("")
+ok   sha3_256(abc)
+ok   sha3_512(abc)
+ok   shake128("")[0:32]
+ok   shake256("")64
+ok   incremental absorb/squeeze
+ok   squeezeblocks multi-block
+ok   kmac kat1 (no data, no custom)
+ok   kmac kat2 (data+custom)
+ok   kmac kat3 (SP800-185 sample1 shape)
+ok   kmac kat4 (custom, out=64)
+ok   kdf kat5 (storage-kek)
+ok   kdf label separation
+ok   kdf empty label rejected
+ok   kmac256 vs OpenSSL (200 iters)
+ok   wrap roundtrip
+ok   wrap tampered tag rejected+zeroed
+ok   wrap wrong aad rejected (rc=-2)
+ok   wrap empty pt
+ok   kem alg=1 roundtrip+determinism
+ok   kem alg=2 roundtrip+determinism
+ok   kem alg=3 roundtrip+determinism
+ok   sig alg=4 sign/verify+reject
+ok   sig alg=5 sign/verify+reject
+ok   sig alg=6 sign/verify+reject
+
+ALL PASS
+<end of output>
+Test time =   2.94 sec
+----------------------------------------------------------
+Test Passed.
+"tee_native" end time: Aug 26 11:31 CST
+"tee_native" time elapsed: 00:00:02
+----------------------------------------------------------
+
+End testing: Aug 26 11:31 CST

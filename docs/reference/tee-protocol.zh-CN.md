@@ -142,7 +142,10 @@ cd tee/tests && cc -O2 -I../ta -I../ta/config -I../include \
 - **liboqs 0.16 互操作（最接近 KAT 的验证）**：ML-KEM 三参数集同种子
   keypair 与 liboqs **逐字节相同**，双向 encaps/decaps 互通；ML-DSA 三
   参数集双向 sign/verify（含 ctx）互通。15/15 全过。
-- 尚未做：TA 上板实测（依赖 P4 OP-TEE 镜像启动，当前卡在 BL32 入口，
+- ~~尚未做：TA 上板实测~~ **已做（2026-08-26）**：TA 在板上跑通，见
+  `board/logs/RESULT_b2_ta_threshold.txt`（会话+GET_INFO）与
+  `RESULT_b2_ta_keyops.txt`（KeyGen/Sign/Decaps 端到端）。以下原文保留：
+- ~~尚未做：TA 上板实测（依赖 P4 OP-TEE 镜像启动，当前卡在 BL32 入口，
   见进展报告）；堆叠 TA 栈用量实测（ML-DSA-87 签名栈峰值的真机确认，
   预留了 512KB）。
 
