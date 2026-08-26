@@ -199,6 +199,30 @@ if [ -f "$D/secmmio.ko" ]; then
     fi
 fi
 
+# ---- 批 2：把 TA 放到 OP-TEE 找得到的地方 ----
+# ⚠️ **/lib 是 initramfs，重启就没了。** TA 的持久副本在 SD 上（$D/*.ta），
+#    这里每次开机复制过去。漏掉这一步的症状很干脆：daemon 自检时
+#    "TA 那条种子路不通"，然后 fail-closed 不启动 —— 而板子其余部分完全正常，
+#    很容易误以为是 OP-TEE 或 BL31 的问题。
+# ⚠️ 备份一律存成 *.ta.bak：OP-TEE 按**文件名**查 TA，备份名放进去永远
+#    加载不到，却会出现在下面那行日志里，让人以为板上有两个可用的 TA。
+if ls $D/*.ta >/dev/null 2>&1; then
+    mkdir -p /lib/optee_armtz
+    cp -f $D/*.ta /lib/optee_armtz/ 2>/dev/null
+    say "TA 已就位：$(ls /lib/optee_armtz/ | tr '\n' ' ')"
+    st "TA=ok"
+else
+    say "!!! SD 上没有 .ta —— 批 2 的种子路会不通，daemon 会拒绝启动"
+    st "TA=missing"
+fi
+# tee-supplicant 由 rootfs 自带、开机已起；不在时补一次（TA 要经它从
+# 普通世界文件系统取出来）
+if ! ps | grep -q "[t]ee-supplicant"; then
+    setsid /usr/sbin/tee-supplicant >/dev/null 2>&1 &
+    sleep 1
+    say "tee-supplicant 补起了一个"
+fi
+
 if [ -x "$D/pqchsm_fpgad" ]; then
     # -lock：启动就把私钥外泄闩锁置上，ML-KEM 的 dk 在**硬件里**再也送不出
     # 总线。这是交付/演示形态该有的姿态。
@@ -207,12 +231,12 @@ if [ -x "$D/pqchsm_fpgad" ]; then
     #    需要核对 dk。所以跑那套 KAT 之前要先重启（或重装位流）并且不带 -lock。
     # ⚠️⚠️ **批 1 之后这个 daemon 有两个新的前置，上板前先确认，别在板上现查。**
     #
-    #  ① **BOOT.BIN 里的 BL31 必须带种子 SiP**（0x8200ff14，
-    #     boot/atf/patch_atf_secmmio.py）。KeyGen 现在的种子由 EL3 生成并
-    #     直接写进 PL —— 旧 BL31 上这条 SMC 是未知的，ATF 回 SMC_UNK，
-    #     症状是"daemon 起来了、ping 通了、一做 KeyGen 就 HARDFAIL"。
-    #     daemon 启动时会探一次内核模块认不认这个 ioctl，但**服务本身在不在
-    #     要到第一次 KeyGen 才确证**（非法目标被拒与服务不存在回的都是 EIO）。
+    #  ① **BOOT.BIN 必须是批 2 那一版**：BL31 带 PQC_SEED_WORD（0x8200ff15）
+    #     且 PQCHSM_SEED_NS_ALLOWED=0，BL32 带 pqchsm_seed.pta。
+    #     批 2 起种子由 **TA 生成**、经 PTA(S-EL1) 与那条只认安全世界的 SMC
+    #     送进 PL —— 普通世界连"触发"都没有了。
+    #     daemon 启动时**两面都验**：普通世界那条必须被拒（成功反而是故障，
+    #     说明装的是批 1 的 BL31），TA 那条必须通。两条都在日志里。
     #  ② **位流必须是带种子暂存口的那一版**（mlkem_axi 0x38 / mldsa_axi 0x34）。
     #     旧位流上那个偏移不存在，写进去石沉大海，KeyGen 会因为
     #     SEED_ERR 被拒 —— 这一条倒是吵的，STATUS 上看得见。

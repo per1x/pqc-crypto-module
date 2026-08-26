@@ -135,6 +135,39 @@ def main():
     else:
         print("  ✓ 种子服务查了调用方世界（SCR_EL3.NS）")
 
+    # ---- 批 2：EL3 退成纯通路 ----
+    # 这两条都是**语义**判据，编得过证明不了它们，所以单独钉住。
+    src_all = defs + cases
+    if not re.search(r"#define\s+PQCHSM_SEED_NS_ALLOWED\s+0\b", src_all):
+        print("  ✗ PQCHSM_SEED_NS_ALLOWED 不是 0 —— 普通世界仍能触发种子装载")
+        print("    批 1 放行它是过渡（那时安全世界还没有客户端）；批 2 起必须关。")
+        fail = 1
+    else:
+        print("  ✓ PQCHSM_SEED_NS_ALLOWED = 0（普通世界不再能触发种子装载）")
+
+    mw = re.search(r"case ZYNQMP_SIP_SVC_PQC_SEED_WORD: \{.*?\n\t\}", cases, re.S)
+    if not mw:
+        print("  ✗ 找不到 PQC_SEED_WORD 那条服务（EL3 的纯通路口）")
+        fail = 1
+    else:
+        # 补丁脚本里这些是**字面量** \t / \n（它在生成 C 源码），
+        # 先还原成真正的空白再匹配，否则正则永远对不上。
+        body = mw.group(0).replace("\\t", "\t").replace("\\n", "\n")
+        # 判据不是"提到了 is_caller_secure"，而是"**无条件**在最前面拒非安全"。
+        # 这条路上流的是种子明文，一个过渡开关都不该有。
+        if not re.search(r"if \(!is_caller_secure\(flags\)\)\s*\{\s*"
+                         r"SMC_RET2\(handle,\s*\(uint64_t\)PQCHSM_SEED_EWORLD",
+                         body):
+            print("  ✗ PQC_SEED_WORD 没有**无条件**拒掉非安全调用方")
+            print("    它与 PQC_SEED 不同：那条有 NS_ALLOWED 过渡开关，")
+            print("    而这条路上流的是种子明文，放行普通世界=CODE-1 原样搬回来。")
+            fail = 1
+        elif "PQCHSM_SEED_NS_ALLOWED" in body:
+            print("  ✗ PQC_SEED_WORD 里出现了 NS_ALLOWED —— 它不该有过渡开关")
+            fail = 1
+        else:
+            print("  ✓ PQC_SEED_WORD 无条件只认安全世界，且没有过渡开关")
+
     # 空对照：同一套判据对着一个**没有**排除的样本必须报失败
     ctrl = defs.replace("if ((a == PQCHSM_MLKEM_SEED_DATA) || "
                         "(a == PQCHSM_MLDSA_SEED_DATA))", "if (0)")

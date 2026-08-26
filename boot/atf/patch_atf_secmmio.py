@@ -149,10 +149,23 @@ DEFS = BEG + '''
  * 返回 x1 = 调用方世界，好让普通世界侧**如实记录**"我是从非安全世界调的"。
  */
 #define ZYNQMP_SIP_SVC_PQC_SEED\t\t0x8200ff14
+/* 批 2：**EL3 退成纯通路**。种子不再由 EL3 自己取熵，而是由 OP-TEE 的 TA
+ * 生成、经 PTA（S-EL1）逐字送进来。这条服务只做一件事：把一个 32 位字写进
+ * PL 的种子暂存口 —— 它自己不产生、不保存、不回读任何种子。
+ *
+ * x1 = 目标（0 = ML-KEM，1 = ML-DSA），x2 = 那个字。
+ *
+ * ⚠️ **只认安全世界调用方，没有开关**（与 PQC_SEED 那条不同：那条有
+ *    PQCHSM_SEED_NS_ALLOWED，是批 1 的过渡）。理由：这条路上流的是**种子明文**，
+ *    放行普通世界等于把 CODE-1 原样搬回来。 */
+#define ZYNQMP_SIP_SVC_PQC_SEED_WORD\t0x8200ff15
 
 /* 批 1：安全世界还没有客户端，先放行普通世界（只回返回码，不回种子）。
  * 批 2/3：改成 0，非安全调用者一律拒。**改这一行就是那道闸门**。 */
-#define PQCHSM_SEED_NS_ALLOWED\t\t1
+/* 批 2 起改成 0：安全世界已经有客户端了（OP-TEE TA 上板跑通，见
+ * board/logs/RESULT_b2_ta_threshold.txt），普通世界不再需要这条路。
+ * 改成 0 之后 daemon 直接发 SECMMIO_SEED 会被 EL3 拒掉 —— 那正是判据。 */
+#define PQCHSM_SEED_NS_ALLOWED\t\t0
 
 /* 目标选择 */
 #define PQCHSM_SEED_TGT_MLKEM\t\t0U
@@ -162,6 +175,7 @@ DEFS = BEG + '''
 #define PQCHSM_SEED_EBADTGT\t\t2U
 #define PQCHSM_SEED_EWORLD\t\t3U
 #define PQCHSM_SEED_ETRNG\t\t4U
+#define PQCHSM_SEED_EFULL\t\t5U
 #define PQCHSM_SEED_EVERIFY\t\t5U
 
 /* PL 寄存器（与 RTL 一一对应，改 RTL 要同时改这里）。
@@ -416,6 +430,42 @@ CASES = '\t' + BEG + '''
 \t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_ETRNG, caller_secure);
 \t\t}
 \t\tSMC_RET2(handle, (uint64_t)0, caller_secure);
+\t}
+
+\tcase ZYNQMP_SIP_SVC_PQC_SEED_WORD: {
+\t\tuint64_t dreg, sreg;
+\t\tuint32_t cap, cnt;
+
+\t\t/* ⚠️ **无条件只认安全世界**，没有过渡开关。这条路上流的是种子
+\t\t * 明文；放行普通世界等于把 CODE-1 原样搬回来（见常量处说明）。 */
+\t\tif (!is_caller_secure(flags)) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EWORLD, (uint64_t)0);
+\t\t}
+
+\t\tif ((uint32_t)x1 == PQCHSM_SEED_TGT_MLKEM) {
+\t\t\tdreg = PQCHSM_MLKEM_SEED_DATA;
+\t\t\tsreg = PQCHSM_MLKEM_SEED_STAT;
+\t\t\tcap  = 16U;
+\t\t} else if ((uint32_t)x1 == PQCHSM_SEED_TGT_MLDSA) {
+\t\t\tdreg = PQCHSM_MLDSA_SEED_DATA;
+\t\t\tsreg = PQCHSM_MLDSA_SEED_STAT;
+\t\t\tcap  = 8U;
+\t\t} else {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EBADTGT, (uint64_t)1);
+\t\t}
+
+\t\t/* 收满了当场拒，别指望 PL 那侧的 SEED_OVF —— 那是个只该在 bug 时
+\t\t * 亮的锁存位，不是给正常流程用的回执。 */
+\t\tcnt = mmio_read_32((uintptr_t)sreg) & 0x1FU;
+\t\tif (cnt >= cap) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EFULL, (uint64_t)1);
+\t\t}
+
+\t\tmmio_write_32((uintptr_t)dreg, (uint32_t)x2);
+\t\t/* 回去的是**写完之后的字计数**，不是种子。调用方据此核对进度，
+\t\t * 这个数字本身不泄漏任何种子字节。 */
+\t\tSMC_RET2(handle, (uint64_t)0,
+\t\t\t (uint64_t)(mmio_read_32((uintptr_t)sreg) & 0x1FU));
 \t}
 ''' + '\t' + END
 

@@ -123,6 +123,30 @@
  */
 #define TA_PQCHSM_CMD_SIGN            8
 
+/*
+ * CMD_SEED_TO_PL：**批 2 的落点** —— 把 PL 密码核这一次运算要用的种子，
+ * 由 TA 自己生成、经安全世界送进 PL 的暂存口。
+ *
+ *   params[0].value.a = 目标（0 = ML-KEM 的 d‖z，1 = ML-DSA 的 ξ）
+ *   params[0].value.b = 出参：实际送进去的字数（16 或 8）
+ *
+ * ⚠️ **这条命令不收、也不回任何种子字节。** 参数里根本没有能放种子的字段，
+ *    这是有意的：接口形状本身就该说明「这条路上不流通密钥材料」。
+ *
+ * 路径：TA(S-EL0) → pqchsm_seed.pta(S-EL1) → SMC 0x8200ff15 → EL3 → PL。
+ * 中间没有任何一段经过普通世界。EL3 那一侧无条件只认安全世界事务，
+ * PL 那一侧只认 AxPROT[1]=0 —— 两道门各自成立、不互相依赖。
+ *
+ * 与批 1 的 CMD 编号 0x8200ff14（EL3 自己取熵）的关系：那条还在，但
+ * PQCHSM_SEED_NS_ALLOWED 已经改成 0，普通世界再也触发不了它。
+ * 批 1 那条现在只是「安全世界的另一种取熵方式」，保管方是同一个。
+ */
+#define TA_PQCHSM_CMD_SEED_TO_PL      9
+
+/* 种子目标，与 EL3 的 PQCHSM_SEED_TGT_* 同值 */
+#define TA_SEED_TGT_MLKEM   0U
+#define TA_SEED_TGT_MLDSA   1U
+
 /* 单条命令各 memref 的尺寸上限（host 与 TA 共同遵守） */
 #define TA_PQCHSM_MAX_LABEL    64
 #define TA_PQCHSM_MAX_SALT     64

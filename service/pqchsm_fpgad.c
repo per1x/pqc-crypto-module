@@ -65,6 +65,8 @@
 #include "wire.h"
 #include "pqcs_tls.h"
 #include "../board/kmod/secmmio_uapi.h"
+#include <tee_client_api.h>
+#include "../tee/include/pqchsm_ta_proto.h"
 
 /* 种子装载的目标编号 —— 与 BL31 的 PQCHSM_SEED_TGT_* 一一对应。
  * 三处（BL31 / 本文件 / uapi 注释）必须一致，对不上的症状是
@@ -153,6 +155,7 @@
 #define MKC_INRST 4u
 #define MKC_DKLOCK 0x10u                 /* CTRL[4]：一次性闩锁 */
 #define MKC_ZEROIZE 2u                   /* CTRL[1]：擦金库（见 mlkem_axi.v A_CTRL） */
+#define MKC_SEEDCLR 0x40u                /* CTRL[6]：作废暂存的那份种子 */
 #define MK_KEYSTAT (S_MLKEM + 0x30)
 #define MK_KEYPSET (S_MLKEM + 0x34)
 /* MODE 里控制片内私钥金库的三个字段 */
@@ -349,15 +352,75 @@ static int hw_rd_abs(uint32_t addr, uint32_t *v)
  * 是什么形态，日志里要看得出来，而不是靠读文档推断。
  * 批 2 编排上移 TA 之后这一位会变成 1，那时这行日志就是它真的上移了的证据。
  */
+/* ============================================================================
+ * 【批 2：编排上移 TA，本进程连"触发"都不再直接发给 EL3】
+ * ============================================================================
+ * 批 1 的形态是：本进程发 SECMMIO_SEED（SMC 0x8200ff14），EL3 自己取熵、
+ * 自己写 PL。种子明文确实没经过普通世界，但**触发权**在普通世界 ——
+ * 有 root 的人可以随时让板子换一份种子。
+ *
+ * 批 2 把这条也收掉：
+ *   · EL3 的 PQCHSM_SEED_NS_ALLOWED 改成 0 —— 普通世界发那条 SMC 直接被拒；
+ *   · 种子改由 **OP-TEE 的 TA 自己生成**，经 pqchsm_seed.pta（S-EL1）
+ *     和一条只认安全世界的 SMC（0x8200ff15）逐字送进 PL。
+ *
+ * 本进程现在只做一件事：**请 TA 去装一份种子**。它拿不到种子，也拿不到
+ * 触发 EL3 的能力 —— 那条路对它已经关了。
+ *
+ * ⚠️ 失败时**必须发 CTRL.SEED_CLR 作废暂存**：中途失败会在 PL 的暂存口里
+ *    留下半份种子，而 SEED_LOCK 未置时下一次 KeyGen 仍可能去用它。
+ *    这一条不能指望 TA 做 —— TA 那侧没有直接清 PL 的路（那要另一条 SiP，
+ *    而多一条 SiP 就多一份攻击面）。
+ */
+static int ta_seed_load(uint32_t target, uint32_t *world)
+{
+	TEEC_Context ctx;
+	TEEC_Session sess;
+	TEEC_Operation op;
+	TEEC_UUID uuid = TA_PQCHSM_UUID;
+	uint32_t origin = 0;
+	TEEC_Result r;
+
+	r = TEEC_InitializeContext(NULL, &ctx);
+	if (r != TEEC_SUCCESS) {
+		logf_("TEEC_InitializeContext 失败 0x%08x —— OP-TEE 驱动没起来？", r);
+		return -1;
+	}
+	memset(&op, 0, sizeof op);
+	/* 不用 LOGIN_PUBLIC：TA 那侧的 open-session 会拒（PS-22）。 */
+	r = TEEC_OpenSession(&ctx, &sess, &uuid, TEEC_LOGIN_USER, NULL,
+			     &op, &origin);
+	if (r != TEEC_SUCCESS) {
+		logf_("TEEC_OpenSession 失败 0x%08x origin=%u —— "
+		      "TA 不在 /lib/optee_armtz/ 或 tee-supplicant 没跑？",
+		      r, origin);
+		TEEC_FinalizeContext(&ctx);
+		return -1;
+	}
+
+	memset(&op, 0, sizeof op);
+	op.paramTypes = TEEC_PARAM_TYPES(TEEC_VALUE_INOUT, TEEC_NONE,
+					 TEEC_NONE, TEEC_NONE);
+	op.params[0].value.a = target;
+	r = TEEC_InvokeCommand(&sess, TA_PQCHSM_CMD_SEED_TO_PL, &op, &origin);
+	TEEC_CloseSession(&sess);
+	TEEC_FinalizeContext(&ctx);
+
+	if (r != TEEC_SUCCESS) {
+		logf_("CMD_SEED_TO_PL 失败 0x%08x origin=%u", r, origin);
+		return -1;
+	}
+	/* 走到这里，种子是安全世界生成并送进去的 —— 世界记 1。
+	 * 这个 1 不是从某个寄存器读回来的，而是**这条路径本身的性质**：
+	 * 普通世界发不了那条 SMC（EL3 无条件拒），所以能成功就只能是 TA 送的。 */
+	if (world)
+		*world = 1;
+	return 0;
+}
+
 static int sec_seed_load(uint32_t target, uint32_t *world)
 {
-	struct secmmio_seed sd = { .target = target, .world = 0 };
-
-	if (ioctl(sec_fd, SECMMIO_SEED, &sd) < 0)
-		return -1;
-	if (world)
-		*world = sd.world;
-	return 0;
+	return ta_seed_load(target, world);
 }
 
 static int hw_wr(unsigned off, uint32_t v)
@@ -1442,24 +1505,47 @@ int main(int argc, char **argv)
 	 *    （内核模块把它翻成 -EIO），两者分得开。 */
 	{
 		struct secmmio_seed probe = { .target = 0xFFFFFFFFu, .world = 0 };
+		uint32_t w = 0;
+		int rc_ns;
 
-		if (ioctl(sec_fd, SECMMIO_SEED, &probe) == 0) {
-			logf_("自检失败：EL3 种子服务对**非法目标**回了成功 —— "
-			      "它多半不是我们以为的那个服务，拒绝启动");
+		/* ---- 反面：普通世界那条路必须**已经关了** ----
+		 * 批 2 把 EL3 的 PQCHSM_SEED_NS_ALLOWED 改成 0。本进程是普通世界，
+		 * 所以这条 ioctl 必须失败。**成功才是故障** —— 那意味着装的是批 1
+		 * 的 BL31，而"触发权已经收走"这句话在这台机器上是假的。
+		 * 用非法目标探测：即便哪天放行了，也不会真在 PL 里留下一份没人用的
+		 * 种子（那会让 SEED_STAT 上来就是"已备好"，把状态判断搅浑）。 */
+		rc_ns = ioctl(sec_fd, SECMMIO_SEED, &probe);
+		if (rc_ns == 0) {
+			logf_("自检失败：普通世界仍能触发 EL3 种子装载 —— "
+			      "装的多半是批 1 的 BL31（NS_ALLOWED=1）。"
+			      "批 2 的前提不成立，拒绝启动。");
 			return 2;
 		}
 		if (errno == ENOTTY) {
 			logf_("自检失败：/dev/secmmio 不认 SECMMIO_SEED —— "
-			      "内核模块是旧的。KeyGen 依赖它，拒绝启动。");
+			      "内核模块是旧的，拒绝启动。");
 			return 2;
 		}
-		/* EIO = SiP 回了非零。非法目标本来就该被拒，所以这条是**正常**的；
-		 * 但"服务不存在"回的也是 EIO，两者在这一层分不开 —— 真正分得开的
-		 * 地方是下面第一次 KeyGen。这里能挡住的是内核模块旧掉那一类。
-		 * 如实写清楚，不假装这条自检比它实际的更强。 */
-		logf_("自检通过：/dev/secmmio 认 SECMMIO_SEED（EL3 种子服务的存在性"
-		      "要到第一次 KeyGen 才能确证 —— 非法目标被拒与服务不存在"
-		      "在这一层回的都是 EIO）");
+		logf_("自检：普通世界触发 EL3 种子装载已被拒（errno=%d）—— "
+		      "这是批 2 期望的形态", errno);
+
+		/* ---- 正面：TA 那条路必须**通** ----
+		 * 只有这一条通了，KeyGen 才有种子可用。它同时验掉三件事：
+		 * OP-TEE 起来了、TA 装在 /lib/optee_armtz/ 且签名对得上、
+		 * PTA 与那条只认安全世界的 SMC 都在位。
+		 *
+		 * ⚠️ 这里**真的装一份 ML-KEM 种子**（不像上面用非法目标）——
+		 * 没有别的办法确证整条链路。装完当场发 SEED_CLR 作废，
+		 * 免得它留在暂存口里被后面某次 KeyGen 悄悄用掉。 */
+		if (ta_seed_load(SEED_TGT_MLKEM, &w) != 0) {
+			logf_("自检失败：TA 那条种子路不通 —— KeyGen 没有种子可用，"
+			      "拒绝启动。（查 OP-TEE 是否起来、TA 是否在 "
+			      "/lib/optee_armtz/、tee-supplicant 是否在跑）");
+			return 2;
+		}
+		hw_wr(MK_CTRL, MKC_SEEDCLR);
+		logf_("自检通过：TA → PTA → EL3 → PL 这条种子路通了（world=%u）"
+		      " —— 自检那份已发 SEED_CLR 作废", w);
 	}
 
 	/* ---- 可选：把私钥外泄闩锁置上（-lock）----

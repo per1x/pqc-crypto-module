@@ -10,6 +10,10 @@
 # （见 ARCHITECTURE-TARGET §7：未烧 eFUSE，镜像替换本来就挡不住）。
 D=/media/sd-mmcblk1p2/hsm
 mkdir -p /lib/optee_armtz
+# ⚠️ 只复制**文件名就是 UUID**的那些。OP-TEE 按文件名查找 TA，所以
+#    ta_pre_b2.ta 这种备份名放进去永远不会被加载 —— 但它会出现在
+#    "TA 已就位" 那行日志里，让人以为板上有两个可用的 TA。
+#    备份一律存成 *.ta.bak，不被这个通配抓到。
 for f in $D/*.ta; do
     [ -f "$f" ] || continue
     cp -f "$f" /lib/optee_armtz/

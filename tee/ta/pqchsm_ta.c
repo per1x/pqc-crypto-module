@@ -18,10 +18,19 @@
 #include "ta_fips202.h"
 #include "ta_kdf.h"
 #include "ta_pqc.h"
+#include "ta_random.h"
 #include "ta_wrap.h"
 
 /* OP-TEE system PTA（与 optee_os lib/libutee/include/pta_system.h 一致，
  * 这里自己定义以避免依赖 dev kit 是否导出该头） */
+/* 种子转发 PTA（boot/optee/patch_optee_seedpta.py 装进 OP-TEE core）。
+ * 它是本项目自己的 PTA，不是上游的 —— UUID 在那个脚本里同样写着一份，
+ * 两处必须一致，对不上的症状是 TEE_OpenTASession 回 ITEM_NOT_FOUND。 */
+#define PTA_PQCHSM_SEED_UUID                                       \
+	{ 0x5f2c1b90, 0x9d44, 0x4a3e,                              \
+	  { 0xb1, 0x27, 0x6e, 0x53, 0x0c, 0x8a, 0xf4, 0x11 } }
+#define PTA_PQCHSM_SEED_CMD_WORD	0
+
 #define PQCHSM_PTA_SYSTEM_UUID \
 	{ 0x3a2f8978, 0x5dc0, 0x11e8, \
 	  { 0x9c, 0x2d, 0xfa, 0x7a, 0xe0, 0x1b, 0xbe, 0xbc } }
@@ -365,6 +374,94 @@ void TA_CloseSessionEntryPoint(void *session_ctx __maybe_unused)
 {
 }
 
+
+/* ============================================================================
+ * 【CMD_SEED_TO_PL：种子由 TA 生成，经安全世界送进 PL】
+ * ============================================================================
+ * 这是批 2 的落点，也是 CODE-1 的终局：种子的**保管方**从 EL3 上移到 TA，
+ * EL3 退成一条纯通路（它只把一个字写进 PL，不产生、不保存、不回读）。
+ *
+ * 路径上每一段都在安全侧：
+ *     TA(S-EL0) → pqchsm_seed.pta(S-EL1) → SMC 0x8200ff15 → EL3 → PL 暂存口
+ * 普通世界从头到尾只发一条「给我装种子」的命令，看不到任何种子字节。
+ *
+ * ⚠️ 三件必须一起做的事：
+ *  ① **本地那份种子用完当场擦。** 不是"离开作用域就没了"—— 栈上的字节还在，
+ *     下一个函数的局部变量会盖到它，也可能不会。显式 memzero。
+ *  ② **中途失败也要擦。** 失败路径比成功路径更容易漏，而漏在失败路径上的
+ *     秘密同样是秘密。
+ *  ③ **PL 那侧也要清干净。** 送了一半就失败的话，暂存口里躺着半份种子，
+ *     而 SEED_LOCK 未置时下一次 KeyGen 仍可能去用它。这里没有直接清 PL 的
+ *     路（那要另一条 SiP），所以**失败时不返回成功**，由调用方发 CTRL.SEED_CLR
+ *     作废 —— daemon 那侧做了这件事。
+ */
+static TEE_Result cmd_seed_to_pl(uint32_t param_types, TEE_Param params[4])
+{
+	static const TEE_UUID pta_uuid = PTA_PQCHSM_SEED_UUID;
+	uint32_t sess = 0;
+	uint32_t eorig = 0;
+	uint8_t  seed[64];
+	uint32_t words, i;
+	uint32_t tgt;
+	TEE_Result res;
+	TEE_Param  p[TEE_NUM_PARAMS];
+
+	if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INOUT,
+	                                   TEE_PARAM_TYPE_NONE,
+	                                   TEE_PARAM_TYPE_NONE,
+	                                   TEE_PARAM_TYPE_NONE))
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	tgt = params[0].value.a;
+	if (tgt == TA_SEED_TGT_MLKEM)
+		words = 16U;            /* d‖z = 64 字节 */
+	else if (tgt == TA_SEED_TGT_MLDSA)
+		words = 8U;             /* ξ = 32 字节 */
+	else
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	res = TEE_OpenTASession(&pta_uuid, TEE_TIMEOUT_INFINITE, 0, NULL,
+	                        &sess, &eorig);
+	if (res != TEE_SUCCESS)
+		return res;
+
+	pqchsm_randombytes(seed, words * 4U);
+
+	for (i = 0; i < words; i++) {
+		/* 小端：第一个字节在最低位 —— 与 PL 那侧 seed_stage 的解释、
+		 * 与 IN_DATA 逐字节那条路**必须是同一种**（RTL 有对拍用例钉着）。 */
+		uint32_t w = (uint32_t)seed[i * 4U]
+		           | ((uint32_t)seed[i * 4U + 1U] << 8)
+		           | ((uint32_t)seed[i * 4U + 2U] << 16)
+		           | ((uint32_t)seed[i * 4U + 3U] << 24);
+
+		memset(p, 0, sizeof(p));
+		p[0].value.a = tgt;
+		p[0].value.b = w;
+		res = TEE_InvokeTACommand(sess, TEE_TIMEOUT_INFINITE,
+		                          PTA_PQCHSM_SEED_CMD_WORD,
+		                          TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
+		                                          TEE_PARAM_TYPE_VALUE_OUTPUT,
+		                                          TEE_PARAM_TYPE_NONE,
+		                                          TEE_PARAM_TYPE_NONE),
+		                          p, &eorig);
+		/* w 是种子的一部分，和 seed[] 一样要擦 */
+		w = 0;
+		if (res != TEE_SUCCESS)
+			break;
+	}
+
+	/* ①② 无论成败都当场擦 */
+	memset(seed, 0, sizeof(seed));
+	TEE_CloseTASession(sess);
+
+	if (res != TEE_SUCCESS)
+		return res;
+
+	params[0].value.b = words;
+	return TEE_SUCCESS;
+}
+
 TEE_Result TA_InvokeCommandEntryPoint(void *session_ctx __maybe_unused,
                                       uint32_t cmd_id, uint32_t param_types,
                                       TEE_Param params[4])
@@ -387,6 +484,8 @@ TEE_Result TA_InvokeCommandEntryPoint(void *session_ctx __maybe_unused,
 		return cmd_decaps(param_types, params);
 	case TA_PQCHSM_CMD_SIGN:
 		return cmd_sign(param_types, params);
+	case TA_PQCHSM_CMD_SEED_TO_PL:
+		return cmd_seed_to_pl(param_types, params);
 	default:
 		return TEE_ERROR_NOT_SUPPORTED;
 	}
