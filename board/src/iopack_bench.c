@@ -44,6 +44,9 @@
 #define MK_INPTR   (S_MLKEM + 0x14)
 #define MK_OUTDAT  (S_MLKEM + 0x18)
 #define MK_OUTLEN  (S_MLKEM + 0x1C)
+#define MK_KEYSTAT (S_MLKEM + 0x30)
+#define MKS_EXPWIPE 0x1u
+#define MKS_PARERR  0x20u
 #define MK_INDATA4 (S_MLKEM + 0x40)
 #define MK_OUTDAT4 (S_MLKEM + 0x44)
 
@@ -89,6 +92,16 @@ static int mlkem_run(int packed, int mode, int pset,
 {
 	size_t i; long spin;
 
+	/* ⚠️ **批 2：先等展开区擦完。**
+	 * 展开区在每次运算之后由硬件无条件擦（约 4096 拍），期间 START 会被拒
+	 * 并置 PARAM_ERR。不等的后果不是报错，是**下面那个等 DONE 的自旋
+	 * 永远转不完** —— 第一版就这么把 harness 的 480 秒看门狗喂饱了，
+	 * 表现成"板子挂了"，而实际只是少等了 55 µs。 */
+	for (spin = 0; spin < 2000000L; spin++)
+		if (!(rd(MK_KEYSTAT) & MKS_EXPWIPE))
+			break;
+	if (rd(MK_KEYSTAT) & MKS_EXPWIPE) return -4;
+
 	wr(MK_MODE, (uint32_t)(mode | (pset << 2)));
 	wr(MK_CTRL, MKC_INRST);
 	i = 0;
@@ -103,8 +116,14 @@ static int mlkem_run(int packed, int mode, int pset,
 	if (rd(MK_INPTR) != inlen) return -1;
 
 	wr(MK_CTRL, MKC_START);
-	for (spin = 0; spin < 200000000L; spin++)
-		if (rd(MK_STATUS) & MKS_DONE) break;
+	/* 同时看 DONE 与 PARAM_ERR：**被拒也要当场返回**，别死等一个永远
+	 * 不会来的 DONE。这条自旋原来只看 DONE —— 于是任何一次被拒都变成
+	 * 一次挂死，而挂死离原因隔着好几层。 */
+	for (spin = 0; spin < 20000000L; spin++) {
+		uint32_t st = rd(MK_STATUS);
+		if (st & MKS_DONE) break;
+		if (st & MKS_PARERR) return -5;
+	}
 	if (!(rd(MK_STATUS) & MKS_DONE)) return -2;
 
 	*outlen = rd(MK_OUTLEN);

@@ -402,7 +402,16 @@ module mlkem_axi #(
     // ---- 链式：先展开、再运算 ----
     // 只有 Decaps 需要私钥，所以只有它有链式形态；KeyGen 本来就是从种子展开，
     // Encaps 只要公钥。
+    // 两相位的链式：只有 Decaps 需要"先展开再运算"。
     wire       chain_run = chain && (mode == M_DECAPS);
+    // 单相位的 CHAIN：KeyGen 只要公钥，dk 展开出来直接进展开区、**不出总线**，
+    // 算完随 S_FIN 一起擦。
+    //
+    // ⚠️ 这一条不是可有可无的。不带 CHAIN 的 KeyGen 会把 ek‖dk 一起交出来
+    // （那是 ACVP 要的形态，§7.3 明确保留），于是**交付路径上的 KeyGen 必须
+    // 带 CHAIN**，否则 dk 实实在在地越过 AXI 边界。上板第一次跑就撞上了：
+    // daemon 的 `n == eklen` 断言当场把它拒了 —— 那条断言正是为此存在的。
+    wire       hide_sk   = chain && (mode == M_KEYGEN);
     wire [1:0] mode_eff  = (chain_run && !chain_ph) ? M_KEYGEN : mode;
 
     // 本次 KeyGen 走不走暂存的种子。闩上之后软件说了不算。
@@ -465,7 +474,7 @@ module mlkem_axi #(
     // 收不收由 chain_run 决定，而 chain_run 由本次运算需不需要私钥决定。
     // （原来这里是 dk_to_slot || dk_lock —— 一个软件位加一个一次性闩，
     //   两者都已随 V-04/V-05 删除。）
-    wire store_dk = (mode_eff == M_KEYGEN) && chain_run;
+    wire store_dk = (mode_eff == M_KEYGEN) && (chain_run || hide_sk);
     // 核吐出的第 ocnt 个字节该进金库还是进输出缓冲：ek 在前，dk 在后。
     wire out_to_vault = store_dk && (ocnt >= eklen);
     // dk 在金库里的槽内偏移。单列一个中间量是因为 Verilog 不允许对括号
@@ -500,7 +509,8 @@ module mlkem_axi #(
     // **静默地展开出另一把密钥**，签出来的 σ / 解出来的 K 完全合法，只是
     // 对不上任何人的公钥。与"喂不满让 z=0"是同一类安静错误，判法也一样：
     // 在 START 那一刻挡住，且不启动任何核。
-    wire chain_gate_ok = !chain_run || (use_staged_src && seed_ready);
+    wire chain_gate_ok = !(chain_run || hide_sk)
+                         || (use_staged_src && seed_ready);
 
     // 从金库取 dk 还要求：那个槽真的装了东西，而且**装的时候用的是同一个
     // 参数集**。pset 不一致时长度全错，表现是"喂不满、BUSY 一直不落"，

@@ -842,6 +842,43 @@ async def test_expansion_area_wiped_after_every_op(dut):
 
 
 @cocotb.test()
+async def test_chain_keygen_hides_dk(dut):
+    """CHAIN 的 KeyGen **只交出 ek**，dk 进展开区、随 S_FIN 一起擦
+
+    ⚠️ 这条是**上板抓到的**：不带 CHAIN 的 KeyGen 会把 ek‖dk 一起交出来
+    （那是 ACVP 要的形态，§7.3 明确保留），于是交付路径上的 KeyGen 必须带
+    CHAIN，否则 dk 实实在在地越过 AXI 边界。第一版只给 Decaps 做了 CHAIN，
+    daemon 的 `n == eklen` 断言当场把 KeyGen 拒了 —— 那条断言正是为此存在的。
+
+    两条判据：
+      · 带 CHAIN：OUT_LEN 恰好是 ek 的长度，一个字节不多；
+      · 不带 CHAIN：OUT_LEN 是 ek+dk（ACVP 那条路仍然通）。
+    只测前一条不够 —— 一个"把 dk 丢掉"的实现也能通过它。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    name = "ML-KEM-768"
+    d, z = bytes([0x71] * 32), bytes([0x72] * 32)
+    ek_ref, dk_ref = mlkem_keygen(d, z, name)
+
+    await stage_seed(dut, d + z)
+    out = await run_raw(dut, mode_word(M_KEYGEN, name, chain=True)
+                        | M_SEED_STAGED, b"")
+    assert out is not None, "带 CHAIN 的 KeyGen 被拒了"
+    assert len(out) == len(ek_ref), \
+        f"带 CHAIN 的 KeyGen OUT_LEN={len(out)}，应当恰好是 ek 的 {len(ek_ref)}"
+    assert out == ek_ref, "ek 与黄金模型不一致"
+    assert dk_ref not in out, "dk 出现在了输出里"
+
+    # 不带 CHAIN：ACVP 那条路仍然通（dk 出得来，那是它存在的理由）
+    out2 = await run_op(dut, M_KEYGEN, name, d + z)
+    assert out2 == ek_ref + dk_ref, \
+        "不带 CHAIN 的 KeyGen 应当仍然交出 ek‖dk（ACVP 要核对 dk）"
+    dut._log.info("CHAIN 的 KeyGen 只交出 ek；不带 CHAIN 的仍交出 ek‖dk")
+
+
+@cocotb.test()
 async def test_slot_abi_is_gone(dut):
     """槽位 ABI 在**寄存器面上**确实没有了（V-05 / V-06）
 

@@ -413,14 +413,17 @@ module mldsa_axi #(
     // ---- 链式：先展开、再运算 ----
     // 只有 Sign 需要私钥，所以只有它有链式形态。
     wire chain_run = chain && (op == OP_SIGN);
+    // 单相位的 CHAIN：KeyGen 只要 pk，sk 展开出来直接进展开区、不出总线。
+    // 不带 CHAIN 的 KeyGen 仍然把 pk‖sk 一起交出来（ACVP 要的形态，§7.3）。
+    wire hide_sk   = chain && (op == OP_KEYGEN);
     // 相位 0 跑 KeyGen（把 sk 展开进展开区），相位 1 跑真正的 Sign。
     wire [1:0] op_eff = (chain_run && !chain_ph) ? OP_KEYGEN : op;
 
     // take_sk **与相位无关**：它决定软件数据在 engine 输入里的落点
     // （sw_base），而那个落点在 START 那一刻就要定下来。
-    wire take_sk  = chain_run;
+    wire take_sk  = chain_run;   /* hide_sk 那趟软件不送 sk 也不取 sk */
     // 展开相位把 sk 收进展开区。收不收由 chain_run 决定，不再有软件位。
-    wire store_sk = (op_eff == OP_KEYGEN) && chain_run;
+    wire store_sk = (op_eff == OP_KEYGEN) && (chain_run || hide_sk);
 
     // ---- 本次 KeyGen 走不走暂存的种子。闩上之后软件说了不算 ----
     wire use_staged_src = seed_staged || seed_lock;
@@ -437,7 +440,8 @@ module mldsa_axi #(
     // **静默地展开出另一把密钥**，签出来的 σ / 解出来的 K 完全合法，只是
     // 对不上任何人的公钥。与"喂不满让 z=0"是同一类安静错误，判法也一样：
     // 在 START 那一刻挡住，且不启动任何核。
-    wire chain_gate_ok = !chain_run || (use_staged_src && seed_ready);
+    wire chain_gate_ok = !(chain_run || hide_sk)
+                         || (use_staged_src && seed_ready);
 
     // ---- 软件必须写够多少字节（见文件头【START 前的校验】）----
     //   KeyGen : ξ(32)（走暂存种子那一趟是 0 —— 软件一个字节都不用送）

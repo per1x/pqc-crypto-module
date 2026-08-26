@@ -1179,10 +1179,11 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 
 		/* 一个输入字节都不送：种子在 PL 的暂存口里，MODE.SEED_STAGED 让
 		 * KeyGen 去那里取。
-		 * ⚠️ **不带 CHAIN**：这一趟只要公钥。dk 在 PL 里展开出来之后
-		 *    随 S_FIN 一起擦掉，本来就出不了总线 —— 下面那条
-		 *    n == eklen 的断言仍然是"私钥没出硬件"的软件侧证据。 */
-		if (mlkem_run(0, q->a0, MKM_SEED_STAGED,
+		 * ⚠️ **必须带 CHAIN**：不带的话 KeyGen 会把 ek‖dk 一起交出来
+		 *    （那是 ACVP 要的形态，§7.3 保留），dk 就越过 AXI 边界了。
+		 *    带上之后 dk 进 PL 的匿名展开区、随 S_FIN 一起擦，
+		 *    下面那条 n == eklen 就是"私钥没出硬件"的软件侧证据。 */
+		if (mlkem_run(0, q->a0, MKM_CHAIN | MKM_SEED_STAGED,
 			      NULL, 0, buf, sizeof buf, &n))
 			return SDR_HARDFAIL;
 		if (n != eklen) {
@@ -1296,7 +1297,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		/* 一个输入字节都不送：ξ 在 PL 的暂存口里（EL3 刚写进去的），
 		 * MODE.SEED_STAGED 让 KeyGen 去那里取。 */
 		if (mldsa_run(MDO_KEYGEN, q->a0,
-			      MDM_SEED_STAGED,
+			      MDM_CHAIN | MDM_SEED_STAGED,
 			      NULL, 0, 0, 0, out + 4, PQCS_MAXPAY - 4, &n, NULL)) {
 			return SDR_HARDFAIL;
 		}
