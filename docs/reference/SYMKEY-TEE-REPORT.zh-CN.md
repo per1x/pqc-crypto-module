@@ -159,3 +159,26 @@ AES-256 密钥装进去"（或反过来），对称 blob 用 **AAD = `"pqchsm/sy
    （预计 11 次 PTA→SMC，亚毫秒级）。
 10. **密钥边界扫描（板上版）**：sdf_demo [5] 装完槽 7 之后、会话结束之前，经 EL3 扫 `sym_axi`
     整窗口，确认 KAT 密钥的 4 个字一个都不出现（`key_vault` 窗口现在 EL3 读都拒，扫描对象只剩槽 2）。
+
+---
+
+## 7. 无板阶段补做的（2026-10-10 第二轮）
+
+构建机这一轮也连不上（ping 不通），所以真编 TA / BL31 / optee_os / 位流仍挂着。
+能在本机做的都做了：
+
+| 项 | 落点 | 结果 |
+|---|---|---|
+| **上板一键脚本** | `board/scripts/pay_d7.sh` + 新工具 `tee/host/ta_symkey.c`（TA 接口正反两面 13 条）、`board/src/d7probe.c`（演示位流装载门反证 + 会话后金库为空） | 替身头 `-Wall -Wextra` 编过、`bash -n` 过 |
+| **TA 客户端** | `pqchsm_ta_client.{c,h}` 加 `pqchsm_ta_symkey_new/load/kat` | `check_ta_surface` 照过 |
+| **PQC 那几段过时注释** | `service/sdfe.h`、`service/README.md` 还写着"dk/sk 进金库槽、一次性闩锁"（批 2 之前的模型） | 已按无状态 PL + TA 种子 blob 改正 |
+| **整顶层综合前检查** | yosys `hierarchy -top zu3eg_hsm_top; proc; check`，`main` 与本分支对比 | 两边都是 48 条告警（全是 PS/BUFGCE 黑盒造成的未驱动线 + 既有项），**D7 没有新增一条**；唯一差异是 yosys 内部线编号。`key_vault` 摊成寄存器那两条是既有、有意的（一拍擦完） |
+
+以下几项与 D7 无关、但这一轮顺手查清并修在 `main` 上（本分支已 rebase 上去）：
+
+| 项 | 根因 | 处理 |
+|---|---|---|
+| `test_xbar` 饱和用例 Verilator 下必挂 | 它往**顶层输出口**预置计数值，Verilator 每次求值用内部状态把输出口盖回去（开 `--public-flat-rw` 也没用，试过） | Verilator 下记 SKIP；Icarus 下照跑（8/8） |
+| `hsm_hwtest` / `hsm_kem3` 的 `-D` 直接模式**每笔写都是空操作** | `352f5e1` 加 `-D` 闸门时把真正那行写删了 | 补回；查过 board/logs，那之后的结果都是经 EL3 模式，没有一份受影响 |
+| `rtl_sim.sh` 缺 mlkem/mldsa 的 `SECURE_ONLY=0` 那一遍 | 两个测试文件注释都说有，脚本里一直没有 —— 种子口那道门在演示形态下**从没被仿真过** | 补上；Verilator：mlkem 27/27；mldsa 有一条用例前提写死 `=1`，按形态分岔后 35/35（两种形态） |
+| 金丝雀（槽 4）在演示位流里 `SECURE_ONLY=0` | `21e3daa` 把全文 `SECURE_ONLY(1)` 批量换成开关时误带了它，对照组被敞开，与文档"两种形态都是 1"打架 | 恢复常量 1（只影响演示位流） |
