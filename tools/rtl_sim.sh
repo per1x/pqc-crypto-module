@@ -149,6 +149,14 @@ run test_mlkem_axi   mlkem_axi
 # （寄存器时序、长度校验、私钥金库、一次性闩锁、非法输入、陈旧状态）。
 # ⚠️ 不带参数就是 ML-DSA-44。另外两个参数集在 tools/mldsa_grid.sh 的九格里跑。
 run test_mldsa_axi   mldsa_axi
+# 演示位流（SECURE_ONLY=0）再跑一遍两个 PQC 从机：那时防火墙对普通世界敞开，
+# 只剩**种子暂存口**自己的 AxPROT 门挡着（test_*_axi 里有专测）。
+# 两个测试文件的注释早就说"rtl_sim.sh 专门加了一条 =0 的运行"，但这里一直没有 ——
+# 也就是说那道门在演示形态下从来没被仿真过。
+export PARAM_SECURE_ONLY=0
+run test_mlkem_axi   mlkem_axi "" "mlkem_axi SECURE_ONLY=0"
+run test_mldsa_axi   mldsa_axi "" "mldsa_axi SECURE_ONLY=0"
+unset PARAM_SECURE_ONLY
 
 echo
 echo "  对称与国密"

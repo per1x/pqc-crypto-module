@@ -1183,6 +1183,19 @@ async def test_firewall_nonsecure_refused(dut):
     n = await run_op(dut, OP_KEYGEN, xi)
     assert n == PKL + SKL
 
+    # ⚠️ 按形态分岔（与 test_mlkem_axi 同一口径）：SECURE_ONLY=0 是演示位流，
+    #    整块从机对普通世界**故意敞开**，"非安全读被拦"在那里本来就不该成立。
+    #    以前只在默认参数下跑，所以写成了无条件断言；按 =0 跑就必挂 ——
+    #    挂的是用例的前提，不是 RTL。=0 下改为断言"读得到"+"窗口外仍拦"，
+    #    而不是跳过：门被误设成关着时，这条要能叫出来。
+    if not int(os.environ.get("PARAM_SECURE_ONLY", "1")):
+        v, _ = await rd(dut, VERSION, PROT_NONSEC)
+        assert v == 0x0001_0000, f"演示形态普通世界应读得到 VERSION，读到 0x{v:08x}"
+        v, r = await rd(dut, 0x80, PROT_NONSEC)
+        assert r == RESP_REFUSED and v == 0, f"越界地址没被拦：0x{v:08x}"
+        dut._log.info("演示形态：普通世界读得到、窗口外照拦（种子口另有专测）")
+        return
+
     v, r = await rd(dut, OUT_LEN, PROT_NONSEC)
     assert r == RESP_REFUSED and v == 0, f"non-secure 读没被拦：0x{v:08x}"
     v, r = await rd(dut, VERSION, PROT_NONSEC)
