@@ -40,7 +40,7 @@ sz=$(wc -c < "$f")
 { dd if="$f" bs=1 count="$off" 2>/dev/null; printf "\x$new"; dd if="$f" bs=1 skip="$((off + 1))" 2>/dev/null; } > "$f.flip" && mv "$f.flip" "$f"
 got=$(dd if="$f" bs=1 skip="$off" count=1 2>/dev/null | hexdump -v -e '1/1 "%02x"')
 [ "$got" = "$new" ] && [ "$(wc -c < "$f")" = "$sz" ] || { echo "改字节失败"; exit 1; }
-echo "已把 $(basename "$f") 第 $off 字节从 0x$old 改成 0x$new（文件长度不变：$sz 字节）"
+echo "已把 $(basename "$f") 第 $off 字节从 0x${old} 改成 0x${new}（文件长度不变：$sz 字节）"
 EOF
 
 part() { echo; echo "${B}══════ $* ══════${N}"; }
