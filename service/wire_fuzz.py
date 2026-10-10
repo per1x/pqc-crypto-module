@@ -49,6 +49,8 @@ MAXPAY = 16384
 (OP_PING, OP_RANDOM, OP_KEYGEN, OP_ENCAPS,
  OP_DECAPS, OP_IMPORT, OP_SYM, OP_AUTH_REMOVED,
  OP_MLDSA_KEYGEN, OP_MLDSA_SIGN, OP_MLDSA_VERIFY) = range(1, 12)
+# D7：对称密钥装载归 TEE（wire.h 的 15..17）
+OP_SYMKEY_GEN, OP_SYMKEY_LOAD, OP_SYMKEY_KAT = 15, 16, 17
 
 SDR_OK = 0
 SDR_INARGERR = 0x01000004
@@ -200,6 +202,17 @@ def main():
         ("IMPORT_KEY 槽 99",        lambda s: call(s, OP_IMPORT, 99, 0, b"\0" * 16)),
         ("IMPORT_KEY 空密钥",       lambda s: call(s, OP_IMPORT, 3, 0, b"")),
         ("IMPORT_KEY 33 字节",      lambda s: call(s, OP_IMPORT, 3, 0, b"\0" * 33)),
+        # D7 之后明文导入**一律**拒（SDR_NOTSUPPORT），合法参数也不例外
+        ("IMPORT_KEY 合法参数（D7：明文导入已弃用）",
+         lambda s: call(s, OP_IMPORT, 3, 0, b"\0" * 16)),
+        ("SYMKEY_GEN 槽 7（KAT 专用）", lambda s: call(s, OP_SYMKEY_GEN, 7, 16)),
+        ("SYMKEY_GEN 槽 99",          lambda s: call(s, OP_SYMKEY_GEN, 99, 16)),
+        ("SYMKEY_GEN 长度 24",        lambda s: call(s, OP_SYMKEY_GEN, 3, 24)),
+        ("SYMKEY_LOAD 空 blob",       lambda s: call(s, OP_SYMKEY_LOAD, 3, 0, b"")),
+        ("SYMKEY_LOAD 129 字节",      lambda s: call(s, OP_SYMKEY_LOAD, 3, 0, b"\0" * 129)),
+        ("SYMKEY_LOAD 伪造 blob",     lambda s: call(s, OP_SYMKEY_LOAD, 3, 0, b"PWRP" + b"\0" * 72)),
+        ("SYMKEY_LOAD 槽 7（KAT 专用）", lambda s: call(s, OP_SYMKEY_LOAD, 7, 0, b"\0" * 76)),
+        ("SYMKEY_KAT 编号 99",        lambda s: call(s, OP_SYMKEY_KAT, 99)),
         ("未知操作码 op=99",        lambda s: call(s, 99)),
         ("未知操作码 op=0",         lambda s: call(s, 0)),
         # ML-DSA：从机已在槽 6 落地并上板跑通，所以这几条现在盯的是**参数校验

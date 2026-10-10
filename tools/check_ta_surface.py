@@ -56,6 +56,24 @@ MUST_HAVE = [
     (CLIENT_C, r"TEEC_LOGIN_USER", "客户端没有用 TEEC_LOGIN_USER 打开会话"),
     (TA_C, r"TEE_GetPropertyAsIdentity", "TA 不再查调用方身份"),
     (TA_C, r"id\.login\s*==\s*TEE_LOGIN_PUBLIC", "TA 不再拒绝匿名（PUBLIC）会话"),
+    # D7：对称密钥装载的两条槽位纪律。缺了任何一条都不报错，只是悄悄允许
+    # "已知密钥进产品槽"（密钥替换）或"产品密钥进 KAT 槽"。
+    (TA_C, r"params\[0\]\.value\.a\s*!=\s*TA_SYM_KAT_SLOT",
+     "CMD_SYMKEY_KAT 不再只许进 KAT 槽 7（公开向量密钥可进产品槽 = 密钥替换）"),
+    (TA_C, r"slot\s*>\s*TA_SYM_SLOT_MAX\s*\|\|\s*\(len\s*!=\s*16U",
+     "CMD_SYMKEY_NEW 不再把槽号限在产品槽 0..6"),
+    (TA_C, r"if\s*\(slot\s*>\s*TA_SYM_SLOT_MAX\)",
+     "CMD_SYMKEY_LOAD 不再把槽号限在产品槽 0..6"),
+    # 对称 blob 必须带域分隔 AAD（否则种子 blob 能被当对称密钥装进金库）
+    (TA_C, r"ta_wrap_open\(g_kek,\s*\(const uint8_t \*\)TA_SYMKEY_AAD",
+     "CMD_SYMKEY_LOAD 解包时没用对称域的 AAD"),
+]
+
+# D7：对称密钥明文**导入/导出**命令不许出现（同 PS-22/24 的形状：看着有用、
+# 产品路径不用、一加回来就是一个洞）。
+RULES += [
+    (TA_C, r"case\s+TA_PQCHSM_CMD_SYMKEY_(IMPORT|EXPORT|UNWRAP|READ)\w*\s*:",
+     "TA 分派里出现了对称密钥明文导入/导出命令（D7 明确不提供）"),
 ]
 
 
@@ -145,6 +163,7 @@ def main():
               "tee/include/pqchsm_ta_proto.h 的墓碑注释。")
         return 1
     print(f"  ✓ TA 对外面：三条谕言机命令仍是删掉的，会话不接受匿名登录")
+    print(f"  ✓ D7：对称装载的槽位纪律与 blob 域分隔在位，没有明文导入/导出命令")
     print("check_ta_surface: 通过")
     return 0
 

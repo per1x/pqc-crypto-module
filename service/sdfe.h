@@ -17,9 +17,10 @@
  * ============================================================================
  * 【私钥怎么处理 —— 两种，必须分开看】
  * ============================================================================
- *   · **对称密钥**（SM4/AES）：装进 PL 的 key_vault，**在 RTL 上就没有通往
- *     总线的读路径**。本库的 SDFE_ImportKey 送进去之后，任何人都读不回来，
- *     包括 daemon 自己。之后只能按槽号使唤它。
+ *   · **对称密钥**（SM4/AES）：**由 TA 生成或解包、经安全世界装进 PL 的
+ *     key_vault**（D7）。普通世界——本库、daemon——从头到尾不经手明文；
+ *     调用方拿到的是 TA 包裹的 blob 和一个槽号。金库在 RTL 上没有通往总线
+ *     的读路径，装载口只认安全事务，会话结束即擦。
  *
  *   · **ML-KEM 私钥 dk**：KeyGen 把 dk 写进 **PL 片内的私钥金库**（一块
  *     只有密码核够得到的 BRAM），对外只交出公钥 ek 和一个槽号；Decaps 按
@@ -69,6 +70,8 @@ extern "C" {
  * 若用 SDR_OK + 一个"通过与否"的出参，忘了看那个出参就等于验过了。
  * 让"没检查返回值"这个最常见的疏忽落在安全的一侧。 */
 #define SDR_VERIFYFAIL    (SDR_BASE + 0x08)
+/* 接口还在、但这台设备明确不做这件事（例：D7 之后的明文导入对称密钥） */
+#define SDR_NOTSUPPORT    (SDR_BASE + 0x09)
 
 typedef void *SDFE_HANDLE;
 
@@ -158,7 +161,34 @@ int SDFE_Verify_MLDSA(SDFE_HANDLE hSession, uint32_t pset,
                       const uint8_t *ctx, uint32_t ctx_len,
                       const uint8_t *sig, uint32_t sig_len);
 
-/* ---- 对称：密钥进 key_vault，之后只按槽号使唤 ---- */
+/* ---- 对称：密钥由 TEE 装进 key_vault，之后只按槽号使唤（D7）----------------
+ *
+ * 权威副本在 TA：它以 PWRP blob（TA 内 KEK 包裹）的形态交给调用方保存。
+ * PL 的 key_vault 是**单段使用容器** —— 装载只能由 TA 经安全世界完成，
+ * 会话结束即擦。本库与 daemon 都不经手任何明文对称密钥。
+ *
+ *   SDFE_GenerateKey ：TA 生成一把 16/32 字节密钥、装进 slot（0..6），
+ *                      blob 交回（*blob_len 入参是容量，出参是实长，≤ 128）
+ *   SDFE_LoadKey     ：把之前拿到的 blob 交回 TA，重新装进 slot（0..6）
+ *   SDFE_LoadKatKey  ：把一把**公开测试向量密钥**装进 KAT 专用槽 7。
+ *                      只给编号，不传密钥字节；槽 7 不接受 Generate/Load，
+ *                      产品槽也不接受 KAT 密钥（见 docs/reference/SYMKEY-TEE-REPORT）。
+ *
+ * ⚠️ SDFE_ImportKey（明文导入）**仍在接口上，但恒回 SDR_NOTSUPPORT**：
+ *    明文导入意味着明文要在 daemon 的缓冲区里走一趟。外部已有密钥的导入
+ *    （转运密钥封装）是将来项。 */
+#define SDFE_SYM_KAT_SLOT          7
+#define SDFE_KAT_SM4_GBT32907      0   /* 0123456789abcdeffedcba9876543210 */
+#define SDFE_KAT_AES128_SP38A      1   /* 2b7e151628aed2a6abf7158809cf4f3c */
+#define SDFE_KAT_AES256_FIPS197    2   /* 000102…1f */
+#define SDFE_SYMKEY_BLOB_MAX       128
+
+int SDFE_GenerateKey(SDFE_HANDLE hSession, uint32_t slot, uint32_t key_len,
+                     uint8_t *blob, uint32_t *blob_len);
+int SDFE_LoadKey(SDFE_HANDLE hSession, uint32_t slot,
+                 const uint8_t *blob, uint32_t blob_len);
+int SDFE_LoadKatKey(SDFE_HANDLE hSession, uint32_t kat_id);
+/* 已弃用：恒回 SDR_NOTSUPPORT（D7）。 */
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
                    const uint8_t *key, uint32_t key_len);
 /* ---- 工作模式（CBC / CTR / CFB / OFB）--------------------------------------
