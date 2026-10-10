@@ -75,6 +75,44 @@ def extract(src, name, pat):
     return m.group(1).replace("\\t", "\t").replace("\\'", "'")
 
 
+def check_symkey(defs, cases, quiet=False):
+    """D7：槽 1 整槽排除出通用读写 + PQC_SYMKEY 无条件只认安全世界、没有锁槽、不回读"""
+    say = (lambda *_: None) if quiet else print
+    fail = 0
+    m_rd = re.search(r"pl_rd_ok\[PL_NSLOT\]\s*=\s*\{([^}]*)\}", defs)
+    m_wr = re.search(r"pl_wr_ok\[PL_NSLOT\]\s*=\s*\{([^}]*)\}", defs)
+    if not (m_rd and m_wr):
+        say("  ✗ 找不到 pl_rd_ok / pl_wr_ok 表")
+        return 1
+    rd1 = m_rd.group(1).split(",")[1].strip()
+    wr1 = m_wr.group(1).split(",")[1].strip()
+    if rd1 != "0" or wr1 != "0":
+        say("  ✗ 槽 1（key_vault）没有从通用 PL_RD/PL_WR 排除（读=%s 写=%s）" % (rd1, wr1))
+        say("    root 经 EL3 转一手就能把自己知道的对称密钥装进去，PL 侧装载门白做")
+        fail = 1
+    else:
+        say("  ✓ 槽 1（key_vault）已从通用 PL_RD/PL_WR 整槽排除（读写都拒）")
+
+    ms = re.search(r"case ZYNQMP_SIP_SVC_PQC_SYMKEY: \{.*?\n\t\}", cases, re.S)
+    if not ms:
+        say("  ✗ 找不到 PQC_SYMKEY 那条服务（对称密钥的安全世界装载口）")
+        return 1
+    body = ms.group(0)
+    if not re.search(r"if \(!is_caller_secure\(flags\)\)\s*\{\s*"
+                     r"SMC_RET2\(handle,\s*\(uint64_t\)PQCHSM_SYM_EWORLD", body):
+        say("  ✗ PQC_SYMKEY 没有**无条件**拒掉非安全调用方（这条路上流的是密钥明文）")
+        fail = 1
+    elif re.search(r"PQCHSM_KV_SLOT_CTRL,\s*0x4U", body):
+        say("  ✗ PQC_SYMKEY 能锁槽 —— 锁槽让密钥在 PL 里过夜，守在反方向（同 V-04）")
+        fail = 1
+    elif re.search(r"mmio_read_32\(\(uintptr_t\)PQCHSM_KV_KEY_IN", body):
+        say("  ✗ PQC_SYMKEY 读了 KEY_IN")
+        fail = 1
+    else:
+        say("  ✓ PQC_SYMKEY 无条件只认安全世界、没有锁槽、不回读密钥")
+    return fail
+
+
 def main():
     src = PATCH.read_text(encoding="utf-8")
 
@@ -168,6 +206,11 @@ def main():
         else:
             print("  ✓ PQC_SEED_WORD 无条件只认安全世界，且没有过渡开关")
 
+    # ---- D7：对称金库（槽 1）只走安全世界 ----
+    # 与种子口是同一对闸门：PL 侧装载口只认安全事务，挡不住 root 经 EL3
+    # 的通用 PL_WR 转一手；这一半由白名单整槽排除来补。
+    fail |= check_symkey(defs, cases)
+
     # 空对照：同一套判据对着一个**没有**排除的样本必须报失败
     ctrl = defs.replace("if ((a == PQCHSM_MLKEM_SEED_DATA) || "
                         "(a == PQCHSM_MLDSA_SEED_DATA))", "if (0)")
@@ -177,6 +220,21 @@ def main():
         fail = 1
     else:
         print("  ✓ 空对照成立")
+
+    # D7 那条的空对照：把槽 1 放回白名单、把世界判据拿掉，都必须被抓到
+    bad_tbl = re.sub(r"(pl_wr_ok\[PL_NSLOT\]\s*=\s*\{\s*1,\s*)0", r"\g<1>1", defs)
+    bad_case = cases.replace("if (!is_caller_secure(flags)) {\n\t\t\tSMC_RET2(handle, "
+                             "(uint64_t)PQCHSM_SYM_EWORLD", "if (0) {\n\t\t\tSMC_RET2(handle, "
+                             "(uint64_t)PQCHSM_SYM_EWORLD")
+    if bad_tbl == defs or bad_case == cases:
+        print("  ✗ D7 空对照没造出来 —— 补丁脚本的形状变了，这条检查要跟着改")
+        fail = 1
+    elif check_symkey(bad_tbl, cases, quiet=True) == 0 or \
+            check_symkey(defs, bad_case, quiet=True) == 0:
+        print("  ✗ D7 空对照失败 —— 槽 1 放回白名单 / 去掉世界判据都没被抓到")
+        fail = 1
+    else:
+        print("  ✓ D7 空对照成立")
 
     if fail:
         return 1

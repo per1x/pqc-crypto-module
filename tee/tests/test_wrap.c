@@ -4,6 +4,7 @@
 
 #include "ta_random.h"
 #include "ta_wrap.h"
+#include "pqchsm_ta_proto.h"
 
 int test_wrap(void)
 {
@@ -75,6 +76,51 @@ int test_wrap(void)
 		fails++;
 	} else {
 		printf("ok   wrap empty pt\n");
+	}
+
+	/* D7：对称 blob 与种子 blob 的域分隔。
+	 * 两类 blob 同一个 KEK —— 唯一把它们分开的是 AAD。一份 32 字节的 ML-DSA ξ
+	 * （种子 blob，AAD 为空）绝不能被 CMD_SYMKEY_LOAD 当成 AES-256 密钥装进金库，
+	 * 反过来对称 blob 也不能被 CMD_SEED_REPLAY 当种子送进 PL。 */
+	{
+		static const uint8_t sym_aad[] = TA_SYMKEY_AAD;
+		const size_t sym_aad_len = sizeof(sym_aad) - 1;
+		uint8_t seed[32];
+
+		pqchsm_randombytes(seed, sizeof(seed));
+		/* 种子 blob（AAD 空）→ 按对称的 AAD 打开：必须失败 */
+		rc = ta_wrap_seal(kek, NULL, 0, seed, sizeof(seed),
+		                  blob, sizeof(blob), &blob_len);
+		rc = rc ? rc : ta_wrap_open(kek, sym_aad, sym_aad_len, blob, blob_len,
+		                            out, sizeof(out), &out_len);
+		if (rc == 0) {
+			printf("FAIL 种子 blob 被当成对称密钥 blob 打开了\n");
+			fails++;
+		} else {
+			printf("ok   种子 blob 不能当对称 blob 用 (rc=%d)\n", rc);
+		}
+		/* 对称 blob → 按种子的（空）AAD 打开：必须失败 */
+		rc = ta_wrap_seal(kek, sym_aad, sym_aad_len, seed, sizeof(seed),
+		                  blob, sizeof(blob), &blob_len);
+		rc = rc ? rc : ta_wrap_open(kek, NULL, 0, blob, blob_len,
+		                            out, sizeof(out), &out_len);
+		if (rc == 0) {
+			printf("FAIL 对称 blob 被当成种子 blob 打开了\n");
+			fails++;
+		} else {
+			printf("ok   对称 blob 不能当种子 blob 用 (rc=%d)\n", rc);
+		}
+		/* 正向：同域往返 */
+		rc = ta_wrap_seal(kek, sym_aad, sym_aad_len, seed, sizeof(seed),
+		                  blob, sizeof(blob), &blob_len);
+		rc = rc ? rc : ta_wrap_open(kek, sym_aad, sym_aad_len, blob, blob_len,
+		                            out, sizeof(out), &out_len);
+		if (rc != 0 || out_len != sizeof(seed) || memcmp(out, seed, sizeof(seed))) {
+			printf("FAIL 对称 blob 同域往返 rc=%d\n", rc);
+			fails++;
+		} else {
+			printf("ok   对称 blob 同域往返\n");
+		}
 	}
 
 	return fails;

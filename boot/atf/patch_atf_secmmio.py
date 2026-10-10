@@ -31,7 +31,7 @@ axi4lite_xbar 文件头里写的那个坑 —— 改一处忘另一处，而且�
 （= 各核自己的防火墙窗口，见表上方的注释），并按槽分别给读/写权限：
 
     槽 0  0x8000_0000  trng_axi        0x00-0x3C   读 写
-    槽 1  0x8001_0000  key_vault_axi   0x00-0x3C   读 写
+    槽 1  0x8001_0000  key_vault_axi   ——   ——     整槽排除（D7：只走 PQC_SYMKEY）
     槽 2  0x8002_0000  sym_axi         0x00-0x7C   读 写
     槽 3  0x8003_0000  mlkem_axi       0x00-0x44   读 写
     槽 4  0x8004_0000  金丝雀           0x00-0x3C   读 ——   （对照，写它没有用途）
@@ -45,6 +45,13 @@ axi4lite_xbar 文件头里写的那个坑 —— 改一处忘另一处，而且�
 它在 CSU 里，EL1 直接读会挨总线错误。放它出来只为一件事：把密钥派生根从
 "编译进去的常量"换成"绑到这块芯片"。**DNA 不是秘密**（有 JTAG 就能读），
 所以它给的是防克隆，不是密钥的硬件保护 —— 详见下面 CSU_DNA_LO 处的长注释。
+
+⚠️ **槽 1（对称金库）整槽排除是 D7 加的**，两个世界都排除。以前它在表里
+"读 写"，而 PL 侧的装载口即便只认安全事务，**这个 SiP 是从 EL3 发的、事务
+天然是安全的** —— root 经 PL_WR 转一手就把自己知道的对称密钥装进去了
+（与种子口当年的 CODE-1 同形）。现在对称密钥只能经 PQC_SYMKEY（0x8200ff16）
+装载，那条服务无条件只认安全世界、没有过渡开关，调用方是 TA 经 PTA。
+普通世界"段末即擦"走槽 2 的 SY_CTRL.ZEROIZE（RTL 里有一根线直通金库）。
 
 风扇整核排除：KAT 用不着它，而它的 DRP 窗口被写坏会扰动 SYSMON 的温度采样。
 最小权限不是姿态，是少一个能出事的地方。
@@ -166,6 +173,54 @@ DEFS = BEG + '''
  * board/logs/RESULT_b2_ta_threshold.txt），普通世界不再需要这条路。
  * 改成 0 之后 daemon 直接发 SECMMIO_SEED 会被 EL3 拒掉 —— 那正是判据。 */
 #define PQCHSM_SEED_NS_ALLOWED\t\t0
+
+/*
+ * ---- 对称密钥装载（D7）：**只认安全世界，没有开关** ----------------------
+ *
+ *   0x8200ff16  x1 = 动作 | (槽 << 8)，x2 = 动作参数
+ *               → x0 = 0/错误码，x1 = 动作之后该槽的 SLOT_STAT
+ *                 （[0] VALID [1] LOCKED [7:4] 已写字数 —— 一个密钥字节都不含）
+ *
+ * ⚠️ 调用方（PTA）用的是 thread_smc，**只带回 x0**。所以要紧的判据折进 x0：
+ *    WORD 时该槽已满 8 字 → EFULL（不让 PL 那侧去 DENY）；
+ *    COMMIT 之后槽没有变 VALID → EVERIFY（少写了字、或槽被锁）。
+ *
+ *   动作 0 BEGIN    清该槽字计数与 VALID
+ *        1 WORD     写一个密钥字（x2）
+ *        2 COMMIT   8 字写齐才置 VALID（PL 侧判，少一个字就 DENY）
+ *        3 ERASE    擦该槽
+ *        4 ZEROIZE  擦整仓
+ *        5 STAT     只读 SLOT_STAT
+ *
+ * 槽号放进**每一次**调用：EL3 每次先写 SLOT_SEL 再动作。于是 TA 那一串
+ * 调用（BEGIN → 8×WORD → COMMIT）不依赖"中间没人改过 SLOT_SEL"——
+ * 普通世界本来也改不了（PL 侧装载门 + 本表整槽排除），这是第三道。
+ *
+ * **刻意没有锁槽动作**：锁槽让密钥在 PL 里过夜，守的是与"PL 是单段使用容器"
+ * 相反的方向（同 V-04 删 dk_lock/sk_lock）。
+ *
+ * 与种子那条一样，这条路上流的是**密钥明文**，放行普通世界等于把 D7 要关的
+ * 那个洞原样搬回来，所以无条件只认安全世界。调用方是 TA，经 PTA（S-EL1）转发
+ * （boot/optee/patch_optee_seedpta.py 的第二条命令）。
+ */
+#define ZYNQMP_SIP_SVC_PQC_SYMKEY\t0x8200ff16
+#define PQCHSM_SYM_OP_BEGIN\t\t0U
+#define PQCHSM_SYM_OP_WORD\t\t1U
+#define PQCHSM_SYM_OP_COMMIT\t\t2U
+#define PQCHSM_SYM_OP_ERASE\t\t3U
+#define PQCHSM_SYM_OP_ZEROIZE\t\t4U
+#define PQCHSM_SYM_OP_STAT\t\t5U
+#define PQCHSM_SYM_EBADOP\t\t2U
+#define PQCHSM_SYM_EWORLD\t\t3U
+#define PQCHSM_SYM_EBADSLOT\t\t6U
+#define PQCHSM_SYM_EFULL\t\t7U
+#define PQCHSM_SYM_EVERIFY\t\t8U
+/* key_vault_axi（槽 1）寄存器 —— 与 RTL 的 A_* 一一对应 */
+#define PQCHSM_KV_CTRL\t\t\t0x80010004ULL
+#define PQCHSM_KV_SLOT_SEL\t\t0x8001000CULL
+#define PQCHSM_KV_KEY_IN\t\t0x80010010ULL
+#define PQCHSM_KV_SLOT_CTRL\t\t0x80010014ULL
+#define PQCHSM_KV_SLOT_STAT\t\t0x80010018ULL
 
 /* 目标选择 */
 #define PQCHSM_SEED_TGT_MLKEM\t\t0U
@@ -315,15 +370,18 @@ static int pqchsm_seed_load(uint64_t data_reg, uint64_t stat_reg, uint32_t words
  */
 static const uint32_t pl_off_max[PL_NSLOT] = {
 \t0x3C,\t/* 0 trng_axi       araddr[5:2]        */
-\t0x3C,\t/* 1 key_vault_axi  ADDR_MASK 0xC0     */
+\t0x3C,\t/* 1 key_vault_axi  整槽排除，见下     */
 \t0x7C,\t/* 2 sym_axi        ADDR_MASK 0x80     */
 \t0x44,\t/* 3 mlkem_axi      ADDR_MASK 0x80     */
 \t0x3C,\t/* 4 金丝雀（只读，对照用）            */
 \t0x00,\t/* 5 fan_ctrl_axi   整核排除           */
 \t0x44,\t/* 6 mldsa_axi      ADDR_MASK 0x80     */
 };
-static const uint8_t pl_rd_ok[PL_NSLOT] = { 1, 1, 1, 1, 1, 0, 1 };
-static const uint8_t pl_wr_ok[PL_NSLOT] = { 1, 1, 1, 1, 0, 0, 1 };
+/* 槽 1（对称金库）读写都是 0：D7 之后它只走 PQC_SYMKEY（安全世界专用）。
+ * 读也排除 —— 元数据本身不含密钥，但"窄的那一侧永远由白名单守"，
+ * 而且普通世界没有任何正当理由去读它（daemon 看 sym_axi 的 KV_VALID）。 */
+static const uint8_t pl_rd_ok[PL_NSLOT] = { 1, 0, 1, 1, 1, 0, 1 };
+static const uint8_t pl_wr_ok[PL_NSLOT] = { 1, 0, 1, 1, 0, 0, 1 };
 
 static int pl_permit(uint64_t a, int is_write)
 {
@@ -466,6 +524,46 @@ CASES = '\t' + BEG + '''
 \t\t * 这个数字本身不泄漏任何种子字节。 */
 \t\tSMC_RET2(handle, (uint64_t)0,
 \t\t\t (uint64_t)(mmio_read_32((uintptr_t)sreg) & 0x1FU));
+\t}
+
+\tcase ZYNQMP_SIP_SVC_PQC_SYMKEY: {
+\t\tuint32_t op = (uint32_t)x1 & 0xFFU;
+\t\tuint32_t slot = ((uint32_t)x1 >> 8) & 0xFFU;
+
+\t\t/* ⚠️ **无条件只认安全世界**，没有过渡开关：这条路上流的是对称密钥
+\t\t * 明文（见常量处说明）。 */
+\t\tif (!is_caller_secure(flags)) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SYM_EWORLD, (uint64_t)0);
+\t\t}
+\t\tif (slot > 7U) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SYM_EBADSLOT, (uint64_t)0);
+\t\t}
+\t\tif (op > PQCHSM_SYM_OP_STAT) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SYM_EBADOP, (uint64_t)0);
+\t\t}
+
+\t\tmmio_write_32((uintptr_t)PQCHSM_KV_SLOT_SEL, slot);
+\t\tif (op == PQCHSM_SYM_OP_BEGIN) {
+\t\t\tmmio_write_32((uintptr_t)PQCHSM_KV_SLOT_CTRL, 0x1U);
+\t\t} else if (op == PQCHSM_SYM_OP_WORD) {
+\t\t\tif (((mmio_read_32((uintptr_t)PQCHSM_KV_SLOT_STAT) >> 4) & 0xFU) >= 8U) {
+\t\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SYM_EFULL, (uint64_t)0);
+\t\t\t}
+\t\t\tmmio_write_32((uintptr_t)PQCHSM_KV_KEY_IN, (uint32_t)x2);
+\t\t} else if (op == PQCHSM_SYM_OP_COMMIT) {
+\t\t\tmmio_write_32((uintptr_t)PQCHSM_KV_SLOT_CTRL, 0x2U);
+\t\t\tif ((mmio_read_32((uintptr_t)PQCHSM_KV_SLOT_STAT) & 0x1U) == 0U) {
+\t\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SYM_EVERIFY, (uint64_t)0);
+\t\t\t}
+\t\t} else if (op == PQCHSM_SYM_OP_ERASE) {
+\t\t\tmmio_write_32((uintptr_t)PQCHSM_KV_SLOT_CTRL, 0x8U);
+\t\t} else if (op == PQCHSM_SYM_OP_ZEROIZE) {
+\t\t\tmmio_write_32((uintptr_t)PQCHSM_KV_CTRL, 0x1U);
+\t\t}
+\t\t/* 回去的是 SLOT_STAT（字数/VALID/LOCKED），不是密钥。
+\t\t * x2 里那个字不回显 —— 调用方自己知道它写了什么。 */
+\t\tSMC_RET2(handle, (uint64_t)0,
+\t\t\t (uint64_t)(mmio_read_32((uintptr_t)PQCHSM_KV_SLOT_STAT) & 0xFFU));
 \t}
 ''' + '\t' + END
 
