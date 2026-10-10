@@ -143,6 +143,11 @@ run test_firewall    axi4lite_firewall
 run test_axi         pqc_accel_axi
 run test_key_vault_core key_vault
 run test_key_vault   key_vault_axi
+# 演示位流（SECURE_ONLY=0）下整块从机对普通世界敞开，这时只剩**装载门**挡着
+# 对称密钥的明文写入（D7）。不跑这一遍，那道门在 =1 下根本轮不到它生效。
+export PARAM_SECURE_ONLY=0
+run test_key_vault   key_vault_axi "" "key_vault_axi SECURE_ONLY=0"
+unset PARAM_SECURE_ONLY
 run test_mlkem_axi   mlkem_axi
 # mldsa_axi 现在接的是**真 engine**（替身已删），判据就是 ACVP 官方向量：
 # 这一条是 AXI → engine → 三个核**整条链路**的端到端对拍，同时还验 AXI 那一层

@@ -20,7 +20,15 @@
 四、**半把密钥不算密钥**。写 7 个字就 commit，槽位必须仍然无效。
 
 五、地址窗口越界与违规留痕。
+
+六、**装载口只认安全世界，与 SECURE_ONLY 无关**（D7）。
+    SLOT_SEL / KEY_IN / SLOT_CTRL 的非安全写在两种形态下都进不去：
+    SECURE_ONLY=1 时被防火墙挡（VIOL_CNT 计数），SECURE_ONLY=0 时被
+    装载门挡（LOAD_REJ 计数）。tools/rtl_sim.sh 专门按 SECURE_ONLY=0
+    再跑一遍本文件 —— 不跑那一遍，装载门在 =1 下根本轮不到它生效，等于没测。
 """
+import os
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
@@ -28,6 +36,9 @@ from cocotb.triggers import RisingEdge, Timer
 VERSION, CTRL, STATUS, SLOT_SEL = 0x00, 0x04, 0x08, 0x0C
 KEY_IN, SLOT_CTRL, SLOT_STAT, VALID_MAP = 0x10, 0x14, 0x18, 0x1C
 LOCK_MAP, ZERO_CNT, VIOL_CNT, VIOL_INFO, PARAM0 = 0x20, 0x24, 0x28, 0x2C, 0x30
+LOAD_REJ = 0x34
+
+SECURE_ONLY = int(os.environ.get("PARAM_SECURE_ONLY", "1"))
 
 CTRL_ZEROIZE = 1 << 0
 SC_BEGIN, SC_COMMIT, SC_LOCK, SC_ERASE = 1 << 0, 1 << 1, 1 << 2, 1 << 3
@@ -57,6 +68,7 @@ WORDS = 8
 async def reset(dut):
     dut.rst_n.value = 0
     dut.tamper.value = 0
+    dut.ext_zeroize.value = 0
     dut.use_sel.value = 0
     dut.s_axi_awaddr.value = 0
     dut.s_axi_awprot.value = 0
@@ -278,12 +290,16 @@ async def test_tamper_wipes_and_latches(dut):
 
 @cocotb.test()
 async def test_nonsecure_blocked_without_side_effects(dut):
-    """non-secure 访问：DECERR，而且**不产生任何副作用**
+    """non-secure 访问（送检形态）：被拒，而且**不产生任何副作用**
 
     只验"返回 DECERR"是不够的。真正危险的是"事务到了下游只是效果被忽略"——
     那种实现里，只要哪一处副作用忘了判门控信号，就是一次远程擦库。
     这里直接用最狠的那一个来验：non-secure 反复写 CTRL.ZEROIZE。
     """
+    if not SECURE_ONLY:
+        # 演示形态下整块从机对普通世界敞开，这条用例的前提不成立；
+        # 该形态下要成立的那句话由 test_load_port_secure_only 断言。
+        return
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
 
@@ -391,3 +407,112 @@ async def test_address_window(dut):
     assert (vc1 >> 16) - (vc0 >> 16) == 4, "越界读没被计数"
 
     dut._log.info("地址窗口 0x00~0x3F：窗口内放行，越界四个地址全部 DECERR 并计数")
+
+
+@cocotb.test()
+async def test_load_port_secure_only(dut):
+    """六：装载口（SLOT_SEL / KEY_IN / SLOT_CTRL）只认安全事务，两种形态都是
+
+    判据不是"响应码"（RAZ/WI 下被拒也回 OKAY），而是三件事：
+      · 槽位内容与 SLOT_SEL **原封不动**；
+      · 安全世界随后照常能装（门没有把自己也关在外面）；
+      · 被拒**有账可查**：=1 时进 VIOL_CNT，=0 时进 LOAD_REJ。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    words = key_words(3)
+    await load_key(dut, 1, words)
+
+    evil = key_words(0xE)
+    # 普通世界想把槽 1 换成自己知道的密钥：完整走一遍装载序列
+    assert await axi_write(dut, SLOT_SEL, 1, PROT_NONSEC) == RESP_REFUSED
+    assert await axi_write(dut, SLOT_CTRL, SC_BEGIN, PROT_NONSEC) == RESP_REFUSED
+    for w in evil:
+        assert await axi_write(dut, KEY_IN, w, PROT_NONSEC) == RESP_REFUSED
+    assert await axi_write(dut, SLOT_CTRL, SC_COMMIT, PROT_NONSEC) == RESP_REFUSED
+    # 再试着改选槽、锁槽、擦槽
+    assert await axi_write(dut, SLOT_SEL, 5, PROT_NONSEC) == RESP_REFUSED
+    assert await axi_write(dut, SLOT_CTRL, SC_LOCK, PROT_NONSEC) == RESP_REFUSED
+    assert await axi_write(dut, SLOT_CTRL, SC_ERASE, PROT_NONSEC) == RESP_REFUSED
+    n_tries = 1 + 1 + len(evil) + 1 + 3
+
+    key, valid = await read_use_key(dut, 1)
+    assert valid == 1 and as_words(key) == words, "普通世界的装载序列改动了槽 1"
+    sel, _ = await axi_read(dut, SLOT_SEL)
+    assert sel == 1, f"SLOT_SEL 被普通世界改成了 {sel}"
+    lm, _ = await axi_read(dut, LOCK_MAP)
+    assert lm == 0, f"普通世界把槽锁上了（LOCK_MAP=0x{lm:02x}）"
+
+    rej, _ = await axi_read(dut, LOAD_REJ)
+    vc, _ = await axi_read(dut, VIOL_CNT)
+    if SECURE_ONLY:
+        # 防火墙先挡：事务根本到不了装载门
+        assert vc & 0xFFFF == n_tries, f"防火墙写违规 {vc & 0xFFFF}，应当是 {n_tries}"
+        assert rej == 0, f"LOAD_REJ={rej}：被防火墙挡下的事务不该到达装载门"
+    else:
+        # 防火墙敞开，只剩装载门
+        assert vc & 0xFFFF == 0, f"演示形态防火墙不该计写违规（{vc & 0xFFFF}）"
+        assert rej == n_tries, f"LOAD_REJ={rej}，应当是 {n_tries}"
+
+    # 安全世界照常能装
+    await load_key(dut, 6, evil)
+    key, valid = await read_use_key(dut, 6)
+    assert valid == 1 and as_words(key) == evil, "安全世界装不进去了"
+
+    dut._log.info("装载口：SECURE_ONLY=%d 下普通世界 %d 笔写全部被拒、无副作用、有账",
+                  SECURE_ONLY, n_tries)
+
+
+@cocotb.test()
+async def test_nonsecure_zeroize_allowed_in_dev(dut):
+    """演示形态：普通世界的 CTRL.ZEROIZE **放行** —— 擦除是安全方向
+
+    这条与"装载口只认安全"是同一条设计的两面：装进去的权力收到安全世界，
+    擦掉的权力不收。送检形态下普通世界整块够不到（防火墙），
+    那时擦除走 sym_axi → ext_zeroize 那根线（见 test_ext_zeroize）。
+    """
+    if SECURE_ONLY:
+        return
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    await load_key(dut, 4, key_words(4))
+    assert await axi_write(dut, CTRL, CTRL_ZEROIZE, PROT_NONSEC) == RESP_OKAY
+    vm, _ = await axi_read(dut, VALID_MAP)
+    assert vm == 0, f"普通世界的 ZEROIZE 没擦掉（VALID_MAP=0x{vm:02x}）"
+    key, valid = await read_use_key(dut, 4)
+    assert valid == 0 and key == 0, "use 口还在送密钥"
+    rej, _ = await axi_read(dut, LOAD_REJ)
+    assert rej == 0, "ZEROIZE 不属于装载口，不该进 LOAD_REJ"
+
+
+@cocotb.test()
+async def test_ext_zeroize(dut):
+    """ext_zeroize（sym_axi 的 CTRL.ZEROIZE）一拍脉冲：全仓清空、计数 +1"""
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+
+    await load_key(dut, 0, key_words(1))
+    await load_key(dut, 7, key_words(2))
+    zc0, _ = await axi_read(dut, ZERO_CNT)
+
+    await RisingEdge(dut.clk)
+    dut.ext_zeroize.value = 1
+    await RisingEdge(dut.clk)
+    dut.ext_zeroize.value = 0
+    await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+
+    vm, _ = await axi_read(dut, VALID_MAP)
+    assert vm == 0, f"ext_zeroize 之后 VALID_MAP=0x{vm:02x}"
+    for slot in (0, 7):
+        key, valid = await read_use_key(dut, slot)
+        assert valid == 0 and key == 0, f"槽 {slot} 的 use 口还在送东西"
+    zc1, _ = await axi_read(dut, ZERO_CNT)
+    assert zc1 == zc0 + 1, f"擦除计数 {zc0} → {zc1}"
+
+    # 擦完照常能装
+    await load_key(dut, 3, key_words(3))
+    _, valid = await read_use_key(dut, 3)
+    assert valid == 1

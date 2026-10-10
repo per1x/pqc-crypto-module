@@ -85,6 +85,7 @@ module sym_vault_top #(
     wire [2:0]   kv_sel;
     wire [255:0] kv_key;
     wire         kv_valid;
+    wire         kv_zeroize;   // sym CTRL.ZEROIZE → 金库（D7：段末即擦）
 
     key_vault_axi #(
         .SECURE_ONLY(SECURE_ONLY), .SLOTS(8), .SLOT_BITS(3), .WORDS(8)
@@ -100,7 +101,7 @@ module sym_vault_top #(
         .s_axi_arvalid(vault_arvalid), .s_axi_arready(vault_arready),
         .s_axi_rdata(vault_rdata), .s_axi_rresp(vault_rresp),
         .s_axi_rvalid(vault_rvalid), .s_axi_rready(vault_rready),
-        .tamper(tamper),
+        .tamper(tamper), .ext_zeroize(kv_zeroize),
         .use_sel(kv_sel), .use_key(kv_key), .use_valid(kv_valid),
         .vault_tampered(vault_tampered));
 
@@ -117,7 +118,8 @@ module sym_vault_top #(
         .s_axi_rdata(sym_rdata), .s_axi_rresp(sym_rresp),
         .s_axi_rvalid(sym_rvalid), .s_axi_rready(sym_rready),
         .tamper(tamper),
-        .kv_sel(kv_sel), .kv_key(kv_key), .kv_valid(kv_valid));
+        .kv_sel(kv_sel), .kv_key(kv_key), .kv_valid(kv_valid),
+        .kv_zeroize(kv_zeroize));
 
 endmodule
 
