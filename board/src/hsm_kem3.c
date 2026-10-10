@@ -142,6 +142,8 @@ static inline void wr(unsigned off, uint32_t v)
                         "若核是 SECURE_ONLY=1，这一笔会 DECERR->SError->panic，丢板子。\n");
         exit(4);
     }
+    /* 与 hsm_hwtest 同一个缺口：加 -D 闸门时真正的写被删了，-D 下每笔写都是空操作 */
+    *(volatile uint32_t *)(pl + off) = v;
 }
 
 static double now_ms(void)
