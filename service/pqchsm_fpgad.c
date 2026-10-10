@@ -216,6 +216,7 @@
 #define MDC_START  0x01u              /* CTRL[0] */
 #define MDC_CLEAR  0x02u              /* CTRL[1] */
 /* CTRL[4] 原来是 SK_LOCK。**已随 V-04 删除**（同 mlkem 那条）。 */
+#define MDC_SEEDCLR 0x40u             /* CTRL[6]：作废暂存的那份 ξ（mldsa_axi.v A_CTRL） */
 #define MDC_ZEROIZE 0x04u             /* CTRL[2]：擦金库（见 mldsa_axi.v A_CTRL） */
 
 #define MDS_BUSY   (1u << 0)
@@ -945,6 +946,58 @@ static int wait_not_wiping(unsigned reg, uint32_t bit, const char *who)
 	return -1;
 }
 
+/* ============================================================================
+ * 【装种子之前先作废暂存口：不让别人留下的半份种子挡住我们】
+ * ============================================================================
+ * TA 装种子是"往暂存口逐字写"，EL3 在收满之后**拒绝再写**（EFULL）。于是只要
+ * 暂存口里已经躺着一份没被 START 消费掉的种子，下一次 SEED_NEW/REPLAY 就失败 ——
+ * 2026-10-10 上板实测：D7 的 ta_symkey 用例为造一份"种子 blob"调了一次
+ * SEED_NEW(ML-DSA)，留下 8 个字，紧接着 sdf_demo 的 ML-DSA KeyGen 全挂
+ * （TA 命令 10 回 0xffff0000）。任何能开 TA 会话的进程都能这样让本 daemon
+ * 拒绝服务，所以不能只靠"别人别这么干"。
+ *
+ * 做法：每次请 TA 装种子**之前**发一次 CTRL.SEED_CLR（作废暂存，不碰展开区、
+ * 不碰别的状态），失败之后再发一次（文件头那条"失败必须作废"的纪律，
+ * 以前只写在注释里、代码没做）。
+ * ⚠️ 写之前先**用读**等擦除落下：擦除期间被拒的写经 EL3 回来是 SError。 */
+static int seed_clr(uint32_t tgt)
+{
+	if (tgt == SEED_TGT_MLKEM) {
+		if (wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM") ||
+		    wait_exp_idle(MK_KEYSTAT, MKS_EXPWIPE, "ML-KEM"))
+			return -1;
+		wr(MK_CTRL, MKC_SEEDCLR);
+	} else {
+		if (wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA") ||
+		    wait_exp_idle(MD_KEYSTAT, MDS_EXPWIPE, "ML-DSA"))
+			return -1;
+		wr(MD_CTRL, MDC_SEEDCLR);
+	}
+	return hw_fault ? -1 : 0;
+}
+
+static int seed_new_clean(uint32_t tgt, uint8_t *blob, size_t cap, size_t *len)
+{
+	if (seed_clr(tgt))
+		return -1;
+	if (ta_seed_new(tgt, blob, cap, len)) {
+		(void)seed_clr(tgt);
+		return -1;
+	}
+	return 0;
+}
+
+static int seed_replay_clean(uint32_t tgt, const uint8_t *blob, size_t len)
+{
+	if (seed_clr(tgt))
+		return -1;
+	if (ta_seed_replay(tgt, blob, len)) {
+		(void)seed_clr(tgt);
+		return -1;
+	}
+	return 0;
+}
+
 static void session_end(void)
 {
 	keys_wipe();
@@ -1224,7 +1277,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 
 		/* TA 生成种子、送进 PL 的暂存口，**并把种子包成 blob 交回**。
 		 * blob 是这把密钥在普通世界的全部形态 —— 本进程解不开它。 */
-		if (ta_seed_new(SEED_TGT_MLKEM, keys[h].blob,
+		if (seed_new_clean(SEED_TGT_MLKEM, keys[h].blob,
 				sizeof keys[h].blob, &keys[h].blob_len))
 			return SDR_HARDFAIL;
 		world = 1;
@@ -1249,9 +1302,9 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		memcpy(out + 4, buf, eklen);
 		*out_len = 4 + eklen;
 		memset(buf, 0, sizeof buf);
-		logf_("KEYGEN pset=%u → 句柄/槽 %u，ek %u 字节"
-		      "（dk %u 字节留在片内金库；种子由 EL3 生成并直接写进 PL，"
-		      "本进程既没见过 dk 也没见过种子；调用方世界=%u）",
+		logf_("KEYGEN pset=%u → 句柄 %u，ek %u 字节"
+		      "（种子由 TA 生成、以 blob 交回；dk %u 字节在 PL 展开区现展开、"
+		      "随 S_FIN 擦；本进程既没见过 dk 也没见过种子；调用方世界=%u）",
 		      q->a0, h, eklen, dklen, world);
 		return SDR_OK;
 	}
@@ -1294,7 +1347,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		/* 先请 TA 把这把密钥的种子重放进 PL 的暂存口，然后一条 CHAIN
 		 * 的 Decaps —— PL 现展开 dk、解完即擦。dk 既没经过总线，
 		 * 也没在 PL 里过夜。 */
-		if (ta_seed_replay(SEED_TGT_MLKEM, keys[h].blob, keys[h].blob_len))
+		if (seed_replay_clean(SEED_TGT_MLKEM, keys[h].blob, keys[h].blob_len))
 			return SDR_HARDFAIL;
 		if (mlkem_run(2, keys[h].pset, MKM_CHAIN | MKM_SEED_STAGED,
 			      in, ctlen, out, PQCS_MAXPAY, &n))
@@ -1338,7 +1391,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 			;
 		if (h == MLDSA_KEY_SLOTS)
 			return SDR_UNKNOWERR;
-		if (ta_seed_new(SEED_TGT_MLDSA, dsa_keys[h].blob,
+		if (seed_new_clean(SEED_TGT_MLDSA, dsa_keys[h].blob,
 				sizeof dsa_keys[h].blob, &dsa_keys[h].blob_len))
 			return SDR_HARDFAIL;
 		world = 1;
@@ -1362,9 +1415,9 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		dsa_keys[h].pset = q->a0;
 		memcpy(out, &h, 4);
 		*out_len = 4 + pklen;
-		logf_("ML-DSA KEYGEN pset=%u → 句柄/槽 %u，pk %u 字节"
-		      "（sk %u 字节留在片内金库；ξ 由 EL3 生成并直接写进 PL，"
-		      "本进程既没见过 sk 也没见过 ξ；调用方世界=%u）",
+		logf_("ML-DSA KEYGEN pset=%u → 句柄 %u，pk %u 字节"
+		      "（ξ 由 TA 生成、以 blob 交回；sk %u 字节在 PL 展开区现展开、"
+		      "随 S_FIN 擦；本进程既没见过 sk 也没见过 ξ；调用方世界=%u）",
 		      q->a0, h, pklen, sklen, world);
 		return SDR_OK;
 	}
@@ -1408,7 +1461,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 				return SDR_HARDFAIL;
 			}
 			memcpy(sbuf + 32, pay, q->len);
-			if (ta_seed_replay(SEED_TGT_MLDSA, dsa_keys[h].blob,
+			if (seed_replay_clean(SEED_TGT_MLDSA, dsa_keys[h].blob,
 					   dsa_keys[h].blob_len))
 				return SDR_HARDFAIL;
 			rv = mldsa_run(MDO_SIGN, dsa_keys[h].pset,

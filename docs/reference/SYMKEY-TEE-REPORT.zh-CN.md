@@ -182,3 +182,54 @@ AES-256 密钥装进去"（或反过来），对称 blob 用 **AAD = `"pqchsm/sy
 | `hsm_hwtest` / `hsm_kem3` 的 `-D` 直接模式**每笔写都是空操作** | `352f5e1` 加 `-D` 闸门时把真正那行写删了 | 补回；查过 board/logs，那之后的结果都是经 EL3 模式，没有一份受影响 |
 | `rtl_sim.sh` 缺 mlkem/mldsa 的 `SECURE_ONLY=0` 那一遍 | 两个测试文件注释都说有，脚本里一直没有 —— 种子口那道门在演示形态下**从没被仿真过** | 补上；Verilator：mlkem 27/27；mldsa 有一条用例前提写死 `=1`，按形态分岔后 35/35（两种形态） |
 | 金丝雀（槽 4）在演示位流里 `SECURE_ONLY=0` | `21e3daa` 把全文 `SECURE_ONLY(1)` 批量换成开关时误带了它，对照组被敞开，与文档"两种形态都是 1"打架 | 恢复常量 1（只影响演示位流） |
+
+---
+
+## 8. 上板结果（2026-10-10，构建机 + 板子都在线）
+
+**结论：D7 在真硅上两种形态全部验过，`pay_d7.sh` 与 `pay_d7_sec.sh` 都是 `rc_all=0`。**
+证据在 `board/logs/RESULT_d7_*.txt`；构建配方在 `boot/d7/`。
+
+### 8.1 构建（构建机，全部落在 `*_d7` 新目录，批 2 的产物一个字节没动）
+
+| 产物 | 来源 | md5 | 核对 |
+|---|---|---|---|
+| `BOOT_D7.BIN` | 批 2 的 bif，只换 BL31 与 OP-TEE 两项 | `232f5ae7…` | `boot_embdata.total_len = 0x18`；BL31 装载布局与 b2 一致；`atf_d7` 相对 `atf_b2` 只有 D7 的 diff |
+| optee_os | `optee_os_b2` 复制 + PTA 补丁 | — | `conf.mk` 与 b2 **逐行一致**（中途抓到一次 `CFG_CORE_ASLR` 漂移，已对齐） |
+| TA | D7 dev kit，签名钥与 b2 相同 | `e7e37214…` | 二进制里有 `pqchsm/symkey/v1` |
+| `zu3eg_hsm_dev.bit` | D7 RTL，`PQC_DEV_OPEN=1` | `cd05e584…` | **WNS 1.773 / WHS 0.010** |
+| `zu3eg_hsm.bit` | D7 RTL，送检 | `36252919…` | **WNS 1.629 / WHS 0.009** |
+| daemon / sdf_demo / 板上工具 | Ubuntu gcc-aarch64 7.5（与 b2 同一编译器） | 见 `deploy/` | daemon 的 NEEDED/RUNPATH 与 b2 那份同形 |
+
+两份位流各 24 条 critical warning，与 b2 **同一批**：`zu3eg_hsm_top.v:138` 的 timing loop（b1/b2 日志里就有）+ ML-DSA `keygen.v` / `sample_in_ball.v`；**没有一条提到 key_vault / sym**。
+
+### 8.2 上板
+
+启动：`BOOT_D7.BIN` 放**槽 5**（原文件留作 `BOOT0005_pre_d7.BIN`），失败会落到槽 6（b2，已知能起）。
+`set_multiboot=5` + 热重启：回读 `CSU_MULTI_BOOT = 5`，约 30 秒 `READY=yes`。
+SD 上被替换的文件都留了 `*_pre_d7` 备份（daemon、两份位流、hsm_hwtest、hsm_kem3、sdf_demo、plharness.sh；TA 留作 `.ta.b2`）。
+
+| 清单 | 结果 |
+|---|---|
+| 3 `GET_INFO` 特性位 | `0x1c` ✅ |
+| 4 `sdf_demo`（演示 / 送检两种形态） | 各 **19 ✅ 0 ❌**；[5] 四条新判据全在：明文导入被拒、KAT 槽 7 对上 GB/T 32907、blob 重装同密文、blob 进不了槽 7；[7] 八格模式向量全对 |
+| `ta_symkey`（TA 接口 14 条正反） | 全过：槽位纪律（`BAD_PARAMETERS`/`ACCESS_DENIED`）、篡改/伪造/空 AAD 域 blob 一律 `MAC_INVALID` |
+| 5 送检形态反证 | 普通世界读槽 1 三个地址全 0；`hsm_hwtest` 经 EL3："密钥仓（槽 1）：EL3 通用读写都拒" PASS，**通过 18 失败 0 跳过 2**；`hsm_kem3` 20/0；`hsm_secneg` rc=0 |
+| 6 演示形态装载门反证（`d7probe`） | 普通世界完整装载序列：`VALID_MAP` 不变、**`LOAD_REJ` 0 → 11**；普通世界 `CTRL.ZEROIZE` 放行、擦后 `VALID_MAP = 0` |
+| 7 段末即擦 | 两种形态会话结束后金库为空（演示形态 `VALID_MAP = 0x00`；daemon 自证无"KV_VALID 仍为 1"） |
+| 8 `wire_fuzz.py`（Mac → mTLS） | **41/41**（含 9 条 D7 新用例），服务没卡 |
+| 9 吞吐 | `SYMKEY_LOAD` **1.28 ms/次**（含 socket 往返）；AES-256-CBC **0.89 MB/s**。`sym_block`/`sym_crypt` 与 `main` **逐字节相同**，所以这是既有分组路径的真实值（每次寄存器访问是一次 ioctl→SMC），不是 D7 回退。FINAL-PLAN 里的"≈4 MB/s"是按 0.3–0.5 µs/次**估**的，实测约慢 4 倍 —— 那段文字应改成实测值 |
+| 10 板上密钥边界扫描（`d7bench`） | 槽 7 装 FIPS-197 C.3 的 AES-256 密钥并验出正确密文后，同一会话里逐字读完 key_vault + sym_axi 两个窗口 128 个字：**8 个密钥字一个都没出现** |
+
+### 8.3 上板抓到的问题（都已修）
+
+1. **daemon 会被别人留下的暂存种子拒绝服务。** `ta_symkey` 第一版为造"种子 blob"调了一次 `SEED_NEW(ML-DSA)`，在 PL 暂存口留下 8 个字，紧接着 daemon 的 ML-DSA KeyGen 全挂（EL3 `EFULL` → TA `0xffff0000`）。任何能开 TA 会话的进程都能这样做。修法：daemon 每次装种子**之前**发 `CTRL.SEED_CLR`、失败后再发一次（文件头早就写着"失败必须作废"，代码一直没做）；`ta_symkey` 改用 KEYGEN 造同域 blob，不碰 PL。
+2. **`pay_d7_sec.sh` 在错的文件里找 `hsm_kem3` 的结果行**，全过也判失败 —— 改为读 stdout。
+3. SD 上的 `plharness.sh` 还是"先解绑再重配"修复**之前**的旧版，换成了仓库版。
+4. 板子一次断电把 multiboot 清回 0、落回 golden（批 2 报告 §8 预告过的那条），daemon 因种子 PTA 不在而 fail-closed —— 符合设计，不是 D7 的问题。
+5. 运行时替换 `/lib/optee_armtz` 里的 TA 后，OP-TEE 仍回旧实例（特性位 `0x0c`）；把 TA 放回 SD、重启后正常。原因没深究 —— **换 TA 一律走 SD + 重启**。
+
+### 8.4 没有做的
+
+- **没把槽 5 提升成开机默认**（`BOOT.BIN` 未动）。上电 POR 会把 multiboot 清 0、回 golden；要上电即 D7，需要 `cp BOOT0005.BIN BOOT.BIN` + `set_multiboot=0`，属于部署决策，留给你。
+- 全套 Icarus `rtl_sim` 仍留给合入 `main` 前那一次。

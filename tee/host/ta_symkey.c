@@ -140,30 +140,23 @@ int main(void)
 		bad_blob[i] = (uint8_t)(i * 7);
 	expect_reject("伪造的 blob",
 		      pqchsm_ta_symkey_load(&t, 3, bad_blob, blen), 0);
-	/* 种子 blob（AAD 空）不能当对称密钥装：32 字节的 ξ 恰好是 AES-256 的长度 */
+	/* 空 AAD 域的 blob（种子 blob 与 KEYGEN 私钥 blob 同一个域）不能当对称密钥装。
+	 * ⚠️ 用 KEYGEN 造这份 blob，**不用 SEED_NEW**：后者会顺手把种子写进 PL 的
+	 *    暂存口、且没人消费 —— 2026-10-10 上板实测，那份残留让紧接着的 daemon
+	 *    ML-DSA KeyGen 全挂（EL3 EFULL）。KEYGEN 只在 TA 内算，不碰 PL。 */
 	{
-		TEEC_Operation op;
-		uint32_t origin = 0;
-		uint8_t sblob[256];
-		int rc;
+		static uint8_t pk[TA_PQCHSM_MAX_PK], kblob[TA_PQCHSM_MAX_BLOB];
+		size_t kl = 0;
+		int rc = pqchsm_ta_keygen(&t, TA_ALG_ML_DSA_44, pk,
+					  kblob, sizeof kblob, &kl);
 
-		memset(&op, 0, sizeof op);
-		op.paramTypes = TEEC_PARAM_TYPES(TEEC_VALUE_INOUT,
-						 TEEC_MEMREF_TEMP_OUTPUT,
-						 TEEC_NONE, TEEC_NONE);
-		op.params[0].value.a = TA_SEED_TGT_MLDSA;
-		op.params[1].tmpref.buffer = sblob;
-		op.params[1].tmpref.size   = sizeof sblob;
-		rc = (int)TEEC_InvokeCommand(&t.sess, TA_PQCHSM_CMD_SEED_NEW,
-					     &op, &origin);
 		if (rc) {
-			printf("  ? 拿不到种子 blob（0x%08x），跳过这一条（**不计通过**）\n",
+			printf("  ? 拿不到空 AAD 域的 blob（0x%08x），这一条**不计通过**\n",
 			       (unsigned)rc);
+			fail = 1;
 		} else {
-			expect_reject("ML-DSA 种子 blob 当对称密钥装",
-				      pqchsm_ta_symkey_load(&t, 3, sblob,
-							    op.params[1].tmpref.size),
-				      TEE_ERROR_MAC_INVALID_);
+			expect_reject("空 AAD 域的 blob（KEYGEN 私钥 blob）当对称密钥装",
+				      pqchsm_ta_symkey_load(&t, 3, kblob, kl), 0);
 		}
 	}
 

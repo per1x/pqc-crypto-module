@@ -103,7 +103,7 @@
 网络型 HSM 尤其如此（数据要送过去，大对象比本地算慢得多）。真正做硬件 bulk 对称的是数据面设备
 （SmartNIC、QAT、内联加密器），不是 HSM。
 
-次要理由：当前 PL 对称路径每分组约 10 次寄存器访问 ≈ **4 MB/s**，而 A53 带 ARMv8 Crypto Extensions
+次要理由：当前 PL 对称路径每分组约 10 次寄存器访问 ≈ **4 MB/s**（估算；**2026-10-10 板上实测经 EL3 那条路 AES-256-CBC 0.89 MB/s**，见 SYMKEY-TEE-REPORT §8），而 A53 带 ARMv8 Crypto Extensions
 实测 AES-256-CBC **~1.14 GB/s**；且 **PL 里根本没有链式模式**（只有单分组变换），产品要的 AES-256-GCM
 它做不了。顺带是安全升级（`aes_core.v` 自陈无 DPA 掩码，Crypto Extensions 的 DPA 抗性更高）。
 
