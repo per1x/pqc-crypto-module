@@ -204,6 +204,34 @@ DEFS = BEG + '''
  * （boot/optee/patch_optee_seedpta.py 的第二条命令）。
  */
 #define ZYNQMP_SIP_SVC_PQC_SYMKEY\t0x8200ff16
+
+/*
+ * ---- PL TRNG 取一个字（给 TA 的密钥熵）：**只认安全世界** ----------------
+ *
+ *   0x8200ff17  无参数
+ *               → 成功：x0 = (1 << 32) | 那个 32 位字
+ *                 失败：x0 = 错误码（第 32 位为 0）
+ *
+ * 【为什么要有它】批 2 把种子与对称密钥的生成搬进 TA 之后，TA 用的是 OP-TEE 的
+ * 软件 PRNG（Fortuna），而这个平台上它的种子只有"开机后的毫秒数"+ 计时器抖动
+ * （optee_os core/tee/tee_cryp_utl.c 的弱默认 plat_rng_init）。PL 里那个做过
+ * SP 800-90B 实测的 TRNG 反而没用上。TA 现在把两路混起来用，PL 这一路取不到就不生成。
+ *
+ * 【为什么把字放进 x0】调用方是 PTA，OP-TEE 3.9 只有 thread_smc()，**只带回 x0**。
+ * x0 是 64 位：第 32 位作"有效"标记，低 32 位是字；错误码都小于 2^32。
+ *
+ * 【不在 EL3 里久等】TRNG 没启用就顺手启用（CTRL.ENABLE，电平位），但启动健康检测
+ * 要一会儿 —— EL3 只短轮询，没就绪回 ENOTREADY，由 TA 那一侧睡一下再试。
+ * ALARM（健康检测报警）回 EALARM：这批数据作废，TA 那侧**拒绝生成密钥**。
+ *
+ * 这条路上流的是**密钥熵**，所以与种子/对称装载那两条一样：无条件只认安全世界。
+ * 普通世界要随机数走 daemon 的 OP_RANDOM（它读的是同一个 TRNG，但拿去做不了任何人的密钥）。
+ */
+#define ZYNQMP_SIP_SVC_PQC_TRNG_WORD\t0x8200ff17
+#define PQCHSM_TRNG_EWORLD\t\t3U
+#define PQCHSM_TRNG_ENOTREADY\t\t9U
+#define PQCHSM_TRNG_EALARM\t\t10U
+#define PQCHSM_TRNG_CTRL\t\t0x80000000ULL
 #define PQCHSM_SYM_OP_BEGIN\t\t0U
 #define PQCHSM_SYM_OP_WORD\t\t1U
 #define PQCHSM_SYM_OP_COMMIT\t\t2U
@@ -524,6 +552,30 @@ CASES = '\t' + BEG + '''
 \t\t * 这个数字本身不泄漏任何种子字节。 */
 \t\tSMC_RET2(handle, (uint64_t)0,
 \t\t\t (uint64_t)(mmio_read_32((uintptr_t)sreg) & 0x1FU));
+\t}
+
+\tcase ZYNQMP_SIP_SVC_PQC_TRNG_WORD: {
+\t\tuint32_t st, w;
+\t\tint i;
+
+\t\tif (!is_caller_secure(flags)) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_TRNG_EWORLD, (uint64_t)0);
+\t\t}
+\t\tst = mmio_read_32((uintptr_t)PQCHSM_TRNG_STATUS);
+\t\tif ((st & 0x80U) == 0U)            /* [7] ENABLED */
+\t\t\tmmio_write_32((uintptr_t)PQCHSM_TRNG_CTRL, 0x1U);
+\t\tfor (i = 0; i < 20000; i++) {
+\t\t\tst = mmio_read_32((uintptr_t)PQCHSM_TRNG_STATUS);
+\t\t\tif ((st & 0x4U) != 0U) {       /* [2] ALARM：这批作废 */
+\t\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_TRNG_EALARM, (uint64_t)0);
+\t\t\t}
+\t\t\tif ((st & 0x3U) == 0x3U) {     /* READY && DATA_VALID */
+\t\t\t\tw = mmio_read_32((uintptr_t)PQCHSM_TRNG_RDATA);
+\t\t\t\tSMC_RET2(handle, (uint64_t)((1ULL << 32) | (uint64_t)w),
+\t\t\t\t\t (uint64_t)0);
+\t\t\t}
+\t\t}
+\t\tSMC_RET2(handle, (uint64_t)PQCHSM_TRNG_ENOTREADY, (uint64_t)0);
 \t}
 
 \tcase ZYNQMP_SIP_SVC_PQC_SYMKEY: {

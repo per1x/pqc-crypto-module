@@ -233,3 +233,26 @@ SD 上被替换的文件都留了 `*_pre_d7` 备份（daemon、两份位流、hs
 
 - **没把槽 5 提升成开机默认**（`BOOT.BIN` 未动）。上电 POR 会把 multiboot 清 0、回 golden；要上电即 D7，需要 `cp BOOT0005.BIN BOOT.BIN` + `set_multiboot=0`，属于部署决策，留给你。
 - 全套 Icarus `rtl_sim` 仍留给合入 `main` 前那一次。
+
+---
+
+## 9. 后续（E1）：TA 的密钥熵接上 PL TRNG
+
+**发现**：批 2 起种子与对称密钥都由 TA 用 `TEE_GenerateRandom` 生成，而这块板的 OP-TEE
+（3.9，`CFG_WITH_SOFTWARE_PRNG=y`）**没有任何硬件熵源**：Fortuna 的初始种子只有
+"开机后的毫秒数"（`core/tee/tee_cryp_utl.c` 的弱默认 `plat_rng_init`，ZynqMP 平台没覆盖），
+之后靠计时器低位抖动慢慢补。PL 里做过 SP 800-90B 实测的 TRNG 反而没用在密钥上。
+
+**修法**：EL3 新 SiP `0x8200ff17 PQC_TRNG_WORD`（无条件只认安全世界，ALARM 拒交）→ PTA 第三条
+命令 → TA 的 `ta_key_entropy()`：`SHAKE256("pqchsm/key-entropy/v1" ‖ PRNG(n) ‖ PL TRNG(n))`，
+**PL 那一路取不到就拒绝生成**。种子（`SEED_NEW`/`SEED_TO_PL`）与 `SYMKEY_NEW` 都改走它。
+
+**上板实证**：`BOOT_E1.BIN`（`57e5a3a5…`）已提升为开机默认（D7 留作 `BOOT_pre_e1.BIN`）。
+TRNG 的 `WORDS` 计数在 `ta_symkey`（生成 16 + 32 字节两把对称密钥）前后**恰好 +12 字**，连测两次 ——
+密钥熵确实取自 PL TRNG。`ta_symkey` / `sdf_demo` / daemon 自检全过。
+
+**同批新增**：`hsmctl` 命令行（一条命令一个业务动作，密钥以 blob 文件保存）、PQC 种子 blob 的
+导出/导入（`OP_PQC_BLOB_EXPORT/IMPORT`）、daemon 分层日志（`[TEE]` / `[TEE→PL]` / `[PL]` / `[NW]`），
+以及按业务流程的演示 `board/demo/business_demo.sh`（板上 `demo/run.sh`；旧版留作 `demo/run_classic.sh`），
+实测输出见 `board/logs/RESULT_business_demo.txt`。
+

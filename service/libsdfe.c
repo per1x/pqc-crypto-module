@@ -467,6 +467,46 @@ int SDFE_LoadKey(SDFE_HANDLE hSession, uint32_t slot,
 		    NULL, 0, NULL);
 }
 
+int SDFE_ExportKeyBlob(SDFE_HANDLE hSession, uint32_t kind, uint32_t key_handle,
+		       uint8_t *blob, uint32_t *blob_len)
+{
+	uint8_t  buf[256];
+	uint32_t n = 0;
+	int rv;
+
+	if (!blob || !blob_len)
+		return SDR_INARGERR;
+	rv = call(hSession, OP_PQC_BLOB_EXPORT, kind, key_handle, NULL, 0,
+		  buf, sizeof buf, &n);
+	if (rv != SDR_OK)
+		return rv;
+	if (n == 0 || n > *blob_len)
+		return SDR_INARGERR;
+	memcpy(blob, buf, n);
+	*blob_len = n;
+	return SDR_OK;
+}
+
+int SDFE_ImportKeyBlob(SDFE_HANDLE hSession, uint32_t kind, uint32_t pset,
+		       const uint8_t *blob, uint32_t blob_len,
+		       uint32_t *key_handle)
+{
+	uint8_t  buf[4];
+	uint32_t n = 0;
+	int rv;
+
+	if (!blob || !blob_len || !key_handle)
+		return SDR_INARGERR;
+	rv = call(hSession, OP_PQC_BLOB_IMPORT, kind, pset, blob, blob_len,
+		  buf, sizeof buf, &n);
+	if (rv != SDR_OK)
+		return rv;
+	if (n != 4)
+		return SDR_COMMFAIL;
+	memcpy(key_handle, buf, 4);
+	return SDR_OK;
+}
+
 int SDFE_LoadKatKey(SDFE_HANDLE hSession, uint32_t kat_id)
 {
 	return call(hSession, OP_SYMKEY_KAT, kat_id, 0, NULL, 0, NULL, 0, NULL);

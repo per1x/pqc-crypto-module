@@ -255,6 +255,39 @@ static void logf_(const char *fmt, ...)
 	fflush(stderr);
 }
 
+/* ============================================================================
+ * 【分层日志：每一步在哪一层执行】
+ * ============================================================================
+ * 演示要让人看见"这一步在 TEE 里、那一步在 PL 里"。这些行只在**那一层的调用
+ * 真的返回成功之后**才打（包装在各个 *_raw 调用外面），所以它们是执行记录，
+ * 不是描述。标签：
+ *   [TEE]     OP-TEE 里的 TA 做的（生成/包裹/解包密钥）
+ *   [TEE→PL]  TA 经 PTA → EL3 把密钥材料写进 PL（普通世界不经手）
+ *   [PL]      FPGA 里的密码核做的运算（带端到端时延）
+ *   [NW]      普通世界 daemon 自己做的（只搬密文 blob、调度）
+ * 演示脚本按这几个标签过滤 daemon 日志。 */
+static double ms_now(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+
+static void lay(const char *tag, const char *fmt, ...)
+{
+	char buf[384];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+	logf_("%-9s %s", tag, buf);
+}
+
+static const char *const MK_PS[3] = { "512", "768", "1024" };
+static const char *const MD_PS[3] = { "44", "65", "87" };
+
 /* ---- 远程口：mTLS ----------------------------------------------------------
  *
  * ⚠️ 这里以前是"明文 TCP + 一条静态预共享口令 + 常量时间比较"。
@@ -517,7 +550,7 @@ static int sec_seed_load(uint32_t target, uint32_t *world)
  * 与种子同形：TA 生成/解包 → PTA → EL3 SiP 0x8200ff16 → PL key_vault。
  * 这里的参数里**没有能放明文密钥的字段**：GEN 收槽号+长度、回 blob；
  * LOAD 收槽号+blob；KAT 收编号。 */
-static int ta_symkey_cmd(uint32_t cmd, uint32_t a, uint32_t b,
+static int ta_symkey_cmd_raw(uint32_t cmd, uint32_t a, uint32_t b,
 			 void *blob, size_t cap, size_t *blob_len, int is_out)
 {
 	TEEC_Operation op;
@@ -546,6 +579,29 @@ static int ta_symkey_cmd(uint32_t cmd, uint32_t a, uint32_t b,
 	}
 	if (blob && is_out && blob_len)
 		*blob_len = op.params[1].tmpref.size;
+	return 0;
+}
+
+static int ta_symkey_cmd(uint32_t cmd, uint32_t a, uint32_t b,
+			 void *blob, size_t cap, size_t *blob_len, int is_out)
+{
+	int rc = ta_symkey_cmd_raw(cmd, a, b, blob, cap, blob_len, is_out);
+
+	if (rc) {
+		lay("[TEE]", "TA 拒绝：%s", cmd == TA_PQCHSM_CMD_SYMKEY_LOAD
+		    ? "blob 认证失败（被改过，或不是本机 KEK 包的）—— 没有任何密钥进 PL"
+		    : "命令被拒（参数或槽位不合规）");
+		return rc;
+	}
+	if (cmd == TA_PQCHSM_CMD_SYMKEY_NEW) {
+		lay("[TEE]", "TA 生成 %u 字节对称密钥（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 %zu 字节 blob",
+		    b, blob_len ? *blob_len : (size_t)0);
+	} else if (cmd == TA_PQCHSM_CMD_SYMKEY_LOAD) {
+		lay("[TEE]", "TA 用 KEK 解开 %zu 字节 blob（认证通过）", cap);
+	} else {
+		lay("[TEE]", "TA 取出公开测试向量密钥 #%u", b);
+	}
+	lay("[TEE→PL]", "密钥经 PTA → EL3 写进 PL 对称金库槽 %u（普通世界不经手）", a);
 	return 0;
 }
 
@@ -603,7 +659,7 @@ static void wr(unsigned off, uint32_t v)
 }
 
 /* ---- TRNG ---- */
-static int trng_bytes(uint8_t *out, uint32_t n)
+static int trng_bytes_raw(uint8_t *out, uint32_t n)
 {
 	uint32_t got = 0, w;
 	long spin;
@@ -625,6 +681,15 @@ static int trng_bytes(uint8_t *out, uint32_t n)
 			out[got++] = (uint8_t)(w >> (8 * i));
 	}
 	return 0;
+}
+
+static int trng_bytes(uint8_t *out, uint32_t n)
+{
+	int rc = trng_bytes_raw(out, n);
+
+	if (!rc)
+		lay("[PL]", "TRNG 取 %u 字节（8 路环振 + SP 800-90B 健康检测）", n);
+	return rc;
 }
 
 /* ---- ML-KEM 长度（由 param_set 算出，与 RTL 一致）---- */
@@ -705,7 +770,7 @@ static int wait_exp_idle(unsigned keystat_reg, uint32_t bit, const char *who)
 	return -1;
 }
 
-static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
+static int mlkem_run_raw(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 		     const uint8_t *in, uint32_t in_len,
 		     uint8_t *out, uint32_t out_cap, uint32_t *out_len)
 {
@@ -739,6 +804,20 @@ static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
 	drain_packed(MK_OUTDAT4, MK_OUTDAT, out, n);
 	*out_len = n;
 	return 0;
+}
+
+static int mlkem_run(uint32_t mode, uint32_t pset, uint32_t mode_extra,
+		     const uint8_t *in, uint32_t in_len,
+		     uint8_t *out, uint32_t out_cap, uint32_t *out_len)
+{
+	static const char *const op[3] = { "生成密钥对", "封装", "解封装" };
+	double t0 = ms_now();
+	int rc = mlkem_run_raw(mode, pset, mode_extra, in, in_len, out, out_cap, out_len);
+
+	if (!rc && mode < 3 && pset < 3)
+		lay("[PL]", "ML-KEM-%s %s：%.2f ms%s", MK_PS[pset], op[mode], ms_now() - t0,
+		    (mode_extra & MKM_CHAIN) ? "（私钥在 PL 展开区现展开，算完由硬件擦）" : "");
+	return rc;
 }
 
 /* ---- ML-DSA 长度（FIPS 204，与 RTL 一致）---- */
@@ -796,7 +875,7 @@ static long now_ms(void)
  *
  * 返回：0 成功；-1 IN_PTR 对不上；-2 硬件拒绝参数/长度；-3 超时；-4 输出放不下。
  * verify_ok 只在 op == MDO_VERIFY 时有意义。 */
-static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
+static int mldsa_run_raw(uint32_t op, uint32_t pset, uint32_t mode_extra,
 		     const uint8_t *in, uint32_t in_len,
 		     uint32_t msg_len, uint32_t ctx_len,
 		     uint8_t *out, uint32_t out_cap, uint32_t *out_len,
@@ -855,6 +934,22 @@ static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
 		return -3;
 	*out_len = n;
 	return 0;
+}
+
+static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
+		     const uint8_t *in, uint32_t in_len,
+		     uint32_t msg_len, uint32_t ctx_len,
+		     uint8_t *out, uint32_t out_cap, uint32_t *out_len,
+		     int *verify_ok)
+{
+	static const char *const opn[3] = { "生成密钥对", "签名", "验签" };
+	double t0 = ms_now();
+	int rc = mldsa_run_raw(op, pset, mode_extra, in, in_len, msg_len, ctx_len, out, out_cap, out_len, verify_ok);
+
+	if (!rc && op < 3 && pset < 3)
+		lay("[PL]", "ML-DSA-%s %s：%.2f ms%s", MD_PS[pset], opn[op], ms_now() - t0,
+		    (mode_extra & MDM_CHAIN) ? "（私钥在 PL 展开区现展开，算完由硬件擦）" : "");
+	return rc;
 }
 
 /* ---- 句柄表：dk 留在这里，不给应用 ---- */
@@ -984,6 +1079,9 @@ static int seed_new_clean(uint32_t tgt, uint8_t *blob, size_t cap, size_t *len)
 		(void)seed_clr(tgt);
 		return -1;
 	}
+	lay("[TEE]", "TA 生成 %s 种子（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 %zu 字节 blob 交回",
+	    tgt == SEED_TGT_MLKEM ? "ML-KEM d‖z" : "ML-DSA ξ", *len);
+	lay("[TEE→PL]", "种子经 PTA → EL3 写进 PL 暂存口（daemon 手里只有 blob）");
 	return 0;
 }
 
@@ -992,9 +1090,12 @@ static int seed_replay_clean(uint32_t tgt, const uint8_t *blob, size_t len)
 	if (seed_clr(tgt))
 		return -1;
 	if (ta_seed_replay(tgt, blob, len)) {
+		lay("[TEE]", "TA 拒绝：种子 blob 认证失败 —— 没有任何种子进 PL");
 		(void)seed_clr(tgt);
 		return -1;
 	}
+	lay("[TEE]", "TA 用 KEK 解开 %zu 字节种子 blob（认证通过）", len);
+	lay("[TEE→PL]", "种子经 PTA → EL3 写进 PL 暂存口");
 	return 0;
 }
 
@@ -1025,6 +1126,7 @@ static void session_end(void)
 	if (rd(SY_STATUS) & SYS_KVOK)
 		logf_("SY_CTRL.ZEROIZE 之后 KV_VALID 仍为 1 —— 位流没有 D7 的"
 		      " sym→vault 擦除线？对称密钥**没有**随会话擦掉");
+	lay("[PL]", "会话结束：PQC 展开区、对称金库与三个分组核已发擦除");
 	/* ⚠️ 关键的一步：**等擦完再返回**。下一个连接的第一笔写不能落在 WIPING 上。 */
 	wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM");
 	wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA");
@@ -1094,7 +1196,7 @@ static void ctr_inc(uint8_t ctr[16])
 			break;
 }
 
-static int sym_crypt(uint32_t alg, uint32_t slot, int dec, uint32_t mode,
+static int sym_crypt_raw(uint32_t alg, uint32_t slot, int dec, uint32_t mode,
 		     const uint8_t iv[16], const uint8_t *in, uint8_t *out,
 		     uint32_t len)
 {
@@ -1179,9 +1281,25 @@ static int sym_crypt(uint32_t alg, uint32_t slot, int dec, uint32_t mode,
 	return 0;
 }
 
+static int sym_crypt(uint32_t alg, uint32_t slot, int dec, uint32_t mode,
+		     const uint8_t iv[16], const uint8_t *in, uint8_t *out,
+		     uint32_t len)
+{
+	static const char *const an[3] = { "AES-128", "AES-256", "SM4" };
+	static const char *const mn[5] = { "ECB", "CBC", "CTR", "CFB", "OFB" };
+	double t0 = ms_now();
+	int rc = sym_crypt_raw(alg, slot, dec, mode, iv, in, out, len);
+
+	if (!rc && alg < 3 && mode < 5)
+		lay("[PL]", "%s-%s %s %u 字节：%u 个分组逐个在 PL 里算，密钥取自金库槽 %u（%.2f ms）",
+		    an[alg], mn[mode], dec ? "解密" : "加密", len, (len + 15u) / 16u, slot,
+		    ms_now() - t0);
+	return rc;
+}
+
 /* SM3：无密钥，字节一个一个写进 HASH_IN，FINAL 之后读 DIGEST0..7。
  * 时序照 hardware/tb/cocotb/test_sym_vault.py 里那条对上 GB/T 32905 的用例。 */
-static int sym_sm3(const uint8_t *in, uint32_t len, uint8_t out[32])
+static int sym_sm3_raw(const uint8_t *in, uint32_t len, uint8_t out[32])
 {
 	long spin;
 	uint32_t i;
@@ -1208,6 +1326,16 @@ static int sym_sm3(const uint8_t *in, uint32_t len, uint8_t out[32])
 		out[4*i+3] = (uint8_t)w;
 	}
 	return 0;
+}
+
+static int sym_sm3(const uint8_t *in, uint32_t len, uint8_t out[32])
+{
+	double t0 = ms_now();
+	int rc = sym_sm3_raw(in, len, out);
+
+	if (!rc)
+		lay("[PL]", "SM3 杂凑 %u 字节（%.2f ms）", len, ms_now() - t0);
+	return rc;
 }
 
 /* ---- 一条请求 ---- */
@@ -1542,6 +1670,58 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 			return SDR_KEYNOTEXIST;   /* 多半是 blob 不是本设备/本 KEK 包的 */
 		logf_("SYMKEY_LOAD 槽 %u —— TA 解开 blob 装进金库", q->a0);
 		return SDR_OK;
+
+	/* ---- 后量子密钥的种子 blob：导出 / 导入（daemon 只搬密文）----------------
+	 * 句柄只在会话内有效；要让一把 ML-KEM / ML-DSA 密钥跨会话、跨进程活下来，
+	 * 应用就得把它的**权威形态**——TA 用 KEK 包裹的种子 blob——自己存起来。
+	 * 这与对称密钥的 SDFE_GenerateKey/LoadKey 是同一个模型（信封）。
+	 * blob 是密文，本进程解不开（KEK 不出 TA），所以交出去没有泄密问题；
+	 * 导入时也不在这里验 —— 用的时候 TA 解包，认证不过就拒。 */
+	case OP_PQC_BLOB_EXPORT: {
+		uint32_t h = q->a1;
+
+		if (q->a0 == 0 && h < MAX_KEYS && keys[h].used) {
+			memcpy(out, keys[h].blob, keys[h].blob_len);
+			*out_len = (uint32_t)keys[h].blob_len;
+		} else if (q->a0 == 1 && h < MLDSA_KEY_SLOTS && dsa_keys[h].used) {
+			memcpy(out, dsa_keys[h].blob, dsa_keys[h].blob_len);
+			*out_len = (uint32_t)dsa_keys[h].blob_len;
+		} else {
+			return SDR_KEYNOTEXIST;
+		}
+		lay("[NW]", "daemon 交出句柄 %u 的种子 blob（%u 字节密文，它自己解不开）", h, *out_len);
+		return SDR_OK;
+	}
+
+	case OP_PQC_BLOB_IMPORT: {
+		uint32_t h;
+
+		if (q->a0 > 1 || q->a1 > 2 || q->len == 0 || q->len > SEED_BLOB_MAX)
+			return SDR_INARGERR;
+		if (q->a0 == 0) {
+			for (h = 0; h < MAX_KEYS && keys[h].used; h++)
+				;
+			if (h == MAX_KEYS)
+				return SDR_UNKNOWERR;
+			memcpy(keys[h].blob, pay, q->len);
+			keys[h].blob_len = q->len;
+			keys[h].pset = q->a1;
+			keys[h].used = 1;
+		} else {
+			for (h = 0; h < MLDSA_KEY_SLOTS && dsa_keys[h].used; h++)
+				;
+			if (h == MLDSA_KEY_SLOTS)
+				return SDR_UNKNOWERR;
+			memcpy(dsa_keys[h].blob, pay, q->len);
+			dsa_keys[h].blob_len = q->len;
+			dsa_keys[h].pset = q->a1;
+			dsa_keys[h].used = 1;
+		}
+		memcpy(out, &h, 4);
+		*out_len = 4;
+		lay("[NW]", "daemon 收下 %u 字节种子 blob → 句柄 %u（用到时才交给 TA 解包）", q->len, h);
+		return SDR_OK;
+	}
 
 	case OP_SYMKEY_KAT:
 		if (ta_symkey_cmd(TA_PQCHSM_CMD_SYMKEY_KAT, PQCS_SYM_KAT_SLOT, q->a0,

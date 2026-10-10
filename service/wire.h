@@ -104,6 +104,12 @@ enum {
 	OP_SYMKEY_GEN    = 15,  /* a0=槽(0..6), a1=密钥长度(16/32) → blob */
 	OP_SYMKEY_LOAD   = 16,  /* a0=槽(0..6), 载荷=blob → 空 */
 	OP_SYMKEY_KAT    = 17,  /* a0=向量编号（见 sdfe.h SDFE_KAT_*）→ 空；固定进槽 7 */
+
+	/* ---- 后量子密钥的种子 blob 导出 / 导入 ----------------------------------
+	 * 让 ML-KEM / ML-DSA 密钥像对称密钥一样以 blob 形态由应用保存、跨会话重用。
+	 * blob 是 TA 用 KEK 包裹的种子（密文），daemon 解不开。 */
+	OP_PQC_BLOB_EXPORT = 18, /* a0=种类(0 ML-KEM,1 ML-DSA), a1=句柄 → blob */
+	OP_PQC_BLOB_IMPORT = 19, /* a0=种类, a1=pset, 载荷=blob → [4 字节句柄] */
 };
 
 /* 对称 blob 的长度上限（PWRP 头 16 + nonce 12 + 32 + tag 16 = 76，留余量） */

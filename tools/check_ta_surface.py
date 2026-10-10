@@ -69,6 +69,18 @@ MUST_HAVE = [
      "CMD_SYMKEY_LOAD 解包时没用对称域的 AAD"),
 ]
 
+# 密钥熵：种子与对称密钥必须走 ta_key_entropy（PRNG ⊕ PL TRNG，PL 取不到就失败）。
+# 直接调 pqchsm_randombytes 生成它们 = 退回只用 OP-TEE 软件 PRNG（这个平台上它的
+# 种子只有开机毫秒数），而且不报任何错。
+RULES += [
+    (TA_C, r"pqchsm_randombytes\(\s*(seed|key)\s*,",
+     "种子/对称密钥又直接用 pqchsm_randombytes 生成了（绕过 PL TRNG）"),
+]
+MUST_HAVE += [
+    (TA_C, r"ta_key_entropy\(seed,", "种子生成没走 ta_key_entropy"),
+    (TA_C, r"ta_key_entropy\(key,", "对称密钥生成没走 ta_key_entropy"),
+]
+
 # D7：对称密钥明文**导入/导出**命令不许出现（同 PS-22/24 的形状：看着有用、
 # 产品路径不用、一加回来就是一个洞）。
 RULES += [
