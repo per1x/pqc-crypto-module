@@ -181,6 +181,16 @@ int SDFE_GenerateKey(SDFE_HANDLE hSession, uint32_t slot, uint32_t key_len,
 int SDFE_LoadKey(SDFE_HANDLE hSession, uint32_t slot,
                  const uint8_t *blob, uint32_t blob_len);
 int SDFE_LoadKatKey(SDFE_HANDLE hSession, uint32_t kat_id);
+/* ---- 后量子密钥的 blob：让密钥跨会话、跨进程活下来 ------------------------
+ * KeyGen 回的句柄只在本会话有效。要保存密钥，导出它的种子 blob（TA 用 KEK 包裹的
+ * 密文，本库与 daemon 都解不开），下次 Import 得到新句柄。kind：0 ML-KEM，1 ML-DSA。 */
+#define SDFE_KIND_MLKEM 0
+#define SDFE_KIND_MLDSA 1
+int SDFE_ExportKeyBlob(SDFE_HANDLE hSession, uint32_t kind, uint32_t key_handle,
+                       uint8_t *blob, uint32_t *blob_len);
+int SDFE_ImportKeyBlob(SDFE_HANDLE hSession, uint32_t kind, uint32_t pset,
+                       const uint8_t *blob, uint32_t blob_len,
+                       uint32_t *key_handle);
 /* 已弃用：恒回 SDR_NOTSUPPORT（D7）。 */
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
                    const uint8_t *key, uint32_t key_len);

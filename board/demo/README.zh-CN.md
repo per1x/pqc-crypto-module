@@ -67,6 +67,21 @@ READY=yes
 
 ## 三、跑演示
 
+```
+ssh root@192.168.50.175
+sh /media/sd-mmcblk1p2/demo/run.sh            # 业务流程演示（命令 + 输出 + 分层日志）
+sh /media/sd-mmcblk1p2/demo/run_classic.sh    # 原来那套（sdf_demo + 反证 + 管理功能面）
+```
+
+**业务流程演示**（[business_demo.sh](business_demo.sh)）用命令行工具 `hsmctl` 一步一步走：
+设备 → 密钥管理（生成 SM4 / ML-DSA-65 / ML-KEM-768、列出、查看）→ SM4-CBC 加解密 →
+ML-DSA 签名验签（含改一位被拒）→ ML-KEM 封装/解封装 → SM3 与随机数 →
+备份、销毁、恢复（含篡改备份被拒）→ 安全性检查（篡改密钥被 TA 拒、普通世界绕过 TEE 装不进
+密钥、会话后金库为空）。每条命令后面跟着 daemon 日志里**这条命令**产生的分层记录：
+`[TEE]` TA 里做的、`[TEE→PL]` 安全通路写进 FPGA、`[PL]` FPGA 里算的（带时延）、`[NW]` daemon 搬密文。
+
+### 原来那套
+
 ### 在板子上
 
 ```
