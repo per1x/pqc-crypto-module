@@ -506,7 +506,10 @@ module zu3eg_hsm_top (
     //    "读到 0" 同时证明了两件事：事务确实到达了本槽（路是通的），
     //    以及它确实被拒了（拿到的不是真寄存器值）。DECERR 只能证明后者。
     //    它的 use 口不接任何东西：这个实例只用来被拒绝。
-    key_vault_axi #(.SECURE_ONLY(SECURE_ONLY_FUNCTIONAL), .SLOTS(8), .SLOT_BITS(3), .WORDS(8))
+    // ⚠️ 这里必须是**常量 1**，不跟 SECURE_ONLY_FUNCTIONAL 走。21e3daa 把全文的
+    //    SECURE_ONLY(1) 批量换成开关时把这一行也带走了，于是演示位流里金丝雀
+    //    对普通世界是敞开的 —— 对照组没了，文档（"两种形态都是 1"）与位流打架。
+    key_vault_axi #(.SECURE_ONLY(1), .SLOTS(8), .SLOT_BITS(3), .WORDS(8))
     u_canary (
         .clk(clk_sys), .rst_n(rst_n),
         .s_axi_awaddr(x_awaddr[8*4 +: 8]), .s_axi_awprot(x_awprot[3*4 +: 3]),
