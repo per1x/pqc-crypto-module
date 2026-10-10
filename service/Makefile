@@ -81,7 +81,7 @@ endif
 
 SSL_LIBS += $(SSL_EXTRA)
 
-all: pqchsm_fpgad libsdfe.a sdf_demo hsmctl
+all: pqchsm_fpgad libsdfe.a sdf_demo hsmctl hsm_httpd
 
 pqchsm_fpgad: pqchsm_fpgad.c pqcs_tls.c pqcs_tls.h wire.h ../board/kmod/secmmio_uapi.h
 	$(CC) $(CFLAGS) $(SSL_CFLAGS) -o $@ pqchsm_fpgad.c pqcs_tls.c $(SSL_LIBS)
@@ -99,8 +99,12 @@ sdf_demo: sdf_demo.c libsdfe.a sdfe.h
 
 # 命令行工具：一条命令一个业务动作（用法见仓库根 README 的「hsmctl 使用手册」）。
 # 与 sdf_demo 同理，只链接 libsdfe，不做任何密码运算。
-hsmctl: hsmctl.c libsdfe.a sdfe.h
-	$(CC) $(CFLAGS) $(SSL_CFLAGS) -o $@ hsmctl.c libsdfe.a $(SSL_LIBS)
+hsmctl: hsmctl.c hsmops.c hsmops.h libsdfe.a sdfe.h
+	$(CC) $(CFLAGS) $(SSL_CFLAGS) -o $@ hsmctl.c hsmops.c libsdfe.a $(SSL_LIBS)
+
+# HTTP（JSON）网关：与 hsmctl 共用 hsmops.c（接口见仓库根 README 的「HTTP 接口」）。
+hsm_httpd: hsm_httpd.c hsmops.c hsmops.h libsdfe.a sdfe.h pqcs_tls.h
+	$(CC) $(CFLAGS) $(SSL_CFLAGS) -o $@ hsm_httpd.c hsmops.c libsdfe.a $(SSL_LIBS)
 
 clean:
-	rm -f pqchsm_fpgad libsdfe.a libsdfe.o pqcs_tls.o sdf_demo hsmctl
+	rm -f pqchsm_fpgad libsdfe.a libsdfe.o pqcs_tls.o sdf_demo hsmctl hsm_httpd

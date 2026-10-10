@@ -1,0 +1,444 @@
+
+[1m  AXU3EGB 后量子密码机 —— 业务流程演示[0m
+  密钥在 TEE 里管 · 运算在 FPGA 里做 · 应用只调接口
+
+  日志标签：[32m[TEE][0m TA 里做的   [33m[TEE→PL][0m 安全通路写进 FPGA   [36m[PL][0m FPGA 里算的   [2m[NW][0m daemon 搬密文
+
+[1m══════ 〇 设备 ══════[0m
+[36m$ hsmctl info[0m
+  pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000 mldsa=0x00010000
+  密钥库目录 /tmp/hsm-demo/keystore
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m══════ 一 密钥管理 ══════[0m
+
+[1m▶ 生成一把 SM4 数据密钥[0m
+[36m$ hsmctl keygen sm4 data-key[0m
+  已生成 SM4 密钥「data-key」→ /tmp/hsm-demo/keystore/data-key.key
+    密钥：60 字节 blob（TA 用 KEK 包裹的密文，本机以外解不开）
+  [32m│ [TEE]     TA 生成 16 字节对称密钥（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 60 字节 blob[0m
+  [33m│ [TEE→PL] 密钥经 PTA → EL3 写进 PL 对称金库槽 3（普通世界不经手）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m密钥由 TA 生成（熵来自 OP-TEE PRNG 与 FPGA 里的真随机数），应用拿到的只是包裹后的 blob。[0m
+
+[1m▶ 生成一对 ML-DSA-65 签名密钥[0m
+[36m$ hsmctl keygen mldsa65 signer[0m
+  已生成 ML-DSA-65 密钥「signer」→ /tmp/hsm-demo/keystore/signer.key
+    公钥 1952 字节（可公开）
+    私钥（种子）：76 字节 blob（TA 用 KEK 包裹的密文，本机以外解不开）
+  [32m│ [TEE]     TA 生成 ML-DSA ξ 种子（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 76 字节 blob 交回[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口（daemon 手里只有 blob）[0m
+  [36m│ [PL]      ML-DSA-65 生成密钥对：1.83 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [2m│ [NW]      daemon 交出句柄 0 的种子 blob（76 字节密文，它自己解不开）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m▶ 生成一对 ML-KEM-768 密钥封装密钥[0m
+[36m$ hsmctl keygen mlkem768 kem-key[0m
+  已生成 ML-KEM-768 密钥「kem-key」→ /tmp/hsm-demo/keystore/kem-key.key
+    公钥 1184 字节（可公开）
+    私钥（种子）：108 字节 blob（TA 用 KEK 包裹的密文，本机以外解不开）
+  [32m│ [TEE]     TA 生成 ML-KEM d‖z 种子（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 108 字节 blob 交回[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口（daemon 手里只有 blob）[0m
+  [36m│ [PL]      ML-KEM-768 生成密钥对：1.02 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [2m│ [NW]      daemon 交出句柄 0 的种子 blob（108 字节密文，它自己解不开）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m▶ 查看密钥库[0m
+[36m$ hsmctl list[0m
+  名字           算法         公钥     blob     创建时间
+  kem-key        ML-KEM-768   1184     108      08-19 05:23
+  signer         ML-DSA-65    1952     76       08-19 05:23
+  data-key       SM4          0        60       08-19 05:23
+  共 3 把
+[36m$ hsmctl show data-key[0m
+  名字   data-key
+  算法   SM4
+  blob   505752500100010010000000100000002afcf6dce3d2e736304de93d5d7720a4…
+         ↑ "PWRP" 头 + AES-256-GCM 密文。KEK 在 TA 里，这个文件本身不含任何明文密钥。
+  [2m密钥文件里只有公钥和密文 blob。拷到别处也没用 —— 只有这块板上的 TA 解得开。[0m
+
+[1m══════ 二 数据加解密（SM4-CBC） ══════[0m
+
+[1m▶ 准备一份业务数据[0m
+[36m$ printf '采购合同 PO-2026-1010\n甲方：示例公司\n金额：人民币 100,000.00 元\n交付：2026-12-31\n' > contract.txt; cat contract.txt[0m
+  采购合同 PO-2026-1010
+  甲方：示例公司
+  金额：人民币 100,000.00 元
+  交付：2026-12-31
+
+[1m▶ 加密[0m
+[36m$ hsmctl encrypt data-key contract.txt contract.enc[0m
+  SM4-CBC 加密：明文 102 字节 → 密文 128 字节（16 字节 IV + 112 字节）
+  [32m│ [TEE]     TA 用 KEK 解开 60 字节 blob（认证通过）[0m
+  [33m│ [TEE→PL] 密钥经 PTA → EL3 写进 PL 对称金库槽 3（普通世界不经手）[0m
+  [36m│ [PL]      TRNG 取 16 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [36m│ [PL]      SM4-CBC 加密 112 字节：7 个分组逐个在 PL 里算，密钥取自金库槽 3（0.12 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+[36m$ hexdump -C contract.enc | head -4[0m
+  00000000  42 2b 19 24 7d 2b 02 d0  2a ab 8a b2 64 9f 71 4a  |B+.$}+..*...d.qJ|
+  00000010  7d 8c 60 c4 0d 46 59 fe  b4 d3 72 46 e4 90 7b ec  |}.`..FY...rF..{.|
+  00000020  ff 8c b5 cc 6e df 6d 82  12 9f f9 00 e9 48 f1 16  |....n.m......H..|
+  00000030  d6 16 dc a5 19 0b 12 75  25 1e 1e 02 a1 e1 54 6c  |.......u%.....Tl|
+  [2m每次加密：TA 解开 blob、经安全通路把密钥装进 FPGA；之后每个分组都在 FPGA 里算，不再进 TEE。[0m
+
+[1m▶ 解密并比对[0m
+[36m$ hsmctl decrypt data-key contract.enc contract.dec[0m
+  SM4-CBC 解密：密文 128 字节 → 明文 102 字节
+  [32m│ [TEE]     TA 用 KEK 解开 60 字节 blob（认证通过）[0m
+  [33m│ [TEE→PL] 密钥经 PTA → EL3 写进 PL 对称金库槽 3（普通世界不经手）[0m
+  [36m│ [PL]      SM4-CBC 解密 112 字节：7 个分组逐个在 PL 里算，密钥取自金库槽 3（0.12 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+[36m$ cmp contract.txt contract.dec && echo '解密结果与原文逐字节一致'[0m
+  解密结果与原文逐字节一致
+
+[1m══════ 三 签名与验签（ML-DSA-65） ══════[0m
+
+[1m▶ 签署合同[0m
+[36m$ hsmctl sign signer contract.txt contract.sig[0m
+  ML-DSA-65 签名：contract.txt（102 字节）→ contract.sig（3309 字节）
+  [2m│ [NW]      daemon 收下 76 字节种子 blob → 句柄 0（用到时才交给 TA 解包）[0m
+  [36m│ [PL]      TRNG 取 32 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [32m│ [TEE]     TA 用 KEK 解开 76 字节种子 blob（认证通过）[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口[0m
+  [36m│ [PL]      ML-DSA-65 签名：4.76 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m▶ 验签[0m
+[36m$ hsmctl verify signer contract.txt contract.sig[0m
+  ✓ 验签通过：contract.txt 确实由「signer」签署，且一个字节都没改过
+  [36m│ [PL]      ML-DSA-65 验签：2.61 ms[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m▶ 有人把金额改了一位，再验[0m
+[36m$ sed 's/100,000/900,000/' contract.txt > contract.forged; grep 金额 contract.forged[0m
+  金额：人民币 900,000.00 元
+[36m$ hsmctl verify signer contract.forged contract.sig[0m
+  ✗ 验签不通过：文件或签名被改过，或者不是这把密钥签的
+  [36m│ [PL]      ML-DSA-65 验签：2.61 ms[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m══════ 四 密钥封装 / 密钥协商（ML-KEM-768） ══════[0m
+
+[1m▶ 发送方：只用对方公钥封装出一个共享密钥[0m
+[36m$ hsmctl encap kem-key kem.ct[0m
+  ML-KEM-768 封装（只用公钥）：封装密文 1088 字节 → kem.ct
+  发送方得到的共享密钥  73142fabfe31ef2360a046c06727db632826f643c389485a3557ee3b4e789ef1
+  [36m│ [PL]      TRNG 取 32 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [36m│ [PL]      ML-KEM-768 封装：1.28 ms[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m▶ 接收方：用私钥解封装，得到同一个共享密钥[0m
+[36m$ hsmctl decap kem-key kem.ct[0m
+  ML-KEM-768 解封装（用私钥）：kem.ct
+  接收方得到的共享密钥  73142fabfe31ef2360a046c06727db632826f643c389485a3557ee3b4e789ef1
+  [2m│ [NW]      daemon 收下 108 字节种子 blob → 句柄 0（用到时才交给 TA 解包）[0m
+  [32m│ [TEE]     TA 用 KEK 解开 108 字节种子 blob（认证通过）[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口[0m
+  [36m│ [PL]      ML-KEM-768 解封装：2.05 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m双方的共享密钥一致 —— 可以拿它做会话密钥。私钥全程没离开 TEE / FPGA。[0m
+
+[1m══════ 五 杂凑与随机数 ══════[0m
+[36m$ hsmctl hash contract.txt[0m
+  SM3 0c25b4975fba02802b18cd1e1c6e7752b7e0bd9546bd16817afbda2e08ae3ce3
+  [36m│ [PL]      SM3 杂凑 102 字节（0.09 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+[36m$ hsmctl random 32[0m
+  8f8b7b385b3f5f2601eb5feebd02417295f1d5b27f9406a201f2705fcef88a5f
+  [36m│ [PL]      TRNG 取 32 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m══════ 六 备份与恢复 ══════[0m
+
+[1m▶ 备份整个密钥库[0m
+[36m$ hsmctl backup keys.pqb[0m
+    + kem-key.key         1312 字节  SM3 2a22f0a7…
+    + signer.key          2048 字节  SM3 9449c33e…
+    + data-key.key          80 字节  SM3 a71cd849…
+  备份包 keys.pqb：3 把密钥，3601 字节（内容全是 TA 包裹的密文）
+  [36m│ [PL]      SM3 杂凑 1312 字节（1.03 ms）[0m
+  [36m│ [PL]      SM3 杂凑 2048 字节（1.61 ms）[0m
+  [36m│ [PL]      SM3 杂凑 80 字节（0.08 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m备份包里全是 TA 包裹的密文，每项带 SM3 校验（SM3 在 FPGA 里算）。[0m
+
+[1m▶ 签名密钥丢了（销毁）[0m
+[36m$ hsmctl destroy signer[0m
+  已销毁「signer」（覆写后删除）。这把密钥只以这份 blob 存在，现在它没有了。
+[36m$ hsmctl sign signer contract.txt contract2.sig[0m
+  ✗ 没有这把密钥：signer
+
+[1m▶ 从备份恢复，原来的签名仍能验过 —— 是同一把密钥[0m
+[36m$ hsmctl restore keys.pqb[0m
+    ✓ kem-key.key        SM3 校验通过，已恢复
+    ✓ signer.key         SM3 校验通过，已恢复
+    ✓ data-key.key       SM3 校验通过，已恢复
+  恢复完成：3 把密钥
+  [36m│ [PL]      SM3 杂凑 1312 字节（1.01 ms）[0m
+  [36m│ [PL]      SM3 杂凑 2048 字节（1.57 ms）[0m
+  [36m│ [PL]      SM3 杂凑 80 字节（0.08 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+[36m$ hsmctl verify signer contract.txt contract.sig[0m
+  ✓ 验签通过：contract.txt 确实由「signer」签署，且一个字节都没改过
+  [36m│ [PL]      ML-DSA-65 验签：2.64 ms[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m▶ 备份包被人改了一个字节[0m
+[36m$ cp keys.pqb keys.bad; sh flip.sh keys.bad $(($(wc -c < keys.bad) - 40))[0m
+  已把 keys.bad 第 3561 字节从 0x66 改成 0x5a（文件长度不变：3601 字节）
+[36m$ hsmctl restore keys.bad[0m
+  ✗ 第 3 项 SM3 校验不符 —— 备份包被改过，整包拒绝恢复（一个文件都没写）
+  [36m│ [PL]      SM3 杂凑 1312 字节（1.02 ms）[0m
+  [36m│ [PL]      SM3 杂凑 2048 字节（1.60 ms）[0m
+  [36m│ [PL]      SM3 杂凑 80 字节（0.08 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+
+[1m══════ 七 安全性检查 ══════[0m
+
+[1m▶ 篡改密钥文件里的 blob，TA 拒绝装载[0m
+[36m$ cp $HSM_KEYSTORE/data-key.key data-key.bak; sh flip.sh $HSM_KEYSTORE/data-key.key $(($(wc -c < data-key.bak) - 1))[0m
+  已把 data-key.key 第 79 字节从 0xaa 改成 0x5a（文件长度不变：80 字节）
+[36m$ hsmctl encrypt data-key contract.txt x.enc[0m
+  ✗ TA 拒绝装载这把密钥（blob 被改过，或不是本机生成的）
+  [32m│ [TEE]     TA 拒绝：blob 认证失败（被改过，或不是本机 KEK 包的）—— 没有任何密钥进 PL[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+[36m$ cp data-key.bak $HSM_KEYSTORE/data-key.key; echo '已还原'[0m
+  已还原
+
+[1m▶ 绕过 TEE：普通世界直接往 FPGA 的密钥装载口写一把密钥[0m
+[36m$ d7probe[0m
+  VALID_MAP 0x00 → 0x00，LOAD_REJ 11 → 22
+  PASS  普通世界的装载序列一笔都没生效（槽 6 仍空）
+  PASS  LOAD_REJ 涨了 11 —— 被拒有账
+  PASS  普通世界 CTRL.ZEROIZE 之后 VALID_MAP = 0x00
+  [2mFPGA 的装载口只认安全世界的事务；普通世界写进去的 11 笔全部被丢弃并计数。[0m
+
+[1m▶ 所有会话都已结束：FPGA 里的对称金库是空的[0m
+[36m$ d7probe vmap[0m
+  PASS  VALID_MAP = 0x00（段末即擦）
+
+[1m══════ 八 应用经 HTTP 接口调用（本机 127.0.0.1:8080） ══════[0m
+  [2m上层应用不链 libsdfe，发 JSON 就行。网关 hsm_httpd 与 hsmctl 共用同一套业务代码，[0m
+  [2m密钥一样在 TEE 里管、运算一样在 FPGA 里做。板上没有 curl，这里用 nc 直接发原样 HTTP 请求：[0m
+[36m$ sed -n 2,5p http[0m
+  m=$1; p=$2; b=${3:-}
+  n=$(printf %s "$b" | wc -c)
+  { printf '%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' "$m" "$p" "$n"
+    printf %s "$b"; } | nc 127.0.0.1 8080 | tr -d '\r' > "$(dirname "$0")/last.raw"
+
+[1m▶ 设备信息[0m
+[36m$ ./http GET /v1/info[0m
+  HTTP 200
+  {
+    "device": "pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000 mldsa=0x00010000",
+    "keystore": "/media/sd-mmcblk1p2/keys",
+    "architecture": "密钥在 TEE（OP-TEE TA）里生成、包裹、装载；运算在 FPGA（PL）里做；本网关与 daemon 只搬句柄和密文 blob"
+  }
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local GET /v1/info → 200（0.5 ms）[0m
+
+[1m▶ 生成密钥：SM4 数据密钥、ML-DSA-65 签名密钥、ML-KEM-768 封装密钥[0m
+[36m$ ./http POST /v1/keys '{"name":"web-data","alg":"sm4"}'[0m
+  HTTP 201
+  {
+    "name": "web-data",
+    "alg": "SM4",
+    "type": "symmetric",
+    "public_key_bytes": 0,
+    "blob_bytes": 60,
+    "created": 1787116987,
+    "note": "密钥由 TA 生成并用 KEK 包裹；本网关只保存密文 blob"
+  }
+  [32m│ [TEE]     TA 生成 16 字节对称密钥（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 60 字节 blob[0m
+  [33m│ [TEE→PL] 密钥经 PTA → EL3 写进 PL 对称金库槽 3（普通世界不经手）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys → 201（2.6 ms）[0m
+[36m$ ./http POST /v1/keys '{"name":"web-signer","alg":"mldsa65"}'[0m
+  HTTP 201
+  {
+    "name": "web-signer",
+    "alg": "ML-DSA-65",
+    "type": "signature",
+    "public_key_bytes": 1952,
+    "blob_bytes": 76,
+    "created": 1787116988,
+    "public_key_b64": "qM7uxGRYrek/YcdnAGFyHk0tZeGiEQPROIE/spgba3BhPEJy…（共 2604 字符）",
+    "note": "私钥种子由 TA 生成并用 KEK 包裹；本网关只保存公钥与密文 blob"
+  }
+  [32m│ [TEE]     TA 生成 ML-DSA ξ 种子（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 76 字节 blob 交回[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口（daemon 手里只有 blob）[0m
+  [36m│ [PL]      ML-DSA-65 生成密钥对：1.82 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [2m│ [NW]      daemon 交出句柄 0 的种子 blob（76 字节密文，它自己解不开）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys → 201（4.6 ms）[0m
+[36m$ ./http POST /v1/keys '{"name":"web-kem","alg":"mlkem768"}'[0m
+  HTTP 201
+  {
+    "name": "web-kem",
+    "alg": "ML-KEM-768",
+    "type": "kem",
+    "public_key_bytes": 1184,
+    "blob_bytes": 108,
+    "created": 1787116988,
+    "public_key_b64": "S/mu2KV/FYmPCqJjFTlpEbdbcXgFrwa8IBBCwnaquXZoC1Z6…（共 1580 字符）",
+    "note": "私钥种子由 TA 生成并用 KEK 包裹；本网关只保存公钥与密文 blob"
+  }
+  [32m│ [TEE]     TA 生成 ML-KEM d‖z 种子（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 108 字节 blob 交回[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口（daemon 手里只有 blob）[0m
+  [36m│ [PL]      ML-KEM-768 生成密钥对：1.03 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [2m│ [NW]      daemon 交出句柄 0 的种子 blob（108 字节密文，它自己解不开）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys → 201（4.1 ms）[0m
+[36m$ ./http GET /v1/keys[0m
+  HTTP 200
+  {
+    "keystore": "/media/sd-mmcblk1p2/keys",
+    "keys": [
+      {
+        "name": "web-signer",
+        "alg": "ML-DSA-65",
+        "type": "signature",
+        "public_key_bytes": 1952,
+        "blob_bytes": 76,
+        "created": 1787116988
+      },
+      {
+        "name": "web-kem",
+        "alg": "ML-KEM-768",
+        "type": "kem",
+        "public_key_bytes": 1184,
+        "blob_bytes": 108,
+        "created": 1787116988
+      },
+      {
+        "name": "web-data",
+        "alg": "SM4",
+        "type": "symmetric",
+        "public_key_bytes": 0,
+        "blob_bytes": 60,
+        "created": 1787116987
+      }
+    ]
+  }
+  [2m│ [HTTP] CN=local GET /v1/keys → 200（0.4 ms）[0m
+
+[1m▶ 加密 / 解密[0m
+[36m$ ./http POST /v1/keys/web-data/encrypt '{"plaintext":"订单 SO-2026-1011，金额：人民币 52,800.00 元"}'[0m
+  HTTP 200
+  {
+    "ciphertext_b64": "OgTLAWOOS6sXB5h7nSSNP2pPqc0Yy7n4Yv3tLBFbjX11s5F2…（共 108 字符）",
+    "format": "IV(16) ‖ CBC 密文（PKCS#7）",
+    "bytes": 80
+  }
+  [32m│ [TEE]     TA 用 KEK 解开 60 字节 blob（认证通过）[0m
+  [33m│ [TEE→PL] 密钥经 PTA → EL3 写进 PL 对称金库槽 3（普通世界不经手）[0m
+  [36m│ [PL]      TRNG 取 16 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [36m│ [PL]      SM4-CBC 加密 64 字节：4 个分组逐个在 PL 里算，密钥取自金库槽 3（0.11 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys/web-data/encrypt → 200（2.3 ms）[0m
+[36m$ ./http POST /v1/keys/web-data/decrypt '{"ciphertext_b64":"<base64，共 108 字符>"}'[0m
+  HTTP 200
+  {
+    "plaintext_b64": "6K6i5Y2VIFNPLTIwMjYtMTAxMe+8jOmHkemine+8muS6uuawkeW4gSA1Miw4MDAuMDAg5YWD",
+    "plaintext": "订单 SO-2026-1011，金额：人民币 52,800.00 元",
+    "bytes": 54
+  }
+  [32m│ [TEE]     TA 用 KEK 解开 60 字节 blob（认证通过）[0m
+  [33m│ [TEE→PL] 密钥经 PTA → EL3 写进 PL 对称金库槽 3（普通世界不经手）[0m
+  [36m│ [PL]      SM4-CBC 解密 64 字节：4 个分组逐个在 PL 里算，密钥取自金库槽 3（0.07 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys/web-data/decrypt → 200（2.2 ms）[0m
+  [32m✓ 解密结果与原文一致[0m
+
+[1m▶ 签名 / 验签 / 改过的消息验不过[0m
+[36m$ ./http POST /v1/keys/web-signer/sign '{"message":"订单 SO-2026-1011：金额 52,800.00 元"}'[0m
+  HTTP 200
+  {
+    "signature_b64": "kguNjdFvH6VXXoKiIdGrLUXm32x2CG40OhPSVcMCwvFWPTBs…（共 4412 字符）",
+    "signature_bytes": 3309
+  }
+  [2m│ [NW]      daemon 收下 76 字节种子 blob → 句柄 0（用到时才交给 TA 解包）[0m
+  [36m│ [PL]      TRNG 取 32 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [32m│ [TEE]     TA 用 KEK 解开 76 字节种子 blob（认证通过）[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口[0m
+  [36m│ [PL]      ML-DSA-65 签名：11.03 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys/web-signer/sign → 200（13.2 ms）[0m
+[36m$ ./http POST /v1/keys/web-signer/verify '{"message":"订单 SO-2026-1011：金额 52,800.00 元","signature_b64":"<base64，共 4412 字符>"}'[0m
+  HTTP 200
+  {
+    "valid": true
+  }
+  [36m│ [PL]      ML-DSA-65 验签：2.64 ms[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys/web-signer/verify → 200（3.4 ms）[0m
+[36m$ ./http POST /v1/keys/web-signer/verify '{"message":"订单 SO-2026-1011：金额 92,800.00 元","signature_b64":"<base64，共 4412 字符>"}'[0m
+  HTTP 200
+  {
+    "valid": false
+  }
+  [36m│ [PL]      ML-DSA-65 验签：2.59 ms[0m
+  [2m│ [HTTP] CN=local POST /v1/keys/web-signer/verify → 200（3.5 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [32m✓ 金额被改过的消息验不过[0m
+
+[1m▶ 密钥封装 / 解封装[0m
+[36m$ ./http POST /v1/keys/web-kem/encapsulate '{}'[0m
+  HTTP 200
+  {
+    "ciphertext_b64": "OtXzGZFPfopk+7/vZ7V3vRLVQjWstCahZkoEnM4U5J32EvV5…（共 1452 字符）",
+    "shared_secret_hex": "398468aae96469f3b0b4e4cf3dd49abde0a977d6203e22557a4305f1821ebc64"
+  }
+  [36m│ [PL]      TRNG 取 32 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [36m│ [PL]      ML-KEM-768 封装：1.28 ms[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys/web-kem/encapsulate → 200（1.9 ms）[0m
+[36m$ ./http POST /v1/keys/web-kem/decapsulate '{"ciphertext_b64":"<base64，共 1452 字符>"}'[0m
+  HTTP 200
+  {
+    "shared_secret_hex": "398468aae96469f3b0b4e4cf3dd49abde0a977d6203e22557a4305f1821ebc64"
+  }
+  [2m│ [NW]      daemon 收下 108 字节种子 blob → 句柄 0（用到时才交给 TA 解包）[0m
+  [32m│ [TEE]     TA 用 KEK 解开 108 字节种子 blob（认证通过）[0m
+  [33m│ [TEE→PL] 种子经 PTA → EL3 写进 PL 暂存口[0m
+  [36m│ [PL]      ML-KEM-768 解封装：2.05 ms（私钥在 PL 展开区现展开，算完由硬件擦）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/keys/web-kem/decapsulate → 200（4.3 ms）[0m
+  [32m✓ 双方共享密钥一致[0m
+
+[1m▶ 杂凑与随机数[0m
+[36m$ ./http POST /v1/sm3 '{"data":"abc"}'[0m
+  HTTP 200
+  {
+    "sm3_hex": "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0",
+    "bytes": 3
+  }
+  [36m│ [PL]      SM3 杂凑 3 字节（0.02 ms）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/sm3 → 200（0.6 ms）[0m
+[36m$ ./http POST /v1/random '{"length":32}'[0m
+  HTTP 200
+  {
+    "random_hex": "5bcd22549a7d512abd87241cd8fba2a007dbadc3c6564e13e708df0ba3aa48a5",
+    "source": "FPGA 环振 TRNG + SP 800-90B 健康检测"
+  }
+  [36m│ [PL]      TRNG 取 32 字节（8 路环振 + SP 800-90B 健康检测）[0m
+  [36m│ [PL]      会话结束：PQC 展开区、对称金库与三个分组核已发擦除[0m
+  [2m│ [HTTP] CN=local POST /v1/random → 200（0.6 ms）[0m
+
+[1m▶ 销毁签名密钥后再用它签名[0m
+[36m$ ./http DELETE /v1/keys/web-signer[0m
+  HTTP 200
+  {
+    "destroyed": "web-signer"
+  }
+  [2m│ [HTTP] CN=local DELETE /v1/keys/web-signer → 200（0.4 ms）[0m
+[36m$ ./http POST /v1/keys/web-signer/sign '{"message":"订单 SO-2026-1011：金额 52,800.00 元"}'[0m
+  HTTP 404
+  {
+    "error": "没有这把密钥：web-signer"
+  }
+  [2m│ [HTTP] CN=local POST /v1/keys/web-signer/sign → 404（0.2 ms）[0m
+  [2m这个口只绑在回环上，网线那头连不到；对外只有 8443（HTTPS + 双向证书）。[0m
+
+[32m[1m演示结束。[0m  工作目录 /tmp/hsm-demo 已删除。

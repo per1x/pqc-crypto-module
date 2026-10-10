@@ -263,6 +263,25 @@ if [ -x "$D/pqchsm_fpgad" ]; then
         else
             st "TCP=off pki/ 凭据不全，只提供本机 socket"
         fi
+        # HTTP（JSON）网关：对外 8443 只有 HTTPS + mTLS（同一套 pki、凭据不全就不监听）；
+        # 本机另开 127.0.0.1:8080 明文口给板上的应用 / 演示用（只绑回环，外部连不到）。
+        # 密钥库放 SD，重启不丢。可选组件：没有这个二进制就跳过。
+        if [ -x "$D/hsm_httpd" ]; then
+            mkdir -p /media/sd-mmcblk1p2/keys
+            HSM_KEYSTORE=/media/sd-mmcblk1p2/keys setsid $D/hsm_httpd 8443 8080 \
+                >> $LOG 2>&1 < /dev/null &
+            sleep 1
+            if busybox netstat -ltn 2>/dev/null | grep -q ":8443 "; then
+                st "HTTPS=8443 网关可用（mTLS）"
+            else
+                st "HTTPS=off 网关没监听上（看 hsm-boot.log 里的 [HTTP] 行）"
+            fi
+            if busybox netstat -ltn 2>/dev/null | grep -q "127.0.0.1:8080 "; then
+                st "HTTP=127.0.0.1:8080 本机接口可用"
+            else
+                st "HTTP=off 本机接口没监听上"
+            fi
+        fi
         st "READY=yes"
     else
         say "!!! daemon 起来了但没看到 socket"

@@ -107,3 +107,17 @@ The board demo `demo/run.sh` runs the full business flow with those traces;
 `tools/demo_to_html.py` turns its output into a report
 (sample: `docs/demo/business_demo.html`).
 
+## `hsm_httpd` — JSON gateway
+
+Same business code as `hsmctl` (`hsmops.c`), exposed as JSON over HTTP.
+Two listeners: `127.0.0.1:8080` plain HTTP bound to loopback only (on-board
+apps and the demo; same trust boundary as running `hsmctl`), and `:8443`
+HTTPS with mutual TLS (client cert must chain to `hsm/pki/hsm_ca.crt`; no
+listener if credentials are missing). Usage: `hsm_httpd [tls_port [local_port]]`,
+defaults 8443 / 8080, `0` disables one.
+
+Routes: `GET /v1/info`, `GET|POST /v1/keys`, `GET|DELETE /v1/keys/{name}`,
+`POST /v1/keys/{name}/{encrypt,decrypt,sign,verify,encapsulate,decapsulate}`,
+`POST /v1/sm3`, `POST /v1/random`. Binary fields are base64 (`*_b64`), digests
+and shared secrets hex. Add `?trace=1` to get the per-layer log lines for that
+request. Part 8 of `demo/run.sh` calls every route on the board via `nc`.

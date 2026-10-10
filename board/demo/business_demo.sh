@@ -15,6 +15,8 @@
 # 这些日志行只在对应那一层的调用**真的成功返回之后**才写，是执行记录，不是旁白。
 #
 # 演示用的密钥库在 /tmp 下，跑完即删；不改启动配置、不换位流。
+# 第八部分经本机 HTTP 口（127.0.0.1:8080，hsm_httpd）调用，用的是网关自己的密钥库，
+# 演示的几把密钥最后都会删掉。
 set -u
 
 HSM=/media/sd-mmcblk1p2/hsm
@@ -43,6 +45,56 @@ got=$(dd if="$f" bs=1 skip="$off" count=1 2>/dev/null | hexdump -v -e '1/1 "%02x
 echo "已把 $(basename "$f") 第 $off 字节从 0x${old} 改成 0x${new}（文件长度不变：$sz 字节）"
 EOF
 
+# 本机 HTTP 调用的小工具：http 方法 路径 [JSON]
+# 板上没有 curl，busybox wget 又发不了 POST —— 就用 nc 把一个原样的 HTTP/1.1 请求
+# 送到 127.0.0.1:8080。打出状态行和排好版的响应 JSON（长 base64 / 十六进制缩写显示，
+# 完整响应留在 $WORK/last.json，后面的步骤从里面取值）。
+cat > "$WORK/http" <<'EOF'
+#!/bin/sh
+m=$1; p=$2; b=${3:-}
+n=$(printf %s "$b" | wc -c)
+{ printf '%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n' "$m" "$p" "$n"
+  printf %s "$b"; } | nc 127.0.0.1 8080 | tr -d '\r' > "$(dirname "$0")/last.raw"
+sed -n '1s/^HTTP\/1\.1 \([0-9]*\).*/HTTP \1/p' "$(dirname "$0")/last.raw"
+sed '1,/^$/d' "$(dirname "$0")/last.raw" > "$(dirname "$0")/last.json"
+awk '
+function out(s) { printf "%s", s }
+function nl() { out("\n"); for (k = 0; k < ind; k++) out("  ") }
+{ t = t $0 }
+END {
+  ind = 0; n = length(t); i = 1
+  while (i <= n) {
+    c = substr(t, i, 1)
+    if (c == "\"") {
+      j = i + 1
+      while (j <= n && substr(t, j, 1) != "\"") { if (substr(t, j, 1) == "\\") j++; j++ }
+      str = substr(t, i + 1, j - i - 1)
+      if (length(str) > 72 && str ~ /^[A-Za-z0-9+\/=]+$/)
+        str = substr(str, 1, 48) "…（共 " length(str) " 字符）"
+      out("\"" str "\""); i = j + 1; continue
+    }
+    if (c == "{" || c == "[") {
+      if (substr(t, i + 1, 1) == (c == "{" ? "}" : "]")) { out(c (c == "{" ? "}" : "]")); i += 2; continue }
+      out(c); ind++; nl()
+    } else if (c == "}" || c == "]") { ind--; nl(); out(c) }
+    else if (c == ",") { out(","); nl() }
+    else if (c == ":") out(": ")
+    else if (c != " " && c != "\n") out(c)
+    i++
+  }
+  out("\n")
+}' "$(dirname "$0")/last.json"
+EOF
+chmod +x "$WORK/http"
+# 从上一次 HTTP 响应里取一个字符串 / 布尔字段
+jv() {
+    v=$(sed -n 's/.*"'"$1"'": *"\([^"]*\)".*/\1/p' "$WORK/last.json")
+    [ -n "$v" ] || v=$(sed -n 's/.*"'"$1"'": *\([^",}]*\).*/\1/p' "$WORK/last.json")
+    echo "$v"
+}
+# 显示命令时把长 base64 缩成占位符（实际执行的命令不变）
+short() { awk '{ while (match($0, /[A-Za-z0-9+\/=]{80,}/)) $0 = substr($0, 1, RSTART - 1) "<base64，共 " RLENGTH " 字符>" substr($0, RSTART + RLENGTH); print }'; }
+
 part() { echo; echo "${B}══════ $* ══════${N}"; }
 step() { echo; echo "${B}▶ $*${N}"; }
 note() { echo "  ${D}$*${N}"; }
@@ -50,12 +102,12 @@ note() { echo "  ${D}$*${N}"; }
 # 跑一条命令：打命令 → 打输出 → 打这条命令产生的分层日志
 run() {
     mark=$(wc -l < "$LOG")
-    echo "${C}\$ $*${N}"
+    echo "${C}\$ $(printf '%s\n' "$*" | short)${N}"
     sh -c "$*" 2>&1 | sed 's/^/  /'
     # 会话结束那一行是客户端断开之后才写的，稍等一下再取日志
     usleep 150000 2>/dev/null || sleep 1
     tail -n +"$((mark + 1))" "$LOG" \
-      | grep -E "\[TEE\]|\[TEE→PL\]|\[PL\]|\[NW\]" \
+      | grep -E "\[TEE\]|\[TEE→PL\]|\[PL\]|\[NW\]|\[HTTP\] CN=" \
       | sed -E 's/^\[[0-9:]+\] //' \
       | while IFS= read -r l; do
             case "$l" in
@@ -166,6 +218,54 @@ note "FPGA 的装载口只认安全世界的事务；普通世界写进去的 11
 
 step "所有会话都已结束：FPGA 里的对称金库是空的"
 run "d7probe vmap"
+
+# ------------------------------------------------------------------ 八
+part "八 应用经 HTTP 接口调用（本机 127.0.0.1:8080）"
+note "上层应用不链 libsdfe，发 JSON 就行。网关 hsm_httpd 与 hsmctl 共用同一套业务代码，"
+note "密钥一样在 TEE 里管、运算一样在 FPGA 里做。板上没有 curl，这里用 nc 直接发原样 HTTP 请求："
+run "sed -n 2,5p http"
+for k in web-data web-signer web-kem; do ./http DELETE /v1/keys/$k >/dev/null 2>&1; done
+
+step "设备信息"
+run ./http GET /v1/info
+
+step "生成密钥：SM4 数据密钥、ML-DSA-65 签名密钥、ML-KEM-768 封装密钥"
+run "./http POST /v1/keys '{\"name\":\"web-data\",\"alg\":\"sm4\"}'"
+run "./http POST /v1/keys '{\"name\":\"web-signer\",\"alg\":\"mldsa65\"}'"
+run "./http POST /v1/keys '{\"name\":\"web-kem\",\"alg\":\"mlkem768\"}'"
+run ./http GET /v1/keys
+
+step "加密 / 解密"
+PT='订单 SO-2026-1011，金额：人民币 52,800.00 元'
+run "./http POST /v1/keys/web-data/encrypt '{\"plaintext\":\"$PT\"}'"
+CT=$(jv ciphertext_b64)
+run "./http POST /v1/keys/web-data/decrypt '{\"ciphertext_b64\":\"$CT\"}'"
+[ "$(jv plaintext)" = "$PT" ] && echo "  ${G}✓ 解密结果与原文一致${N}" || echo "  ${R}✗ 解密结果与原文不一致${N}"
+
+step "签名 / 验签 / 改过的消息验不过"
+MSG='订单 SO-2026-1011：金额 52,800.00 元'
+run "./http POST /v1/keys/web-signer/sign '{\"message\":\"$MSG\"}'"
+SIG=$(jv signature_b64)
+run "./http POST /v1/keys/web-signer/verify '{\"message\":\"$MSG\",\"signature_b64\":\"$SIG\"}'"
+FORGED=$(echo "$MSG" | sed 's/52,800/92,800/')
+run "./http POST /v1/keys/web-signer/verify '{\"message\":\"$FORGED\",\"signature_b64\":\"$SIG\"}'"
+[ "$(jv valid)" = false ] && echo "  ${G}✓ 金额被改过的消息验不过${N}"
+
+step "密钥封装 / 解封装"
+run "./http POST /v1/keys/web-kem/encapsulate '{}'"
+KCT=$(jv ciphertext_b64); SS1=$(jv shared_secret_hex)
+run "./http POST /v1/keys/web-kem/decapsulate '{\"ciphertext_b64\":\"$KCT\"}'"
+[ "$(jv shared_secret_hex)" = "$SS1" ] && echo "  ${G}✓ 双方共享密钥一致${N}" || echo "  ${R}✗ 共享密钥不一致${N}"
+
+step "杂凑与随机数"
+run "./http POST /v1/sm3 '{\"data\":\"abc\"}'"
+run "./http POST /v1/random '{\"length\":32}'"
+
+step "销毁签名密钥后再用它签名"
+run ./http DELETE /v1/keys/web-signer
+run "./http POST /v1/keys/web-signer/sign '{\"message\":\"$MSG\"}'"
+note "这个口只绑在回环上，网线那头连不到；对外只有 8443（HTTPS + 双向证书）。"
+for k in web-data web-kem; do ./http DELETE /v1/keys/$k >/dev/null 2>&1; done
 
 echo
 echo "${G}${B}演示结束。${N}  工作目录 $WORK 已删除。"

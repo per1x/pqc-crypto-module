@@ -244,7 +244,7 @@ hsmctl sign signer contract.txt contract.sig; tail -6 /media/sd-mmcblk1p2/hsm/hs
 ```
 
 板上的业务流程演示（`sh /media/sd-mmcblk1p2/demo/run.sh`）就是把上面这些命令按顺序跑一遍，
-每条命令后面附上它产生的日志。把演示输出转成网页：
+每条命令后面附上它产生的日志；最后一部分改经本机 HTTP 接口再走一遍（见下一节）。把演示输出转成网页：
 `python3 tools/demo_to_html.py <演示输出.txt> <输出.html>`，一份实测结果在
 [docs/demo/business_demo.html](docs/demo/business_demo.html)。
 
@@ -253,6 +253,46 @@ hsmctl sign signer contract.txt contract.sig; tail -6 /media/sd-mmcblk1p2/hsm/hs
 - 备份包只能在**同一块板**上恢复使用：blob 由这块板 TA 的 KEK 包裹，跨设备迁移（KEK 导出仪式）尚未实现。
 - 对称加解密每次命令都会经 TEE 把密钥装进 FPGA 一次（约 1.3 ms），之后每个分组都在 FPGA 里算，不再进 TEE。
 - 吞吐受寄存器访问路径限制（每次经 EL3），AES-256-CBC 实测约 0.9 MB/s；适合密钥类与小数据业务，不是大批量数据加密设备。
+
+### HTTP 接口：`hsm_httpd`
+
+不想链 `libsdfe` 的应用可以直接发 JSON（源码 [service/hsm_httpd.c](service/hsm_httpd.c)）。
+它和 `hsmctl` 共用同一份业务代码（[service/hsmops.c](service/hsmops.c)），语义完全一样：
+密钥在 TEE 里管、运算在 FPGA 里做，网关只保存公钥和密文 blob。开机由 `hsm-boot.sh` 拉起，
+密钥库在 SD 卡 `/media/sd-mmcblk1p2/keys`。
+
+| 端口 | 协议 | 谁能连 |
+|---|---|---|
+| `127.0.0.1:8080` | 明文 HTTP | 只绑回环，**只有板上的进程**能连（与能跑 `hsmctl` 同一信任边界） |
+| `:8443` | HTTPS + 双向证书 | 客户端证书须由 `hsm/pki/hsm_ca.crt` 签发；凭据不全就不监听 |
+
+启动参数 `hsm_httpd [HTTPS端口 [本机HTTP端口]]`（默认 8443、8080，给 0 关掉那一个）。
+
+| 方法 | 路径 | 请求体 | 响应 |
+|---|---|---|---|
+| GET | `/v1/info` | — | 设备信息 |
+| GET | `/v1/keys` | — | 密钥列表 |
+| POST | `/v1/keys` | `{"name","alg"}`，alg 同 `hsmctl keygen` | 201 + 密钥信息（含公钥） |
+| GET / DELETE | `/v1/keys/{name}` | — | 一把密钥的信息 / 销毁 |
+| POST | `/v1/keys/{name}/encrypt` | `{"plaintext"}` 或 `{"plaintext_b64"}` | `ciphertext_b64`（IV ‖ CBC 密文） |
+| POST | `/v1/keys/{name}/decrypt` | `{"ciphertext_b64"}` | `plaintext_b64`（是 UTF-8 时另给 `plaintext`） |
+| POST | `/v1/keys/{name}/sign` | `{"message"}` 或 `{"message_b64"}` | `signature_b64` |
+| POST | `/v1/keys/{name}/verify` | 同上 + `"signature_b64"` | `{"valid": true/false}` |
+| POST | `/v1/keys/{name}/encapsulate` | `{}` | `ciphertext_b64`、`shared_secret_hex` |
+| POST | `/v1/keys/{name}/decapsulate` | `{"ciphertext_b64"}` | `shared_secret_hex` |
+| POST | `/v1/sm3` | `{"data"}` 或 `{"data_b64"}` | `sm3_hex` |
+| POST | `/v1/random` | `{"length"}`（≤ 1024） | `random_hex` |
+
+状态码：密钥不存在 404、重名 409、参数错 400、TA 拒绝装载 422。任何请求加 `?trace=1`，
+响应多一个 `trace` 数组，就是这次请求在 TEE / TEE→PL / PL / NW 各层留下的日志。
+
+板上没有 curl（busybox `wget` 也发不了 POST），用 `nc` 发原样请求即可：
+
+```bash
+printf 'POST /v1/sm3 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{"data":"abc"}' | nc 127.0.0.1 8080
+```
+
+演示脚本第八部分就是这样逐个调用上面的接口（它把这几行包成了一个 `./http 方法 路径 [JSON]` 小工具）。
 
 ## 证据
 

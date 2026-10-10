@@ -3,6 +3,7 @@
 
     ssh root@<板子> 'sh /media/sd-mmcblk1p2/demo/run.sh' > demo.txt
     python3 tools/demo_to_html.py demo.txt demo.html
+    python3 tools/demo_to_html.py cli.txt http.txt demo.html     # 多份输出合成一页
 
 输入保留 ANSI 颜色码更好（用来区分「说明」与「输出」）；没有也能转。
 页面完全自包含（无外部脚本 / 字体 / 图片），可以直接发给别人打开。
@@ -20,6 +21,7 @@ TAGS = {
     "[TEE→PL]": ("bridge", "TEE→PL", "安全通路写进 FPGA"),
     "[PL]": ("pl", "PL", "FPGA 密码核"),
     "[NW]": ("nw", "NW", "普通世界 daemon"),
+    "[HTTP]": ("nw", "HTTP", "本机 HTTP 网关收到的请求"),
 }
 
 
@@ -75,9 +77,9 @@ def parse(raw):
 def out_line(l):
     e = html.escape(l)
     st = l.strip()
-    if st.startswith("✓") or st.startswith("PASS") or "逐字节一致" in st:
+    if st.startswith("✓") or st.startswith("PASS") or "逐字节一致" in st or re.match(r"HTTP 2\d\d", st):
         return f'<span class="ok">{e}</span>'
-    if st.startswith("✗") or st.startswith("FAIL"):
+    if st.startswith("✗") or st.startswith("FAIL") or re.match(r"HTTP [45]\d\d", st):
         return f'<span class="bad">{e}</span>'
     return e
 
@@ -222,7 +224,7 @@ footer {{ margin-top:36px; color:var(--muted); font-size:13px }}
 <body><div class="wrap">
 <header>
   <h1>后量子密码机 · 业务流程演示</h1>
-  <p class="sub">AXU3EGB（Zynq UltraScale+）· 密钥在 TEE 里管 · 运算在 FPGA 里做 · 应用只调接口</p>
+  <p class="sub">AXU3EGB（Zynq UltraScale+）· 密钥在 TEE 里管 · 运算在 FPGA 里做 · 应用经命令行 / HTTP 接口调用</p>
 </header>
 <div class="arch">
   <div class="t"><b>TEE（OP-TEE TA）</b><span>生成种子与对称密钥（熵 = OP-TEE PRNG ⊕ PL TRNG），用 KEK 包成 blob；需要时解开、经安全通路装进 FPGA。KEK 不出 TA。</span></div>
@@ -247,14 +249,19 @@ footer {{ margin-top:36px; color:var(--muted); font-size:13px }}
 
 
 def main():
-    if len(sys.argv) != 3:
-        sys.exit("用法：demo_to_html.py <演示输出.txt> <输出.html>")
-    raw = open(sys.argv[1], encoding="utf-8").read()
-    header, parts = parse(raw)
+    if len(sys.argv) < 3:
+        sys.exit("用法：demo_to_html.py <演示输出.txt> [更多输出.txt …] <输出.html>")
+    ins, out = sys.argv[1:-1], sys.argv[-1]
+    header, parts = [], []
+    for f in ins:          # 每份各自解析再拼接：板上命令行演示 + HTTP 演示可以合成一页
+        h, p = parse(open(f, encoding="utf-8").read())
+        header += h
+        parts += p
     if not parts:
-        sys.exit("没认出任何段落 —— 输入不是 business_demo.sh 的输出？")
-    open(sys.argv[2], "w", encoding="utf-8").write(render(header, parts, sys.argv[1].split("/")[-1]))
-    print(f"已生成 {sys.argv[2]}：{len(parts)} 段")
+        sys.exit("没认出任何段落 —— 输入不是 business_demo.sh / http_demo.sh 的输出？")
+    open(out, "w", encoding="utf-8").write(
+        render(header, parts, "、".join(f.split("/")[-1] for f in ins)))
+    print(f"已生成 {out}：{len(parts)} 段")
 
 
 if __name__ == "__main__":
