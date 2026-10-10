@@ -2,6 +2,11 @@
 
 分支 `feature/tee-mainline-batch2`（基于 batch1）。`main` 全程未动。
 
+> **2026-10-10 已合入 `main`**（`--no-ff` 合并点 `3ca4cb4`；`main` 是 batch2 的祖先，
+> 无冲突；batch1 已包含在内）。合并后主机全套 `ctest` **56/56**，其中 Icarus
+> `rtl_sim` 1554 秒。批 2 之后的 D7（对称密钥装载归 TEE）见
+> 分支 `feature/tee-symkey` 的 `SYMKEY-TEE-REPORT.zh-CN.md`。
+
 ---
 
 ## 0. 一句话
