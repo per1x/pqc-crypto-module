@@ -7,14 +7,15 @@
 # ============================================================================
 # 【演示要证明三件事，缺一件这台机器就不算密码机】
 # ============================================================================
-#   ① **算得对**：远程调用 → FPGA 里的密码核算 → 结果对上官方向量。
+#   ① **算得对**：调用 → FPGA 里的密码核算 → 结果对上官方向量。
 #      光"跑通了"不够，必须对上 NIST ACVP / GB-T 的字节。
 #
-#   ② **私钥不出接口**：应用只拿到句柄，从头到尾没见过 dk；
-#      对称密钥进了 PL 的 key_vault，那里在 RTL 上就没有通往总线的读路径。
+#   ② **密钥在 TEE 里管**：后量子私钥的种子与对称密钥都由 OP-TEE 里的 TA
+#      生成、包裹、装载；应用和 daemon 手里只有句柄与密文 blob。私钥每次在
+#      FPGA 里现展开、算完即擦；对称密钥在 FPGA 金库里没有任何读出路径。
 #
-#   ③ **扫地址也读不出来**：绕过接口、直接扫 PL 的地址空间，
-#      密钥字一个都不出现，四个核的 VERSION 全部读回 0。
+#   ③ **绕过接口也够不着**：送检形态下直接扫 PL 地址空间，五个功能核全部读回 0；
+#      演示形态下功能核是开的，但对称金库的装载口仍然只认安全世界。
 #
 # ③ 是最容易被略过、也最要紧的一条：①② 都是"按规矩用"的结果，
 # 而 ③ 是"不按规矩用"的结果。只演示前两条，等于只证明了正门是锁着的。
@@ -38,7 +39,7 @@ D=$(dirname "$0")
 
 hr() { echo; echo "──────────────────────────────────────────────────────────"; echo "$*"; echo; }
 
-hr "① + ② 算得对 & 私钥不出接口"
+hr "① + ② 算得对 & 密钥在 TEE 里管、运算在 FPGA 里做"
 # shellcheck disable=SC2086
 "$D/sdf_demo" $REMOTE || { echo "演示失败"; exit 1; }
 
@@ -83,25 +84,37 @@ fi
 
 case "$FORM" in
 secure)
-    hr "③ 绕过接口直接扫地址：读不出密钥，四个核的 VERSION 全部读回 0"
+    hr "③ 绕过接口直接扫地址：读不出密钥，功能核的 VERSION 全部读回 0"
     "$D/hsm_secneg" >/dev/null 2>&1
     cat "${SECNEG_OUT:-/media/sd-mmcblk1p2/hsm/RESULT_secneg.txt}"
     ;;
 open)
-    hr "③ 绕过接口直接扫地址 —— 本形态下跳过，原因如下"
+    hr "③ 绕过接口：演示形态下唯一仍然关着的门 —— 对称密钥的装载口"
     cat <<'EOF'
-当前跑的是**演示形态**（zu3eg_hsm_dev.bit，SECURE_ONLY=0）：四个功能核对普通
-世界是**开着的**，这样 Linux 才能直接驱动 KAT。板子开机默认起的就是这一份。
+当前跑的是**演示形态**（zu3eg_hsm_dev.bit，SECURE_ONLY=0）：五个功能核
+（TRNG、对称金库、对称核、ML-KEM、ML-DSA）对普通世界是开着的，Linux 能直接
+驱动 KAT。板子开机默认起的就是这一份。
 
-所以在这个形态下跑 ③ 没有意义 —— 它问的是"门关上了没有"，而这里门本来就
-是开的。硬跑只会打出五行 FAIL，那是拿错了尺子，不是板子坏了。
+但有一样东西**不跟这个开关走**：对称金库的装载口只认安全世界的事务
+（种子暂存口也一样）。下面绕过 TEE、用普通世界直接往装载口写一把密钥：
+EOF
+    echo
+    if [ -x "$D/d7probe" ]; then
+        "$D/d7probe" | sed 's/^/  /'
+    else
+        echo "  （缺 $D/d7probe，跳过）"
+    fi
+    cat <<'EOF'
 
-想看门关上的样子，要换成送检形态（zu3eg_hsm.bit，SECURE_ONLY=1）：
+想看"整扇门都关上"的样子，换成送检形态（zu3eg_hsm.bit，SECURE_ONLY=1）：
 
-    sh /media/sd-mmcblk1p2/hsm/plharness.sh /media/sd-mmcblk1p2/hsm/zu3eg_hsm.bit
-    sh /media/sd-mmcblk1p2/hsm/secform_check.sh
+    sh /media/sd-mmcblk1p2/hsm/plharness.sh /media/sd-mmcblk1p2/hsm/pay_d7_sec.sh
+    cat /media/sd-mmcblk1p2/hsm/d7seclog.txt
 
-⚠️ 换位流要走 plharness.sh —— 它会先把带活 AXI 主口的驱动解绑。直接
+它会装送检位流、从普通世界扫一遍（全部读回 0）、再经安全世界跑完整 KAT 与
+sdf_demo，最后装回出厂位流。跑完重启一次（hsmreboot.sh）回到演示形态。
+
+⚠️ 换位流必须走 plharness.sh —— 它会先把带活 AXI 主口的驱动解绑。直接
    fpgautil 重配会把总线挂死，那时候 sysrq 也救不回来，只能断电。
 
 两个形态各自证明的东西不同，缺一不可：
@@ -132,15 +145,6 @@ esac
 hr "④ 往被拒的地址狂写三万多笔：板子不会崩"
 "$D/hsm_nocrash" >/dev/null 2>&1
 cat "${NOCRASH_OUT:-/media/sd-mmcblk1p2/hsm/RESULT_nocrash.txt}"
-if [ "$FORM" = open ]; then
-    cat <<'EOF'
-
-⚠️ 演示形态下最后那条「安全世界读到的违规计数是 0」是**预期的**，不是缺陷：
-   防火墙这一层本来就没在拒绝任何东西（槽 0-4 是开的），自然没有防火墙违规
-   可记。真正被拒的是译码器那四类地址，它们的计数确实在涨（那一行是 PASS，
-   16 位饱和，多跑几次就停在 65535）。这一条同样要在送检形态下才有完整含义。
-EOF
-fi
 
 hr "演示结束。板子还活着 —— 这句话本身是第 ④ 步的结论。"
 uptime

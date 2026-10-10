@@ -101,6 +101,7 @@ int main(int argc, char **argv)
 	printf("  公钥 ek %u 字节，私钥句柄 = %u\n", ek_len, kh);
 	hex("ek 开头", ek, ek_len);
 	printf("  ← 注意：本程序**从头到尾没有拿到过私钥 dk**，只有这个句柄\n");
+	printf("    （种子由 TEE 里的 TA 生成并保管；每次运算 FPGA 现展开私钥、算完即擦）\n");
 
 	/* ---- 3. 封装 / 解封装 ---- */
 	printf("\n[3] SDFE_Encapsulate_MLKEM（用公钥）\n");
@@ -207,7 +208,7 @@ int main(int argc, char **argv)
 		unsigned int pset;
 
 		printf("\n[6] SDFE_GenerateKeyPair/Sign/Verify_MLDSA"
-		       "（三个参数集，sk 全程在片内）\n");
+		       "（三个参数集，种子在 TEE、签名在 FPGA）\n");
 		for (pset = 0; pset < 3; pset++) {
 			unsigned int pk_len = sizeof pk, sig_len = sizeof sig;
 			unsigned int kh2 = 0;
@@ -248,7 +249,7 @@ int main(int argc, char **argv)
 				       NAME[pset]); return 1;
 			}
 			sig[sig_len / 2] ^= 0x01;
-			printf("  ✅ %-10s 槽 %u：pk %u 字节、σ %u 字节，验得过；"
+			printf("  ✅ %-10s 句柄 %u：pk %u 字节、σ %u 字节，验得过；"
 			       "改一字节即验不过\n", NAME[pset], kh2, pk_len, sig_len);
 		}
 	}
@@ -300,7 +301,7 @@ int main(int argc, char **argv)
 		char got[129];
 		int i, k;
 
-		printf("\n[7] SDFE_EncryptMode/DecryptMode（CBC/CTR/CFB/OFB，密钥留在硬件）\n");
+		printf("\n[7] SDFE_EncryptMode/DecryptMode（CBC/CTR/CFB/OFB，分组运算在 FPGA）\n");
 		for (i = 0; i < 8; i++) {
 			/* KAT 只有一个槽（7）：每格按算法重装一次对应的公开向量密钥 */
 			uint32_t slot = SDFE_SYM_KAT_SLOT;

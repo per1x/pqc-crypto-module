@@ -1,0 +1,394 @@
+demo/functions.sh_pre_d7 demo/run.sh_pre_d7 hsm/hsm_hwtest_pre_d7 hsm/hsm_kem3_pre_d7 hsm/hsm_nocrash_pre_d7 hsm/plharness.sh_pre_d7 hsm/pqchsm_fpgad_pre_d7 hsm/run_demo.sh_pre_d7 hsm/sdf_demo_pre_d7 hsm/zu3eg_hsm.bit_pre_d7 hsm/zu3eg_hsm_dev.bit_pre_d7 
+
+==========================================================
+  AXU3EGB 后量子密码机 —— 板上演示
+==========================================================
+
+──────────────────────────────────────────────────────────
+〇 设备就绪
+
+  CLOCK=ok
+  NET=ok eth1=192.168.50.175
+  PL=crypto
+  SECMMIO=ok
+  TA=ok
+  DAEMON=ok
+  TCP=9797 远程可用（mTLS）
+  READY=yes
+
+  上电到这个状态约 35 秒，全自动，没有任何手工步骤。
+  PL=crypto 是密码位流已经装进 FPGA；SECMMIO=ok 是安全世界那条通路活着；
+  TA=ok 是 OP-TEE 里管密钥的那个 TA 已就位（密钥的生成、包裹、装载都在它里面）。
+
+──────────────────────────────────────────────────────────
+① + ② 算得对 & 密钥在 TEE 里管、运算在 FPGA 里做
+
+=== 应用程序：通过 SDF 风格接口使用密码机 ===
+
+[连接] 本机
+[设备] pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000 mldsa=0x00010000
+
+[1] SDFE_GenerateRandom —— 取自 PL 里的环振噪声源
+  32 字节随机数     6a302e1ec41f2693229e1c7c07f7ce50…（共 32 字节）
+
+[2] SDFE_GenerateKeyPair_MLKEM(ML-KEM-768)
+  公钥 ek 1184 字节，私钥句柄 = 0
+  ek 开头              f0c72625b79218864bd882a669b69786…（共 1184 字节）
+  ← 注意：本程序**从头到尾没有拿到过私钥 dk**，只有这个句柄
+    （种子由 TEE 里的 TA 生成并保管；每次运算 FPGA 现展开私钥、算完即擦）
+
+[3] SDFE_Encapsulate_MLKEM（用公钥）
+  共享密钥 K         d611306ad915b25aa4e73f75de01f40e…（共 32 字节）
+  密文 c               994e1f901cbec049a7b641bf6a61b4ce…（共 1088 字节）
+
+[4] SDFE_Decapsulate_MLKEM（用句柄，不是私钥）
+  解出的 K            d611306ad915b25aa4e73f75de01f40e…（共 32 字节）
+  ✅ 两边的共享密钥一致 —— 一次完整的 KEM 在 FPGA 上跑通
+
+[5] 对称密钥归 TEE：KAT 槽 + 生成/blob 重装（SM4，密钥不经普通世界）
+  ✅ 明文导入被拒（本设备不支持该操作）
+  SM4 密文             681edf34d206965e86b3e94f536e4246
+  ✅ KAT 槽 7 与 GB/T 32907 A.1 逐字节一致
+  ✅ 解密回到原文
+  TA 生成 SM4 密钥进槽 3，应用只拿到 60 字节 blob
+  ✅ blob 重装进槽 4 后同一明文得同一密文
+  ✅ blob 装不进 KAT 槽 7（参数错误）
+
+[6] SDFE_GenerateKeyPair/Sign/Verify_MLDSA（三个参数集，种子在 TEE、签名在 FPGA）
+  ✅ ML-DSA-44  句柄 0：pk 1312 字节、σ 2420 字节，验得过；改一字节即验不过
+  ✅ ML-DSA-65  句柄 1：pk 1952 字节、σ 3309 字节，验得过；改一字节即验不过
+  ✅ ML-DSA-87  句柄 2：pk 2592 字节、σ 4627 字节，验得过；改一字节即验不过
+
+[7] SDFE_EncryptMode/DecryptMode（CBC/CTR/CFB/OFB，分组运算在 FPGA）
+  ✅ AES-128-CBC  64 字节对上标准向量，解密回到原文
+  ✅ AES-128-CTR  64 字节对上标准向量，解密回到原文
+  ✅ AES-128-CFB  64 字节对上标准向量，解密回到原文
+  ✅ AES-128-OFB  64 字节对上标准向量，解密回到原文
+  ✅ SM4-CBC      64 字节对上标准向量，解密回到原文
+  ✅ SM4-CTR      64 字节对上标准向量，解密回到原文
+  ✅ SM4-CFB      64 字节对上标准向量，解密回到原文
+  ✅ SM4-OFB      64 字节对上标准向量，解密回到原文
+
+[8] SDFE_Hash_SM3（硬件 SM3 核，无密钥）
+  SM3("abc")             66c7f0f462eeedd9d1f2d46bdc10e4e2…（共 32 字节）
+  ✅ 与 GB/T 32905 A.1 逐字节一致
+
+[9] 反证：断开重连之后，上一会话的句柄必须失效
+  ✅ 旧句柄 0 已失效（句柄不存在）
+
+=== 全部完成。本程序没有碰过任何寄存器。 ===
+
+──────────────────────────────────────────────────────────
+③ 绕过接口：演示形态下唯一仍然关着的门 —— 对称密钥的装载口
+
+当前跑的是**演示形态**（zu3eg_hsm_dev.bit，SECURE_ONLY=0）：五个功能核
+（TRNG、对称金库、对称核、ML-KEM、ML-DSA）对普通世界是开着的，Linux 能直接
+驱动 KAT。板子开机默认起的就是这一份。
+
+但有一样东西**不跟这个开关走**：对称金库的装载口只认安全世界的事务
+（种子暂存口也一样）。下面绕过 TEE、用普通世界直接往装载口写一把密钥：
+
+  VALID_MAP 0x00 → 0x00，LOAD_REJ 44 → 55
+  PASS  普通世界的装载序列一笔都没生效（槽 6 仍空）
+  PASS  LOAD_REJ 涨了 11 —— 被拒有账
+  PASS  普通世界 CTRL.ZEROIZE 之后 VALID_MAP = 0x00
+
+想看"整扇门都关上"的样子，换成送检形态（zu3eg_hsm.bit，SECURE_ONLY=1）：
+
+    sh /media/sd-mmcblk1p2/hsm/plharness.sh /media/sd-mmcblk1p2/hsm/pay_d7_sec.sh
+    cat /media/sd-mmcblk1p2/hsm/d7seclog.txt
+
+它会装送检位流、从普通世界扫一遍（全部读回 0）、再经安全世界跑完整 KAT 与
+sdf_demo，最后装回出厂位流。跑完重启一次（hsmreboot.sh）回到演示形态。
+
+⚠️ 换位流必须走 plharness.sh —— 它会先把带活 AXI 主口的驱动解绑。直接
+   fpgautil 重配会把总线挂死，那时候 sysrq 也救不回来，只能断电。
+
+两个形态各自证明的东西不同，缺一不可：
+  · 演示形态证明**算得对**（普通世界直连核，逐字节对上官方向量）；
+  · 送检形态证明**够不着**（同一批地址，普通世界全部读回 0，
+    而安全世界经 EL3 白名单照样跑通全套 KAT）。
+
+──────────────────────────────────────────────────────────
+④ 往被拒的地址狂写三万多笔：板子不会崩
+
+==== 崩不了板：用户态最坏情况 ====
+每个地点读写各 2000 次。判据：程序自己跑完 + 板子还在。
+改 RAZ/WI 之前，下面第 ① 组的第一笔写就足以让内核 panic。
+
+[对照：先证明总线这条路是活的]
+  PASS  风扇观测口读到真值 0x00010000 —— 事务确实发得出去
+  当前是演示形态（SECURE_ONLY=0）：功能核对普通世界开放，只有金丝雀关着
+
+[① 功能核与金丝雀：以前往被拒地址的第一笔写就 panic]
+  PASS  trng_axi VERSION      (槽 0，演示形态下开放，写只读寄存器)：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  key_vault_axi VERSION (槽 1，演示形态下开放，写只读寄存器)：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  sym_axi VERSION       (槽 2，演示形态下开放，写只读寄存器)：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  mlkem_axi VERSION     (槽 3，演示形态下开放，写只读寄存器)：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  mldsa_axi VERSION     (槽 6，演示形态下开放，写只读寄存器)：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  金丝雀 VERSION        (槽 4，两种形态都拒)：读写各 2000 次，全程无总线错误，进程还活着
+
+[② 译码器判"没有这个地址"的四类]
+  PASS  槽内偏移高位非零 0x8001_0110（镜像地址）：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  槽号越界 0x8007_0000（只有 7 个槽，槽 6 是 ML-DSA）：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  aperture 以外 0x8010_0004：读写各 2000 次，全程无总线错误，进程还活着
+  PASS  未对齐 0x8001_0005：读写各 2000 次，4000 次 SIGBUS —— 这是 CPU 的对齐异常（Device 内存不支持非对齐），事务没上总线，与 RAZ/WI 无关；同步可捕获，崩不了板
+
+[留痕：违规计数只有安全世界读得到]
+  PASS  普通世界读金丝雀的违规计数得到 0 —— 攻击者看不到自己的痕迹
+        金丝雀 防火墙违规  读 4001 / 写 4000（各自 16 位饱和）
+        xbar   译码违规    读 10000 / 写 10000（各自 16 位饱和）
+  PASS  安全世界读到了非零的违规计数 —— 痕迹留下了
+
+================================
+通过 13，失败 0
+
+你能读到这一行，本身就是结论的一半：板子跑完了上面所有操作还活着。
+
+──────────────────────────────────────────────────────────
+演示结束。板子还活着 —— 这句话本身是第 ④ 步的结论。
+
+ 03:57:08 up 14 min,  load average: 1.08, 0.97, 0.64
+
+[1m═══ 密码机功能演示 ═══[0m
+  密钥库 /tmp/tmp.vygWXz/keystore.bin（临时，退出即删）
+  DEV：⚠️ KDR 是编译进二进制的**公开常量**，密钥库的机密性等于零。仅供开发/演示。
+
+[1m━━ 一、算法支持性 —— 问模块自己，不是问文档[0m
+
+  PKCS#11 的标准问法：C_GetMechanismList + C_GetMechanismInfo
+  模块  pqc-hsm PKCS#11 v3.2 front-end  
+  厂商  pqc-hsm prototype               
+  版本  PKCS#11 3.2
+  槽位  4 个
+
+  支持 5 个机制：
+    CKM_ML_DSA_KEY_PAIR_GEN   生成密钥对
+    CKM_ML_DSA                签名、验签
+    CKM_ML_KEM_KEY_PAIR_GEN   生成密钥对
+    CKM_ML_KEM                封装、解封装
+    CKM_AES_GCM               密钥 16..32 字节  加密、解密
+  
+  ⚠️ CKM_ML_DSA 这一行容易读成"硬件"——它不是。算法本身有整核并在板上
+     对过 ACVP，但 PKCS#11 这一侧走的是 liboqs。见 docs/API.md。
+
+[1m━━ 二、熵源[0m
+
+  **这一节在板上有两个熵源，要分清。**
+  
+  ① 本节这个软件密码机（pqchsmd）取随机数走 OpenSSL —— 它跑在 PS 的
+     Linux 上，与 PL 的熵源无关。这条边界写在 docs/SECURITY.md 的局限表里。
+  
+  ② FPGA 里那个才是硬件熵源：8 个环形振荡器 + SP 800-90B 健康检测
+     （RCT/APT），1,048,576 个调节前样本实测 H = 0.871 bit/sample。
+     它由板上的 pqchsm_fpgad 提供，取一个看看：
+  
+    [1] SDFE_GenerateRandom —— 取自 PL 里的环振噪声源
+      32 字节随机数     4b291305890b5111f4687830b96ddebe…（共 32 字节）
+    
+  [32m✓[0m 上面那 32 字节来自 PL 的环振噪声源，不是 OpenSSL
+
+[1m━━ 三、槽位管理[0m
+
+  全部四个槽位的初始状态：
+  [2m$ pqchsm-admin -k $TMP/keystore.bin -n 4 list[0m
+slot   label              state     alg            usage    policy
+0      -                  UNINIT    -              0x0      0x0
+1      -                  UNINIT    -              0x0      0x0
+2      -                  UNINIT    -              0x0      0x0
+3      -                  UNINIT    -              0x0      0x0
+  
+  槽位状态机：UNINIT →（init-token）→ EMPTY →（generate）→ LOADED
+  [2m$ pqchsm-cli -p 19099 init-token 0 SIGN-SLOT 12345678[0m
+  [2m$ pqchsm-cli -p 19099 info 0[0m
+label=SIGN-SLOT state=EMPTY alg=- usage=0x0 policy=0x0 use_count=0
+  
+  会话与角色：SO 负责初始化和设 User PIN，User 负责用密钥。
+  会话句柄 = 4294967297
+  
+  反例 —— 没登录就想生成密钥：
+    错误: not authorized (3)
+  [32m✓[0m 被拒（not authorized）—— 授权是真的在管事，不是摆设
+  [2m$ pqchsm-cli -p 19099 login 4294967297 so 12345678[0m
+  [2m$ pqchsm-cli -p 19099 set-user-pin 4294967297 87654321[0m
+  [2m$ pqchsm-cli -p 19099 logout 4294967297[0m
+  [2m$ pqchsm-cli -p 19099 login 4294967297 user 87654321[0m
+  [32m✓[0m SO 设 PIN、User 登录，两个角色各司其职
+
+[1m━━ 四、密钥管理[0m
+
+  生成一对 ML-DSA-44（算法名就是 ACVP 的 parameterSet 串）：
+  对象句柄 = 1
+  [2m$ pqchsm-cli -p 19099 info 0[0m
+label=SIGN-SLOT state=LOADED alg=ML-DSA-44 usage=0x4 policy=0x0 use_count=0
+  
+  [2m$ pqchsm-cli pubkey 4294967297 1 > pk.bin[0m
+  公钥 1312 字节，签名 2420 字节
+  [32m✓[0m 与 FIPS 204 的 ML-DSA-44 尺寸一致（1312 / 2420）
+  
+  ⚠️ 注意上面这份命令表里**没有"导出私钥"这一条** —— 不是忘了写。
+     公钥导得出，私钥导不出，这是接口层面的结构性事实。
+     PKCS#11 那一侧同理：私钥对象的 CKA_EXTRACTABLE 是 false。
+  
+  销毁与清零：
+  [2m$ pqchsm-cli -p 19099 destroy 4294967297 1[0m
+  [2m$ pqchsm-cli -p 19099 info 0[0m
+label=SIGN-SLOT state=EMPTY alg=- usage=0x0 policy=0x0 use_count=1
+
+[1m━━ 五、备份与恢复（M-of-N 门限）[0m
+
+  备份不是想备就能备 —— 槽位策略说了算。
+  
+  ⚠️ 先说清 backup 的参数：<M> <N> 后面那个 <slot> 是**用哪个槽位的 SO PIN
+     来授权**，不是"备份哪个槽"。导出的是密钥库里**所有**带 BACKUPABLE
+     策略的槽位。（pqchsm-admin 的帮助串这里写得有歧义，容易读反。）
+  
+  现在库里一个 BACKUPABLE 的槽位都没有。先备一次：
+    已备份 0 个槽位到 $TMP/b0.bin；3 份分片写到 $TMP/x.1 .. $TMP/x.3（门限 2）
+  [32m✓[0m 备了 0 个槽位 —— 默认不可备份，是默认拒绝而不是出错
+  
+  再建一个**带 BACKUPABLE（0x2）策略**的槽位：
+  [2m$ pqchsm-admin -k $TMP/keystore.bin -n 4 list[0m
+slot   label              state     alg            usage    policy
+0      SIGN-SLOT          EMPTY     -              0x0      0x0
+1      -                  UNINIT    -              0x0      0x0
+2      BACKUPABLE         LOADED    ML-DSA-44      0x4      0x2
+3      -                  UNINIT    -              0x0      0x0
+  
+  同一条命令再来一次，2-of-3 分片：
+    已备份 1 个槽位到 $TMP/b2.bin；3 份分片写到 $TMP/share.1 .. $TMP/share.3（门限 2）
+  [32m✓[0m 这次备到了 —— 差别只在那一位策略上
+  
+  三份分片各 38 字节。现在验门限。
+  
+  只给 1 片（门限是 2）——**必须失败**：
+    恢复失败: metadata integrity failure（分片不够 M 份、分片有误或备份被改都会走到这里）
+  [32m✓[0m 被拒 —— 少一片就是恢复不了
+  
+  给 2 片（第 1 和第 3 片）：
+    已用 2 份分片恢复 1 个槽位，并重新 sealing 到 $TMP/r2.bin
+  
+  换一组（第 1 和第 2 片）——真门限方案，不挑是哪几片：
+    已用 2 份分片恢复 1 个槽位，并重新 sealing 到 $TMP/r3.bin
+  
+  ⚠️ 这一节备份的是**这个软件密码机**（pqchsmd）的密钥库。
+     板上那台 TEE+FPGA 密码机的密钥，权威副本是 TA 用 KEK 包裹的 blob：
+     blob 本身可以随便存、随便拷，但只有这块板上的 TA 解得开（KEK 不出 TA）。
+     所以那边的"备份"就是保存 blob，"跨设备迁移"则还没做（要 KEK 导出仪式）。
+
+[1m━━ 六、安全存储[0m
+
+  密钥库是一个文件：AES-GCM 包裹、KEK 由 KDR 派生、全文件 MAC、
+  头部带一个每次写盘 +1 的 epoch。
+  
+      keystore.bin  5072 字节
+      keystore.bin.epoch（防回滚锚点）= 13
+  
+  反例甲 —— 改坏一个 bit：
+      第 200 字节 121 → 122（已回读确认）
+    装载密钥库失败: metadata integrity failure —— 槽位数对不上？(-n 4)
+  [32m✓[0m 拒绝装载，**而且没有改写这个文件**（fail-closed，不是"修一修再用"）
+  
+  反例乙 —— 拿一份旧快照换回去（回放攻击）：
+      旧快照 epoch 落后于锚点当前值 15
+  [32m✓[0m 被拒 —— 旧快照的全文件 MAC 本来就是对的（当初自己算的），
+       拦住它的只能是那个单调的 epoch 锚点
+  
+  换 KEK（不动密钥本身，只换包裹它的那把）：
+  [2m$ pqchsm-cli -p 19099 rotate-kek[0m
+  [32m✓[0m 换完之后密钥库照常装载
+  
+  ⚠️ 默认 KDR 是编译进二进制的**公开常量**（见开头那行 DEV 告警）——
+     也就是说这个演示形态下密钥库的机密性等于零。PRODUCTION 形态会拒绝
+     在没有硬件派生根时启动。见 docs/SECURITY.md「构建形态」一节。
+
+[1m━━ 七、算法调用 —— 支持不等于能用，走一遍完整调用链[0m
+
+  第一节列出了 5 个机制。列出来只是声明，这一节把它们**调一遍**。
+  
+  调用链（两条路，最终落到同一个后端）：
+  
+      应用 ──▶ PKCS#11 C_*  ──┐
+                              ├──▶ 槽位层（会话/角色/策略）
+      应用 ──▶ SDF SDFE_*  ──┘         │
+                                       ▼
+                                pqc 后端 vtable
+                                       │
+                         ┌─────────────┴─────────────┐
+                     liboqs（软件）          FPGA 密码核
+                                       PQCHSM_BACKEND=sdfe 切换
+  
+  [1m签名类：ML-DSA 的签 → 验往返，以及它的两个反例[0m
+  
+    ① C_GenerateKeyPair(CKM_ML_DSA_KEY_PAIR_GEN, CKA_PARAMETER_SET=ML-DSA-44)
+       公钥对象 2147483649，私钥对象 1
+    
+    ② C_SignInit/C_Sign —— 私钥只以对象句柄出现，应用碰不到它
+       签名 2420 字节（ML-DSA-44 应为 2420）  ✓
+    
+    ③ C_VerifyInit/C_Verify（原消息）
+       ✓ 验签通过
+    
+    ④ 把消息改一个 bit，再验一次 —— **必须失败**
+       ✓ 被拒（rv=0xc0）—— 改一个 bit 就验不过
+    
+    ⑤ 消息不动，改签名的一个 bit —— 同样必须失败
+       ✓ 被拒（rv=0xc0）
+  [32m✓[0m 签名往返成立，且两条篡改路径都验不过
+  
+  [1mKEM 类：在这块板上，ML-KEM 的封装/解封装是**真硬件**在算[0m
+  
+  上面 roundtrip 走的是 PKCS#11 → 软件后端。同一块板上还有一条路直通
+  FPGA：hsm/sdf_demo 经 pqchsm_fpgad → EL3 → PL 里的 mlkem_axi。
+  
+    [2] SDFE_GenerateKeyPair_MLKEM(ML-KEM-768)
+      公钥 ek 1184 字节，私钥句柄 = 0
+      ek 开头              8f8912e8428121c097cc2b3dcce797a0…（共 1184 字节）
+      ← 注意：本程序**从头到尾没有拿到过私钥 dk**，只有这个句柄
+        （种子由 TEE 里的 TA 生成并保管；每次运算 FPGA 现展开私钥、算完即擦）
+    
+    [3] SDFE_Encapsulate_MLKEM（用公钥）
+      共享密钥 K         977f96498dd1d9b23921b4d563f34e0a…（共 32 字节）
+      密文 c               5668ad4076414366a88b17075d35baf6…（共 1088 字节）
+    
+    [4] SDFE_Decapsulate_MLKEM（用句柄，不是私钥）
+      解出的 K            977f96498dd1d9b23921b4d563f34e0a…（共 32 字节）
+      ✅ 两边的共享密钥一致 —— 一次完整的 KEM 在 FPGA 上跑通
+  [32m✓[0m 应用手里只有句柄 —— 种子在 TEE 里，私钥只在 FPGA 运算时现展开
+  
+  ⚠️ 两条路的差别值得说清：PKCS#11 这一侧目前走 liboqs（软件），SDF 那一侧
+     走 FPGA。把 PKCS#11 也接到硬件要设 PQCHSM_BACKEND=sdfe —— 见 docs/API.md。
+
+[1m━━ 怎么调用[0m
+
+  本演示用的是 pqchsm-cli（一条 TCP 到 pqchsmd）。应用一般走这两条：
+  
+    PKCS#11  —— 跨厂商标准接口。板上这份模块在 bin/pqchsm-pkcs11.so，
+               主机侧的 Python / Java 示例见仓库 demo/python、demo/java
+    SDF 风格 —— 国密惯用的一套，直接对 FPGA 密码机：
+               板上 hsm/sdf_demo，或从别的机器跑 demo/remote/run.sh
+  
+  把 PKCS#11 的 ML-KEM 接到 TEE+FPGA 密码机（种子由 TA 保管、FPGA 现展开）：
+    export PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=<板子IP>
+    export PQCHSM_SDFE_PKI=$HOME/.config/pqchsm/pki
+
+[1m═══ 演示结束 ═══[0m
+  临时密钥库与分片已删除。
+
+
+──────────────────────────────────────────────────────────
+还能看什么
+
+  远程调用（在另一台机器上，全程不用 SSH，mTLS 双向证书）：
+      ./demo/remote/run.sh <板子IP>
+
+  管理功能面已经在上面第 ⑤ 段跑过了。主机上也能单独跑（不需要板子）：
+      ./demo/functions/run.sh
+
+  这块板上更细的证据（原始输出，未经整理）：
+      ls /media/sd-mmcblk1p2/hsm/RESULT_*.txt
+
+  密钥仓反证（密钥装在 FPGA 里、密文算对的同时，扫遍金库与对称核的地址窗口，
+  密钥的字一个都不出现）—— daemon 在跑也能做：
+      /media/sd-mmcblk1p2/hsm/d7bench
+

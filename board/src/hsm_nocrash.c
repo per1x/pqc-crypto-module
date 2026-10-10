@@ -21,7 +21,8 @@
 // ============================================================================
 // 【它故意做的都是以前会出事的事】
 // ============================================================================
-//   ① 往四个 SECURE_ONLY=1 的核里写 —— 防火墙拒；
+//   ① 往功能核与金丝雀里写 —— 送检形态下防火墙全拒；演示形态下功能核是
+//      开的（写的是只读的 VERSION，无副作用），只有金丝雀拒；
 //   ② 往镜像地址、越窗地址写 —— 译码器判"没有这个地址"；
 //   ③ 往 aperture 以外、不存在的槽写 —— 同上；
 //   ④ 未对齐地址读写；
@@ -220,25 +221,33 @@ static int sec_rd(unsigned long off, uint32_t *out)
 
 int main(void)
 {
-	/* ① 防火墙拒的：四个功能核 + 金丝雀。地址都是各核合法的 VERSION 偏移，
-	 *    所以被拒的一定是 AxPROT 门控，不是译码 —— 两类分开测才说得清。 */
-	static const struct site refused[] = {
-		{ 0x00020, "trng_axi VERSION      (槽 0，防火墙拒)", 0 },
-		{ 0x10000, "key_vault_axi VERSION (槽 1，防火墙拒)", 0 },
-		{ 0x20000, "sym_axi VERSION       (槽 2，防火墙拒)", 0 },
-		{ 0x30000, "mlkem_axi VERSION     (槽 3，防火墙拒)", 0 },
-		{ 0x40000, "金丝雀 VERSION        (槽 4，防火墙拒)", 0 },
+	/* ① 功能核 + 金丝雀。地址都是各核合法的 VERSION 偏移，所以被拒的一定是
+	 *    AxPROT 门控，不是译码 —— 两类分开测才说得清。
+	 *    ⚠️ 标签按形态填（main 里先认形态）：演示形态（SECURE_ONLY=0）下功能核
+	 *    对普通世界是**开的**，以前一律写"防火墙拒"是错的；金丝雀两种形态都拒。 */
+	static struct site refused[] = {
+		{ 0x00020, NULL, 0 },
+		{ 0x10000, NULL, 0 },
+		{ 0x20000, NULL, 0 },
+		{ 0x30000, NULL, 0 },
+		{ 0x60000, NULL, 0 },
+		{ 0x40000, "金丝雀 VERSION        (槽 4，两种形态都拒)", 0 },
 	};
+	static const char *const core_name[5] = {
+		"trng_axi VERSION      (槽 0", "key_vault_axi VERSION (槽 1",
+		"sym_axi VERSION       (槽 2", "mlkem_axi VERSION     (槽 3",
+		"mldsa_axi VERSION     (槽 6" };
+	static char core_label[5][96];
 	/* ② 译码器判"没有这个地址"的四类，与 axi4lite_xbar 的 hit_of() 一一对应 */
 	static const struct site nohit[] = {
 		{ 0x10110, "槽内偏移高位非零 0x8001_0110（镜像地址）", 0 },
-		{ 0x60000, "槽号越界 0x8006_0000（只有 6 个槽）", 0 },
+		{ 0x70000, "槽号越界 0x8007_0000（只有 7 个槽，槽 6 是 ML-DSA）", 0 },
 		{ 0x100004,"aperture 以外 0x8010_0004", 0 },
 		{ 0x10005, "未对齐 0x8001_0005", 1 },
 	};
 	struct sigaction sa;
-	uint32_t v, tv, mv, xv;
-	int fd, good;
+	uint32_t v, cv, xv;
+	int fd, good, open_form, i;
 
 	rep = fopen("/media/sd-mmcblk1p2/hsm/RESULT_nocrash.txt", "w");
 	if (!rep) rep = stdout;
@@ -267,7 +276,20 @@ int main(void)
 		goto out;
 	}
 
-	hammer("① 防火墙拒的地址：以前第一笔写就 panic",
+	/* 认形态：普通世界读 trng VERSION —— 送检形态读回 0，演示形态读回真值 */
+	v = rd_safe(0x00020, &good);
+	open_form = good && v == VERSION_TRUE;
+	fprintf(rep, "  当前是%s\n", open_form
+		? "演示形态（SECURE_ONLY=0）：功能核对普通世界开放，只有金丝雀关着"
+		: "送检形态（SECURE_ONLY=1）：功能核与金丝雀都对普通世界关着");
+	for (i = 0; i < 5; i++) {
+		snprintf(core_label[i], sizeof core_label[i], "%s，%s)", core_name[i],
+			 open_form ? "演示形态下开放，写只读寄存器" : "防火墙拒");
+		refused[i].what = core_label[i];
+	}
+
+	hammer(open_form ? "① 功能核与金丝雀：以前往被拒地址的第一笔写就 panic"
+			 : "① 防火墙拒的地址：以前第一笔写就 panic",
 	       refused, sizeof refused / sizeof refused[0]);
 	hammer("② 译码器判\"没有这个地址\"的四类",
 	       nohit, sizeof nohit / sizeof nohit[0]);
@@ -275,26 +297,23 @@ int main(void)
 	/* 留痕：从安全世界读计数器。普通世界读同样的地址只会得到 0 —— 这正是
 	 * 我们要的：证据存在，但制造证据的人看不到也擦不掉。 */
 	fprintf(rep, "\n[留痕：违规计数只有安全世界读得到]\n");
-	v = rd_safe(0x00038, &good);     /* 普通世界读 trng A_VIOL */
+	/* 用**金丝雀**的计数器（key_vault_axi 的 VIOL_CNT，偏移 0x28）：它在两种形态
+	 * 下都拒普通世界，所以两种形态下都该有痕。以前用 trng 的计数器，演示形态下
+	 * trng 根本没拒任何东西，必然读到 0，于是每次都打一条"预期的 FAIL"。 */
+	v = rd_safe(0x40028, &good);
 	if (good && v == 0)
-		ok("普通世界读 trng A_VIOL 得到 0 —— 攻击者看不到自己的痕迹");
+		ok("普通世界读金丝雀的违规计数得到 0 —— 攻击者看不到自己的痕迹");
 	else
-		bad("普通世界读 trng A_VIOL 得到 0x%08x（good=%d）", v, good);
+		bad("普通世界读金丝雀的违规计数得到 0x%08x（good=%d）", v, good);
 
 	if (sec_open() == 0 &&
-	    sec_rd(0x00038, &tv) == 0 &&      /* trng  A_VIOL   {读,写} */
-	    sec_rd(0x30024, &mv) == 0 &&      /* mlkem A_VIOL   {读,写} */
+	    sec_rd(0x40028, &cv) == 0 &&      /* 金丝雀 VIOL_CNT {读,写} */
 	    sec_rd(0x3002C, &xv) == 0) {      /* mlkem A_XBAR_VIOL 译码违规 */
-		fprintf(rep, "        trng  防火墙违规  读 %u / 写 %u\n",
-			tv >> 16, tv & 0xFFFF);
-		fprintf(rep, "        mlkem 防火墙违规  读 %u / 写 %u\n",
-			mv >> 16, mv & 0xFFFF);
-		/* A_XBAR_VIOL 与各核 A_VIOL 同一布局：{读[31:16], 写[15:0]}。
-		 * 第一版只打了低 16 位却把标签写成"译码违规"，看着像总数
-		 * 其实只有写的那一半 —— 和前面 SIGBUS 只记总数是同一类错误。 */
-		fprintf(rep, "        xbar  译码违规    读 %u / 写 %u（各自 16 位饱和）\n",
+		fprintf(rep, "        金丝雀 防火墙违规  读 %u / 写 %u（各自 16 位饱和）\n",
+			cv >> 16, cv & 0xFFFF);
+		fprintf(rep, "        xbar   译码违规    读 %u / 写 %u（各自 16 位饱和）\n",
 			xv >> 16, xv & 0xFFFF);
-		if ((tv & 0xFFFF) && (xv & 0xFFFF))
+		if ((cv & 0xFFFF) && (xv & 0xFFFF))
 			ok("安全世界读到了非零的违规计数 —— 痕迹留下了");
 		else
 			bad("安全世界读到的违规计数是 0 —— 打了这么多次却没留痕");

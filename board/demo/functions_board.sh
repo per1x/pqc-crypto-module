@@ -31,8 +31,8 @@
 #
 # **本脚本演的是后者。** 槽位/备份/安全存储这些密码机管理功能都在这一侧。
 #
-# 两边能接起来：设 PQCHSM_BACKEND=sdfe 之后，ML-KEM 的密钥生成走 FPGA、
-# 私钥进 PL 片内金库 —— 于是"槽位与备份在主机侧管、密钥材料在硬件里"。
+# 两边能接起来：设 PQCHSM_BACKEND=sdfe 之后，ML-KEM 走那台 TEE+FPGA 密码机
+# （种子由 TA 保管、FPGA 现展开）—— 于是"槽位与备份在主机侧管、密钥材料在 TEE 里"。
 # 但那样有一个真实的取舍，见第五节末尾。
 # ============================================================================
 set -uo pipefail
@@ -253,10 +253,10 @@ say "换一组（第 1 和第 2 片）——真门限方案，不挑是哪几片
     | sed "s|${WORK}/|\$TMP/|g; s/^/    /"
 
 say ""
-say "⚠️ 一个真实的取舍，值得单独说：**\"能备份\"和\"留在硬件里\"是互斥的。**"
-say "   备份备的是种子，而私钥一旦进了 FPGA 的片内金库就没有读出路径 ——"
-say "   也就没法备份。可恢复 ↔ 不可导出，只能选一个。这不是缺陷，是密码机"
-say "   设计里一个必须由使用者做的决定。"
+say "⚠️ 这一节备份的是**这个软件密码机**（pqchsmd）的密钥库。"
+say "   板上那台 TEE+FPGA 密码机的密钥，权威副本是 TA 用 KEK 包裹的 blob："
+say "   blob 本身可以随便存、随便拷，但只有这块板上的 TA 解得开（KEK 不出 TA）。"
+say "   所以那边的\"备份\"就是保存 blob，\"跨设备迁移\"则还没做（要 KEK 导出仪式）。"
 
 # ============================================================================
 sec "六、安全存储"
@@ -371,7 +371,7 @@ say ""
 if [ -x /media/sd-mmcblk1p2/hsm/sdf_demo ]; then
     /media/sd-mmcblk1p2/hsm/sdf_demo 2>/dev/null \
         | sed -n "/\[2\] SDFE_GenerateKeyPair/,/共享密钥一致/p" | sed "s/^/    /"
-    ok "私钥句柄从头到尾没变成过一串字节 —— dk 不出 PL"
+    ok "应用手里只有句柄 —— 种子在 TEE 里，私钥只在 FPGA 运算时现展开"
 else
     say "    （hsm/sdf_demo 不在，跳过）"
 fi
@@ -389,7 +389,7 @@ say "             主机侧的 Python / Java 示例见仓库 demo/python、demo/
 say "  SDF 风格 —— 国密惯用的一套，直接对 FPGA 密码机："
 say "             板上 hsm/sdf_demo，或从别的机器跑 demo/remote/run.sh"
 say ""
-say "把 ML-KEM 的密钥生成接到 FPGA（私钥进 PL 片内金库）："
+say "把 PKCS#11 的 ML-KEM 接到 TEE+FPGA 密码机（种子由 TA 保管、FPGA 现展开）："
 say "  export PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=<板子IP>"
 say "  export PQCHSM_SDFE_PKI=\$HOME/.config/pqchsm/pki"
 
