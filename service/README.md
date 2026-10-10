@@ -53,8 +53,8 @@ line of it changes.
 | Key | Where | Leaves the hardware? |
 |---|---|---|
 | Symmetric (AES/SM4) | `key_vault` (authoritative copy: TA-wrapped blob held by the caller) | **No** — the RTL has no bus-side read path, and the daemon never sees plaintext |
-| ML-KEM `dk` | The PL's on-chip key vault; `KeyGen` returns only `ek` and a slot number | **No** — and with `-lock` the RTL stops driving it onto the bus at all |
-| ML-DSA `sk` | Same, in its own set of vault slots | **No**, same latch |
+| ML-KEM `dk` | Not stored anywhere in expanded form: the TA keeps the **seed** as a wrapped blob; per operation the TA stages the seed into the PL, which expands, computes and wipes (batch 2, stateless PL) | **No** — the daemon holds only the blob; the slot ABI and `-lock` latch were removed |
+| ML-DSA `sk` | Same (seed `ξ` as a TA blob) | **No**, same |
 
 Symmetric keys are generated and loaded by the TA (`SDFE_GenerateKey` /
 `SDFE_LoadKey` / `SDFE_LoadKatKey`; wire ops `OP_SYMKEY_GEN`/`LOAD`/`KAT`, 15–17).
@@ -63,8 +63,9 @@ KAT-only. `SDFE_ImportKey` (plaintext, op 6) always returns `SDR_NOTSUPPORT`,
 and the daemon wipes the symmetric vault at session end. Block encryption is
 unchanged: it runs in the PL by slot number, with no SMC per block.
 
-⚠️ The `dk` row used to read "returned by KeyGen, held by the daemon", which was
-true before `dk_to_slot`. A stale comment on a security claim is the most
+⚠️ The `dk` row used to read "returned by KeyGen, held by the daemon" (true before
+`dk_to_slot`), and later "on-chip key vault slot + `-lock` latch" (true before
+batch 2). A stale comment on a security claim is the most
 expensive kind: a reader concludes the private key leaves the hardware when it
 does not, or the reverse. See
 [../docs/SECURITY.md](../docs/SECURITY.md#limitations).
