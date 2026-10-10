@@ -1354,7 +1354,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 			return SDR_HARDFAIL;
 		memset(in, 0, sizeof in);
 		*out_len = n;
-		logf_("DECAPS 句柄/槽 %u → K %u 字节（dk 全程在片内）", h, n);
+		logf_("DECAPS 句柄 %u → K %u 字节（TA 重放种子，dk 在 PL 现展开、算完即擦）", h, n);
 		return SDR_OK;
 	}
 
@@ -1478,8 +1478,8 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 			return SDR_HARDFAIL;
 		}
 		*out_len = n;
-		logf_("ML-DSA SIGN 句柄/槽 %u，msg %u 字节 → sig %u 字节"
-		      "（sk 全程在片内）", h, q->len, n);
+		logf_("ML-DSA SIGN 句柄 %u，msg %u 字节 → sig %u 字节"
+		      "（TA 重放 ξ，sk 在 PL 现展开、算完即擦）", h, q->len, n);
 		return SDR_OK;
 	}
 
@@ -2040,7 +2040,7 @@ int main(int argc, char **argv)
 		hw_fault = 0;
 		session_end();
 		hw_fault = 0;
-		logf_("客户端断开（句柄表已清，两个 PQC 金库已擦）");
+		logf_("客户端断开（句柄表已清；两个 PQC 展开区与对称金库已擦）");
 	}
 	return 0;
 }

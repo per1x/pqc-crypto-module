@@ -1,0 +1,159 @@
+
+[1m  AXU3EGB 后量子密码机 —— 演示[0m
+  密钥在 TEE 里管 · 运算在 FPGA 里做 · 应用只调接口
+
+[1m════ 〇 架构一页纸 ════[0m
+
+   ┌──────────────────────── 普通世界（Linux）────────────────────────┐
+   │  应用 ──▶ libsdfe（SDF 接口）/ PKCS#11 ──▶ pqchsm_fpgad（daemon）  │
+   │                                            · 串行化硬件访问          │
+   │                                            · 句柄表里只有密文 blob   │
+   └──────────────┬──────────────────────────────────┬────────────────┘
+                  │ 密钥管理（TEE Client API）        │ 运算数据（寄存器读写）
+   ┌──────────────▼──────── 安全世界 ──────────┐      │
+   │  OP-TEE TA（S-EL0）                        │      │
+   │   · 生成种子 / 对称密钥（TRNG）            │      │
+   │   · 用 KEK 包成 blob 交出（KEK 不出 TA）   │      │
+   │   · 需要时解开，经安全通路送进 FPGA        │      │
+   │  PTA（S-EL1）──▶ BL31 / EL3（SiP 白名单）  │      │
+   └──────────────┬─────────────────────────────┘      │
+                  │ 只认安全事务的装载口               │ 经 EL3 白名单
+   ┌──────────────▼──────────── FPGA（PL）─────────────▼──────────────┐
+   │  ML-KEM · ML-DSA · AES / SM4 · SM3 · TRNG                         │
+   │  · 私钥每次从种子现展开，算完由硬件无条件擦除                       │
+   │  · 对称密钥在金库里没有任何读出路径，会话结束即擦                   │
+   └───────────────────────────────────────────────────────────────────┘
+
+  一句话：[1m明文密钥只存在于 TA 和 FPGA 里[0m；应用和 daemon 手里只有句柄和密文 blob。
+
+[1m════ 一 设备就绪 ════[0m
+
+  PL=crypto
+  SECMMIO=ok
+  TA=ok
+  DAEMON=ok
+  TCP=9797 远程可用（mTLS）
+  READY=yes
+
+  安全世界：optee: revision 3.8，TA 已加载
+  FPGA    ：operating（密码位流）
+  上电到就绪约 35 秒，全自动。
+
+[1m════ 二 走一遍 ════[0m
+
+  已连接：本机（UNIX socket）
+  设备：pqchsm_fpgad on FPGA  mlkem=0x00010000 sym=0x00010000 mldsa=0x00010000
+
+[1m━━ A. 密钥管理在 TEE —— 密钥由 TA 生成、包裹、装载，应用和 daemon 都碰不到明文[0m
+
+  [1mA1. 后量子私钥：TA 保管「种子」，FPGA 每次现展开、算完即擦[0m
+    TA 生成种子 d‖z → 经安全世界送进 FPGA → FPGA 展开出密钥对
+    应用拿到：公钥 1184 字节 + 句柄 0（2.6 ms）
+    daemon 拿到：TA 用 KEK 包裹的种子 blob（它解不开，KEK 不出 TA）
+    FPGA 里：私钥只在这一次运算里存在，结束即被硬件擦除
+    ✅ 私钥 dk 没有以明文出现在 TEE 之外的任何地方
+
+  [1mA2. 对称密钥：TA 生成 → 包成 blob 交给应用保存 → 需要时再装进 FPGA[0m
+    SDFE_GenerateKey(槽 3, SM4) 用时 1.3 ms
+    应用拿到的 blob 5057525001000100100000001000000048deb982184338b1…（60 字节）
+    ↑ 这是密文（AES-256-GCM，KEK 在 TA 内）。应用可以存盘，但解不开。
+    SDFE_LoadKey(槽 4, blob) 用时 1.3 ms —— TA 解包后经安全世界装进 FPGA
+    ✅ 同一份 blob 装进另一个槽，加密结果相同 —— 密钥可随身带走、随时重装
+    ✅ blob 改一个比特 → TA 拒绝装载（GCM 认证失败）
+    ✅ 明文导入密钥 → 拒绝（明文必然经过普通世界，本设备不提供这条路）
+
+  [1mA3. 标准向量自检：公开测试密钥只能进专用的 KAT 槽 7[0m
+    ✅ SM4 对上 GB/T 32907 附录 A（应用只给了向量编号，没传一个密钥字节）
+
+[1m━━ B. FPGA 做运算 —— 每一项都对官方向量，时延是应用侧端到端实测[0m
+
+  [1mB1. ML-KEM-768（FIPS 203）：密钥封装[0m
+    生成 2.5 ms │ 封装 1.4 ms │ 解封装 3.4 ms
+    ✅ 双方得到同一个 32 字节共享密钥
+
+  [1mB2. ML-DSA-44 / 65 / 87（FIPS 204）：数字签名[0m
+    ML-DSA-44  生成   2.5 ms │ 签名    5.6 ms │ 验签   1.8 ms │ σ 2420 字节
+    ML-DSA-65  生成   3.2 ms │ 签名   13.9 ms │ 验签   2.7 ms │ σ 3309 字节
+    ML-DSA-87  生成   4.0 ms │ 签名   17.6 ms │ 验签   3.8 ms │ σ 4627 字节
+    ✅ 三个参数集都签得出、验得过，签名改一个比特即验不过
+
+  [1mB3. AES-128 / SM4 四种工作模式（SP 800-38A 附录 F 等官方向量）[0m
+    ✅ 8 组全部逐字节对上标准向量，解密回到原文
+    吞吐：AES-256-CBC 0.92 MB/s（每个分组都在 FPGA 里算；瓶颈是每次寄存器访问都要经 EL3）
+
+  [1mB4. SM3（GB/T 32905）杂凑 与 硬件随机数[0m
+    ✅ SM3("abc") 对上 GB/T 32905 附录 A
+    随机数          0c10aa8ef16b8040fbcbca6a4446757b…（32 字节）
+    ↑ 来自 FPGA 里 8 路环形振荡器 + SP 800-90B 健康检测，不是软件伪随机
+
+[1m━━ C. 会话结束 —— 句柄作废、FPGA 里的对称密钥被擦[0m
+    已断开。daemon 清空句柄表，并让 FPGA 擦掉金库与运算核里的残留。
+    （run.sh 接下来从硬件侧核对这一点）
+
+  小结：✅ 9 项  ❌ 0 项
+
+[1m════ 三 刚才那些调用走了哪条路 ════[0m
+
+  daemon 日志里本次运行的记录（每类调用取第一笔），以及每类调用经过的层：
+
+    [03:50:30] KEYGEN pset=1 → 句柄 0，ek 1184 字节
+    [03:50:30] SYMKEY_GEN 槽 3
+    [03:50:30] SYMKEY_LOAD 槽 4 —— TA 解开 blob 装进金库
+    [03:50:30] SYMKEY_KAT 向量 0 → 槽 7
+    [03:50:30] ENCAPS pset=1 → K 32 + c 1088 字节
+    [03:50:30] DECAPS 句柄 1 → K 32 字节
+    [03:50:30] ML-DSA KEYGEN pset=0 → 句柄 0，pk 1312 字节
+    [03:50:30] ML-DSA SIGN 句柄 0，msg 41 字节 → sig 2420 字节
+    [03:50:30] ML-DSA VERIFY pset=0 msg 41 字节 → 通过
+    [03:50:30] SYM_CRYPT alg=0 模式=1 加密 槽 7，64 字节
+    [03:50:30] SM3 3 字节 → 32 字节摘要
+    [03:50:30] RANDOM 32 字节
+    [03:50:30] 客户端断开（句柄表已清；两个 PQC 展开区与对称金库已擦）
+
+    生成 / 装载密钥   应用 → daemon → TA（生成/解包）→ PTA → EL3 → FPGA 装载口
+    签名 / 解封装     应用 → daemon → TA（重放种子）→ … → FPGA 现展开 → 运算 → 擦
+                                   └→ daemon 经 EL3 白名单喂数据、取结果
+    加解密 / 杂凑     应用 → daemon → EL3 白名单 → FPGA（按槽号用金库里的密钥）
+                      ↑ 这一步不进 TEE：密钥已经在 FPGA 里，每个分组不再走 TA
+
+[1m════ 四 从硬件侧核对 ════[0m
+
+  ① 会话已经结束 —— 直接读 FPGA 的金库状态寄存器：
+     PASS  VALID_MAP = 0x00（段末即擦）
+
+  ② 绕过 TEE，用普通世界直接往 FPGA 的装载口写一把密钥：
+     VALID_MAP 0x00 → 0x00，LOAD_REJ 33 → 44
+     PASS  普通世界的装载序列一笔都没生效（槽 6 仍空）
+     PASS  LOAD_REJ 涨了 11 —— 被拒有账
+     PASS  普通世界 CTRL.ZEROIZE 之后 VALID_MAP = 0x00
+
+  ③ 送检位流（SECURE_ONLY=1）下普通世界连读都读不到 —— 证据见
+     /media/sd-mmcblk1p2/hsm/d7seclog.txt（这里不现场切位流，那要重配 FPGA）
+
+[1m════ 五 上层怎么调用 ════[0m
+
+  ① SDF 风格 C 接口（国密惯用；demo_tour 就是这么写的）
+
+      SDFE_OpenDevice(&dev);  SDFE_OpenSession(dev, &ses);
+
+      SDFE_GenerateKey(ses, 3, 16, blob, &blen);      // TA 生成 SM4 密钥 → 槽 3，交回 blob
+      SDFE_EncryptMode(ses, SDFE_ALG_SM4, SDFE_MODE_CBC, 3, iv, in, len, out);
+      ...                                             // 下次会话：
+      SDFE_LoadKey(ses, 3, blob, blen);               // 同一把密钥重新装进 FPGA
+
+      SDFE_GenerateKeyPair_MLDSA(ses, SDFE_MLDSA_65, pk, &pklen, &h);
+      SDFE_Sign_MLDSA(ses, h, msg, msglen, NULL, 0, sig, &siglen);
+
+     头文件 service/sdfe.h，库 libsdfe.a；应用侧不链接任何密码库。
+
+  ② 远程调用（另一台机器，mTLS 双向证书，不用 SSH）
+
+      SDFE_OpenDeviceRemote(&dev, "<板子IP>", 9797, &creds);   // 之后的调用完全一样
+      仓库里一条命令：./demo/remote/run.sh <板子IP>
+
+  ③ PKCS#11（跨厂商标准接口）
+
+      模块 demo/bin/pqchsm-pkcs11.so；设 PQCHSM_BACKEND=sdfe 时 ML-KEM 走这台密码机。
+      ⚠️ 其余机制在 PKCS#11 侧目前仍是软件后端（PKCS#11 瘦客户端是下一步，FINAL-PLAN PS-13）。
+
+[32m[1m演示完成：全部通过。[0m

@@ -18,6 +18,7 @@ $CC -O2 -Wall -Wextra $SSLF -c -o /tmp/d7_pqcs_tls.o pqcs_tls.c
 /usr/bin/aarch64-linux-gnu-ar rcs /tmp/d7_libsdfe.a /tmp/d7_libsdfe.o /tmp/d7_pqcs_tls.o
 $CC -O2 -Wall -Wextra $SSLF -o $OUT/sdf_demo sdf_demo.c /tmp/d7_libsdfe.a $SSLL
 $CC -O2 -Wall -Wextra $SSLF -o $OUT/d7bench ../board/src/d7bench.c /tmp/d7_libsdfe.a $SSLL
+$CC -O2 -Wall -Wextra $SSLF -o $OUT/demo_tour ../board/demo/demo_tour.c /tmp/d7_libsdfe.a $SSLL
 cd $R/board/src
 $CC -O2 -Wall -Wextra -static -I.. -o $OUT/hsm_hwtest hsm_hwtest.c
 $CC -O2 -Wall -Wextra -static -I.. -o $OUT/hsm_kem3 hsm_kem3.c
