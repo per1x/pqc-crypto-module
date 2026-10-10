@@ -93,7 +93,17 @@ int SDFE_Decapsulate_MLKEM(SDFE_HANDLE hSession, uint32_t key_handle,
                            const uint8_t *ct, uint32_t ct_len,
                            uint8_t *ss, uint32_t *ss_len);
 
-/* 对称——密钥写入 key_vault，此后按槽位使用 */
+/* 对称——密钥由 TEE 装进 key_vault，此后按槽位使用。
+ * 产品槽 0..6；槽 7 只给 KAT（公开测试向量密钥，按编号选）。
+ * blob = TA 内 KEK 包裹的 PWRP（AAD "pqchsm/symkey/v1"），KEK 不出 TA。
+ * blob 由调用方保管，下个会话用 SDFE_LoadKey 重新装入。
+ * blob_len 入参是容量、出参是实长（上限 SDFE_SYMKEY_BLOB_MAX = 128）。 */
+int SDFE_GenerateKey(SDFE_HANDLE hSession, uint32_t slot, uint32_t key_len,
+                     uint8_t *blob, uint32_t *blob_len);   /* key_len 为 16 或 32 */
+int SDFE_LoadKey(SDFE_HANDLE hSession, uint32_t slot,
+                 const uint8_t *blob, uint32_t blob_len);
+int SDFE_LoadKatKey(SDFE_HANDLE hSession, uint32_t kat_id); /* 仅槽 7 */
+/* 明文导入：恒回 SDR_NOTSUPPORT（0x01000009）。 */
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
                    const uint8_t *key, uint32_t key_len);
 int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
@@ -118,7 +128,8 @@ const char *SDFE_StrError(int rv);
 
 返回码沿用 SDF 惯例：成功为 `SDR_OK`（0），否则为 `SDR_BASE + n`——
 `SDR_OPENDEVICE`、`SDR_COMMFAIL`、`SDR_INARGERR`、`SDR_KEYNOTEXIST`、
-`SDR_HARDFAIL`、`SDR_UNKNOWERR`。
+`SDR_HARDFAIL`、`SDR_UNKNOWERR`，以及 `SDR_NOTSUPPORT`（`SDR_BASE + 9`，设备明确不做这件事，
+例如 `SDFE_ImportKey`）。
 
 参数集为 `SDFE_MLKEM_512` / `_768` / `_1024`；对称算法为 `SDFE_ALG_AES128` /
 `_AES256` / `_SM4`，与 `sym_axi` 的 `ALG` 字段对应。
@@ -168,7 +179,7 @@ SDF 中*内部密钥*的概念天然对应 `key_vault`：`SDF_InternalSign` 接�
 | 对称加解密（CTR） | 同上 | 同上。GM/T 0018 本身没列 CTR，这是超出部分 |
 | 杂凑 | `SDFE_Hash_SM3`（一次一段） | **硬件** SM3 核，对上 GB/T 32905 A.1 |
 | 设备标识 | `SDFE_GetDeviceDNA`（16 字节） | ⚠️ **返回的不是密钥，是一个公开的芯片编号**。用途只有一个：让上层把 keystore 之类的东西绑到这块板（换板打不开 = 防克隆）。有 JTAG 的人能读到同样的值，所以任何"它来自硬件所以安全"的推理都是错的。经 BL31 白名单的只读窗口 `0xFFCA0050-5C` 取，EL1 直读是总线错误 |
-| 密钥管理（对称密钥进片内、只按槽号使唤） | `SDFE_ImportKey` | **硬件** `key_vault`，RTL 上没有读出通路 |
+| 密钥管理（对称密钥进片内、只按槽号使唤） | `SDFE_GenerateKey` / `LoadKey` / `LoadKatKey`（`ImportKey` 恒回 `SDR_NOTSUPPORT`） | 密钥在 **TEE 内生成并装载**进硬件 `key_vault`，RTL 上没有读出通路 |
 | 非对称（后量子） | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **硬件**，私钥在片内金库，只交出公钥与槽号 |
 | 公钥加密任意长度数据 | `SDFE_PKEncrypt` / `PKDecrypt` | KEM 走硬件；DEM 的 AES-GCM 走软件（口径见 `sdfe_pkenc.h`） |
 
@@ -227,7 +238,7 @@ NTT 与 Keccak 两个算子，整算法的硬件 transport 尚不存在。
 
 | 密钥 | 存在哪里 | 会离开硬件吗？ |
 |---|---|---|
-| 对称（AES / SM4） | `key_vault` 寄存器阵列 | **不会。** RTL 里没有总线侧的读出路径。演示程序在导入后擦掉自己那份副本，此后没有任何人——包括守护进程——能把它取回来 |
+| 对称（AES / SM4） | `key_vault` 寄存器阵列；权威副本是调用方持有的、TA 包裹的 PWRP blob | **不会。** RTL 里没有总线侧的读出路径，普通世界（含守护进程）从不见明文：密钥由 TA 生成，经 SiP `PQC_SYMKEY` 装入。守护进程在会话结束时擦金库 |
 | ML-KEM `dk` | 目前由 `KeyGen` 返回；由守护进程持有 | ⚠️ **会，它会离开硬件**——但不会离开*接口*。应用手里始终只有一个句柄 |
 
 第二行是当前状态，不能简化成"私钥永不离开硬件"。要让那句话成立，需要在

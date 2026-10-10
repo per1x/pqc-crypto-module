@@ -85,9 +85,10 @@ cocotb testbench 单独验证。
 > 而形态有**两种**，一列写不下。哨兵两种形态都是 1 —— 它是对照组。
 > 槽 5（风扇）永远不门控：它不在密码边界之内。
 >
-> ⚠️ 有一样东西**不跟这个开关走**：**种子暂存口**（`mlkem_axi 0x38`、
-> `mldsa_axi 0x34`）在两种形态下都要求 `AxPROT[1]=0`。演示 bitstream 对普通
-> 世界什么都开着，但种子仍然只能来自安全世界。
+> ⚠️ 有两样东西**不跟这个开关走**：**种子暂存口**（`mlkem_axi 0x38`、
+> `mldsa_axi 0x34`）与**对称金库的装载口**（`key_vault_axi` 的 `SLOT_SEL` /
+> `KEY_IN` / `SLOT_CTRL`，D7）在两种形态下都要求 `AxPROT[1]=0`。演示 bitstream
+> 对普通世界什么都开着，但种子与对称密钥仍然只能来自安全世界。
 
 ## `trng_axi` — 槽位 0
 
@@ -164,6 +165,24 @@ cocotb testbench 单独验证。
 | `0x28` | `VIOL_CNT` | R | `{read violations[31:16], write violations[15:0]}`，饱和计数 |
 | `0x2C` | `VIOL_INFO` | R | `[7:0]` 首次违规地址，`[8]` 为写操作，`[9]` NS 位，`[10]` 有效 |
 | `0x30` | `PARAM0` | R | `{WORDS[15:8], SLOTS[7:0]}`，供驱动自检 |
+| `0x34` | `LOAD_REJ` | R | `[15:0]` 普通世界对装载口（`SLOT_SEL`/`KEY_IN`/`SLOT_CTRL`）的写被拒次数，饱和。D7 新增 |
+
+> ### D7：装载口只认安全世界，普通世界只剩"擦"
+>
+> `SLOT_SEL`、`KEY_IN`、`SLOT_CTRL` 三个装载口**只认 `AxPROT[1]=0`，与 `SECURE_ONLY`
+> 无关**（与种子暂存口同一口径）。普通世界的写走 RAZ/WI 并计入 `LOAD_REJ`，
+> **不回 SLVERR**（posted 写的错误是 SError，代价是断电）。`CTRL.ZEROIZE` 不门控：
+> 擦除永远是安全方向。
+>
+> 这一半单独不成立。另一半在 BL31：**槽 1 从通用 `PL_RD`/`PL_WR` 整槽排除**
+> （读写都拒、两个世界都拒），否则 root 经 SiP 转一手——那笔事务从 EL3 发出、
+> 天然是安全的——就绕过了这道门。对称密钥现在只能经 **SiP `0x8200ff16`
+> （`PQC_SYMKEY`）** 装载，它无条件只认安全世界、没有锁槽动作，调用方是 TA
+> 经 PTA（`CMD_SYMKEY_NEW` / `_LOAD` / `_KAT`，见 `tee-protocol.zh-CN.md`）。
+>
+> 对外口径：**权威副本在 TA（以 blob 形态交调用方保存），这里是单段使用容器**——
+> daemon 在会话结束发 `sym_axi` 的 `CTRL.ZEROIZE`，RTL 里有一根线把它直通到
+> 本仓的 zeroize（`ext_zeroize`），连金库一起擦。
 
 **本表中没有任何地址会返回密钥材料。** `KEY_IN` 只写，读回为 0——不是"被门控
 成 0"，而是压根就没有接到密钥寄存器上。`test_key_never_readable` 用八个槽位
@@ -171,7 +190,8 @@ cocotb testbench 单独验证。
 出现，以此验证这一点。这个测试是咬人的：把任意一个密钥字接进读多路选择器，
 它立刻就会报出泄漏的地址和值。
 
-装载一把密钥：
+装载一把密钥（D7 之后**只由安全世界执行**——EL3 的 `PQC_SYMKEY` 服务按这个序列
+逐笔发，每笔先写 `SLOT_SEL`）：
 
 ```
 SLOT_SEL  = n            select the slot
@@ -180,6 +200,9 @@ KEY_IN    × 8            eight 32-bit words (256 bits)
 SLOT_CTRL = COMMIT       set VALID
 SLOT_CTRL = LOCK         optional; afterwards it can be neither written nor erased
 ```
+
+> `LOCK` 在 RTL 里还在，但 D7 之后**没有任何通路会发它**：EL3 那条服务刻意不提供
+> 锁槽动作。锁槽让密钥在 PL 里过夜，守的是与"单段使用容器"相反的方向（同 V-04）。
 
 **装了一半的密钥不算密钥**：只有 `COMMIT` 才让槽位可用。**擦除在一个周期内
 完成**——整个密钥仓，而不是逐字扫过——所以不存在半把密钥残存的窗口。**防拆是
@@ -199,7 +222,7 @@ SLOT_CTRL = LOCK         optional; afterwards it can be neither written nor eras
 | 偏移 | 名称 | 访问 | 说明 |
 |---|---|---|---|
 | `0x00` | `VERSION` | R | 常量 |
-| `0x04` | `CTRL` | W | `[0]` ZEROIZE（写 1，自清；擦除全部三个核） |
+| `0x04` | `CTRL` | W | `[0]` ZEROIZE（写 1，自清；擦除全部三个核，**并经 `ext_zeroize` 擦整个对称金库**——D7） |
 | `0x08` | `STATUS` | R | `[0]` BUSY，`[1]` DONE，`[2]` KEY_READY，`[3]` KV_VALID |
 | `0x0C` | `ALG` | RW | `[1:0]` 0 = AES-128，1 = AES-256，2 = SM4，3 = SM3；`[2]` DECRYPT |
 | `0x10` | `KEY_SLOT` | RW | `[2:0]` 使用密钥仓的哪个槽位 |

@@ -101,10 +101,11 @@ Base `0x8000_0000`, slot from `addr[18:16]`, 64 KB each. See
 > describe it. The canary stays at 1 in both — it is the control group.
 > Slot 5 (fan) is never gated: it is not inside the crypto boundary.
 >
-> ⚠️ One thing does **not** follow this knob: the **seed staging port**
-> (`mlkem_axi 0x38`, `mldsa_axi 0x34`) requires `AxPROT[1]=0` in *both* forms.
-> A demo bitstream is open to the normal world for everything else, but seeds
-> still only come from the secure world.
+> ⚠️ Two things do **not** follow this knob: the **seed staging port**
+> (`mlkem_axi 0x38`, `mldsa_axi 0x34`) and the **`key_vault_axi` load port**
+> (`SLOT_SEL 0x0C`, `KEY_IN 0x10`, `SLOT_CTRL 0x14`) require `AxPROT[1]=0` in
+> *both* forms. A demo bitstream is open to the normal world for everything
+> else, but seeds and symmetric keys still only come from the secure world.
 
 ## `trng_axi` — slot 0
 
@@ -185,6 +186,15 @@ whether a slot is loaded. To *use* a key, a core in the PL takes it over the
 | `0x28` | `VIOL_CNT` | R | `{read violations[31:16], write violations[15:0]}`, saturating |
 | `0x2C` | `VIOL_INFO` | R | `[7:0]` first violation address, `[8]` was a write, `[9]` NS bit, `[10]` valid |
 | `0x30` | `PARAM0` | R | `{WORDS[15:8], SLOTS[7:0]}`, for driver self-check |
+| `0x34` | `LOAD_REJ` | R | `[15:0]` non-secure writes refused at the load port (`SLOT_SEL`/`KEY_IN`/`SLOT_CTRL`), saturating |
+
+**The load port is secure-only, regardless of `SECURE_ONLY`.** `SLOT_SEL`,
+`KEY_IN` and `SLOT_CTRL` accept only `AxPROT[1]=0` writes in both bitstream
+forms; a non-secure write is RAZ/WI and increments `LOAD_REJ`. `CTRL.ZEROIZE`
+(`0x04`) is deliberately **not** gated — wiping is the safe direction. On the
+EL3 side, BL31 removes slot 1 from the generic `PL_RD`/`PL_WR` SiP whitelist
+entirely (both reads and writes, both worlds); keys reach the vault only via
+TA → PTA → SiP `0x8200ff16` (`PQC_SYMKEY`, secure callers only).
 
 **No address in this table returns key material.** `KEY_IN` is write-only and
 reads as 0 — not "gated to 0", but never connected to the key registers in the
@@ -194,7 +204,8 @@ asserting that none of the 64 key words appears anywhere. The test bites: wiring
 one key word into the read multiplexer makes it report the leaking address and
 value immediately.
 
-Loading a key:
+Loading a key (performed by the secure world — the TA drives it through
+`PQC_SYMKEY` BEGIN/WORD/COMMIT; the normal world cannot):
 
 ```
 SLOT_SEL  = n            select the slot
@@ -225,7 +236,7 @@ address that is gated.
 | Offset | Name | Access | Description |
 |---|---|---|---|
 | `0x00` | `VERSION` | R | Constant |
-| `0x04` | `CTRL` | W | `[0]` ZEROIZE (write-1, self-clearing; erases all three cores) |
+| `0x04` | `CTRL` | W | `[0]` ZEROIZE (write-1, self-clearing; erases all three cores **and the whole `key_vault`**, via an internal wire — it is not a bus write to slot 1) |
 | `0x08` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` KEY_READY, `[3]` KV_VALID |
 | `0x0C` | `ALG` | RW | `[1:0]` 0 = AES-128, 1 = AES-256, 2 = SM4, 3 = SM3; `[2]` DECRYPT |
 | `0x10` | `KEY_SLOT` | RW | `[2:0]` which key vault slot to use |

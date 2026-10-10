@@ -98,16 +98,25 @@ vendor 树是 liboqs 0.16.0 内 mlkem-native/mldsa-native 的 ref 实现，
 
 ## 4. 命令协议（摘要，权威定义在 proto 头）
 
-| 命令 | 说明 |
-|---|---|
-| GET_INFO | 协议版本 + 特性位 |
-| KDF_DERIVE | KDR 派生子密钥（label 强制域分隔） |
-| KEK_SET | 按密钥库 salt 派生并缓存 KEK |
-| WRAP / UNWRAP | KEK 包裹/解包（UNWRAP 认证失败清零输出） |
-| KEYGEN | 返回 (公钥, 包裹私钥 blob) |
-| KEYGEN_FROM_SEED | 种子展开（ML-KEM 64B d‖z / ML-DSA 32B ξ），种子存储优化路径 |
-| DECAPS | blob 私钥解封装 → ss |
-| SIGN | hedged 签名（rnd 由 TA 内 TRNG 现取），消息帧 = ctx_len‖ctx‖msg |
+| 编号 | 命令 | 说明 |
+|---|---|---|
+| 0 | GET_INFO | 协议版本 + 特性位（bit2 ML-KEM、bit3 ML-DSA、**bit4 对称装载 D7**；bit0/1 恒 0） |
+| 1 / 3 / 4 | ~~KDF_DERIVE / WRAP / UNWRAP~~ | **已删除**（PS-22/24 谕言机），编号永久保留不复用 |
+| 2 | KEK_SET | 按密钥库 salt 派生并缓存 KEK（KEK 不出 TA） |
+| 5 | KEYGEN | 返回 (公钥, 包裹私钥 blob) |
+| 6 | KEYGEN_FROM_SEED | 种子展开（ML-KEM 64B d‖z / ML-DSA 32B ξ），种子存储优化路径 |
+| 7 | DECAPS | blob 私钥解封装 → ss |
+| 8 | SIGN | hedged 签名（rnd 由 TA 内 TRNG 现取），消息帧 = ctx_len‖ctx‖msg |
+| 9 | SEED_TO_PL | TA 生成种子送进 PL 暂存口（不回种子） |
+| 10 / 11 | SEED_NEW / SEED_REPLAY | 批 2：种子由 TA 保管，PL 每次现展开；blob AAD 为空 |
+| 12 | **SYMKEY_NEW** | D7：TA 生成 16/32 字节对称密钥 → 经 PTA → SiP `0x8200ff16` 装进 key_vault 槽 0..6 → 包成 blob 交回 |
+| 13 | **SYMKEY_LOAD** | D7：blob → TA 解开 → 装进槽 0..6；**只往 PL 写，不回明文** |
+| 14 | **SYMKEY_KAT** | D7：按编号把 TA 内编译的**公开测试向量密钥**装进 KAT 专用槽 7（只许槽 7） |
+
+对称 blob 用 AAD = `"pqchsm/symkey/v1"` 封装，与种子 blob（AAD 空）互不可用
+（`tee/tests/test_wrap.c` 两个方向各钉一条）。没有"导入明文对称密钥"的命令——
+那样明文必然要在普通世界缓冲区里走一趟；外部密钥导入（转运密钥封装）是将来项。
+设计与取舍见 [SYMKEY-TEE-REPORT](SYMKEY-TEE-REPORT.zh-CN.md)。
 
 v1 未提供：显式 rnd 的确定性签名（KAT 驱动路径留在普通世界软件后端）、
 VERIFY 命令（验签只用公钥，不需要进 TA）。输出缓冲一律

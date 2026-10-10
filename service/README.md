@@ -52,9 +52,16 @@ line of it changes.
 
 | Key | Where | Leaves the hardware? |
 |---|---|---|
-| Symmetric (AES/SM4) | `key_vault` | **No** — the RTL has no bus-side read path |
+| Symmetric (AES/SM4) | `key_vault` (authoritative copy: TA-wrapped blob held by the caller) | **No** — the RTL has no bus-side read path, and the daemon never sees plaintext |
 | ML-KEM `dk` | The PL's on-chip key vault; `KeyGen` returns only `ek` and a slot number | **No** — and with `-lock` the RTL stops driving it onto the bus at all |
 | ML-DSA `sk` | Same, in its own set of vault slots | **No**, same latch |
+
+Symmetric keys are generated and loaded by the TA (`SDFE_GenerateKey` /
+`SDFE_LoadKey` / `SDFE_LoadKatKey`; wire ops `OP_SYMKEY_GEN`/`LOAD`/`KAT`, 15–17).
+The daemon only carries the blob; slots 0..6 are product slots, slot 7 is
+KAT-only. `SDFE_ImportKey` (plaintext, op 6) always returns `SDR_NOTSUPPORT`,
+and the daemon wipes the symmetric vault at session end. Block encryption is
+unchanged: it runs in the PL by slot number, with no SMC per block.
 
 ⚠️ The `dk` row used to read "returned by KeyGen, held by the daemon", which was
 true before `dk_to_slot`. A stale comment on a security claim is the most
