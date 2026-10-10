@@ -58,6 +58,6 @@ echo "d7probe vmap rc=$rc" | tee -a $OUT; [ $rc -eq 0 ] || rc_all=1
 grep -q "KV_VALID 仍为 1" $D/hsm-boot.log 2>/dev/null \
   && { echo "  ✗ daemon 日志里出现了「KV_VALID 仍为 1」" | tee -a $OUT; rc_all=1; }
 
-echo "=== 结论：rc_all=$rc_all（0 = D7 板上这几条全过）===" | tee -a $OUT
+echo "=== 结论：rc_all=${rc_all}（0 = D7 板上这几条全过）===" | tee -a $OUT
 sync
 exit $rc_all
