@@ -334,3 +334,35 @@ async def test_nonsecure_refused(dut):
     assert await sym_block(sym, ALG_AES128, 6, AES_PT) == AES128_CT
 
     dut._log.info("non-secure：两条总线都 DECERR，且没有副作用")
+
+
+@cocotb.test()
+async def test_sym_zeroize_wipes_vault(dut):
+    """D7：sym_axi 的 CTRL.ZEROIZE 现在**连金库一起擦**
+
+    送检形态下普通世界够不到槽 1（BL31 整槽排除），daemon 的"段末即擦"只能
+    走槽 2 的 CTRL.ZEROIZE。以前那一笔只擦三个核的轮密钥、金库原样不动 ——
+    于是"会话结束密钥就没了"这句话对对称密钥是假的。
+    判据：擦完之后 KV_VALID 落下、LOAD_KEY 装不上、同槽的分组运算被拒。
+    """
+    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
+    await reset(dut)
+    vault, sym = Bus(dut, "vault"), Bus(dut, "sym")
+
+    await vault_load(vault, 2, AES128_KEY)
+    assert await sym_block(sym, ALG_AES128, 2, AES_PT) == AES128_CT
+
+    assert await wr(sym, S_CTRL, 1) == RESP_OKAY
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+
+    vm, _ = await rd(vault, V_VALID_MAP)
+    assert vm == 0, f"sym ZEROIZE 之后金库还有有效槽（VALID_MAP=0x{vm:02x}）"
+    assert await wr(sym, S_SLOT, 2) == RESP_OKAY
+    st, _ = await rd(sym, S_STATUS)
+    assert not (st & ST_KVVALID), "sym_axi 还认为槽 2 有效"
+
+    # 重新装一次照常工作：擦的是内容，不是能力
+    await vault_load(vault, 2, AES128_KEY)
+    assert await sym_block(sym, ALG_AES128, 2, AES_PT) == AES128_CT
+    dut._log.info("sym CTRL.ZEROIZE：三个核 + 金库一起清，重装后照常工作")

@@ -1,0 +1,5 @@
+PASS  槽 7 的 AES-256 对上 FIPS-197 C.3 —— 密钥确实在核里
+PASS  key_vault + sym_axi 两个窗口 128 个字逐个读完，密钥的 8 个字一个都没出现（而密文正确）
+INFO  SYMKEY_LOAD 单次 1.28 ms（50 次平均，含 socket 往返）
+INFO  AES-256-CBC 255 KB 用时 0.282 s → 0.89 MB/s（分组路径 D7 未改）
+d7bench: 通过

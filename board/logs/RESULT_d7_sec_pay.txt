@@ -1,0 +1,31 @@
+载入送检位流 zu3eg_hsm.bit（SECURE_ONLY=1）
+cp: '/lib/firmware/zu3eg_hsm.bit' and '/lib/firmware/zu3eg_hsm.bit' are the same file
+Time taken to load BIN is 2696.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+fpga_manager state = operating
+=== ① 形态自证 ===
+  FAN=0x00010000  TRNG_VER=0x00000000
+  ✓ 送检形态
+=== ② 普通世界读槽 1 全部为 0 ===
+  ✓ 0x80010000 = 0x00000000
+  ✓ 0x8001001C = 0x00000000
+  ✓ 0x80010034 = 0x00000000
+=== ③ 经 EL3：hsm_hwtest / hsm_kem3；普通世界：hsm_secneg ===
+  hsm_hwtest rc=0
+  PASS  密钥仓（槽 1）：EL3 通用读写都拒 —— 普通世界经 SiP 转一手也装不进对称密钥
+  SKIP  AES-128/256、SM4 KAT：D7 之后装载只走 TA，改由 sdf_demo [5]/[7] 经 CMD_SYMKEY_KAT 跑
+  SKIP  密钥边界扫描：需要先装已知密钥，D7 之后改到 TA 装载路径上做
+通过 18，失败 0，跳过 2（跳过不计入通过）
+  hsm_kem3 rc=0
+done pass=20 fail=0
+done pass=20 fail=0
+  hsm_secneg rc=0
+=== ④ 送检形态下 D7 daemon + sdf_demo ===
+  sdf_demo rc=0 ✅=19 ❌=0
+[5] 对称密钥归 TEE：KAT 槽 + 生成/blob 重装（SM4，密钥不经普通世界）
+  ✅ 明文导入被拒（本设备不支持该操作）
+  ✅ KAT 槽 7 与 GB/T 32907 A.1 逐字节一致
+  ✅ blob 重装进槽 4 后同一明文得同一密文
+  ✅ blob 装不进 KAT 槽 7（参数错误）
+[7] SDFE_EncryptMode/DecryptMode（CBC/CTR/CFB/OFB，密钥留在硬件）
+=== 结论：rc_all=0（0 = 送检形态这几条全过）===

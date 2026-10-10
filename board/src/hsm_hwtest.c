@@ -12,10 +12,16 @@
 // 证明：
 //   · ML-KEM-512 的 KeyGen / Encaps / Decaps 在真硅上跑出的字节与 **NIST
 //     ACVP 向量**逐字节相同（不是与我自己的模型比）；
-//   · AES-128/256（FIPS 197 附录 C）、SM4（GB/T 32907 附录 A）、
-//     SM3（GB/T 32905 附录 A）同上；
-//   · 密钥仓装进去的密钥能被对称核用出正确密文，而**两个从机的整个地址
-//     窗口里读不到那把密钥的任何一个字**；
+//   · SM3（GB/T 32905 附录 A）同上；
+//   · **D7：普通世界（经 EL3 的通用 PL_RD/PL_WR）够不到密钥仓** ——
+//     装载口整槽排除，读写都被 EL3 白名单拒；
+//
+// ⚠️ D7 之后**本工具不再跑 AES/SM4 的 KAT 与密钥边界扫描**。那两项都要先往
+//    密钥仓装一把已知密钥，而装载口现在只认安全世界（TA → PTA → EL3 SiP
+//    0x8200ff16）—— 本工具在普通世界，装不进去，**这正是 D7 要的性质**。
+//    AES/SM4 的 KAT 改由 sdf_demo 的 [5]/[7] 经 TA 的 CMD_SYMKEY_KAT 跑
+//    （公开向量密钥、只进槽 7），见 docs/reference/SYMKEY-TEE-REPORT.zh-CN.md。
+//    这里把它们记成 SKIP（**不计入 PASS**）—— 跳过被打成通过比没有报告更危险。
 //   · TRNG 出的是真随机（健康检测通过 + 基本统计），
 //   · **AxPROT 门控在真硬件上确实生效**：金丝雀那个 SECURE_ONLY=1 的实例，
 //     从非安全世界的 Linux 访问必然 DECERR（表现为 SIGBUS）。
@@ -195,7 +201,7 @@ static inline void wr(unsigned off, uint32_t v)
 }
 
 /* ---- 记分板 ---- */
-static int n_pass, n_fail;
+static int n_pass, n_fail, n_skip;
 static FILE *rep;
 
 static void ok(const char *fmt, ...)
@@ -219,6 +225,19 @@ static void bad(const char *fmt, ...)
     fflush(rep);
     va_end(ap);
     n_fail++;
+}
+
+/* 跳过**不是**通过：单独计数、单独一行，绝不走 ok() */
+static void skip(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(rep, "  SKIP  ");
+    vfprintf(rep, fmt, ap);
+    fprintf(rep, "\n");
+    fflush(rep);
+    va_end(ap);
+    n_skip++;
 }
 
 static void hexdiff(const char *what, const unsigned char *got,
@@ -366,90 +385,35 @@ static void test_mlkem(void)
 #define SYS_KRDY 4u
 #define SYS_KVOK 8u
 
-static void vault_load(int slot, const unsigned char *key, int len)
-{
-    int i;
-    unsigned char k32[32];
-    memset(k32, 0, sizeof k32);
-    memcpy(k32, key, len);
-    wr(V_SLOT, slot);
-    wr(V_SLOTC, 1);                       /* BEGIN */
-    for (i = 0; i < 8; i++)
-        wr(V_KEYIN, ((uint32_t)k32[4*i] << 24) | ((uint32_t)k32[4*i+1] << 16)
-                    | ((uint32_t)k32[4*i+2] << 8) | k32[4*i+3]);
-    wr(V_SLOTC, 2);                       /* COMMIT */
-}
-
-static int sym_block(int alg, int slot, const unsigned char *in,
-                     unsigned char *out, int decrypt)
-{
-    int i;
-    long spin;
-    wr(SY_ALG, (uint32_t)(alg | (decrypt ? 4 : 0)));
-    wr(SY_SLOT, slot);
-    if (!(rd(SY_STATUS) & SYS_KVOK))
-        return -1;
-    wr(SY_CMD, 1);                        /* LOAD_KEY */
-    for (spin = 0; spin < 100000L; spin++)
-        if (rd(SY_STATUS) & SYS_KRDY)
-            break;
-    if (!(rd(SY_STATUS) & SYS_KRDY))
-        return -2;
-    for (i = 0; i < 4; i++)
-        wr(SY_DIN0 + 4*i, ((uint32_t)in[4*i] << 24) | ((uint32_t)in[4*i+1] << 16)
-                          | ((uint32_t)in[4*i+2] << 8) | in[4*i+3]);
-    wr(SY_CMD, 2);                        /* BLOCK */
-    for (spin = 0; spin < 100000L; spin++)
-        if (rd(SY_STATUS) & SYS_DONE)
-            break;
-    if (!(rd(SY_STATUS) & SYS_DONE))
-        return -3;
-    for (i = 0; i < 4; i++) {
-        uint32_t w = rd(SY_DOUT0 + 4*i);
-        out[4*i]   = (unsigned char)(w >> 24);
-        out[4*i+1] = (unsigned char)(w >> 16);
-        out[4*i+2] = (unsigned char)(w >> 8);
-        out[4*i+3] = (unsigned char)w;
-    }
-    return 0;
-}
+/* D7：vault_load（普通世界逐字写 KEY_IN）已删除 —— 装载口只认安全世界。 */
 
 static void test_sym(void)
 {
-    unsigned char out[16], dig[32];
+    unsigned char dig[32];
     long spin;
     int i;
 
     fprintf(rep, "\n[对称与国密  FIPS 197 / GB-T 32907 / GB-T 32905]\n");
 
-    vault_load(0, aes128_key, 16);
-    vault_load(1, aes256_key, 32);
-    vault_load(2, sm4_key, 16);
-    if ((rd(V_VMAP) & 0x7) != 0x7) {
-        bad("密钥仓：槽 0/1/2 没都装上（VALID_MAP=0x%02x）", rd(V_VMAP));
-        return;
+    /* D7：普通世界够不到密钥仓。经 EL3 时这是一条**正面**判据：
+     * 通用 PL_RD/PL_WR 对槽 1 读写都拒（白名单整槽排除）。
+     * 直接 mmap 模式下不写（写被拒是 SError，丢板子），只记 SKIP。 */
+    if (sec_fd >= 0) {
+        struct secmmio_op op = { .addr = (uint32_t)(PL_BASE + V_SLOT), .val = 0 };
+        int wr_refused = ioctl(sec_fd, SECMMIO_WR, &op) < 0;
+        int rd_ok;
+
+        (void)rd_safe(V_VMAP, &rd_ok);
+        if (wr_refused && !rd_ok)
+            ok("密钥仓（槽 1）：EL3 通用读写都拒 —— 普通世界经 SiP 转一手也装不进对称密钥");
+        else
+            bad("密钥仓（槽 1）没被 EL3 白名单排除（写%s、读%s）—— "
+                "BL31 不是 D7 那一版？", wr_refused ? "被拒" : "放行",
+                rd_ok ? "放行" : "被拒");
+    } else {
+        skip("密钥仓装载门：直接模式不写 PL（D7 的普通世界反证由 hsm_secneg/sdf_demo 做）");
     }
-    ok("密钥仓：三把密钥装载并 COMMIT 成功");
-
-    if (sym_block(0, 0, aes_pt, out, 0))            bad("AES-128：核没跑完");
-    else if (memcmp(out, aes128_ct, 16))            { bad("AES-128 密文不一致"); hexdiff("ct", out, aes128_ct, 16); }
-    else                                            ok("AES-128 加密：FIPS 197 C.1 逐字节一致");
-
-    if (sym_block(0, 0, aes128_ct, out, 1))         bad("AES-128 解密：核没跑完");
-    else if (memcmp(out, aes_pt, 16))               bad("AES-128 解密不一致");
-    else                                            ok("AES-128 解密：回到原文");
-
-    if (sym_block(1, 1, aes_pt, out, 0))            bad("AES-256：核没跑完");
-    else if (memcmp(out, aes256_ct, 16))            { bad("AES-256 密文不一致"); hexdiff("ct", out, aes256_ct, 16); }
-    else                                            ok("AES-256 加密：FIPS 197 C.3 逐字节一致");
-
-    if (sym_block(2, 2, sm4_pt, out, 0))            bad("SM4：核没跑完");
-    else if (memcmp(out, sm4_ct, 16))               { bad("SM4 密文不一致"); hexdiff("ct", out, sm4_ct, 16); }
-    else                                            ok("SM4 加密：GB/T 32907 A.1 逐字节一致");
-
-    if (sym_block(2, 2, sm4_ct, out, 1))            bad("SM4 解密：核没跑完");
-    else if (memcmp(out, sm4_pt, 16))               bad("SM4 解密不一致");
-    else                                            ok("SM4 解密：回到原文");
+    skip("AES-128/256、SM4 KAT：D7 之后装载只走 TA，改由 sdf_demo [5]/[7] 经 CMD_SYMKEY_KAT 跑");
 
     /* SM3("abc") */
     wr(SY_ALG, 3);
@@ -477,49 +441,12 @@ static void test_sym(void)
 /* ================= 边界反证：密钥读不出来 ================= */
 static void test_key_boundary(void)
 {
-    unsigned kw[4];
-    unsigned off;
-    int i, leaked = 0;
-    unsigned char out[16];
-
     fprintf(rep, "\n[密码边界：密钥能用，但读不出来]\n");
-
-    /* 先确认这把密钥确实在被用（密文对得上 FIPS 197） */
-    if (sym_block(0, 0, aes_pt, out, 0) || memcmp(out, aes128_ct, 16)) {
-        bad("边界反证的前提不成立：AES 没算出正确密文");
-        return;
-    }
-
-    for (i = 0; i < 4; i++)
-        kw[i] = ((uint32_t)aes128_key[4*i] << 24)
-              | ((uint32_t)aes128_key[4*i+1] << 16)
-              | ((uint32_t)aes128_key[4*i+2] << 8) | aes128_key[4*i+3];
-
-    /* 把密钥仓与对称核两个窗口整个扫一遍。
-     * 窗口外的地址会被防火墙拒（DECERR → SIGBUS），rd_safe 接住并记成
-     * "读不到" —— 读不到当然也就漏不出去，所以那些地址算通过。 */
-    {
-        int okv, oks, nread = 0, nrefused = 0;
-        for (off = 0; off < 0x100; off += 4) {
-            uint32_t a = rd_safe(S_VAULT + off, &okv);
-            uint32_t b = rd_safe(S_SYM + off, &oks);
-            nread += okv + oks;
-            nrefused += (!okv) + (!oks);
-            for (i = 0; i < 4; i++) {
-                if (okv && a == kw[i]) {
-                    bad("密钥第 %d 字出现在密钥仓 +0x%02x", i, off); leaked = 1;
-                }
-                if (oks && b == kw[i]) {
-                    bad("密钥第 %d 字出现在对称核 +0x%02x", i, off); leaked = 1;
-                }
-            }
-        }
-        if (!leaked)
-            ok("扫完两个从机各 256 字节（%d 个读得到、%d 个被拒："
-               "其中 EL3 白名单 %d、PL 防火墙 %d）："
-               "密钥的 4 个字一个都没出现，而密文正确",
-               nread, nrefused, n_ref_el3, n_ref_fw);
-    }
+    /* 这一项要先往密钥仓装一把已知密钥再扫两个窗口。D7 之后本工具装不进去，
+     * 所以记 SKIP。RTL 层面的同一条性质由 test_key_vault / test_sym_vault 的
+     * 逐地址扫描钉着；板上版本待 TA 装载路径上板后，在 sdf_demo [5] 装完
+     * 槽 7 之后补一次扫描（见 SYMKEY-TEE-REPORT 的上板清单）。 */
+    skip("密钥边界扫描：需要先装已知密钥，D7 之后改到 TA 装载路径上做");
 }
 
 /* ================= AxPROT 金丝雀 ================= */
@@ -560,10 +487,13 @@ static void test_canary(void)
     /* 对照组：同一个模块的另一个实例。
      * 这一版四个功能核都是 SECURE_ONLY=1，所以对照组的期望也随 transport 变：
      * 安全世界读得到（说明核是活的），普通世界读不到（那是 hsm_secneg 的活）。 */
-    r = rd_safe(S_VAULT + 0x00, &okv);
+    /* ⚠️ D7 之后对照组从槽 1（key_vault）换成槽 3（mlkem）：EL3 已把槽 1
+     * 整槽排除，经 EL3 读它必然被拒 —— 那是 D7 的正面性质，不再能当"核是活的"
+     * 的对照。mlkem 同样是 SECURE_ONLY_FUNCTIONAL、VERSION 同值。 */
+    r = rd_safe(sec_fd >= 0 ? S_MLKEM + 0x00 : S_VAULT + 0x00, &okv);
     if (sec_fd >= 0) {
         if (okv && r == 0x00010000u)
-            ok("对照：同模块的 key_vault 实例经 EL3 读回 VERSION=0x%08x —— "
+            ok("对照：mlkem 经 EL3 读回 VERSION=0x%08x —— "
                "核是活的，上面那条不是\"什么都读不到\"", r);
         else
             bad("对照组经 EL3 读不出 VERSION（ok=%d val=0x%08x）", okv, r);
@@ -711,7 +641,7 @@ int main(int argc, char **argv)
     test_trng();
 
     fprintf(rep, "\n================================\n");
-    fprintf(rep, "通过 %d，失败 %d\n", n_pass, n_fail);
+    fprintf(rep, "通过 %d，失败 %d，跳过 %d（跳过不计入通过）\n", n_pass, n_fail, n_skip);
     fclose(rep);
     return n_fail ? 1 : 0;
 }

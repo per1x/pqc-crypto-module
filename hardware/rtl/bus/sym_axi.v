@@ -23,7 +23,7 @@
 // ============================================================================
 // 【寄存器表】（偏移，宽度均 32 位，窗口 0x00~0x7F）
 //   0x00 VERSION   R
-//   0x04 CTRL      W   [0]=ZEROIZE（写 1 触发，自清；三个核一起擦）
+//   0x04 CTRL      W   [0]=ZEROIZE（写 1 触发，自清；三个核**与对称金库**一起擦）
 //   0x08 STATUS    R   [0]=BUSY [1]=DONE [2]=KEY_READY [3]=KV_VALID
 //   0x0C ALG       RW  [1:0] 0=AES-128 1=AES-256 2=SM4 3=SM3；[2]=DECRYPT
 //   0x10 KEY_SLOT  RW  [2:0] 用密钥仓的哪个槽
@@ -78,7 +78,12 @@ module sym_axi #(
     // ---- 密钥仓的使用口：这 256 根线不出 PL ----
     output wire [2:0]   kv_sel,
     input  wire [255:0] kv_key,
-    input  wire         kv_valid
+    input  wire         kv_valid,
+
+    // ---- CTRL.ZEROIZE 同时擦对称金库（D7）：一拍脉冲，接 key_vault_axi.ext_zeroize ----
+    // 送检形态下普通世界够不到金库所在的槽 1（BL31 整槽排除），
+    // 段末"连密钥一起擦"只能借这根线。它只能擦，不能装 —— 安全方向。
+    output wire         kv_zeroize
 );
     localparam [1:0] RESP_OKAY = 2'b00;
 
@@ -157,6 +162,8 @@ module sym_axi #(
 
     // 擦除：软件的 CTRL.ZEROIZE 或硬件 tamper，两条都直通三个核
     wire zeroize_all = zero_pulse || tamper || fw_tampered;
+    // tamper 不必经这里：它本来就直接接到金库
+    assign kv_zeroize = zero_pulse;
 
     // ================= 三个算法核 =================
     // ⚠️ 密钥来自 kv_key，**不是来自任何寄存器**。装载还要 kv_valid 为真 ——

@@ -1,0 +1,37 @@
+PL 密码机硬件自测  @ 0x80000000
+mlkem_axi VERSION = 0x00010000
+
+[ML-KEM-512  NIST ACVP 向量]
+  PASS  KeyGen tc0：ek 800 + dk 1632 字节逐字节一致
+  PASS  KeyGen tc1：ek 800 + dk 1632 字节逐字节一致
+  PASS  KeyGen tc2：ek 800 + dk 1632 字节逐字节一致
+  PASS  Encaps tc0：K 32 + c 768 字节逐字节一致
+  PASS  Encaps tc1：K 32 + c 768 字节逐字节一致
+  PASS  Encaps tc2：K 32 + c 768 字节逐字节一致
+  PASS  Decaps tc0：K 32 字节逐字节一致
+  PASS  Decaps tc1：K 32 字节逐字节一致
+  PASS  Decaps tc2：K 32 字节逐字节一致
+
+[对称与国密  FIPS 197 / GB-T 32907 / GB-T 32905]
+  PASS  密钥仓（槽 1）：EL3 通用读写都拒 —— 普通世界经 SiP 转一手也装不进对称密钥
+  SKIP  AES-128/256、SM4 KAT：D7 之后装载只走 TA，改由 sdf_demo [5]/[7] 经 CMD_SYMKEY_KAT 跑
+  PASS  SM3("abc")：GB/T 32905 A.1 逐字节一致
+
+[密码边界：密钥能用，但读不出来]
+  SKIP  密钥边界扫描：需要先装已知密钥，D7 之后改到 TA 装载路径上做
+
+[AxPROT 门控：同一个金丝雀地址，两种 transport 期望相反]
+  PASS  安全世界（EL3）读金丝雀 = 0x00010000 —— SECURE_ONLY=1 的核对安全 master 是**开的**，门控确实按 AxPROT 判
+  PASS  对照：mlkem 经 EL3 读回 VERSION=0x00010000 —— 核是活的，上面那条不是"什么都读不到"
+
+[TRNG]
+  PASS  启动健康检测通过（SP 800-90B §4.3，1023 个样本）
+  PASS  无 RCT / APT 告警
+  PASS  取到 256 个随机字，交付计数 256
+  PASS  一比特占比 0.5076（4158/8192），无明显偏置
+  PASS  256 个字里没有相邻重复
+        注：以上**不是**最小熵评估。真实最小熵要导出原始比特
+        跑 SP 800-90B 的 EntropyAssessment，见 ring_osc.v 的说明。
+
+================================
+通过 18，失败 0，跳过 2（跳过不计入通过）

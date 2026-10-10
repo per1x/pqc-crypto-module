@@ -30,6 +30,13 @@
 	{ 0x5f2c1b90, 0x9d44, 0x4a3e,                              \
 	  { 0xb1, 0x27, 0x6e, 0x53, 0x0c, 0x8a, 0xf4, 0x11 } }
 #define PTA_PQCHSM_SEED_CMD_WORD	0
+#define PTA_PQCHSM_SEED_CMD_SYMKEY	1    /* D7：对称金库的一个动作 */
+
+/* PTA_PQCHSM_SEED_CMD_SYMKEY 的动作编号 —— 与 BL31 的 PQCHSM_SYM_OP_* 同值 */
+#define SYM_OP_BEGIN	0U
+#define SYM_OP_WORD	1U
+#define SYM_OP_COMMIT	2U
+#define SYM_OP_ERASE	3U
 
 #define PQCHSM_PTA_SYSTEM_UUID \
 	{ 0x3a2f8978, 0x5dc0, 0x11e8, \
@@ -103,7 +110,7 @@ static TEE_Result cmd_get_info(uint32_t types, TEE_Param params[4])
 	/* bit0(KDF) 与 bit1(WRAP/UNWRAP) 恒 0：那两条命令已经删掉（PS-22/24）。
 	 * 位的**位置**保留，不让后面的位往前挪 —— 挪了的话旧 host 会把
 	 * "支持 ML-KEM" 读成 "支持 KDF"。 */
-	params[0].value.b = 0xC; /* ML-KEM | ML-DSA */
+	params[0].value.b = 0x1C; /* ML-KEM | ML-DSA | SYMKEY（D7） */
 	return TEE_SUCCESS;
 }
 
@@ -400,7 +407,12 @@ void TA_CloseSessionEntryPoint(void *session_ctx __maybe_unused)
 static TEE_Result seed_push(uint32_t tgt, const uint8_t *seed, uint32_t words)
 {
 	static const TEE_UUID pta_uuid = PTA_PQCHSM_SEED_UUID;
-	uint32_t sess = 0, eorig = 0, i;
+	/* ⚠️ 会话句柄是 TEE_TASessionHandle（指针宽度），不是 uint32_t。
+	 * 以前这里写的是 uint32_t：在 aarch64 上 TEE_OpenTASession 往 4 字节的
+	 * 变量里写 8 字节，越界盖到相邻的栈变量；能跑只是因为 libutee 的句柄
+	 * 恰好是个小整数、高 4 字节为 0。D7 加 sym_push 时一并改正。 */
+	TEE_TASessionHandle sess = TEE_HANDLE_NULL;
+	uint32_t eorig = 0, i;
 	TEE_Result res;
 	TEE_Param  p[TEE_NUM_PARAMS];
 
@@ -550,6 +562,182 @@ static TEE_Result cmd_seed_replay(uint32_t param_types, TEE_Param params[4])
 }
 
 
+/* ============================================================================
+ * 【CMD_SYMKEY_*：对称密钥装载归 TEE（D7）】
+ * ============================================================================
+ * 路径与种子同形：TA(S-EL0) → pqchsm_seed.pta(S-EL1) → SMC 0x8200ff16 → EL3
+ * → PL key_vault（槽 1）。普通世界那侧：PL 的装载口只认 AxPROT[1]=0，
+ * BL31 把槽 1 整槽排除出通用 PL_RD/PL_WR —— 两道门各自成立。
+ *
+ * ⚠️ 与种子那三件事一样：本地明文用完当场擦、失败路径也擦；送了一半就失败
+ *    的话，这里**有**直接清 PL 的路（ERASE 动作），所以当场擦掉那一槽，
+ *    不留"半把密钥"给下一次 COMMIT。
+ *
+ * 只做"装载"。分组运算仍由 daemon 按槽号驱动 sym_axi，一个分组都不走 SMC。
+ */
+static const uint8_t sym_kat_keys[3][32] = {
+	/* TA_SYM_KAT_SM4_GBT32907：GB/T 32907 附录 A 示例 1 */
+	{ 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+	  0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10 },
+	/* TA_SYM_KAT_AES128_SP38A：SP 800-38A 附录 F */
+	{ 0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+	  0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c },
+	/* TA_SYM_KAT_AES256_FIPS197：FIPS-197 附录 C.3 */
+	{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+	  0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+	  0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+	  0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f },
+};
+static const uint32_t sym_kat_len[3] = { 16U, 16U, 32U };
+
+static TEE_Result sym_op(TEE_TASessionHandle sess, uint32_t op, uint32_t slot, uint32_t arg)
+{
+	TEE_Param p[TEE_NUM_PARAMS];
+	uint32_t  eorig = 0;
+	TEE_Result res;
+
+	memset(p, 0, sizeof(p));
+	p[0].value.a = op | (slot << 8);
+	p[0].value.b = arg;
+	res = TEE_InvokeTACommand(sess, TEE_TIMEOUT_INFINITE,
+	                          PTA_PQCHSM_SEED_CMD_SYMKEY,
+	                          TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
+	                                          TEE_PARAM_TYPE_VALUE_OUTPUT,
+	                                          TEE_PARAM_TYPE_NONE,
+	                                          TEE_PARAM_TYPE_NONE),
+	                          p, &eorig);
+	p[0].value.b = 0;    /* 可能是密钥字 */
+	return res;
+}
+
+/* 把一把 16/32 字节的密钥装进金库的 slot。**只往里写，没有读回路径。**
+ * 字序：第 0 个字节在第 0 个字的最高位（大端），不足 32 字节补零 ——
+ * 与 key_vault 的 use_mux、aes_core/sm4_core 的期望一致（RTL 有 FIPS-197 /
+ * GB/T 32907 对拍用例钉着；以前 daemon 明文导入那条路也是这个字序）。 */
+static TEE_Result sym_push(uint32_t slot, const uint8_t *key, uint32_t len)
+{
+	static const TEE_UUID pta_uuid = PTA_PQCHSM_SEED_UUID;
+	uint8_t    k32[32];
+	TEE_TASessionHandle sess = TEE_HANDLE_NULL;
+	uint32_t   eorig = 0, i, w;
+	TEE_Result res;
+
+	if (slot > 7U || (len != 16U && len != 32U))
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	res = TEE_OpenTASession(&pta_uuid, TEE_TIMEOUT_INFINITE, 0, NULL,
+	                        &sess, &eorig);
+	if (res != TEE_SUCCESS)
+		return res;
+
+	memset(k32, 0, sizeof(k32));
+	memcpy(k32, key, len);
+
+	res = sym_op(sess, SYM_OP_BEGIN, slot, 0);
+	for (i = 0; (res == TEE_SUCCESS) && (i < 8U); i++) {
+		w = ((uint32_t)k32[4U * i] << 24) | ((uint32_t)k32[4U * i + 1U] << 16)
+		  | ((uint32_t)k32[4U * i + 2U] << 8) | (uint32_t)k32[4U * i + 3U];
+		res = sym_op(sess, SYM_OP_WORD, slot, w);
+		w = 0;           /* w 是密钥的一部分 */
+	}
+	if (res == TEE_SUCCESS)
+		res = sym_op(sess, SYM_OP_COMMIT, slot, 0);   /* EL3 核对 VALID */
+	if (res != TEE_SUCCESS)
+		(void)sym_op(sess, SYM_OP_ERASE, slot, 0);    /* 不留半把密钥 */
+
+	pqchsm_bzero(k32, sizeof(k32));
+	TEE_CloseTASession(sess);
+	return res;
+}
+
+static TEE_Result cmd_symkey_new(uint32_t types, TEE_Param params[4])
+{
+	uint8_t    key[32];
+	uint32_t   slot, len;
+	size_t     blen = 0;
+	TEE_Result res;
+
+	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
+	                             TEE_PARAM_TYPE_MEMREF_OUTPUT,
+	                             TEE_PARAM_TYPE_NONE, TEE_PARAM_TYPE_NONE))
+		return TEE_ERROR_BAD_PARAMETERS;
+	if (!g_kek_ready)
+		return TEE_ERROR_BAD_STATE;
+	slot = params[0].value.a;
+	len  = params[0].value.b;
+	if (slot > TA_SYM_SLOT_MAX || (len != 16U && len != 32U))
+		return TEE_ERROR_BAD_PARAMETERS;
+	if (params[1].memref.size < ta_wrap_blob_len(len)) {
+		params[1].memref.size = ta_wrap_blob_len(len);
+		return TEE_ERROR_SHORT_BUFFER;
+	}
+
+	pqchsm_randombytes(key, len);
+	/* 先包、后装：包不成就不装，免得金库里躺着一把调用方永远拿不回 blob 的密钥 */
+	if (ta_wrap_seal(g_kek, (const uint8_t *)TA_SYMKEY_AAD,
+	                 sizeof(TA_SYMKEY_AAD) - 1U, key, len,
+	                 params[1].memref.buffer, params[1].memref.size,
+	                 &blen) != 0)
+		res = TEE_ERROR_GENERIC;
+	else
+		res = sym_push(slot, key, len);
+	pqchsm_bzero(key, sizeof(key));          /* 成败都擦 */
+	if (res != TEE_SUCCESS)
+		return res;
+	params[1].memref.size = blen;
+	return TEE_SUCCESS;
+}
+
+static TEE_Result cmd_symkey_load(uint32_t types, TEE_Param params[4])
+{
+	uint8_t    key[32];
+	size_t     klen = 0;
+	uint32_t   slot;
+	TEE_Result res;
+
+	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
+	                             TEE_PARAM_TYPE_MEMREF_INPUT,
+	                             TEE_PARAM_TYPE_NONE, TEE_PARAM_TYPE_NONE))
+		return TEE_ERROR_BAD_PARAMETERS;
+	if (!g_kek_ready)
+		return TEE_ERROR_BAD_STATE;
+	slot = params[0].value.a;
+	if (slot > TA_SYM_SLOT_MAX)
+		return TEE_ERROR_BAD_PARAMETERS;
+	if (!params[1].memref.buffer || params[1].memref.size > TA_PQCHSM_MAX_BLOB)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	if (ta_wrap_open(g_kek, (const uint8_t *)TA_SYMKEY_AAD,
+	                 sizeof(TA_SYMKEY_AAD) - 1U,
+	                 params[1].memref.buffer, params[1].memref.size,
+	                 key, sizeof(key), &klen) != 0)
+		return TEE_ERROR_MAC_INVALID;    /* 包括"这是一份种子 blob" */
+	if (klen != 16U && klen != 32U)
+		res = TEE_ERROR_BAD_PARAMETERS;
+	else
+		res = sym_push(slot, key, (uint32_t)klen);
+	pqchsm_bzero(key, sizeof(key));
+	return res;
+}
+
+static TEE_Result cmd_symkey_kat(uint32_t types, TEE_Param params[4])
+{
+	uint32_t id;
+
+	if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
+	                             TEE_PARAM_TYPE_NONE, TEE_PARAM_TYPE_NONE,
+	                             TEE_PARAM_TYPE_NONE))
+		return TEE_ERROR_BAD_PARAMETERS;
+	/* 只许进 KAT 专用槽：已知密钥进产品槽 = 密钥替换（见协议头） */
+	if (params[0].value.a != TA_SYM_KAT_SLOT)
+		return TEE_ERROR_ACCESS_DENIED;
+	id = params[0].value.b;
+	if (id >= sizeof(sym_kat_len) / sizeof(sym_kat_len[0]))
+		return TEE_ERROR_BAD_PARAMETERS;
+	return sym_push(TA_SYM_KAT_SLOT, sym_kat_keys[id], sym_kat_len[id]);
+}
+
+
 TEE_Result TA_InvokeCommandEntryPoint(void *session_ctx __maybe_unused,
                                       uint32_t cmd_id, uint32_t param_types,
                                       TEE_Param params[4])
@@ -578,6 +766,12 @@ TEE_Result TA_InvokeCommandEntryPoint(void *session_ctx __maybe_unused,
 		return seed_new_or_to_pl(param_types, params, 1);
 	case TA_PQCHSM_CMD_SEED_REPLAY:
 		return cmd_seed_replay(param_types, params);
+	case TA_PQCHSM_CMD_SYMKEY_NEW:
+		return cmd_symkey_new(param_types, params);
+	case TA_PQCHSM_CMD_SYMKEY_LOAD:
+		return cmd_symkey_load(param_types, params);
+	case TA_PQCHSM_CMD_SYMKEY_KAT:
+		return cmd_symkey_kat(param_types, params);
 	default:
 		return TEE_ERROR_NOT_SUPPORTED;
 	}

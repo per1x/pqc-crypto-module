@@ -1,0 +1,56 @@
+=== 线协议畸形输入 ===
+
+[一] 参数越界 —— 必须拒绝
+  PASS  OP_RANDOM 长度 0：status=0x01000004，服务没卡住
+  PASS  OP_RANDOM 长度 0xFFFFFFFF：status=0x01000004，服务没卡住
+  PASS  OP_RANDOM 长度 MAXPAY+1：status=0x01000004，服务没卡住
+  PASS  KEYGEN pset=3（只有 0/1/2）：status=0x01000004，服务没卡住
+  PASS  KEYGEN pset=0xFFFFFFFF：status=0x01000004，服务没卡住
+  PASS  DECAPS 句柄 999（不存在）：status=0x01000005，服务没卡住
+  PASS  IMPORT_KEY 槽 99：status=0x01000009，服务没卡住
+  PASS  IMPORT_KEY 空密钥：status=0x01000009，服务没卡住
+  PASS  IMPORT_KEY 33 字节：status=0x01000009，服务没卡住
+  PASS  IMPORT_KEY 合法参数（D7：明文导入已弃用）：status=0x01000009，服务没卡住
+  PASS  SYMKEY_GEN 槽 7（KAT 专用）：status=0x01000004，服务没卡住
+  PASS  SYMKEY_GEN 槽 99：status=0x01000004，服务没卡住
+  PASS  SYMKEY_GEN 长度 24：status=0x01000004，服务没卡住
+  PASS  SYMKEY_LOAD 空 blob：status=0x01000004，服务没卡住
+  PASS  SYMKEY_LOAD 129 字节：status=0x01000004，服务没卡住
+  PASS  SYMKEY_LOAD 伪造 blob：status=0x01000005，服务没卡住
+  PASS  SYMKEY_LOAD 槽 7（KAT 专用）：status=0x01000004，服务没卡住
+  PASS  SYMKEY_KAT 编号 99：status=0x01000004，服务没卡住
+  PASS  未知操作码 op=99：status=0x01000004，服务没卡住
+  PASS  未知操作码 op=0：status=0x01000004，服务没卡住
+  PASS  ML-DSA KEYGEN pset=3（只有 0/1/2）：status=0x01000004，服务没卡住
+  PASS  ML-DSA KEYGEN pset=0xFFFFFFFF：status=0x01000004，服务没卡住
+  PASS  ML-DSA SIGN 句柄 999（不存在）：status=0x01000005，服务没卡住
+  PASS  ML-DSA SIGN 非空 ctx（约定里没给 ctx 字节留位置）：status=0x01000005，服务没卡住
+  PASS  ML-DSA VERIFY pset=9：status=0x01000004，服务没卡住
+  PASS  ML-DSA VERIFY 载荷短于 pk+sig：status=0x01000004，服务没卡住
+
+[二] 长度与载荷对不上 —— 必须拒绝
+  PASS  ENCAPS ek 少一字节：status=0x01000004，服务没卡住
+  PASS  ENCAPS ek 多一字节：status=0x01000004，服务没卡住
+  PASS  ENCAPS 空载荷：status=0x01000004，服务没卡住
+  PASS  SYM_BLOCK 15 字节：status=0x01000004，服务没卡住
+  PASS  SYM_BLOCK 17 字节：status=0x01000004，服务没卡住
+
+[三] 会被 RTL 静默截断的值 —— 拒绝，而不是算成别的算法
+     （sym_axi 里 alg 只取低 2 位、槽号 3 位）
+  PASS  SYM_BLOCK alg=3（RTL 会当成 SM3）：status=0x01000004，服务没卡住
+  PASS  SYM_BLOCK alg=4（截断成 AES-128）：status=0x01000004，服务没卡住
+  PASS  SYM_BLOCK alg=7（截断成 SM3）：status=0x01000004，服务没卡住
+  PASS  SYM_BLOCK 槽=200（截断成槽 0）：status=0x01000004，服务没卡住
+  PASS  SYM_BLOCK 槽=8（只有 0..7）：status=0x01000004，服务没卡住
+
+[四] 协议层畸形 —— 服务可以断开，但不能死
+  PASS  magic 不对：服务端断开连接
+  PASS  len 超过 MAXPAY：服务端断开连接
+  PASS  声明 100 字节只发 10 字节（半条请求）：服务端断开连接
+
+[五] 收尾：服务还能正常干活吗
+  PASS  OP_RANDOM 32 字节 status=0 len=32
+  PASS  KEYGEN pset=1 返回 1188 字节（4 句柄 + 1184 ek）
+
+==========================================================
+通过 41，失败 0

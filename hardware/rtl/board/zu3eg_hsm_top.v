@@ -522,7 +522,7 @@ module zu3eg_hsm_top (
         .s_axi_arvalid(x_arvalid[4]), .s_axi_arready(x_arready[4]),
         .s_axi_rdata(x_rdata[32*4 +: 32]), .s_axi_rresp(x_rresp[2*4 +: 2]),
         .s_axi_rvalid(x_rvalid[4]), .s_axi_rready(x_rready[4]),
-        .tamper(tamper),
+        .tamper(tamper), .ext_zeroize(1'b0),
         .use_sel(3'd0), .use_key(), .use_valid(), .vault_tampered());
 
     // ================= 槽 5：风扇温控（与密码无关）=================

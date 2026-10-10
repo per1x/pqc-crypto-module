@@ -407,6 +407,10 @@ if(Python3_Interpreter_FOUND)
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_ta_surface.py --self-test)
   add_test(NAME ta_surface COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_ta_surface.py)
+  # BL31 补丁的无板检查：EL3 片段编得过 + 种子口/对称金库（D7）的白名单排除在位。
+  # 这一层在主机上编不了真 ATF，它挡的是"连编都编不过/排除被删掉"这一类。
+  add_test(NAME atf_patch COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_atf_patch.py)
 endif()
 
 # 结构性回归：KDR 铁律是"只进不出"。这条用例扫公共头，确保没人加回读出根密钥的接口。

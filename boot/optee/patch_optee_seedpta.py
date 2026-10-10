@@ -21,6 +21,12 @@ UUID 之外还有两道门：
      和 CODE-1 是同一个洞，只是换了个门牌。
   ② `is_user_ta_ctx()`：调用方必须是用户态 TA，不是别的 PTA。
 
+【第二条命令：对称密钥装载（D7）】
+`PTA_PQCHSM_SEED_CMD_SYMKEY` 把 TA 的一个"金库动作"转成 SMC 0x8200ff16
+（PQC_SYMKEY）。形状与种子那条相同：两个整数进、一个整数出，没有能放
+密钥块的 memref。两道门对它同样生效（门在 open_session，不分命令）。
+**没有锁槽动作**：EL3 那条服务本身就不提供。
+
 【EL3 那一侧还有一道】
 `ZYNQMP_SIP_SVC_PQC_SEED_WORD` 无条件只认安全世界事务。也就是说即便这两道门
 都被绕过，普通世界发同一条 SMC 仍然被 EL3 拒掉。两处各自成立，不互相依赖。
@@ -55,6 +61,8 @@ PTA_SRC = r'''// SPDX-License-Identifier: BSD-2-Clause
  * 它无条件只认安全世界调用方 —— 本 PTA 跑在 S-EL1，所以过得去；
  * 普通世界发同一条 SMC 会被 EL3 拒掉。 */
 #define ZYNQMP_SIP_SVC_PQC_SEED_WORD	0x8200ff15UL
+/* D7：对称金库（槽 1）的安全世界装载口，同样无条件只认安全世界 */
+#define ZYNQMP_SIP_SVC_PQC_SYMKEY	0x8200ff16UL
 
 /* cmd 0：写一个种子字。
  *   params[0].value.a = 目标（0 = ML-KEM，1 = ML-DSA）
@@ -62,6 +70,14 @@ PTA_SRC = r'''// SPDX-License-Identifier: BSD-2-Clause
  *   params[1].value.a = 出参：EL3 回报的「写完之后的字计数」
  * ⚠️ 没有「读回种子」的命令，也不该有。 */
 #define PTA_PQCHSM_SEED_CMD_WORD	0
+
+/* cmd 1：对称金库的一个动作（D7）。
+ *   params[0].value.a = 动作 | (槽 << 8)（动作 0..5，见 BL31 那一侧）
+ *   params[0].value.b = 动作参数（WORD 时是那个密钥字）
+ *   params[1].value.a = 出参：恒 0（thread_smc 只带回 x0；判据由 EL3 在 x0 里给，
+ *                       COMMIT 之后槽没变 VALID、或写满了还写，x0 都非 0）
+ * ⚠️ 没有「读回密钥」的动作，也没有「锁槽」动作。 */
+#define PTA_PQCHSM_SEED_CMD_SYMKEY	1
 
 static TEE_Result open_session(uint32_t param_types __unused,
 			       TEE_Param params[TEE_NUM_PARAMS] __unused,
@@ -87,14 +103,30 @@ static TEE_Result invoke_command(void *sess_ctx __unused, uint32_t cmd_id,
 {
 	unsigned long r;
 
-	if (cmd_id != PTA_PQCHSM_SEED_CMD_WORD)
-		return TEE_ERROR_NOT_IMPLEMENTED;
-
 	if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
 					   TEE_PARAM_TYPE_VALUE_OUTPUT,
 					   TEE_PARAM_TYPE_NONE,
 					   TEE_PARAM_TYPE_NONE))
 		return TEE_ERROR_BAD_PARAMETERS;
+
+	if (cmd_id == PTA_PQCHSM_SEED_CMD_SYMKEY) {
+		/* 动作 0..5、槽 0..7；其余位必须为 0 —— 别让 EL3 去猜高位 */
+		if ((params[0].value.a & 0xFFU) > 5U ||
+		    ((params[0].value.a >> 8) & 0xFFU) > 7U ||
+		    (params[0].value.a >> 16) != 0U)
+			return TEE_ERROR_BAD_PARAMETERS;
+		/* 与种子那条同一个调用（thread_smc，只带回 x0）。
+		 * 不用带完整寄存器组的那个 —— 它在 3.9 与 4.x 的头文件里位置不同，
+		 * 而这里需要的判据 EL3 已经折进 x0 了。 */
+		r = thread_smc(ZYNQMP_SIP_SVC_PQC_SYMKEY,
+			       (unsigned long)params[0].value.a,
+			       (unsigned long)params[0].value.b, 0);
+		params[1].value.a = 0U;
+		return (r == 0UL) ? TEE_SUCCESS : TEE_ERROR_GENERIC;
+	}
+
+	if (cmd_id != PTA_PQCHSM_SEED_CMD_WORD)
+		return TEE_ERROR_NOT_IMPLEMENTED;
 
 	if (params[0].value.a > 1U)
 		return TEE_ERROR_BAD_PARAMETERS;
@@ -152,6 +184,8 @@ def main():
             ('tee_ta_get_calling_session', '少了「拒普通世界」那道门'),
             ('is_user_ta_ctx', '少了「必须是用户 TA」那道门'),
             ('0x8200ff15', 'SMC 号不对'),
+            ('0x8200ff16', 'D7 对称装载的 SMC 号不对'),
+            ('PTA_PQCHSM_SEED_CMD_SYMKEY', '少了 D7 对称装载那条命令'),
     ):
         if need not in body:
             sys.exit('自检失败：%s（%s）' % (need, why))

@@ -429,11 +429,47 @@ int SDFE_Verify_MLDSA(SDFE_HANDLE hSession, uint32_t pset,
 	return rv;
 }
 
+/* D7：明文导入已弃用。**不再把明文发上线** —— 直接在本地回 NOTSUPPORT，
+ * 免得调用方的密钥白白在 socket 上走一趟（daemon 那侧同样会拒）。 */
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
 		   const uint8_t *key, uint32_t key_len)
 {
-	return call(hSession, OP_IMPORT_KEY, slot, 0, key, key_len,
+	(void)hSession; (void)slot; (void)key; (void)key_len;
+	return SDR_NOTSUPPORT;
+}
+
+int SDFE_GenerateKey(SDFE_HANDLE hSession, uint32_t slot, uint32_t key_len,
+		     uint8_t *blob, uint32_t *blob_len)
+{
+	uint8_t  buf[PQCS_SYMKEY_BLOB_MAX];
+	uint32_t n = 0;
+	int rv;
+
+	if (!blob || !blob_len || (key_len != 16 && key_len != 32))
+		return SDR_INARGERR;
+	rv = call(hSession, OP_SYMKEY_GEN, slot, key_len, NULL, 0,
+		  buf, sizeof buf, &n);
+	if (rv != SDR_OK)
+		return rv;
+	if (n == 0 || n > *blob_len)
+		return SDR_INARGERR;
+	memcpy(blob, buf, n);
+	*blob_len = n;
+	return SDR_OK;
+}
+
+int SDFE_LoadKey(SDFE_HANDLE hSession, uint32_t slot,
+		 const uint8_t *blob, uint32_t blob_len)
+{
+	if (!blob || blob_len == 0 || blob_len > PQCS_SYMKEY_BLOB_MAX)
+		return SDR_INARGERR;
+	return call(hSession, OP_SYMKEY_LOAD, slot, 0, blob, blob_len,
 		    NULL, 0, NULL);
+}
+
+int SDFE_LoadKatKey(SDFE_HANDLE hSession, uint32_t kat_id)
+{
+	return call(hSession, OP_SYMKEY_KAT, kat_id, 0, NULL, 0, NULL, 0, NULL);
 }
 
 static int sym(SDFE_HANDLE h, uint32_t alg, uint32_t slot, int dec,
@@ -545,6 +581,7 @@ const char *SDFE_StrError(int rv)
 	case SDR_HARDFAIL:    return "硬件运算失败";
 	case SDR_AUTHFAIL:    return "远程通道认证失败（证书/身份/时钟）";
 	case SDR_VERIFYFAIL:  return "验签不通过（是结果，不是故障）";
+	case SDR_NOTSUPPORT:  return "本设备不支持该操作";
 	default:              return "未知错误";
 	}
 }

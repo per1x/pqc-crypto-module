@@ -103,7 +103,7 @@
 网络型 HSM 尤其如此（数据要送过去，大对象比本地算慢得多）。真正做硬件 bulk 对称的是数据面设备
 （SmartNIC、QAT、内联加密器），不是 HSM。
 
-次要理由：当前 PL 对称路径每分组约 10 次寄存器访问 ≈ **4 MB/s**，而 A53 带 ARMv8 Crypto Extensions
+次要理由：当前 PL 对称路径每分组约 10 次寄存器访问 ≈ **4 MB/s**（估算；**2026-10-10 板上实测经 EL3 那条路 AES-256-CBC 0.89 MB/s**，见 SYMKEY-TEE-REPORT §8），而 A53 带 ARMv8 Crypto Extensions
 实测 AES-256-CBC **~1.14 GB/s**；且 **PL 里根本没有链式模式**（只有单分组变换），产品要的 AES-256-GCM
 它做不了。顺带是安全升级（`aes_core.v` 自陈无 DPA 掩码，Crypto Extensions 的 DPA 抗性更高）。
 
@@ -122,6 +122,14 @@
 必须另建 XMPU/SMMU 约束，而 XMPU 只毒化不 gate。**这不是加个 IP，是把边界重新论证一遍。**
 
 **本条不阻塞批 1**：批 1 不动 `sym_axi` / `key_vault` 的功能，只补 `SY_CTRL` 擦除（见 §8 第 2 项）。
+
+> **2026-10-10 · 落地状态（"密钥装载"那一半）**：按指示先做 `STATELESS-PL-CONFLICTS §7.1`
+> 的三道防护，**而不是**方案 A 的"整体移出 PL"——`key_vault` / `sym_axi` 留在边界内，
+> 但**装载归 TEE**：PL 装载口只认安全事务、BL31 把槽 1 整槽排除、只能经 TA →
+> PTA → SiP `0x8200ff16` 装载；daemon 只搬 blob，明文导入拒。分组运算仍在 PL、
+> 不走 SMC。权威副本在 TA，PL 是单段使用容器、会话结束即擦。
+> 与方案 A 的差异与理由、未解决项见 [SYMKEY-TEE-REPORT](SYMKEY-TEE-REPORT.zh-CN.md)。
+> **产品定位（bulk 在 PL 还是 TEE 软件）仍待定**，本条标题里的"待定"不因此撤销。
 
 ### D8 · 算法广度
 **定**：**不补 RSA/ECC**，保持 PQC 专用定位。国密 SM2/SM3/SM4 若立项则在 TEE 软件里做（上游一个都没有）。
@@ -280,7 +288,7 @@ RPC 回普通世界写文件，性能和信任模型都变差。
 |---|---|---|---|---|---|
 | V-01 | `mlkem_axi.v` **16 槽 × 4 KB dk 金库** | KeyGen 把完整 dk 写进 PL 槽、Decaps 按槽取用；**私钥的权威保管方成了 PL**，跨会话存活 | 硬冲突 | 先降级为"单次操作展开区"（清除条件改 S_FIN 无条件清），再决定是否连 ABI 删 | 批2 |
 | V-02 | `mldsa_axi.v` **8 槽 × 8 KB sk 金库** + `S_LOAD`/`S_STORE` | 同上，sk（含 K、s1/s2、t0）按槽复用 | 硬冲突 | 同 V-01 | 批2 |
-| V-03 | `key_vault.v` 8 槽对称金库 | 对称密钥权威保管方是 PL | 硬冲突 | 随 D7 方案 A 移出边界；**批 1 只补擦除，不动功能** | 批2 |
+| V-03 | `key_vault.v` 8 槽对称金库 | 对称密钥权威保管方是 PL | 硬冲突 | 随 D7 方案 A 移出边界；**批 1 只补擦除，不动功能**。**2026-10-10：按 §7.1 改为"保留、装载归 TEE、单段即擦"，权威归属已移到 TA**（见 SYMKEY-TEE-REPORT） | 批2 → D7 |
 | V-04 | `dk_lock` / `sk_lock` 一次性闩 | 闩的目的是把"私钥留在 PL"升级成硬件性质——**守在与模型相反的方向** | 硬冲突 | 随 V-01/02 删；"关闭导出"的闸门改落 TEE 策略侧 | 批2 |
 | V-05 | `MODE` 的 `DK_TO_SLOT`/`DK_FROM_SLOT`/`SK_TO_SLOT`/`SK_FROM_SLOT`/`SLOT[9:6]` | 寄存器面把"按槽引用私钥"编码成对外 ABI | 硬冲突 | MODE 只留 OP/PSET；daemon、libsdfe、board/src 宏同步 | 批2 |
 | V-06 | `KEYSTAT` / `KEYPSET` | 对外暴露"PL 有状态且可查"；泄密钥存在性/数量/参数集 | 需重构 | 随金库删，只留与密钥无关的健康位 | 批2 |

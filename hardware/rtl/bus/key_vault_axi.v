@@ -24,6 +24,34 @@
 //   0x28 VIOL_CNT   R   {读违规[31:16], 写违规[15:0]}
 //   0x2C VIOL_INFO  R   [7:0]=首次违规地址 [8]=是写 [9]=NS 位 [10]=有效
 //   0x30 PARAM0     R   {WORDS[15:8], SLOTS[7:0]}
+//   0x34 LOAD_REJ   R   [15:0] 普通世界对装载口的写被拒次数（饱和）
+//
+// ============================================================================
+// 【装载口只认安全世界（D7 · STATELESS-PL-CONFLICTS §7.1 ①）】
+// ============================================================================
+// SLOT_SEL / KEY_IN / SLOT_CTRL 这三个"装载口"**只认 AxPROT[1]==0，
+// 与 SECURE_ONLY 无关** —— 与 mlkem_axi/mldsa_axi 的种子暂存口同一口径。
+// 演示位流（SECURE_ONLY=0）对普通世界什么都开着，但对称密钥仍然只能
+// 由安全世界（TA → PTA → EL3 SiP 0x8200ff16）装进来。
+//
+// 为什么三个都门控、不只是 KEY_IN：
+//   · SLOT_SEL：TA 装载是一串事务（选槽 → BEGIN → 8 字 → COMMIT），
+//     普通世界只要能在中间改 SLOT_SEL，就能把后几个字导进另一个槽；
+//   · SLOT_CTRL：BEGIN/COMMIT 是装载的一部分；LOCK 在"PL 是单段使用容器"
+//     的模型里守的是反方向（让密钥过夜，同 V-04），一并收掉；
+//     ERASE 是安全方向，但它作用在 SLOT_SEL 选中的槽上，而 SLOT_SEL
+//     已经是安全世界的了 —— 普通世界要擦，走下面那条不看槽号的全局擦除。
+//
+// **CTRL.ZEROIZE 不门控**：擦除永远是安全方向。另外 sym_axi 的
+// CTRL.ZEROIZE 经 ext_zeroize 直通这里，普通世界的 daemon 不碰槽 1
+// 也能做到"段末即擦"。
+//
+// 被拒的写：RAZ/WI + 计数（LOAD_REJ），**绝不回 SLVERR** ——
+// 理由与种子口相同：写是 posted 的，错误以 SError 回来，代价是断电。
+//
+// ⚠️ 这一条挡的是"普通世界自己发事务"。挡不住"root 经 EL3 的通用 PL_WR
+//    转一手"—— 那条由 BL31 白名单把槽 1 整槽排除（patch_atf_secmmio.py），
+//    两边合起来才成立。
 //
 // **这张表里没有一个地址会返回密钥材料。** KEY_IN 是只写的，读它返回 0；
 // 其余全是元数据。test_key_vault 里有一条用例把 256 字节地址空间**逐字扫一遍**，
@@ -71,6 +99,10 @@ module key_vault_axi #(
     // ---- 篡改检测：机箱开盖、电压/温度越界、JTAG 插入等接这里 ----
     input  wire        tamper,
 
+    // ---- 外部擦除：sym_axi 的 CTRL.ZEROIZE 接这里（脉冲，安全方向）----
+    // 普通世界在送检形态下够不到本槽（BL31 整槽排除），段末擦除走这根线。
+    input  wire        ext_zeroize,
+
     // ---- 使用口：只接 PL 内部的算法核，不出芯片边界 ----
     input  wire [SLOT_BITS-1:0]  use_sel,
     output wire [WORDS*32-1:0]   use_key,
@@ -85,7 +117,7 @@ module key_vault_axi #(
                      A_SLOT_SEL  = 4'h3, A_KEY_IN    = 4'h4, A_SLOT_CT = 4'h5,
                      A_SLOT_STAT = 4'h6, A_VALID_MAP = 4'h7, A_LOCK_MAP = 4'h8,
                      A_ZERO_CNT  = 4'h9, A_VIOL_CNT  = 4'hA, A_VIOL_INFO = 4'hB,
-                     A_PARAM0    = 4'hC;
+                     A_PARAM0    = 4'hC, A_LOAD_REJ  = 4'hD;
 
     // ================= 防火墙 =================
     wire [7:0]  f_awaddr;
@@ -168,7 +200,7 @@ module key_vault_axi #(
         .ld_slot(slot_sel),
         .ld_begin(ld_begin), .ld_we(ld_we), .ld_wdata(ld_wdata),
         .ld_commit(ld_commit), .ld_lock(ld_lock), .ld_erase(ld_erase),
-        .zeroize(do_zeroize), .tamper(tamper),
+        .zeroize(do_zeroize || ext_zeroize), .tamper(tamper),
         .use_sel(use_sel), .use_key(use_key), .use_valid(use_valid),
         .valid_map(valid_map), .lock_map(lock_map), .sel_fill(sel_fill),
         .tamper_latched(vault_tamper_latched),
@@ -181,9 +213,11 @@ module key_vault_axi #(
     // 这正是把防火墙独立出来的意义：从机里没有"忘了判"的可能。
     reg aw_got, w_got;
     reg [7:0]  aw_addr_r;
+    reg [2:0]  aw_prot_r;
     reg [31:0] w_data_r;
     reg [3:0]  w_strb_r;
     reg        deny_sticky;
+    reg [15:0] load_rej;
 
     assign f_awready = !aw_got && !f_bvalid;
     assign f_wready  = !w_got  && !f_bvalid;
@@ -193,24 +227,33 @@ module key_vault_axi #(
     wire [7:0]  wr_addr = (f_awvalid && f_awready) ? f_awaddr : aw_addr_r;
     wire [31:0] wr_data = (f_wvalid  && f_wready)  ? f_wdata  : w_data_r;
     wire [3:0]  wr_strb = (f_wvalid  && f_wready)  ? f_wstrb  : w_strb_r;
+    wire [2:0]  wr_prot = (f_awvalid && f_awready) ? f_awprot : aw_prot_r;
+    // 装载口（见文件头）：只认安全事务，与 SECURE_ONLY 无关
+    wire wr_load_addr = (wr_addr[5:2] == A_SLOT_SEL) || (wr_addr[5:2] == A_KEY_IN)
+                        || (wr_addr[5:2] == A_SLOT_CT);
+    wire wr_load_ok   = (wr_prot[1] == 1'b0);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             aw_got <= 1'b0; w_got <= 1'b0;
-            aw_addr_r <= 8'd0; w_data_r <= 32'd0; w_strb_r <= 4'd0;
+            aw_addr_r <= 8'd0; aw_prot_r <= 3'd0;
+            w_data_r <= 32'd0; w_strb_r <= 4'd0;
             f_bvalid <= 1'b0; f_bresp <= RESP_OKAY;
             slot_sel <= {SLOT_BITS{1'b0}};
             ld_begin <= 1'b0; ld_we <= 1'b0; ld_commit <= 1'b0;
             ld_lock <= 1'b0; ld_erase <= 1'b0; do_zeroize <= 1'b0;
             ld_wdata <= 32'd0;
             deny_sticky <= 1'b0;
+            load_rej <= 16'd0;
         end else begin
             ld_begin <= 1'b0; ld_we <= 1'b0; ld_commit <= 1'b0;
             ld_lock <= 1'b0; ld_erase <= 1'b0; do_zeroize <= 1'b0;
 
             if (vault_deny) deny_sticky <= 1'b1;
+            if (ext_zeroize) deny_sticky <= 1'b0;
 
-            if (f_awvalid && f_awready) begin aw_got <= 1'b1; aw_addr_r <= f_awaddr; end
+            if (f_awvalid && f_awready) begin aw_got <= 1'b1; aw_addr_r <= f_awaddr;
+                                              aw_prot_r <= f_awprot; end
             if (f_wvalid  && f_wready)  begin w_got  <= 1'b1; w_data_r  <= f_wdata;
                                               w_strb_r <= f_wstrb; end
 
@@ -219,7 +262,10 @@ module key_vault_axi #(
                 f_bvalid <= 1'b1;
                 f_bresp  <= RESP_OKAY;
 
-                if (wr_strb[0]) begin
+                if (wr_strb[0] && wr_load_addr && !wr_load_ok) begin
+                    // 普通世界碰装载口：丢弃 + 计数，回 OKAY（RAZ/WI）
+                    if (load_rej != 16'hFFFF) load_rej <= load_rej + 16'd1;
+                end else if (wr_strb[0]) begin
                     case (wr_addr[5:2])
                     A_CTRL: begin
                         do_zeroize  <= wr_data[0];
@@ -284,6 +330,7 @@ module key_vault_axi #(
                 A_VIOL_CNT:  f_rdata <= {viol_rd_count, viol_wr_count};
                 A_VIOL_INFO: f_rdata <= r_viol_info;
                 A_PARAM0:    f_rdata <= {16'd0, WORDS[7:0], SLOTS[7:0]};
+                A_LOAD_REJ:  f_rdata <= {16'd0, load_rej};
                 // CTRL 与 SLOT_CTRL 是只写的；读它们返回 0
                 default:     f_rdata <= 32'd0;
                 endcase
@@ -292,7 +339,8 @@ module key_vault_axi #(
         end
     end
 
-    wire _unused = &{1'b0, f_awprot, f_arprot, wr_strb[3:1], fw_tampered, 1'b0};
+    wire _unused = &{1'b0, f_arprot, wr_prot[2], wr_prot[0], wr_strb[3:1],
+                     fw_tampered, 1'b0};
 
 endmodule
 

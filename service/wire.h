@@ -33,7 +33,11 @@ enum {
 	OP_MLKEM_KEYGEN  = 3,   /* a0=pset → [4 字节句柄][ek] */
 	OP_MLKEM_ENCAPS  = 4,   /* a0=pset, 载荷=ek → [32 字节 K][c] */
 	OP_MLKEM_DECAPS  = 5,   /* a0=句柄, 载荷=c → [32 字节 K] */
-	OP_IMPORT_KEY    = 6,   /* a0=槽, 载荷=key */
+	/* 6 —— 明文导入对称密钥。**D7 之后 daemon 一律拒（SDR_NOTSUPPORT）**：
+	 * 明文在 daemon 的缓冲区里走一趟，正是 D7 要关的洞。号码保留不复用，
+	 * 老客户端发它得到的是一个明确的"不支持"，而不是别的操作。
+	 * 换成下面的 OP_SYMKEY_GEN / OP_SYMKEY_LOAD / OP_SYMKEY_KAT。 */
+	OP_IMPORT_KEY    = 6,
 	OP_SYM_BLOCK     = 7,   /* a0=alg, a1=槽|(解密<<8), 载荷=16 字节 → 16 字节 */
 	/* 8 —— 曾经的 OP_AUTH（TCP 连接的第一帧，载荷是预共享口令）。
 	 * **已删除**：远程口改成 mTLS 之后，身份在 TLS 握手里就定下来了，
@@ -87,7 +91,24 @@ enum {
 	 *    keystore 绑到这块板（防克隆）。别把"能读 DNA"当成一个需要保护的能力，
 	 *    也别把"绑到 DNA"说成"受硬件保护"。 */
 	OP_DEVICE_DNA    = 14,
+
+	/* ---- 对称密钥装载归 TEE（D7）---------------------------------------
+	 * daemon 只搬密文：密钥由 TA 生成/解包，经 PTA → EL3 SiP → PL 装进金库，
+	 * **本进程没有一个能放对称密钥明文的缓冲区**。分组运算不变（OP_SYM_BLOCK /
+	 * OP_SYM_CRYPT 按槽号驱动 PL，一个分组都不走 SMC）。
+	 *
+	 * 槽：产品槽 0..6；槽 7 是 KAT 专用（只装公开测试向量密钥）。
+	 * blob：TA 的 PWRP（AES-256-GCM，KEK 不出 TA）。它就是这把密钥在普通世界的
+	 * 全部形态 —— 调用方自己保存，下次会话用 OP_SYMKEY_LOAD 重装。
+	 * 会话结束 daemon 发 SY_CTRL.ZEROIZE，金库连同三个核一起擦。 */
+	OP_SYMKEY_GEN    = 15,  /* a0=槽(0..6), a1=密钥长度(16/32) → blob */
+	OP_SYMKEY_LOAD   = 16,  /* a0=槽(0..6), 载荷=blob → 空 */
+	OP_SYMKEY_KAT    = 17,  /* a0=向量编号（见 sdfe.h SDFE_KAT_*）→ 空；固定进槽 7 */
 };
+
+/* 对称 blob 的长度上限（PWRP 头 16 + nonce 12 + 32 + tag 16 = 76，留余量） */
+#define PQCS_SYMKEY_BLOB_MAX 128u
+#define PQCS_SYM_KAT_SLOT    7u
 
 /* OP_SYM_CRYPT 的模式编号。数值与任何标准无关，只是本线格式内部的约定；
  * GM/T 0018 的 SGD_SM4_CBC 之类算法 ID 由上层（libsdfe）映射过来。 */

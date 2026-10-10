@@ -96,7 +96,17 @@ int SDFE_Decapsulate_MLKEM(SDFE_HANDLE hSession, uint32_t key_handle,
                            const uint8_t *ct, uint32_t ct_len,
                            uint8_t *ss, uint32_t *ss_len);
 
-/* symmetric — the key goes into key_vault and is thereafter used by slot */
+/* symmetric — the TEE loads the key into key_vault; thereafter it is used by slot.
+ * Product slots are 0..6; slot 7 is KAT-only (public test-vector keys, by id).
+ * blob = PWRP wrapped by a KEK that never leaves the TA (AAD "pqchsm/symkey/v1").
+ * The caller stores the blob; reload it with SDFE_LoadKey in the next session.
+ * blob_len is capacity in, actual length out (max SDFE_SYMKEY_BLOB_MAX = 128). */
+int SDFE_GenerateKey(SDFE_HANDLE hSession, uint32_t slot, uint32_t key_len,
+                     uint8_t *blob, uint32_t *blob_len);   /* key_len 16 or 32 */
+int SDFE_LoadKey(SDFE_HANDLE hSession, uint32_t slot,
+                 const uint8_t *blob, uint32_t blob_len);
+int SDFE_LoadKatKey(SDFE_HANDLE hSession, uint32_t kat_id); /* slot 7 only */
+/* Plaintext import: always returns SDR_NOTSUPPORT (0x01000009). */
 int SDFE_ImportKey(SDFE_HANDLE hSession, uint32_t slot,
                    const uint8_t *key, uint32_t key_len);
 int SDFE_Encrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
@@ -135,7 +145,8 @@ const char *SDFE_StrError(int rv);
 
 Return codes follow SDF convention: `SDR_OK` (0) on success, `SDR_BASE + n`
 otherwise — `SDR_OPENDEVICE`, `SDR_COMMFAIL`, `SDR_INARGERR`,
-`SDR_KEYNOTEXIST`, `SDR_HARDFAIL`, `SDR_UNKNOWERR`.
+`SDR_KEYNOTEXIST`, `SDR_HARDFAIL`, `SDR_UNKNOWERR`, and `SDR_NOTSUPPORT`
+(`SDR_BASE + 9`, the device deliberately does not do this — e.g. `SDFE_ImportKey`).
 
 Parameter sets are `SDFE_MLKEM_512` / `_768` / `_1024`; symmetric algorithms are
 `SDFE_ALG_AES128` / `_AES256` / `_SM4`, matching the `ALG` field of `sym_axi`.
@@ -218,7 +229,7 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 | Symmetric CTR | same | same; CTR is beyond what GM/T 0018 lists |
 | Hash | `SDFE_Hash_SM3` (one-shot) | **hardware** SM3 core, matches GB/T 32905 A.1 |
 | Device identity | `SDFE_GetDeviceDNA` (16 bytes) | ⚠️ **This is not a key — it is a public chip serial.** Its one use is letting a caller bind something (a keystore, say) to this board, so a copy taken to another board will not open. Anyone with JTAG reads the same value, so "it came from hardware, therefore it is secret" is wrong. Fetched through the read-only BL31 window at `0xFFCA0050-5C`; reading it directly from EL1 is a bus error |
-| Key management | `SDFE_ImportKey` | **hardware** `key_vault`, no read path in RTL |
+| Key management | `SDFE_GenerateKey` / `LoadKey` / `LoadKatKey` (`ImportKey` → `SDR_NOTSUPPORT`) | Key generated and loaded **inside the TEE** into hardware `key_vault`; no read path in RTL |
 | Post-quantum asymmetric | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **hardware**, private keys stay in the on-chip vault |
 | Public-key encryption of arbitrary data | `SDFE_PKEncrypt` / `PKDecrypt` | KEM in hardware, AES-GCM DEM in software |
 
@@ -252,7 +263,7 @@ Two cases that must not be collapsed into one sentence.
 
 | Key | Where it lives | Leaves the hardware? |
 |---|---|---|
-| Symmetric (AES / SM4) | `key_vault` register array | **No.** The RTL has no bus-side read path. The demo wipes its own copy after import, and from then on nobody — including the daemon — can retrieve it |
+| Symmetric (AES / SM4) | `key_vault` register array; the authoritative copy is a TA-wrapped PWRP blob held by the caller | **No.** The RTL has no bus-side read path, and the normal world (daemon included) never sees plaintext: the TA generates the key and loads it via SiP `PQC_SYMKEY`. The daemon wipes the vault at session end |
 | ML-KEM `dk` | Returned by `KeyGen` today; held by the daemon | ⚠️ **Yes, it leaves the hardware** — but not the *interface*. The application only ever holds a handle |
 
 The second row is the current state and cannot be shortened to "private keys

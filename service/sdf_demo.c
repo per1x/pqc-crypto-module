@@ -45,7 +45,7 @@ int main(int argc, char **argv)
 {
 	SDFE_HANDLE dev, ses;
 	unsigned char rnd[32], ek[1600], ct[1600], ss1[32], ss2[32];
-	unsigned char key[16], pt[16], enc[16], dec[16];
+	unsigned char pt[16], enc[16], dec[16];
 	unsigned int ek_len = sizeof ek, ct_len = sizeof ct;
 	unsigned int ss1_len = sizeof ss1, ss2_len = sizeof ss2;
 	unsigned int kh = 0;
@@ -121,17 +121,27 @@ int main(int argc, char **argv)
 		printf("  ❌ 共享密钥不一致\n"); return 1;
 	}
 
-	/* ---- 5. 对称：密钥进 key_vault，之后只按槽号使唤 ---- */
-	printf("\n[5] SDFE_ImportKey + SDFE_Encrypt/Decrypt（SM4，密钥留在硬件）\n");
-	memcpy(key, "\x01\x23\x45\x67\x89\xab\xcd\xef\xfe\xdc\xba\x98\x76\x54\x32\x10", 16);
+	/* ---- 5. 对称：密钥由 TEE 装进 key_vault，之后只按槽号使唤（D7）----
+	 *
+	 * 两半：
+	 *   5a 正确性：公开测试向量密钥**按编号**装进 KAT 槽 7（TA 内常量表），
+	 *      对 GB/T 32907 A.1 的标准答案。线上没有一个密钥字节。
+	 *   5b 产品路径：TA 生成密钥 → 应用拿到 blob（密文）→ 加密 → 用 blob 重装
+	 *      进另一个槽 → 同一明文得同一密文。应用、库、daemon 全程没见过明文密钥。
+	 * 再加一条反证：明文导入（SDFE_ImportKey）必须回 SDR_NOTSUPPORT。 */
+	printf("\n[5] 对称密钥归 TEE：KAT 槽 + 生成/blob 重装（SM4，密钥不经普通世界）\n");
 	memcpy(pt,  "\x01\x23\x45\x67\x89\xab\xcd\xef\xfe\xdc\xba\x98\x76\x54\x32\x10", 16);
-	if ((rv = SDFE_ImportKey(ses, 3, key, 16)) != SDR_OK) {
-		printf("  装载密钥失败：%s\n", SDFE_StrError(rv)); return 1;
+	{
+		static const unsigned char dummy[16];
+		rv = SDFE_ImportKey(ses, 3, dummy, 16);
+		printf("  %s 明文导入被拒（%s）\n", rv == SDR_NOTSUPPORT ? "✅" : "❌",
+		       SDFE_StrError(rv));
+		if (rv != SDR_NOTSUPPORT) return 1;
 	}
-	memset(key, 0, sizeof key);   /* 应用这边也抹掉：硬件里那份才算数 */
-	printf("  密钥已进 key_vault 槽 3，应用侧已抹除\n");
-
-	if ((rv = SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, enc)) != SDR_OK) {
+	if ((rv = SDFE_LoadKatKey(ses, SDFE_KAT_SM4_GBT32907)) != SDR_OK) {
+		printf("  装 KAT 密钥失败：%s\n", SDFE_StrError(rv)); return 1;
+	}
+	if ((rv = SDFE_Encrypt(ses, SDFE_ALG_SM4, SDFE_SYM_KAT_SLOT, pt, enc)) != SDR_OK) {
 		printf("  加密失败：%s\n", SDFE_StrError(rv)); return 1;
 	}
 	hex("SM4 密文", enc, 16);
@@ -140,14 +150,40 @@ int main(int argc, char **argv)
 		static const unsigned char want[16] = {
 			0x68,0x1e,0xdf,0x34,0xd2,0x06,0x96,0x5e,
 			0x86,0xb3,0xe9,0x4f,0x53,0x6e,0x42,0x46 };
-		printf("  %s 与 GB/T 32907 A.1 %s\n",
+		printf("  %s KAT 槽 7 与 GB/T 32907 A.1 %s\n",
 		       memcmp(enc, want, 16) ? "❌" : "✅",
 		       memcmp(enc, want, 16) ? "不一致" : "逐字节一致");
 	}
-	if ((rv = SDFE_Decrypt(ses, SDFE_ALG_SM4, 3, enc, dec)) != SDR_OK) {
+	if ((rv = SDFE_Decrypt(ses, SDFE_ALG_SM4, SDFE_SYM_KAT_SLOT, enc, dec)) != SDR_OK) {
 		printf("  解密失败：%s\n", SDFE_StrError(rv)); return 1;
 	}
 	printf("  %s 解密回到原文\n", memcmp(dec, pt, 16) ? "❌" : "✅");
+	{
+		unsigned char blob[SDFE_SYMKEY_BLOB_MAX], c1[16], c2[16];
+		uint32_t blen = sizeof blob;
+
+		if ((rv = SDFE_GenerateKey(ses, 3, 16, blob, &blen)) != SDR_OK) {
+			printf("  TA 生成密钥失败：%s\n", SDFE_StrError(rv)); return 1;
+		}
+		printf("  TA 生成 SM4 密钥进槽 3，应用只拿到 %u 字节 blob\n", blen);
+		if ((rv = SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, c1)) != SDR_OK) {
+			printf("  加密失败：%s\n", SDFE_StrError(rv)); return 1;
+		}
+		if ((rv = SDFE_LoadKey(ses, 4, blob, blen)) != SDR_OK) {
+			printf("  blob 重装失败：%s\n", SDFE_StrError(rv)); return 1;
+		}
+		if ((rv = SDFE_Encrypt(ses, SDFE_ALG_SM4, 4, pt, c2)) != SDR_OK) {
+			printf("  加密失败：%s\n", SDFE_StrError(rv)); return 1;
+		}
+		printf("  %s blob 重装进槽 4 后同一明文得同一密文\n",
+		       memcmp(c1, c2, 16) ? "❌" : "✅");
+		if (!memcmp(c1, c2, 16) && !memcmp(c1, enc, 16))
+			printf("  ❌ 生成的密钥竟与 KAT 密钥相同\n");
+		/* 槽 7 不收产品密钥（KAT 专用） */
+		rv = SDFE_LoadKey(ses, SDFE_SYM_KAT_SLOT, blob, blen);
+		printf("  %s blob 装不进 KAT 槽 7（%s）\n",
+		       rv != SDR_OK ? "✅" : "❌", SDFE_StrError(rv));
+	}
 
 	/* ---- 6. ML-DSA：三个参数集各走一遍 KeyGen → Sign → Verify ----
 	 *
@@ -238,12 +274,8 @@ int main(int argc, char **argv)
 		static const unsigned char IVC[16] = {
 			0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,
 			0xf8,0xf9,0xfa,0xfb,0xfc,0xfd,0xfe,0xff };
-		static const unsigned char AESK[16] = {
-			0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,
-			0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c };
-		static const unsigned char SM4K[16] = {
-			0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
-			0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10 };
+		/* 两把密钥（SP 800-38A 的 AES-128、GB/T 32907 的 SM4）**不在这里**：
+		 * D7 之后它们编译在 TA 里，这里只给编号（SDFE_KAT_*）。 */
 		/* 期望值：AES 的四条是 SP 800-38A 附录 F 的官方向量 */
 		static const char *const EXP[8] = {
 	"7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b273bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7",
@@ -269,24 +301,17 @@ int main(int argc, char **argv)
 		int i, k;
 
 		printf("\n[7] SDFE_EncryptMode/DecryptMode（CBC/CTR/CFB/OFB，密钥留在硬件）\n");
-		/* 两把密钥各占一个槽；装进去之后应用侧抹掉 */
-		{
-			unsigned char tmp[16];
-
-			memcpy(tmp, AESK, 16);
-			if ((rv = SDFE_ImportKey(ses, 4, tmp, 16)) != SDR_OK) {
-				printf("  装 AES 密钥失败：%s\n", SDFE_StrError(rv)); return 1;
-			}
-			memcpy(tmp, SM4K, 16);
-			if ((rv = SDFE_ImportKey(ses, 5, tmp, 16)) != SDR_OK) {
-				printf("  装 SM4 密钥失败：%s\n", SDFE_StrError(rv)); return 1;
-			}
-			memset(tmp, 0, sizeof tmp);
-		}
-
 		for (i = 0; i < 8; i++) {
-			uint32_t slot = (CASES[i].alg == SDFE_ALG_SM4) ? 5u : 4u;
+			/* KAT 只有一个槽（7）：每格按算法重装一次对应的公开向量密钥 */
+			uint32_t slot = SDFE_SYM_KAT_SLOT;
 			const unsigned char *iv = CASES[i].ctr_iv ? IVC : IV0;
+
+			rv = SDFE_LoadKatKey(ses, CASES[i].alg == SDFE_ALG_SM4
+			                          ? SDFE_KAT_SM4_GBT32907
+			                          : SDFE_KAT_AES128_SP38A);
+			if (rv != SDR_OK) {
+				printf("  装 KAT 密钥失败：%s\n", SDFE_StrError(rv)); return 1;
+			}
 
 			rv = SDFE_EncryptMode(ses, CASES[i].alg, CASES[i].mode, slot,
 			                      iv, PT, sizeof PT, ct);

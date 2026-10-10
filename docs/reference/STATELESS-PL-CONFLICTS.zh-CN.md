@@ -160,6 +160,11 @@ provider（`pqc_kdr_provider_optee()`），provider 形状天然匹配，是纯�
 **注意这不是给 PL 开保管权**：正本仍在 TEE，基准②的实质（权威归属）成立，
 放宽的只是基准①③的**寿命粒度**。
 
+> **2026-10-10：本节三条已落地**（分支 `feature/tee-symkey`，见
+> [SYMKEY-TEE-REPORT](SYMKEY-TEE-REPORT.zh-CN.md)）。③ 比原文多走了一步：
+> `SY_CTRL.ZEROIZE` 原本**接不到金库**，"段末发 ZEROIZE"擦的只是轮密钥；
+> 现在 RTL 加了一根线把它直通金库。
+
 **替代方案（便宜且都有现成写法）**：① 装载口只认安全事务（`AxPROT[1]==0`）；
 ② **EL3 白名单必须排除该偏移**——否则 root 经 SiP 转一手照样能写（两边缺一等于白做）；
 ③ daemon 补 `SY_CTRL`，段末与 `session_end` 发 ZEROIZE。

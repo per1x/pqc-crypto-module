@@ -38,7 +38,8 @@
  *   [0] value.out: a = 协议版本(PQCHSM_TA_PROTO_VERSION), b = 特性位
  * 特性位：bit0 = 支持 KDF（**已删除，恒 0**）；
  *        bit1 = 支持 WRAP/UNWRAP（**已删除，恒 0**）；
- *        bit2 = 支持 ML-KEM；bit3 = 支持 ML-DSA
+ *        bit2 = 支持 ML-KEM；bit3 = 支持 ML-DSA；
+ *        bit4 = 支持对称密钥装载（CMD_SYMKEY_*，D7）
  * bit0/bit1 保留位置而不是让后面的位往前挪：挪了的话旧 host 会把
  * "支持 ML-KEM" 读成 "支持 KDF"。
  */
@@ -170,6 +171,55 @@
  */
 #define TA_PQCHSM_CMD_SEED_NEW        10
 #define TA_PQCHSM_CMD_SEED_REPLAY     11
+
+/*
+ * CMD_SYMKEY_NEW / _LOAD / _KAT —— **对称密钥装载归 TEE（D7）**。
+ *
+ * 批 2 之前对称密钥是明文经普通世界 daemon 写进 PL key_vault 的。现在：
+ * 权威副本在 TA（以 PWRP blob 的形态交给调用方保存），PL 的 key_vault 是
+ * **单段使用容器**——装载只能由 TA 经 PTA → EL3 SiP 0x8200ff16 完成，
+ * 段末由 daemon 发 sym_axi 的 CTRL.ZEROIZE（RTL 直通金库）擦掉。
+ * 分组运算本身仍在 PL、仍由 daemon 按槽号驱动，**一个分组都不走 SMC**。
+ *
+ *   CMD_SYMKEY_NEW(slot, len) → TA 生成密钥、装进槽、**包成 blob 交回**
+ *       params[0].value.a = 槽（0..TA_SYM_SLOT_MAX）
+ *       params[0].value.b = 密钥长度（16 或 32）
+ *       params[1] = memref_output：blob
+ *
+ *   CMD_SYMKEY_LOAD(slot, blob) → TA 解开 blob、装进槽
+ *       params[0].value.a = 槽（0..TA_SYM_SLOT_MAX）
+ *       params[1] = memref_input：blob
+ *
+ *   CMD_SYMKEY_KAT(id) → 把一把**公开测试向量密钥**装进 KAT 专用槽
+ *       params[0].value.a = 槽（必须是 TA_SYM_KAT_SLOT）
+ *       params[0].value.b = 向量编号（TA_SYM_KAT_*）
+ *
+ * ⚠️ **三条命令都不回、也不收任何明文密钥字节**（KAT 那条收的是编号）。
+ *    没有"导入明文"的命令：那样明文必然要在普通世界的缓冲区里走一趟，
+ *    正是 D7 要关的洞。外部密钥的导入（转运密钥封装）是将来项。
+ *
+ * ⚠️ **CMD_SYMKEY_LOAD 不是解包谕言机**：解开之后只往 PL 的金库写，
+ *    没有把明文交回调用方的路径（同 CMD_SEED_REPLAY）。
+ *
+ * ⚠️ **KAT 只许进槽 7，产品命令只许进槽 0..6。** 装一把人人都知道的密钥
+ *    本身就是"密钥替换"——若它能进任意槽，任何能开 TA 会话的进程都能在
+ *    受害者装载之后把同一槽换成已知密钥。分开之后两条路互相够不着。
+ *
+ * blob 用 AAD = TA_SYMKEY_AAD 封装（种子 blob 的 AAD 为空），两类 blob
+ * 互不可用：一份 32 字节的 ML-DSA ξ blob 不能被当成 AES-256 密钥装进金库。
+ */
+#define TA_PQCHSM_CMD_SYMKEY_NEW      12
+#define TA_PQCHSM_CMD_SYMKEY_LOAD     13
+#define TA_PQCHSM_CMD_SYMKEY_KAT      14
+
+#define TA_SYM_SLOT_MAX     6U          /* 产品槽 0..6 */
+#define TA_SYM_KAT_SLOT     7U          /* KAT 专用槽 */
+#define TA_SYMKEY_AAD       "pqchsm/symkey/v1"
+
+/* 公开测试向量密钥（TA 内编译进去的常量表；调用方只给编号） */
+#define TA_SYM_KAT_SM4_GBT32907   0U    /* GB/T 32907 附录 A：0123456789abcdeffedcba9876543210 */
+#define TA_SYM_KAT_AES128_SP38A   1U    /* SP 800-38A 附录 F：2b7e151628aed2a6abf7158809cf4f3c */
+#define TA_SYM_KAT_AES256_FIPS197 2U    /* FIPS-197 附录 C.3：000102…1f */
 
 /* 种子长度：ML-KEM 的 d‖z = 64，ML-DSA 的 ξ = 32 */
 #define TA_SEED_LEN_MLKEM   64U
