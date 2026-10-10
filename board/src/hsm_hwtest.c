@@ -187,6 +187,11 @@ static inline void wr(unsigned off, uint32_t v)
                         "若核是 SECURE_ONLY=1，这一笔会 DECERR->SError->panic，丢板子。\n");
         exit(4);
     }
+    /* ⚠️ 这一行在 352f5e1 加 -D 闸门时被一并删掉了：此后直接模式（-D）下的
+     * **每一笔写都是空操作**，而读照常 —— 于是 KAT 表现为"核没跑完"或结果
+     * 不对，像是 RTL 坏了。查 board/logs：那之后的结果都是默认的经 EL3 模式
+     * （pay_seckat.sh 等），没有一份 -D 结果受影响。 */
+    *(volatile uint32_t *)(pl + off) = v;
 }
 
 /* ---- 记分板 ---- */
