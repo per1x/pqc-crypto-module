@@ -52,4 +52,14 @@ int pqchsm_ta_sign(pqchsm_ta *t, uint32_t alg,
                    const uint8_t *msg, size_t msg_len,
                    uint8_t *sig, size_t cap, size_t *sig_len);
 
+/* ---- D7：对称密钥装载（密钥由 TA 生成/解包，经安全世界装进 PL key_vault）----
+ * 三条都**不收、不回任何明文密钥字节**：NEW 回 blob，LOAD 收 blob，KAT 收编号。
+ * 产品槽 0..TA_SYM_SLOT_MAX；KAT 只进 TA_SYM_KAT_SLOT。
+ * ⚠️ TA 会经 EL3 访问 PL：调用前确认 PL 已 operating（否则 EL3 上取数错误、核卡死）。 */
+int pqchsm_ta_symkey_new(pqchsm_ta *t, uint32_t slot, uint32_t key_len,
+                         uint8_t *blob, size_t cap, size_t *blob_len);
+int pqchsm_ta_symkey_load(pqchsm_ta *t, uint32_t slot,
+                          const uint8_t *blob, size_t blob_len);
+int pqchsm_ta_symkey_kat(pqchsm_ta *t, uint32_t slot, uint32_t kat_id);
+
 #endif /* PQCHSM_TA_CLIENT_H */

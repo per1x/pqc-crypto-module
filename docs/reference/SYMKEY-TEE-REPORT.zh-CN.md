@@ -134,6 +134,11 @@ AES-256 密钥装进去"（或反过来），对称 blob 用 **AAD = `"pqchsm/sy
 
 ## 6. 上板清单（板子回来后按顺序做）
 
+> **一键版**：演示形态下 `sh board/scripts/pay_d7.sh`（覆盖下面第 3、4、6、7 条：
+> `ta_symkey` 正反两面 → `d7probe` 装载门反证 → `sdf_demo` → 会话后金库为空），
+> 送检形态那一半走 `pay_seckat.sh`（第 5 条），第 8 条 `wire_fuzz.py` 从 Mac 跑。
+> 需要在构建机上多编三样：`tee/host/ta_symkey`、`board/src/d7probe`、新的 `sdf_demo`。
+
 > 板子这一轮不在，下面**一条都没有验过**。全部不涉及任何一次性/不可逆写入。
 
 1. **构建**：位流（dev + sec 两份，看 `key_vault_axi`/`sym_axi` 有无新的 critical warning、WNS/WHS）；

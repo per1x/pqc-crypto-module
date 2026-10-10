@@ -216,3 +216,58 @@ int pqchsm_ta_sign(pqchsm_ta *t, uint32_t alg,
 	free(frame);
 	return rc;
 }
+
+/* ---- D7：对称密钥装载 ---- */
+int pqchsm_ta_symkey_new(pqchsm_ta *t, uint32_t slot, uint32_t key_len,
+                         uint8_t *blob, size_t cap, size_t *blob_len)
+{
+	TEEC_Operation op;
+	uint32_t       origin;
+	int            rc;
+
+	if (!blob || !blob_len)
+		return -1;
+	memset(&op, 0, sizeof(op));
+	op.paramTypes = TEEC_PARAM_TYPES(TEEC_VALUE_INPUT,
+	                                 TEEC_MEMREF_TEMP_OUTPUT,
+	                                 TEEC_NONE, TEEC_NONE);
+	op.params[0].value.a = slot;
+	op.params[0].value.b = key_len;
+	op.params[1].tmpref.buffer = blob;
+	op.params[1].tmpref.size   = cap;
+	rc = invoke(t, TA_PQCHSM_CMD_SYMKEY_NEW, &op, &origin);
+	if (rc == 0)
+		*blob_len = op.params[1].tmpref.size;
+	return rc;
+}
+
+int pqchsm_ta_symkey_load(pqchsm_ta *t, uint32_t slot,
+                          const uint8_t *blob, size_t blob_len)
+{
+	TEEC_Operation op;
+	uint32_t       origin;
+
+	if (!blob || !blob_len)
+		return -1;
+	memset(&op, 0, sizeof(op));
+	op.paramTypes = TEEC_PARAM_TYPES(TEEC_VALUE_INPUT,
+	                                 TEEC_MEMREF_TEMP_INPUT,
+	                                 TEEC_NONE, TEEC_NONE);
+	op.params[0].value.a = slot;
+	op.params[1].tmpref.buffer = (void *)blob;
+	op.params[1].tmpref.size   = blob_len;
+	return invoke(t, TA_PQCHSM_CMD_SYMKEY_LOAD, &op, &origin);
+}
+
+int pqchsm_ta_symkey_kat(pqchsm_ta *t, uint32_t slot, uint32_t kat_id)
+{
+	TEEC_Operation op;
+	uint32_t       origin;
+
+	memset(&op, 0, sizeof(op));
+	op.paramTypes = TEEC_PARAM_TYPES(TEEC_VALUE_INPUT, TEEC_NONE,
+	                                 TEEC_NONE, TEEC_NONE);
+	op.params[0].value.a = slot;
+	op.params[0].value.b = kat_id;
+	return invoke(t, TA_PQCHSM_CMD_SYMKEY_KAT, &op, &origin);
+}

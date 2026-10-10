@@ -12,7 +12,7 @@ CROSS  ?=
 CC      = $(CROSS)gcc
 CFLAGS  = -O2 -Wall -Wextra -static
 
-all: mldsa_hwtest
+all: mldsa_hwtest d7probe
 
 mldsa_hwtest: mldsa_hwtest.c kat_mldsa.h
 	$(CC) $(CFLAGS) -o $@ mldsa_hwtest.c
@@ -23,7 +23,11 @@ mldsa_hwtest: mldsa_hwtest.c kat_mldsa.h
 kat: ../../tools/mldsa_kat_to_c.py
 	python3 ../../tools/mldsa_kat_to_c.py > kat_mldsa.h
 
+# D7：演示位流下普通世界装不进对称密钥（只读写 key_vault 一页，不碰 uapi 头）
+d7probe: d7probe.c
+	$(CC) $(CFLAGS) -o $@ d7probe.c
+
 clean:
-	rm -f mldsa_hwtest
+	rm -f mldsa_hwtest d7probe
 
 .PHONY: all kat clean
