@@ -14,6 +14,7 @@ application → libsdfe → pqchsm_fpgad → /dev/secmmio → EL3 SiP → AXI fi
 | `wire.h` | The request/response encoding between the two |
 | `pqcs_tls.h`, `pqcs_tls.c` | mTLS for the remote port: why, and what it does and does not buy |
 | `sdf_demo.c` | A worked example application |
+| `hsmctl.c` | Command-line tool: one command per business operation (see below) |
 
 ```bash
 make                              # host build
@@ -71,3 +72,38 @@ does not, or the reverse. See
 [../docs/SECURITY.md](../docs/SECURITY.md#limitations).
 
 Interface reference: [../docs/API.md](../docs/API.md).
+
+## `hsmctl` — command reference
+
+`hsmctl` runs on the board (local UNIX socket to `pqchsm_fpgad`). Like `sdf_demo` it
+links only `libsdfe` and performs no cryptography itself. Build: `make hsmctl`.
+The full Chinese manual is in the repository root `README.zh-CN.md`
+(「命令行：hsmctl 使用手册」).
+
+Keys live in a keystore directory, one `<name>.key` file per key
+(`HSM_KEYSTORE`, default `./keystore`). A key file never holds a plaintext key:
+symmetric keys are stored as the TA's KEK-wrapped blob, post-quantum keys as the
+public key plus the TA-wrapped seed blob. Only the TA on this board can unwrap them.
+
+| Command | Purpose |
+|---|---|
+| `info` | Device info and keystore location |
+| `keygen <alg> <name>` | Generate a key: `sm4 aes128 aes256 mlkem512 mlkem768 mlkem1024 mldsa44 mldsa65 mldsa87` |
+| `list` / `show <name>` | List the keystore / inspect one key file (public-key SM3 fingerprint, blob head) |
+| `encrypt <name> <in> <out>` / `decrypt <name> <in> <out>` | Symmetric CBC + PKCS#7; IV from the PL TRNG; output = IV ‖ ciphertext |
+| `sign <name> <file> <sig>` / `verify <name> <file> <sig>` | ML-DSA |
+| `encap <name> <ct>` / `decap <name> <ct>` | ML-KEM; both print the shared secret |
+| `hash <file>` / `random <n>` | SM3 / TRNG bytes |
+| `backup <bundle>` / `restore <bundle>` | Keystore bundle with a per-entry SM3; restore verifies everything before writing anything |
+| `destroy <name>` | Overwrite and delete a key file |
+
+Exit status: `0` success, `1` error (including the TA refusing a tampered or
+foreign blob), `2` a business "no" (signature does not verify, bundle checksum mismatch).
+
+Each layer the daemon calls logs a tagged line once that call has succeeded —
+`[TEE]` (TA), `[TEE→PL]` (secure path into the FPGA), `[PL]` (FPGA core, with
+latency), `[NW]` (daemon only moves ciphertext blobs) — in `hsm/hsm-boot.log`.
+The board demo `demo/run.sh` runs the full business flow with those traces;
+`tools/demo_to_html.py` turns its output into a report
+(sample: `docs/demo/business_demo.html`).
+

@@ -134,12 +134,125 @@ SDFE_Encapsulate_MLKEM(ses, SDFE_MLKEM_768, ek, ek_len,
                        ss, &ss_len, ct, &ct_len);
 SDFE_Decapsulate_MLKEM(ses, kh, ct, ct_len, ss, &ss_len);   /* 按句柄 */
 
-SDFE_ImportKey(ses, /*slot*/ 3, key, 16);            /* 写入密钥仓——         */
-SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 此后不可读出          */
+SDFE_GenerateKey(ses, /*slot*/ 3, 16, blob, &blen); /* TA 生成 SM4 密钥装进 FPGA，交回 blob */
+SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 分组运算在 FPGA，密钥读不出来      */
+SDFE_LoadKey(ses, 3, blob, blen);                    /* 下次会话：同一把密钥重新装回      */
 ```
 
 构建并运行：`make -C service && ./service/sdf_demo`。
 接口参考：[docs/API.zh-CN.md](docs/API.zh-CN.md)。
+
+### 命令行：`hsmctl` 使用手册
+
+`hsmctl` 是一条命令一个业务动作的命令行工具（源码 [service/hsmctl.c](service/hsmctl.c)）。
+它和 `sdf_demo` 一样**只链接 `libsdfe`、不做任何密码运算**：加密、签名、杂凑、随机数都在
+密码机里完成（密钥在 TEE、运算在 FPGA），它只负责读写文件和 PKCS#7 填充。
+
+**构建**：`make -C service hsmctl`（板上那份由构建机交叉编译，配方见
+[boot/d7/build-apps-d7.sh](boot/d7/build-apps-d7.sh)，放在 SD 的 `hsm/hsmctl`）。
+
+**连接**：通过本机 UNIX socket 连板上的 `pqchsm_fpgad`，所以在板子上运行
+（`ssh root@<板子IP>`）。设备必须已就绪（`HSM_STATUS` 里 `READY=yes`）。
+
+**密钥库**：一个目录，一把密钥一个 `<名字>.key` 文件（权限 0600）。
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `HSM_KEYSTORE` | `./keystore` | 密钥库目录，不存在时自动创建 |
+
+密钥文件里**没有明文密钥**：对称密钥存的是 TA 用 KEK 包裹的 blob（60 / 76 字节）；
+后量子密钥存的是公钥 + TA 包裹的种子 blob。KEK 不出 TA，所以这些文件拷到哪里都只是
+密文，也只有这块板上的 TA 解得开。
+
+#### 命令一览
+
+| 命令 | 作用 | 在哪一层执行 |
+|---|---|---|
+| `hsmctl info` | 设备信息（各密码核版本）与密钥库位置 | — |
+| `hsmctl keygen <算法> <名字>` | 生成一把密钥，写入 `<名字>.key` | TEE 生成并包裹 → 安全通路 → FPGA |
+| `hsmctl list` | 列出密钥库：名字、算法、公钥长度、blob 长度、创建时间 | 本地 |
+| `hsmctl show <名字>` | 看一把密钥的文件内容（公钥摘要、SM3 指纹、blob 开头） | SM3 在 FPGA |
+| `hsmctl encrypt <名字> <明文> <密文>` | 对称加密：CBC + PKCS#7，IV 取自 FPGA 真随机数；输出 = 16 字节 IV ‖ 密文 | TEE 解包装载 → FPGA 逐分组 |
+| `hsmctl decrypt <名字> <密文> <明文>` | 对称解密，校验填充 | 同上 |
+| `hsmctl sign <名字> <文件> <签名>` | ML-DSA 签名（文件 ≤ 8 KB） | TEE 解开种子 → FPGA 现展开私钥签名、算完即擦 |
+| `hsmctl verify <名字> <文件> <签名>` | ML-DSA 验签（只用公钥） | FPGA |
+| `hsmctl encap <名字> <封装密文>` | ML-KEM 封装（发送方，只用公钥），打印共享密钥 | FPGA |
+| `hsmctl decap <名字> <封装密文>` | ML-KEM 解封装（接收方），打印共享密钥 | TEE 解开种子 → FPGA |
+| `hsmctl hash <文件>` | SM3 杂凑（文件 ≤ 16 KB） | FPGA |
+| `hsmctl random <字节数>` | 真随机数（1–256 字节） | FPGA TRNG |
+| `hsmctl backup <备份包>` | 把整个密钥库打成备份包，每项附 SM3 校验 | SM3 在 FPGA |
+| `hsmctl restore <备份包>` | 先整包校验 SM3，全部通过才写回；任一项不符则一个文件都不写 | SM3 在 FPGA |
+| `hsmctl destroy <名字>` | 销毁一把密钥（覆写后删除） | 本地 |
+
+`<算法>` 取值：
+
+| 取值 | 算法 | 用途 | 公钥 / blob |
+|---|---|---|---|
+| `sm4` | SM4（128 位） | 加解密 | — / 60 字节 |
+| `aes128` / `aes256` | AES-128 / AES-256 | 加解密 | — / 60、76 字节 |
+| `mldsa44` / `mldsa65` / `mldsa87` | ML-DSA（FIPS 204） | 签名验签 | 1312 / 1952 / 2592 字节；blob 76 字节 |
+| `mlkem512` / `mlkem768` / `mlkem1024` | ML-KEM（FIPS 203） | 密钥封装 | 800 / 1184 / 1568 字节；blob 108 字节 |
+
+#### 一个完整的业务流程
+
+```bash
+export HSM_KEYSTORE=/media/sd-mmcblk1p2/keys     # 放 SD 上，重启不丢
+
+hsmctl keygen sm4      data-key                  # 数据密钥
+hsmctl keygen mldsa65  signer                    # 签名密钥
+hsmctl keygen mlkem768 kem-key                   # 密钥封装密钥
+hsmctl list
+
+hsmctl encrypt data-key contract.txt contract.enc
+hsmctl decrypt data-key contract.enc contract.dec
+
+hsmctl sign   signer contract.txt contract.sig
+hsmctl verify signer contract.txt contract.sig  # 改过一个字节就会验不过
+
+hsmctl encap kem-key kem.ct                      # 发送方：得到共享密钥
+hsmctl decap kem-key kem.ct                      # 接收方：得到同一个共享密钥
+
+hsmctl backup keys.pqb                           # 备份
+hsmctl destroy signer
+hsmctl restore keys.pqb                          # 恢复后原签名照样验得过
+```
+
+#### 返回值与报错
+
+| 返回值 | 含义 |
+|---|---|
+| 0 | 成功 |
+| 1 | 出错：参数不对、文件读写失败、密码机拒绝（例如 blob 被改过、不是本机生成的密钥） |
+| 2 | 业务上的"否"：验签不通过；备份包校验不符而拒绝恢复 |
+
+常见报错：`TA 拒绝装载这把密钥` —— 密钥文件被改过，或者是别的设备生成的（KEK 不同）；
+`连不上密码机` —— daemon 没起来，看 `HSM_STATUS` 与 `hsm/hsm-boot.log`。
+
+#### 看见每一步在哪里执行
+
+daemon 在每一层调用成功返回后会写一行带标签的日志（`/media/sd-mmcblk1p2/hsm/hsm-boot.log`）：
+
+| 标签 | 含义 |
+|---|---|
+| `[TEE]` | OP-TEE 里的 TA 做的：生成 / 包裹 / 解开密钥 |
+| `[TEE→PL]` | TA 经 PTA → EL3 把密钥材料写进 FPGA（普通世界不经手） |
+| `[PL]` | FPGA 里的密码核做的运算，带时延 |
+| `[NW]` | 普通世界 daemon 自己做的：只搬密文 blob |
+
+```bash
+hsmctl sign signer contract.txt contract.sig; tail -6 /media/sd-mmcblk1p2/hsm/hsm-boot.log
+```
+
+板上的业务流程演示（`sh /media/sd-mmcblk1p2/demo/run.sh`）就是把上面这些命令按顺序跑一遍，
+每条命令后面附上它产生的日志。把演示输出转成网页：
+`python3 tools/demo_to_html.py <演示输出.txt> <输出.html>`，一份实测结果在
+[docs/demo/business_demo.html](docs/demo/business_demo.html)。
+
+#### 边界
+
+- 备份包只能在**同一块板**上恢复使用：blob 由这块板 TA 的 KEK 包裹，跨设备迁移（KEK 导出仪式）尚未实现。
+- 对称加解密每次命令都会经 TEE 把密钥装进 FPGA 一次（约 1.3 ms），之后每个分组都在 FPGA 里算，不再进 TEE。
+- 吞吐受寄存器访问路径限制（每次经 EL3），AES-256-CBC 实测约 0.9 MB/s；适合密钥类与小数据业务，不是大批量数据加密设备。
 
 ## 证据
 
