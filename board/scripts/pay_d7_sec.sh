@@ -52,7 +52,7 @@ cp /tmp/hsm_hwtest.txt $D/RESULT_d7_sechwtest.txt 2>/dev/null
 grep -E "密钥仓（槽 1）|SKIP|通过 [0-9]+" /tmp/hsm_hwtest.txt | tee -a $OUT
 grep -q "PASS  密钥仓（槽 1）：EL3 通用读写都拒" /tmp/hsm_hwtest.txt || rc_all=1
 grep -qE "失败 0，跳过 2" /tmp/hsm_hwtest.txt || rc_all=1
-# hsm_kem3 的 "done pass=N fail=M" 打在 **stdout**（进 $OUT），不在 /tmp/hsm_kem3.txt ——
+# hsm_kem3 的 "done pass=N fail=M" 打在 **stdout**（进 ${OUT}），不在 /tmp/hsm_kem3.txt ——
 # 第一版去后者里找，结果全过也判成失败（2026-10-10 上板踩到）。
 $D/hsm_kem3 > /tmp/d7_kem3.out 2>&1; echo "  hsm_kem3 rc=$?" | tee -a $OUT
 cat /tmp/d7_kem3.out >> $OUT
