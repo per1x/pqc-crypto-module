@@ -425,7 +425,11 @@ async def test_decode_viol_count(dut):
     dut._log.info(f"四类不命中 x 读写 = {n} 笔，计数器逐笔跟上，从机零次被访问")
 
 
-@cocotb.test()
+# ⚠️ 这条只在 Icarus 下跑：它往**顶层输出口**预置计数值，Verilator 会在下一次
+#    求值时用内部状态把输出口盖回去，预置永远不生效（开 --public-flat-rw 也没用，
+#    试过）。不跳过的话它在 Verilator 下必挂，像是"RTL 只在一个仿真器上有 bug"。
+#    记成 SKIP 而不是改判据：饱和边界照样由 rtl_sim.sh（Icarus 全套）把关。
+@cocotb.test(skip=(cocotb.SIM_NAME or "").lower().startswith("verilator"))
 async def test_decode_viol_saturates(dut):
     """计数器到 0xFFFF 就停住，不回绕
 
