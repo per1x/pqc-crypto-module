@@ -211,6 +211,21 @@ def main():
     # 的通用 PL_WR 转一手；这一半由白名单整槽排除来补。
     fail |= check_symkey(defs, cases)
 
+    # ---- PL TRNG 给 TA 的熵：同样无条件只认安全世界 ----
+    mt = re.search(r"case ZYNQMP_SIP_SVC_PQC_TRNG_WORD: \{.*?\n\t\}", cases, re.S)
+    if not mt:
+        print("  ✗ 找不到 PQC_TRNG_WORD 那条服务（TA 的密钥熵来源）")
+        fail = 1
+    elif not re.search(r"if \(!is_caller_secure\(flags\)\)\s*\{\s*"
+                       r"SMC_RET2\(handle,\s*\(uint64_t\)PQCHSM_TRNG_EWORLD", mt.group(0)):
+        print("  ✗ PQC_TRNG_WORD 没有无条件拒掉非安全调用方（这条路上流的是密钥熵）")
+        fail = 1
+    elif "PQCHSM_TRNG_EALARM" not in mt.group(0):
+        print("  ✗ PQC_TRNG_WORD 不看 ALARM —— 健康检测报警时还在交数据")
+        fail = 1
+    else:
+        print("  ✓ PQC_TRNG_WORD 无条件只认安全世界，ALARM 时拒交数据")
+
     # 空对照：同一套判据对着一个**没有**排除的样本必须报失败
     ctrl = defs.replace("if ((a == PQCHSM_MLKEM_SEED_DATA) || "
                         "(a == PQCHSM_MLDSA_SEED_DATA))", "if (0)")

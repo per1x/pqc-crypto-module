@@ -63,6 +63,8 @@ PTA_SRC = r'''// SPDX-License-Identifier: BSD-2-Clause
 #define ZYNQMP_SIP_SVC_PQC_SEED_WORD	0x8200ff15UL
 /* D7：对称金库（槽 1）的安全世界装载口，同样无条件只认安全世界 */
 #define ZYNQMP_SIP_SVC_PQC_SYMKEY	0x8200ff16UL
+/* PL TRNG 取一个字（TA 的密钥熵），同样无条件只认安全世界 */
+#define ZYNQMP_SIP_SVC_PQC_TRNG_WORD	0x8200ff17UL
 
 /* cmd 0：写一个种子字。
  *   params[0].value.a = 目标（0 = ML-KEM，1 = ML-DSA）
@@ -78,6 +80,12 @@ PTA_SRC = r'''// SPDX-License-Identifier: BSD-2-Clause
  *                       COMMIT 之后槽没变 VALID、或写满了还写，x0 都非 0）
  * ⚠️ 没有「读回密钥」的动作，也没有「锁槽」动作。 */
 #define PTA_PQCHSM_SEED_CMD_SYMKEY	1
+
+/* cmd 2：从 PL TRNG 取一个 32 位字（给 TA 的密钥熵）。
+ *   params[0].value.a = 出参：那个字
+ *   params[0].value.b = 出参：0 成功；9 未就绪（调用方稍后再试）；10 健康检测报警
+ * EL3 把字放在 x0 的低 32 位、第 32 位作有效标记（thread_smc 只带回 x0）。 */
+#define PTA_PQCHSM_SEED_CMD_TRNG	2
 
 static TEE_Result open_session(uint32_t param_types __unused,
 			       TEE_Param params[TEE_NUM_PARAMS] __unused,
@@ -102,6 +110,24 @@ static TEE_Result invoke_command(void *sess_ctx __unused, uint32_t cmd_id,
 				 TEE_Param params[TEE_NUM_PARAMS])
 {
 	unsigned long r;
+
+	if (cmd_id == PTA_PQCHSM_SEED_CMD_TRNG) {
+		if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_OUTPUT,
+						   TEE_PARAM_TYPE_NONE,
+						   TEE_PARAM_TYPE_NONE,
+						   TEE_PARAM_TYPE_NONE))
+			return TEE_ERROR_BAD_PARAMETERS;
+		r = thread_smc(ZYNQMP_SIP_SVC_PQC_TRNG_WORD, 0, 0, 0);
+		if ((r >> 32) == 1UL) {
+			params[0].value.a = (uint32_t)r;
+			params[0].value.b = 0U;
+		} else {
+			params[0].value.a = 0U;
+			params[0].value.b = (uint32_t)r;    /* 错误码，不含任何随机字节 */
+		}
+		r = 0;
+		return TEE_SUCCESS;
+	}
 
 	if (param_types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
 					   TEE_PARAM_TYPE_VALUE_OUTPUT,
@@ -186,6 +212,8 @@ def main():
             ('0x8200ff15', 'SMC 号不对'),
             ('0x8200ff16', 'D7 对称装载的 SMC 号不对'),
             ('PTA_PQCHSM_SEED_CMD_SYMKEY', '少了 D7 对称装载那条命令'),
+            ('0x8200ff17', 'PL TRNG 取熵的 SMC 号不对'),
+            ('PTA_PQCHSM_SEED_CMD_TRNG', '少了 PL TRNG 取熵那条命令'),
     ):
         if need not in body:
             sys.exit('自检失败：%s（%s）' % (need, why))

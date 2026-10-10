@@ -31,6 +31,7 @@
 	  { 0xb1, 0x27, 0x6e, 0x53, 0x0c, 0x8a, 0xf4, 0x11 } }
 #define PTA_PQCHSM_SEED_CMD_WORD	0
 #define PTA_PQCHSM_SEED_CMD_SYMKEY	1    /* D7：对称金库的一个动作 */
+#define PTA_PQCHSM_SEED_CMD_TRNG	2    /* PL TRNG 取一个字（密钥熵） */
 
 /* PTA_PQCHSM_SEED_CMD_SYMKEY 的动作编号 —— 与 BL31 的 PQCHSM_SYM_OP_* 同值 */
 #define SYM_OP_BEGIN	0U
@@ -383,6 +384,88 @@ void TA_CloseSessionEntryPoint(void *session_ctx __maybe_unused)
 
 
 /* ============================================================================
+ * 【密钥熵：OP-TEE 的软件 PRNG ⊕ PL 的 TRNG，PL 那一路取不到就不生成】
+ * ============================================================================
+ * 种子与对称密钥是这台机器上最要紧的随机数。以前它们只来自 TEE_GenerateRandom，
+ * 也就是 OP-TEE 的软件 Fortuna —— 而在这个平台上它的种子只有"开机后的毫秒数"
+ * 加计时器抖动（optee_os core/tee/tee_cryp_utl.c 的弱默认 plat_rng_init，
+ * 平台没有覆盖）。PL 里那个做过 SP 800-90B 实测的环振 TRNG 反而没用上。
+ *
+ * 现在：key = SHAKE256("pqchsm/key-entropy/v1" ‖ PRNG(n) ‖ TRNG(n))。
+ *   · 两路都进哈希：任何一路好，输出就好；单独一路被预测也推不出输出；
+ *   · **PL 那一路取不到（未就绪超时 / 健康检测报警 / PTA 打不开）就失败**，
+ *     不悄悄退回只用 PRNG —— 退回去等于把这次修的问题原样放回来，而且不报错。
+ * 路径：TA → pqchsm_seed.pta（S-EL1）→ SMC 0x8200ff17 → EL3 → PL trng_axi。 */
+static TEE_Result trng_fill(uint8_t *out, size_t len)
+{
+	static const TEE_UUID pta_uuid = PTA_PQCHSM_SEED_UUID;
+	TEE_TASessionHandle sess = TEE_HANDLE_NULL;
+	TEE_Param  p[TEE_NUM_PARAMS];
+	uint32_t   eorig = 0, w = 0, tries = 0;
+	size_t     got = 0, k;
+	TEE_Result res;
+
+	res = TEE_OpenTASession(&pta_uuid, TEE_TIMEOUT_INFINITE, 0, NULL,
+	                        &sess, &eorig);
+	if (res != TEE_SUCCESS)
+		return res;
+	while (got < len) {
+		memset(p, 0, sizeof(p));
+		res = TEE_InvokeTACommand(sess, TEE_TIMEOUT_INFINITE,
+		                          PTA_PQCHSM_SEED_CMD_TRNG,
+		                          TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_OUTPUT,
+		                                          TEE_PARAM_TYPE_NONE,
+		                                          TEE_PARAM_TYPE_NONE,
+		                                          TEE_PARAM_TYPE_NONE),
+		                          p, &eorig);
+		if (res != TEE_SUCCESS)
+			break;
+		if (p[0].value.b == 9U && tries++ < 2000U) {   /* 未就绪：睡 1 ms 再试，最多约 2 s */
+			TEE_Wait(1);
+			continue;
+		}
+		if (p[0].value.b != 0U) {                      /* 报警 / 超时：拒绝 */
+			res = TEE_ERROR_NO_DATA;
+			break;
+		}
+		w = p[0].value.a;
+		for (k = 0; k < 4U && got < len; k++)
+			out[got++] = (uint8_t)(w >> (8U * k));
+		w = 0;
+		p[0].value.a = 0;
+	}
+	TEE_CloseTASession(sess);
+	if (res != TEE_SUCCESS)
+		pqchsm_bzero(out, len);
+	return res;
+}
+
+static TEE_Result ta_key_entropy(uint8_t *out, size_t len)
+{
+	static const uint8_t dom[] = "pqchsm/key-entropy/v1";
+	uint8_t a[64], b[64];
+	pqchsm_sponge_t sp;
+	TEE_Result res;
+
+	if (len > sizeof(a))
+		return TEE_ERROR_BAD_PARAMETERS;
+	pqchsm_randombytes(a, len);                 /* OP-TEE 软件 PRNG */
+	res = trng_fill(b, len);                    /* PL 环振 TRNG */
+	if (res == TEE_SUCCESS) {
+		pqchsm_sponge_init(&sp, PQCHSM_SHAKE256_RATE);
+		pqchsm_sponge_absorb(&sp, dom, sizeof(dom) - 1U);
+		pqchsm_sponge_absorb(&sp, a, len);
+		pqchsm_sponge_absorb(&sp, b, len);
+		pqchsm_sponge_pad(&sp, PQCHSM_DOMAIN_SHAKE);
+		pqchsm_sponge_squeeze(&sp, out, len);
+		pqchsm_bzero(&sp, sizeof(sp));
+	}
+	pqchsm_bzero(a, sizeof(a));
+	pqchsm_bzero(b, sizeof(b));
+	return res;
+}
+
+/* ============================================================================
  * 【CMD_SEED_TO_PL：种子由 TA 生成，经安全世界送进 PL】
  * ============================================================================
  * 这是批 2 的落点，也是 CODE-1 的终局：种子的**保管方**从 EL3 上移到 TA，
@@ -499,8 +582,9 @@ static TEE_Result seed_new_or_to_pl(uint32_t param_types, TEE_Param params[4],
 		return TEE_ERROR_BAD_PARAMETERS;
 	}
 
-	pqchsm_randombytes(seed, nbytes);
-	res = seed_push(tgt, seed, words);
+	res = ta_key_entropy(seed, nbytes);         /* PRNG ⊕ PL TRNG，PL 取不到就失败 */
+	if (res == TEE_SUCCESS)
+		res = seed_push(tgt, seed, words);
 
 	if ((res == TEE_SUCCESS) && want_blob) {
 		size_t blen = 0;
@@ -672,7 +756,11 @@ static TEE_Result cmd_symkey_new(uint32_t types, TEE_Param params[4])
 		return TEE_ERROR_SHORT_BUFFER;
 	}
 
-	pqchsm_randombytes(key, len);
+	res = ta_key_entropy(key, len);             /* PRNG ⊕ PL TRNG，PL 取不到就失败 */
+	if (res != TEE_SUCCESS) {
+		pqchsm_bzero(key, sizeof(key));
+		return res;
+	}
 	/* 先包、后装：包不成就不装，免得金库里躺着一把调用方永远拿不回 blob 的密钥 */
 	if (ta_wrap_seal(g_kek, (const uint8_t *)TA_SYMKEY_AAD,
 	                 sizeof(TA_SYMKEY_AAD) - 1U, key, len,
