@@ -684,6 +684,7 @@ static void test_anchor_provider(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	snprintf(g_path, sizeof(g_path), "/tmp/pqchsm_ks_%d.bin", (int)getpid());
 
 	test_roundtrip();

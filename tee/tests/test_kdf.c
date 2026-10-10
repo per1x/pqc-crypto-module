@@ -12,6 +12,9 @@
 
 #include "ta_fips202.h"
 #include "ta_kdf.h"
+/* 随机对拍那一段用 pqchsm_randombytes()。以前靠隐式声明混过去 ——
+ * C99 起那是错误，新编译器直接拒编。 */
+#include "ta_random.h"
 
 /* ---- KAT（OpenSSL 3.6.3 生成）---- */
 static const uint8_t kat1_key[32] = "0123456789abcdef0123456789abcdef";

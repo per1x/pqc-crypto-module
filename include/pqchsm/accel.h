@@ -128,7 +128,7 @@ const accel_transport_t *accel_transport_mmap(void);
 void                     accel_set_transport(const accel_transport_t *t);
 const accel_transport_t *accel_get_transport(void);
 
-/* 经寄存器接口实现的 pqc_backend_t —— 与 pqc_backend_liboqs() 可互换 */
+/* 经寄存器接口实现的 pqc_backend_t —— 与 pqc_backend_native() 可互换 */
 const pqc_backend_t *pqc_backend_accel(void);
 
 /* 直接跑一次 NTT（给 RTL 对拍用；正常密码路径不经这里）。

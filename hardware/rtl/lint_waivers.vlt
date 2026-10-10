@@ -252,3 +252,21 @@ lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/pack.v" -match "*'in_val
 // ML-DSA keygen：power2round 的 t₀（a0）取值域是 (−2^(D−1), 2^(D−1)]，
 // 13 位就够；算子输出给满 32 位，高 19 位是符号扩展，打包只取低 13 位。
 lint_off -rule UNUSEDSIGNAL -file "*/hardware/rtl/mldsa/keygen.v" -match "*'p2r_t0'*"
+
+// ---- SYNCASYNCNET：派生的工作复位 rst_work_q ----
+//
+// ML-KEM 三个核在擦除期间要把自己按在复位里（寄存器里的中间态一拍带走，
+// BRAM 另有逐地址擦除机）。那个复位是**寄存器**输出（不是 "rst_n && !wipe" 那样
+// 组合出来的 —— 反引号在 .vlt 里会被当预处理指令，所以这里不用它写代码；
+// 组合异步复位有毛刺风险，Vivado 会报 DRC，见 trng_top.v 里
+// cond_rst_n 的同一条规矩）。
+//
+// ⚠️ 注释里**不要以工具名开头**：`// <工具名> ...` 会被 .vlt 的词法器当成
+// 元注释指令，报 "syntax error, unexpected '/'"（这条踩过一次）。
+// 那条规则说的是"这个信号既在时钟块里被赋值、又用作异步
+// 复位"。对一个**有意做出来的**派生复位而言这正是它的定义 —— 板级顶层那个
+// 同步后的 rst_n 也是同一种东西（zu3eg_hsm_top.v:344，早于本次改动）。
+// 按信号名精确豁免，不整文件关掉：新出现的同类告警仍然会被抓到。
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/mlkem/keygen.v" -match "*'*rst_work_q'*"
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/mlkem/encaps.v" -match "*'*rst_work_q'*"
+lint_off -rule SYNCASYNCNET -file "*/hardware/rtl/mlkem/decaps.v" -match "*'*rst_work_q'*"

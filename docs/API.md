@@ -194,14 +194,15 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 | `CKM_AES_GCM` | AEAD DEM over the KEM shared secret (`C_Encrypt`/`C_Decrypt`) | Software GCM; KEM half in hardware |
 | `CKM_AES_ECB` / `CKM_AES_CBC` | `sym_axi` AES-128/256 | **Hardware** |
 | `CKM_SHA3_256` | `sha3_core` (currently reached only through ML-KEM) | Needs a dedicated path |
-| `CKM_ML_DSA` (0x1D) | The algorithm now has a full core, wired to AXI, in the bitstream, and verified byte-for-byte against ACVP **on the board** — but PKCS#11 still calls liboqs | ⚠️ See below |
+| `CKM_ML_DSA` (0x1D) | The algorithm now has a full core, wired to AXI, in the bitstream, and verified byte-for-byte against ACVP **on the board** — but PKCS#11 still calls the software backend | ⚠️ See below |
 | SM4 / SM3 | No standard mechanism code exists | Vendor-defined codes |
 
 > **The `CKM_ML_DSA` row is easy to misread as "hardware". It is not.** Two
 > separate facts: `mldsa_axi` is a real core, verified against ACVP on the board
 > (see `board/logs/`), and it is reachable **through the SDF path**
 > (libsdfe → daemon → EL3 → core). But the **PKCS#11 module has no transport to
-> that hardware** — it calls liboqs. This is not "just a backend switch" away:
+> that hardware** — it calls the software backend (mlkem-native / mldsa-native,
+> `pqc_backend_native`). This is not "just a backend switch" away:
 > `src/hal/` implements only the NTT and Keccak primitives, not a whole-algorithm
 > hardware transport. The correct
 > phrasing is "the algorithm is verified in hardware, while PKCS#11 runs in

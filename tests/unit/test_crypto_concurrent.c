@@ -315,6 +315,7 @@ static void test_selftest_wait(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	test_rng_serialization();
 	test_selftest_gate();
 	test_selftest_wait();

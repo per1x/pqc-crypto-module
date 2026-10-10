@@ -141,6 +141,7 @@ static void test_sig(pqc_alg_t alg)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	TCASE("参数校验");
 	uint8_t dummy[8] = { 0 };
 	CHECK_EQ_INT(pqc_keypair(PQC_ALG_NONE, dummy, dummy), PQC_ERR_BAD_ARG);

@@ -1,0 +1,31 @@
+=== 批 2：种子保管上移 TA + EL3 世界分级（2026-08-26 上板）===
+
+--- 启动槽（判据：重启后仍是 6）---
+--- OP-TEE ---
+[    3.763186] optee: probing for conduit method from DT.
+[    3.768075] optee: revision 3.8 (af141c61)
+[    3.768446] optee: initialized driver
+--- TA（开机由 hsm-boot.sh 从 SD 复制到 initramfs）---
+total 144
+-rwxr-xr-x    1 root     root        146384 Aug 18 20:24 4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3.ta
+a70feb098db9f367a6ab9e19d5386292  /lib/optee_armtz/4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3.ta
+--- daemon 自检（两面都验）---
+[20:22:44] 自检通过：TRNG VERSION = 0x00010000，EL3 通路可用
+[20:22:44] 自检：普通世界触发 EL3 种子装载已被拒（errno=5）—— 这是批 2 期望的形态
+[20:22:44] 自检通过：TA → PTA → EL3 → PL 这条种子路通了（world=1） —— 自检那份已发 SEED_CLR 作废
+--- ta_probe ---
+        并且执行到了自己的 open-session 入口** —— 是它主动拒的。
+✓ [2b] TEEC_OpenSession(LOGIN_USER) —— **TA 已加载并建立实例**
+✓ [3] CMD_GET_INFO —— TA 里的代码执行过并返回：
+        version  = 0x00010000（编译进 TA 的 PQCHSM_TA_PROTO_VERSION）
+        features = 0x0000000c
+✓ 版本与 host 一致 —— 板上跑的就是这次编出来的那份 TA
+
+ta_probe: 通过 —— **TEE 主线的前置死结不成立，OP-TEE TA 在这块板上跑通了**
+--- 镜像 ---
+0ea6e4437698abc7b44b3a235b49ce78  /media/sd-mmcblk1p1/BOOT.BIN
+bb3402ea4efae7e1062a65632fe684b4  /media/sd-mmcblk1p1/BOOT0001.BIN
+8d42d1a58b62c8ca95501bf486fbb45d  /media/sd-mmcblk1p1/BOOT0002.BIN
+f045a64b60ad644d58e40db1d612613a  /media/sd-mmcblk1p1/BOOT0006.BIN
+bb3402ea4efae7e1062a65632fe684b4  /media/sd-mmcblk1p1/BOOT0007.BIN
+1bd51b5dcb81d3b5680f2e5776507d4d  /media/sd-mmcblk1p2/hsm/pqchsm_fpgad

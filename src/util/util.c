@@ -34,10 +34,20 @@ int pqc_random_bytes(uint8_t *out, size_t n)
 	if (!out || n == 0 || n > INT_MAX) {
 		return -1;
 	}
-	/* 装了硬件熵源就走它，**并且不回退**：取不到就返回错误，让上层决定
-	 * 停机还是降级。静默回退到 OpenSSL 会让"熵来自硬件"变成一句假话，
-	 * 而调用方无从知道。没装 transport 时照旧走软件源。 */
-	if (hwrng_available()) {
+	/* 装了**真硬件**熵源就走它，**并且不回退**：取不到就返回错误，让上层
+	 * 决定停机还是降级。静默回退到 OpenSSL 会让"熵来自硬件"变成一句假话，
+	 * 而调用方无从知道。没装硬件源时照旧走软件源。
+	 *
+	 * ⚠️ **判据是 hwrng_is_hardware()，不是 hwrng_available()。**（PS-25）
+	 * 两者的差别正好落在最坏的地方：`hwrng_available()` 对**桩** transport
+	 * 也返回真（它只问"装了没有"），而桩的字节来自软件。于是老写法在装了
+	 * 桩的进程里会：
+	 *   ① 绕开 OpenSSL 的 RAND_bytes，改用桩那条**没有经过任何熵源评估**的
+	 *      路径去产密钥材料；
+	 *   ② 同时让上层"我们走的是硬件熵源"这句话看起来成立。
+	 * 两条叠起来就是"以为更强、其实更弱，而且没人看得出来"。
+	 * is_hardware 是 transport 自己如实填的那一位（见 hwrng.h），桩填 0。 */
+	if (hwrng_is_hardware()) {
 		return hwrng_bytes(out, n) == HWRNG_OK ? 0 : -1;
 	}
 	return RAND_bytes(out, (int)n) == 1 ? 0 : -1;

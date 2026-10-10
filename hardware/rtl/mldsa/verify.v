@@ -30,6 +30,12 @@ module mldsa_verify (
     input  wire        clk,
     input  wire        rst_n,
 
+    // ---- 擦除广播（engine 里那一台擦除机，见 mldsa_engine.v 文件头）----
+    // wipe 期间本核在复位里，下面每一块 ram_dp 的 B 口被强制成
+    // addr=wipe_addr、we=1、din=0 —— BRAM 不因复位清零，必须真写一遍。
+    input  wire        wipe,
+    input  wire [12:0] wipe_addr,
+
     input  wire [1:0]  pset,          // 0=44 1=65 2=87，start 那一拍锁存
     input  wire        start,
 
@@ -196,44 +202,44 @@ module mldsa_verify (
     reg  [12:0] pk_raddr;  wire [7:0] pk_rdata;
     ram_dp #(.DW(8), .AW(13)) u_pk (
         .clk(clk), .a_we(pk_wr_en), .a_addr(pk_wr_addr), .a_din(pk_wr_data),
-        .a_dout(), .b_we(1'b0), .b_addr(pk_raddr), .b_din(8'd0), .b_dout(pk_rdata));
+        .a_dout(), .b_we(wipe), .b_addr(wipe ? wipe_addr[12:0] : (pk_raddr)), .b_din(wipe ? 8'd0 : (8'd0)), .b_dout(pk_rdata));
     reg  [12:0] sig_raddr; wire [7:0] sig_rdata;
     ram_dp #(.DW(8), .AW(13)) u_sig (
         .clk(clk), .a_we(sig_wr_en), .a_addr(sig_wr_addr), .a_din(sig_wr_data),
-        .a_dout(), .b_we(1'b0), .b_addr(sig_raddr), .b_din(8'd0), .b_dout(sig_rdata));
+        .a_dout(), .b_we(wipe), .b_addr(wipe ? wipe_addr[12:0] : (sig_raddr)), .b_din(wipe ? 8'd0 : (8'd0)), .b_dout(sig_rdata));
     reg  [12:0] msg_raddr; wire [7:0] msg_rdata;
     ram_dp #(.DW(8), .AW(13)) u_msg (
         .clk(clk), .a_we(msg_wr_en), .a_addr(msg_wr_addr), .a_din(msg_wr_data),
-        .a_dout(), .b_we(1'b0), .b_addr(msg_raddr), .b_din(8'd0), .b_dout(msg_rdata));
+        .a_dout(), .b_we(wipe), .b_addr(wipe ? wipe_addr[12:0] : (msg_raddr)), .b_din(wipe ? 8'd0 : (8'd0)), .b_dout(msg_rdata));
     reg  [7:0]  ctx_raddr; wire [7:0] ctx_rdata;
     ram_dp #(.DW(8), .AW(8)) u_ctx (
         .clk(clk), .a_we(ctx_wr_en), .a_addr(ctx_wr_addr), .a_din(ctx_wr_data),
-        .a_dout(), .b_we(1'b0), .b_addr(ctx_raddr), .b_din(8'd0), .b_dout(ctx_rdata));
+        .a_dout(), .b_we(wipe), .b_addr(wipe ? wipe_addr[7:0] : (ctx_raddr)), .b_din(wipe ? 8'd0 : (8'd0)), .b_dout(ctx_rdata));
 
     // ================= 系数存储 =================
     reg         z_we;  reg [10:0] z_waddr;  reg signed [31:0] z_din;  reg [10:0] z_raddr;
     wire signed [31:0] z_dout;
     ram_dp #(.DW(32), .AW(11)) u_z (
         .clk(clk), .a_we(z_we), .a_addr(z_waddr), .a_din(z_din), .a_dout(),
-        .b_we(1'b0), .b_addr(z_raddr), .b_din(32'd0), .b_dout(z_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[10:0] : (z_raddr)), .b_din(wipe ? 32'd0 : (32'd0)), .b_dout(z_dout));
     reg         t1_we; reg [10:0] t1_waddr; reg signed [31:0] t1_din; reg [10:0] t1_raddr;
     wire signed [31:0] t1_dout;
     ram_dp #(.DW(32), .AW(11)) u_t1 (
         .clk(clk), .a_we(t1_we), .a_addr(t1_waddr), .a_din(t1_din), .a_dout(),
-        .b_we(1'b0), .b_addr(t1_raddr), .b_din(32'd0), .b_dout(t1_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[10:0] : (t1_raddr)), .b_din(wipe ? 32'd0 : (32'd0)), .b_dout(t1_dout));
     // hint：k×256 位
     reg         h_we;  reg [10:0] h_waddr;  reg h_din;  reg [10:0] h_raddr;
     wire        h_dout;
     ram_dp #(.DW(1), .AW(11)) u_h (
         .clk(clk), .a_we(h_we), .a_addr(h_waddr), .a_din(h_din), .a_dout(),
-        .b_we(1'b0), .b_addr(h_raddr), .b_din(1'b0), .b_dout(h_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[10:0] : (h_raddr)), .b_din(wipe ? 1'd0 : (1'b0)), .b_dout(h_dout));
 
     // c 存储：256×32（③ 存 c，随后就地 NTT 成 ĉ）
     reg         c_we;  reg [7:0] c_waddr;  reg signed [31:0] c_din;  reg [7:0] c_raddr;
     wire signed [31:0] c_dout;
     ram_dp #(.DW(32), .AW(8)) u_c (
         .clk(clk), .a_we(c_we), .a_addr(c_waddr), .a_din(c_din), .a_dout(),
-        .b_we(1'b0), .b_addr(c_raddr), .b_din(32'd0), .b_dout(c_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[7:0] : (c_raddr)), .b_din(wipe ? 32'd0 : (32'd0)), .b_dout(c_dout));
 
     assign dbg_coef =
           (dbg_sel[6:3] == 4'd0) ? z_dout
@@ -291,13 +297,13 @@ module mldsa_verify (
     wire signed [31:0] ac_dout;
     ram_dp #(.DW(32), .AW(8)) u_acc (
         .clk(clk), .a_we(ac_we), .a_addr(ac_waddr), .a_din(ac_din), .a_dout(),
-        .b_we(1'b0), .b_addr(ac_raddr), .b_din(32'd0), .b_dout(ac_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[7:0] : (ac_raddr)), .b_din(wipe ? 32'd0 : (32'd0)), .b_dout(ac_dout));
     reg         wp_we; reg [9:0] wp_waddr; reg [7:0] wp_din; reg [9:0] wp_raddr;
     wire [7:0]  wp_dout;
     reg  [9:0]  wp_ptr;
     ram_dp #(.DW(8), .AW(10)) u_wp (
         .clk(clk), .a_we(wp_we), .a_addr(wp_waddr), .a_din(wp_din), .a_dout(),
-        .b_we(1'b0), .b_addr(wp_raddr), .b_din(8'd0), .b_dout(wp_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[9:0] : (wp_raddr)), .b_din(wipe ? 8'd0 : (8'd0)), .b_dout(wp_dout));
 
     // ---- NTT 核（③：c/z/t₁ 三组正变换，就地覆盖）----
     reg         nt_start, nt_inv, nt_we;

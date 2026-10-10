@@ -198,13 +198,14 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 的机制在这里 */
 | `CKM_AES_ECB` / `CKM_AES_CBC` | `sym_axi` 的 AES-128/256 | **硬件** |
 | `CKM_AES_GCM` | OpenSSL（DEM 用） | 软件，见下 |
 | `CKM_SHA3_256` | `sha3_core`（目前只能经 ML-KEM 到达） | 需要一条专用通路 |
-| `CKM_ML_DSA`（0x1D） | 算法本身**已有整核并上板验过**，但 PKCS#11 这一侧仍走 liboqs | ⚠️ 见下 |
+| `CKM_ML_DSA`（0x1D） | 算法本身**已有整核并上板验过**，但 PKCS#11 这一侧仍走软件后端 | ⚠️ 见下 |
 | SM4 / SM3 | 不存在标准机制码 | 厂商自定义码 |
 
 ⚠️ **`CKM_ML_DSA` 这一行容易被读成"硬件"，它不是。** 两件事要分开：
 `mldsa_axi` 是真核、已在板上逐字节对上 ACVP（board/logs/），**经 SDF 那条路
 （libsdfe → daemon → EL3 → 核）可达**；但 **PKCS#11 模块没有走到硬件的传输层**
-——它调的是 liboqs。这不是"换个后端就行"：`src/hal/` 现有的 accel 只实现了
+——它调的是软件后端（mlkem-native / mldsa-native，`pqc_backend_native`）。
+这不是"换个后端就行"：`src/hal/` 现有的 accel 只实现了
 NTT 与 Keccak 两个算子，整算法的硬件 transport 尚不存在。
 所以正确说法是"**算法在硬件上验过，PKCS#11 走的是软件**"，而不是二选一。
 

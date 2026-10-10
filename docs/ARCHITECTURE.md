@@ -140,7 +140,7 @@ passes lint rather than being excluded from it.)
 | Directory | Modules | Contents |
 |---|---|---|
 | `hardware/rtl/mlkem/` | 27 | NTT, base multiply, Montgomery/Barrett reduction, sampling, compression, encode/decode, and whole KeyGen / Encaps / Decaps cores |
-| `hardware/rtl/mldsa/` | 13 | ML-DSA operators — NTT, rounding, hints, sampling. Verified, but not chained into whole cores |
+| `hardware/rtl/mldsa/` | 16 | ML-DSA — NTT, rounding, hints, sampling, **and whole KeyGen / Sign / Verify cores** behind the shared `mldsa_engine`. Verified byte-for-byte against ACVP on silicon (registry DOC-1: this row used to say "not chained into whole cores", which stopped being true and contradicted the board logs) |
 | `hardware/rtl/keccak/` | 2 | `keccak_f1600` permutation and the `sha3_core` sponge (G / PRF / XOF / H share one instance) |
 | `hardware/rtl/sym/` | 6 | AES-128/256, SM4, SM3 |
 | `hardware/rtl/trng/` | 6 | Ring-oscillator source, RCT/APT health tests, SHA-3 conditioning, erasable FIFO, AXI wrapper |

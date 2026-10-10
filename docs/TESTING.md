@@ -41,6 +41,13 @@ repository.
 | Remote call (**mTLS**) | full nine-section demo from another machine (KEM / ML-DSA at all three parameter sets / four block modes / SM3 / stale-handle counter-proof); **a client certificate from a different CA is refused**, measured against the real board | `tools/demo_remote.sh`, `service/sdf_demo.c` |
 | The mTLS layer itself | 4 / 4 — one positive plus three negatives (foreign CA / no client certificate / CN not in the ACL). **The negatives are the point**; "it connects" only proves the configuration is not broken | `tools/tls_regress.sh` |
 | Two P0 concurrency defects | each is demonstrably **red before the fix**: liboqs RNG cross-talk 849/3000 times, self-test gate inconsistent 852 862 times | `tests/unit/test_crypto_concurrent.c` |
+
+> ⚠️ The "liboqs RNG cross-talk" figure is **historical**: the liboqs
+> dependency has since been removed entirely (the vendored
+> mlkem-native / mldsa-native is used instead, see
+> `src/crypto/pqc_native.c`), taking the process-global RNG and its
+> lock with it. The test stays — the property it checks (no cross-talk
+> between the two paths under concurrency) must still hold.
 | Session-close ABA | before the fix, four threads closing one handle succeeded 311 times (should be 300) and a bystander's session was wiped twice | `tests/unit/test_slot_concurrent.c` |
 | Keystore fail-closed | a corrupt or unreadable keystore makes the daemon refuse to start **without touching the file** | `tools/daemon_failclosed.sh` |
 | Security state survives power loss | PIN failure counts, lockout and unlock are **on disk without any save call** (simulated pull-the-plug, then reload) | `tests/unit/test_keystore.c` |
@@ -199,6 +206,12 @@ decode, the erase machine and the TRNG sampling FIFO:
   109.2 µs (8192 cycles @ 75 MHz; the difference is polling overhead), and
   *(that measurement predates the on-chip key vault; the wipe now covers a
   third, 16 KB block and takes 16384 cycles ≈ 218 µs — re-measurement pending)*
+  > **⚠️ Both figures are stale.** The vault is 16 slots / 64 KB, so the wipe
+  > counter is 16 bits and this layer runs **65536 cycles** (≈ 874 µs at
+  > 75 MHz); since batch 1 the three ML-KEM cores have their own erase
+  > machines on top. `REGISTERS.md` is the single source for that number.
+  > The measurements above are kept as the record of what was actually timed,
+  > **on an older bitstream** — re-measurement is board-pending.
   afterwards `OUT_LEN = IN_PTR = 0` with the same input reproducing 2432
   identical bytes.
 - *TRNG*, 3/3 — `DROPS = 0` with `BLOCKS = 17892` absorbed while nobody was

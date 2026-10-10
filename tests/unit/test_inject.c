@@ -48,6 +48,7 @@ static hsm_session_t provision(hsm_token_t *tok, hsm_slot_id_t slot)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	hsm_token_t *tok = hsm_token_new(3);
 	CHECK(tok != NULL);
 

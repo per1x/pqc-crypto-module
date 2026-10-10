@@ -1,0 +1,35 @@
+载入送检位流 zu3eg_hsm.bit（SECURE_ONLY=1）
+cp: '/lib/firmware/zu3eg_hsm.bit' and '/lib/firmware/zu3eg_hsm.bit' are the same file
+Time taken to load BIN is 2695.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+fpga_manager state = operating
+
+=== ① 形态自证：风扇口该读得到，TRNG 该读回 0 ===
+  FAN(0x80050000)=0x00010000  TRNG_VER(0x80000020)=0x00000000
+  ✓ 是送检形态（普通世界读 TRNG VERSION 回 0）
+
+=== ② 新放宽出来的窗口 0x40/0x44 对普通世界也必须读回 0 ===
+  ✓ 0x80030040 = 0x00000000
+  ✓ 0x80030044 = 0x00000000
+  ✓ 0x80060040 = 0x00000000
+  ✓ 0x80060044 = 0x00000000
+  ✓ 0x80030000 = 0x00000000
+  ✓ 0x80060000 = 0x00000000
+  ✓ 0x8003003C = 0x00000000
+  ✓ 0x80060038 = 0x00000000
+  ✓ 含打包口在内，整段对普通世界都是 0
+
+=== ③ 正向：安全世界经 EL3 仍然用得了 ===
+done pass=20 fail=0
+  hsm_kem3 rc=0
+  hsm_kem3 通过条数 0
+  hsm_kem3 失败条数 0
+
+=== ④ 反向：hsm_secneg（普通世界扫地址）===
+  hsm_secneg rc=0
+
+=== 收尾：装回演示位流 ===
+cp: '/lib/firmware/zu3eg_hsm_dev.bit' and '/lib/firmware/zu3eg_hsm_dev.bit' are the same file
+Time taken to load BIN is 2696.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+  daemon [1243 ]  TRNG_VER=0x00010000

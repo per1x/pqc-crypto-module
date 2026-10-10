@@ -52,6 +52,18 @@ module mlkem_keygen #(
     input  wire        clk,
     input  wire        rst_n,
 
+    // ---- 擦除（登记表 Z-03：核内 BRAM 以前**根本没有擦除口**）----
+    // zeroize 是脉冲：拉起就进擦除态，把核内每一块 ram_dp 逐地址写 0，
+    // 期间 wiping=1、本核按在复位里（寄存器里的中间态一并清掉）。
+    // **逐地址写，不是靠复位** —— ram_dp 是 BRAM 推断模板，存储阵列没有
+    // 复位口（那个文件头写着这一条），靠复位"擦"等于没擦。
+    //
+    // 上一版这里什么都没有：每跑完一次 KeyGen/Decaps，ŝ、ê、多项式银行里
+    // 的私钥系数就原样留在 BRAM 里，直到下一次运算碰巧覆盖同一个地址。
+    // 而 mlkem_axi 那一层的 ZEROIZE 只擦它自己的输入输出缓冲，报告"擦完了"。
+    input  wire        zeroize,
+    output wire        wiping,
+
     // ---- 参数与种子 ----
     input  wire [1:0]  param_set,   // 0=512 1=768 2=1024
     input  wire [255:0] d_in,       // KeyGen_internal 的 d
@@ -93,10 +105,57 @@ module mlkem_keygen #(
     reg  signed [15:0] ba_din, bb_din;
     wire signed [15:0] ba_dout, bb_dout;
 
+
+    // ================= 擦除机 =================
+    // 上升沿启动（zeroize 是脉冲，但上层可能给电平，两种都吃得下）。
+    // 计数器宽度取本核最大的一块存储；比它小的块地址取低位，于是被写好几遍
+    // —— 写几遍 0 和写一遍没有区别，为此再加计数器不值得。
+    reg              wipe_run;
+    reg  [11:0]  wipe_addr;
+    reg              zero_d;
+    wire             wipe = wipe_run;
+
+    assign wiping = wipe_run;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wipe_run <= 1'b0; wipe_addr <= 12'd0; zero_d <= 1'b0;
+        end else begin
+            zero_d <= zeroize;
+            if (zeroize && !zero_d) begin
+                wipe_run  <= 1'b1;
+                wipe_addr <= 12'd0;
+            end else if (wipe_run) begin
+                // 最后一个地址那一拍 b_we 仍为高（组合自 wipe），
+                // 所以顶到头的那一格也真的被写了 0。
+                if (&wipe_addr) wipe_run <= 1'b0;
+                else            wipe_addr <= wipe_addr + 12'd1;
+            end
+        end
+    end
+
+    // 本核的工作复位：擦除期间按在复位里，寄存器中的中间态一拍带走。
+    // BRAM 交给上面那台擦除机（复位擦不掉它）。
+    //
+    // ⚠️ **单独用一个寄存器产生它，而不是 `rst_n && !wipe_run`。** 两条理由：
+    //  ① 组合出来的异步复位网络有毛刺风险，Vivado 会就此报 DRC，Verilator
+    //     报 SYNCASYNCNET（wipe_run 既被同步读、又进了异步复位网络）。
+    //     这与 trng_top.v 里 cond_rst_n 的处理是同一条规矩。
+    //  ② 用 `zeroize || wipe_run` 而不是只看 wipe_run：zeroize 那一拍
+    //     wipe_run 还没起来（它是同一个时钟沿赋的值），只看 wipe_run 的话
+    //     核会多跑一拍 —— 那一拍它可能正往 BRAM 里写，与刚开始的擦除赛跑。
+    //     现在复位与擦除**同一拍**生效。
+    reg rst_work_q;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) rst_work_q <= 1'b0;
+        else        rst_work_q <= !(zeroize || wipe_run);
+    end
+    wire rst_work_n = rst_work_q;
+
     ram_dp #(.DW(16), .AW(12)) u_bank (
         .clk(clk),
         .a_we(ba_we), .a_addr(ba_addr), .a_din(ba_din), .a_dout(ba_dout),
-        .b_we(bb_we), .b_addr(bb_addr), .b_din(bb_din), .b_dout(bb_dout));
+        .b_we(wipe | (bb_we)), .b_addr(wipe ? wipe_addr[11:0] : (bb_addr)), .b_din(wipe ? 16'd0 : (bb_din)), .b_dout(bb_dout));
 
     // ================= 状态机 =================
     localparam [5:0]
@@ -150,9 +209,9 @@ module mlkem_keygen #(
     wire [7:0]  sha_out_data;
 
     sha3_core u_sha3 (
-        .clk(clk), .rst_n(rst_n),
+        .clk(clk), .rst_n(rst_work_n),
         .rate_bytes(sha_rate), .suffix(sha_suffix),
-        .start(sha_start), .zeroize(1'b0),
+        .start(sha_start), .zeroize(wipe_run),   /* Z-04：以前接死 1'b0 */
         .in_valid(sha_in_valid), .in_ready(sha_in_ready), .in_data(sha_in_data),
         .in_flush(sha_in_flush),
         .out_valid(sha_out_valid), .out_ready(sha_out_ready), .out_data(sha_out_data),
@@ -168,7 +227,7 @@ module mlkem_keygen #(
 
     // .count() 有意留空：本核只按 rej_done 推进，采到第几个系数不看。
     mlkem_rej_uniform u_rej (
-        .clk(clk), .rst_n(rst_n),
+        .clk(clk), .rst_n(rst_work_n),
         .start(rej_start), .done(rej_done),
         .in_valid(rej_in_valid), .in_bytes(rej_in_bytes), .in_ready(rej_in_ready),
         .count(), .rd_addr(rej_rd_addr), .rd_data(rej_rd_data));
@@ -183,7 +242,7 @@ module mlkem_keygen #(
     wire cbd_fb_valid = (state == S_SE_RUN) && sha_out_valid;
 
     mlkem_cbd_stream u_cbd (
-        .clk(clk), .rst_n(rst_n),
+        .clk(clk), .rst_n(rst_work_n),
         .eta3(eta1_3_r), .start(cbd_start), .done(cbd_done),
         .in_valid(cbd_fb_valid), .in_ready(cbd_in_ready), .in_data(sha_out_data),
         .out_valid(cbd_out_valid), .out_ready(cbd_out_ready),
@@ -196,7 +255,7 @@ module mlkem_keygen #(
     wire signed [15:0] ntt_rd_data;
 
     ntt_core u_ntt (
-        .clk(clk), .rst_n(rst_n),
+        .clk(clk), .rst_n(rst_work_n),
         .start(ntt_start), .inverse(1'b0), .done(ntt_done),
         .wr_en(ntt_wr_en), .wr_addr(ntt_wr_addr), .wr_data(ntt_wr_data),
         .rd_addr(ntt_rd_addr), .rd_data(ntt_rd_data));
@@ -481,8 +540,8 @@ module mlkem_keygen #(
     end
 
     // ================= 时序 =================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+    always @(posedge clk or negedge rst_work_n) begin
+        if (!rst_work_n) begin
             state <= S_IDLE;
             done  <= 1'b0;
             k_r <= 3'd3; eta1_3_r <= 1'b0;

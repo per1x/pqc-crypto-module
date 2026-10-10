@@ -15,6 +15,7 @@
  */
 #include "pqchsm/anchor.h"
 #include "pqchsm/audit.h"
+#include "pqchsm/kdr.h"
 #include "pqchsm/backup.h"
 #include "pqchsm/keystore.h"
 #include "pqchsm/slot.h"
@@ -89,6 +90,24 @@ int main(int argc, char **argv)
 	}
 	const char *cmd = argv[i++];
 	int rest = argc - i;
+
+	/* ---- 信任根：**显式**装上（PS-04，库里没有自动回退了）----
+	 * 与 pqchsmd / PKCS#11 模块同一条纪律：默认桩，PQCHSM_KDR=device-dna
+	 * 改装设备 DNA；显式要了却拿不到就失败，不静默回退。
+	 * 装不上根就打不开 keystore —— 早失败比在 unwrap 处失败好解释得多。 */
+	{
+		const char *kdr = getenv("PQCHSM_KDR");
+
+		if (kdr && !strcmp(kdr, "device-dna")) {
+			if (pqc_kdr_install_device_dna() != 0) {
+				fprintf(stderr, "PQCHSM_KDR=device-dna 但装不上设备 DNA 根\n");
+				return 1;
+			}
+		} else if (pqc_kdr_install_stub() != 0) {
+			fprintf(stderr, "装不上桩 KDR（PRODUCTION 形态下它不进二进制）\n");
+			return 1;
+		}
+	}
 
 	hsm_token_t *tok = hsm_token_new(n_slots);
 	if (!tok) {

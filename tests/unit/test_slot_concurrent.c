@@ -324,6 +324,7 @@ static void scenario_close_race(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	scenario_distinct_slots();
 	scenario_same_slot();
 	scenario_session_table();

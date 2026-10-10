@@ -34,14 +34,20 @@
 extern "C" {
 #endif
 
-#define PQC_WRAP_VERSION   1
-#define PQC_WRAP_HDR_LEN   16
-#define PQC_WRAP_NONCE_LEN 12
-#define PQC_WRAP_TAG_LEN   16
-#define PQC_WRAP_OVERHEAD  (PQC_WRAP_HDR_LEN + PQC_WRAP_NONCE_LEN + PQC_WRAP_TAG_LEN)
+/* ⚠️ 线格式**不在这里定义**，在 pqchsm/pwrp_format.h —— 安全世界那份实现
+ * （tee/ta/ta_wrap.c，用 TEE crypto API）include 的是同一个头。
+ * 下面这些只是给既有调用方留的别名，改格式请改那边，不要在这里加数字。
+ * 理由（以及"两份实现正当、两份格式定义不正当"的分界）见那个文件头。 */
+#include "pqchsm/pwrp_format.h"
 
-#define PQC_WRAP_ALG_AES256GCM 1
-#define PQC_KEK_LEN 32
+#define PQC_WRAP_VERSION   PWRP_VERSION
+#define PQC_WRAP_HDR_LEN   PWRP_HDR_LEN
+#define PQC_WRAP_NONCE_LEN PWRP_NONCE_LEN
+#define PQC_WRAP_TAG_LEN   PWRP_TAG_LEN
+#define PQC_WRAP_OVERHEAD  PWRP_OVERHEAD
+
+#define PQC_WRAP_ALG_AES256GCM PWRP_ALG_AES256GCM
+#define PQC_KEK_LEN PWRP_KEK_LEN
 
 /* 给定明文长度，blob 需要多大 */
 size_t pqc_wrap_blob_len(size_t pt_len);

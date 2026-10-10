@@ -40,8 +40,9 @@ int pqc_profile_startup_check(const char **why)
 	if (!p->hardware_backed) {
 		msg = "PRODUCTION 形态要求 KDR 有硬件保证（不出芯片、不可读出），"
 		      "而当前 provider 不是 —— 拒绝启动。"
-		      "这块板上没有可用的秘密硬件根（eFUSE 已永久排除、"
-		      "BBRAM 无电池、PUF 黑钥未通），见 docs/SECURITY.md。";
+		      "本形态未启用秘密硬件根：这颗 ZU3EG 具备 eFUSE/PUF，"
+		      "但本项目红线不做不可逆烧写；这块板的 BBRAM 另无电池。"
+		      "见 docs/SECURITY.md 与 docs/reference/HSM-COMPARISON.md。";
 		if (why) {
 			*why = msg;
 		}

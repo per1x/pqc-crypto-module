@@ -76,7 +76,24 @@ static uint8_t *slurp(const char *p, size_t *n)
 
 static void test_provider(void)
 {
-	TCASE("默认 provider 是桩，且明确标记为无硬件保证");
+	/* ====================================================================
+	 * 【PS-04：没装 provider 就是 NULL，没有任何自动回退】
+	 * ====================================================================
+	 * 这里以前的判据是"默认 provider 就是桩"—— 而那正是要删掉的行为：
+	 * DEV 形态下 pqc_kdr_get_provider() 会在没人装的时候悄悄回退到那个编译
+	 * 进去的公开常量，于是"忘了装"与"故意用桩"完全无法区分。
+	 *
+	 * 现在先验那条**新的**契约（没装 = NULL、派生直接失败），再显式装桩。
+	 */
+	TCASE("没装 provider 时：get 返回 NULL，派生直接失败（不回退到任何常量根）");
+	uint8_t probe[32];
+	pqc_kdr_set_provider(NULL);
+	CHECK(pqc_kdr_get_provider() == NULL);
+	CHECK_EQ_INT(pqc_kdr_is_hardware_backed(), 0);
+	CHECK(pqc_kdr_derive("x", NULL, 0, probe, sizeof(probe)) != 0);
+
+	TCASE("显式装桩之后才有根，且明确标记为无硬件保证");
+	CHECK_EQ_INT(pqc_kdr_install_stub(), 0);
 	const pqc_kdr_provider_t *p = pqc_kdr_get_provider();
 	CHECK(p != NULL);
 	CHECK(p == pqc_kdr_provider_stub());
@@ -100,9 +117,12 @@ static void test_provider(void)
 	CHECK_EQ_INT(g_fake_calls, 1);
 	CHECK_EQ_INT(out[0], 0x5A);
 
+	/* 卸掉 → 真的什么都不剩（不是"退回桩"）。
+	 * 后面的用例还要用根，所以再显式装回来。 */
 	pqc_kdr_set_provider(NULL);
-	CHECK(pqc_kdr_get_provider() == pqc_kdr_provider_stub());
+	CHECK(pqc_kdr_get_provider() == NULL);
 	CHECK_EQ_INT(pqc_kdr_is_hardware_backed(), 0);
+	CHECK_EQ_INT(pqc_kdr_install_stub(), 0);
 }
 
 static void test_domain_separation(void)
@@ -263,9 +283,13 @@ static void test_device_dna_absent(void)
 	uint8_t out[32];
 
 	TCASE("没有 /dev/secmmio 时，device-dna provider 不可用");
-	pqc_kdr_set_provider(NULL);
+	CHECK_EQ_INT(pqc_kdr_install_stub(), 0);
 	CHECK(pqc_kdr_provider_device_dna() == NULL);
 
+	/* 判据从"回退到桩"改成"**当前是什么就还是什么**"：先显式装桩，
+	 * 装 DNA 失败之后手上仍然是那个桩（而不是被换掉、也不是被清空）。
+	 * 这一条比原来的更严 —— 原来那句在自动回退还在的时候，即使
+	 * install 把 provider 清成了 NULL 也照样能过。 */
 	TCASE("安装失败时**不改动**当前 provider，也不回退到任何常量根");
 	CHECK_EQ_INT(pqc_kdr_install_device_dna(), -1);
 	CHECK(pqc_kdr_get_provider() == pqc_kdr_provider_stub());
@@ -278,6 +302,7 @@ static void test_device_dna_absent(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	test_provider();
 	test_device_dna_absent();
 	test_domain_separation();

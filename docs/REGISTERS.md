@@ -80,15 +80,31 @@ discarded** (RAZ/WI) — no side effect, and no bus error.
 Base `0x8000_0000`, slot from `addr[18:16]`, 64 KB each. See
 [ARCHITECTURE.md](ARCHITECTURE.md#address-map) for why the decode is exact.
 
-| Slot | Address | Slave | `SECURE_ONLY` |
-|---|---|---|---|
-| 0 | `0x8000_0000` | `trng_axi` | 0 |
-| 1 | `0x8001_0000` | `key_vault_axi` | 0 |
-| 2 | `0x8002_0000` | `sym_axi` | 0 |
-| 3 | `0x8003_0000` | `mlkem_axi` | 0 |
-| 4 | `0x8004_0000` | canary (`key_vault_axi`) | **1** |
-| 5 | `0x8005_0000` | `fan_ctrl_axi` | 0 |
-| 6 | `0x8006_0000` | `mldsa_axi` | per form |
+| Slot | Address | Slave | `SECURE_ONLY` (secure form) | `SECURE_ONLY` (demo form) |
+|---|---|---|---|---|
+| 0 | `0x8000_0000` | `trng_axi` | **1** | 0 |
+| 1 | `0x8001_0000` | `key_vault_axi` | **1** | 0 |
+| 2 | `0x8002_0000` | `sym_axi` | **1** | 0 |
+| 3 | `0x8003_0000` | `mlkem_axi` | **1** | 0 |
+| 4 | `0x8004_0000` | canary (`key_vault_axi`) | **1** | **1** |
+| 5 | `0x8005_0000` | `fan_ctrl_axi` | 0 | 0 |
+| 6 | `0x8006_0000` | `mldsa_axi` | **1** | 0 |
+
+> **⚠️ This table used to say `0` for the five functional slaves and flatly
+> contradicted the paragraph three screens above it**, which states that the
+> default bitstream gives the normal world zero reachability. The `0` column was
+> left over from the *first* build, where only the canary was gated — that build
+> proved AxPROT gating works, but proved it only about an empty shell.
+>
+> The parameter is one build-time knob (`SECURE_ONLY_FUNCTIONAL` in
+> `zu3eg_hsm_top.v`) and there are **two** forms, so a single column cannot
+> describe it. The canary stays at 1 in both — it is the control group.
+> Slot 5 (fan) is never gated: it is not inside the crypto boundary.
+>
+> ⚠️ One thing does **not** follow this knob: the **seed staging port**
+> (`mlkem_axi 0x38`, `mldsa_axi 0x34`) requires `AxPROT[1]=0` in *both* forms.
+> A demo bitstream is open to the normal world for everything else, but seeds
+> still only come from the secure world.
 
 ## `trng_axi` — slot 0
 
@@ -229,9 +245,9 @@ RTL `hardware/rtl/bus/mlkem_axi.v`, tests
 | Offset | Name | Access | Description |
 |---|---|---|---|
 | `0x00` | `VERSION` | R | Constant `0x0001_0000` |
-| `0x04` | `CTRL` | W | START, ZEROIZE |
-| `0x08` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` HASH_OK, `[3]` TAMPER, `[4]` WIPING, `[5]` PARAM_ERR |
-| `0x0C` | `MODE` | RW | `[1:0]` operation (0 KeyGen, 1 Encaps, 2 Decaps), `[3:2]` parameter set (0 = 512, 1 = 768, 2 = 1024) |
+| `0x04` | `CTRL` | W | `[0]` START, `[1]` ZEROIZE, `[2]` IN_RST, `[3]` OUT_RST, `[4]` DK_LOCK (one-way), `[5]` SEED_LOCK (one-way), `[6]` SEED_CLR |
+| `0x08` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` HASH_OK, `[3]` TAMPER, `[4]` WIPING, `[5]` PARAM_ERR, `[6]` SEED_ERR |
+| `0x0C` | `MODE` | RW | `[1:0]` operation (0 KeyGen, 1 Encaps, 2 Decaps), `[3:2]` parameter set (0 = 512, 1 = 768, 2 = 1024), `[4]` DK_TO_SLOT, `[5]` DK_FROM_SLOT, `[9:6]` SLOT (4 bits — **16 slots, not 4**), `[10]` SEED_STAGED |
 | `0x10` | `IN_DATA` | W | Input byte stream; the write pointer advances automatically |
 | `0x14` | `IN_PTR` | RW | Input write pointer |
 | `0x18` | `OUT_DATA` | R | Output byte stream |
@@ -240,7 +256,16 @@ RTL `hardware/rtl/bus/mlkem_axi.v`, tests
 | `0x24` | `VIOL_CNT` | R | Firewall violation counters |
 | `0x28` | `PARAM0` | R | Capability word |
 | `0x2C` | `XBAR_VIOL` | R | **Decoder** violations — accesses that hit no slot at all |
-| `0x30` | `KEYSTAT` | R | `[3:0]` occupied vault slots, `[11:4]` parameter set per slot (2 bits each), `[16]` private-key export latch |
+| `0x30` | `KEYSTAT` | R | `[15:0]` occupied vault slots (**16**), `[16]` private-key export latch, `[17]` seed latch |
+| `0x34` | `KEYPSET` | R | Parameter set per slot, 2 bits each — **its own register**: with 16 slots the per-slot `pset` needs 32 bits and no longer fits alongside the valid bits |
+| `0x38` | `SEED_DATA` | W | Secure-world seed staging: 16 little-endian 32-bit words = `d‖z`. **Only accepts `AxPROT[1]=0`, regardless of `SECURE_ONLY`; there is no read-back path (reads return 0); consumed at START** |
+| `0x3C` | `SEED_STAT` | R | `[4:0]` words staged (0..16), `[8]` SEED_READY, `[9]` SEED_LOCK, `[10]` SEED_STAGED, `[31:16]` non-secure writes refused (saturating). **No seed byte appears here** |
+
+> **⚠️ This table was wrong in three ways before, and each was the kind of wrong
+> that costs a debugging session** (registry DOC-3): it said 4 vault slots when
+> the RTL has 16; it folded `KEYPSET` into `KEYSTAT` when `0x34` is its own
+> register; and `MODE` listed only two of its six fields, so a driver could not
+> check what it had written. `MODE` is now fully read-back-able in RTL too.
 
 **Everything goes in through one buffer, in the order the standard defines it**,
 because the three cores' input shapes are entirely different and one register
@@ -275,8 +300,24 @@ uses, leaving the old private key in the tail; bitstream readback or a scan
 chain could recover it; or one could simply push `in_ptr` into the old region
 and start an operation. So there is a real erase machine — triggered on the
 **rising edge** of tamper or zeroize, both BRAMs written to zero address by
-address in parallel, 8192 cycles, with `WIPING = 1` and output reads refused
-throughout.
+address in parallel, with `WIPING = 1` and output reads refused throughout.
+
+> **How many cycles — the one number three documents used to disagree about.**
+> The wipe counter is 16 bits because the largest block it covers is the 64 KB
+> private-key vault, so this layer's machine runs **65536 cycles** (≈ 874 µs at
+> 75 MHz). The two 8 KB buffers only use the low 13 bits and are therefore
+> written several times over; writing zero repeatedly is the same as writing it
+> once, and a second counter is not worth it.
+>
+> The stale figures were 8192 (this file — the pre-vault machine, when only the
+> two 8 KB buffers existed) and 16384 (`TESTING.md`). Both predate the 16-slot
+> vault. **Software polling `WIPING` must size its timeout against 65536, not
+> 8192** — that is why the disagreement mattered rather than being cosmetic.
+>
+> Since batch 1 the three ML-KEM cores have their own erase machines as well
+> (their internal BRAM previously had none at all), and `STATUS[4]` is now the
+> OR of this layer's machine and all three cores'. **Measured cycle counts are
+> board-pending** — the numbers above are what the RTL counts, not a stopwatch.
 
 **What does and does not reach the buffer.** ML-KEM's `dk` is genuinely
 returned to software — it is the protocol's private key, which the module wraps

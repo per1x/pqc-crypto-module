@@ -315,6 +315,7 @@ static void test_flow(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	g_req = malloc(CAP);
 	g_resp = malloc(CAP);
 	if (!g_req || !g_resp) {

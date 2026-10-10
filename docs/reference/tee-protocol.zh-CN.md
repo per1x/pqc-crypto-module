@@ -34,7 +34,18 @@ keygen/decaps/sign、KDR/KEK 派生、PWRP 包裹）搬进 OP-TEE 可信应用�
   ss 是会话密钥不是长期私钥；若后续要求 ss 也不出 TA，在协议上加
   "TA 内派生会话密钥"命令即可，不动现有命令。
 - KDR 取自 OP-TEE system PTA 的 `PTA_SYSTEM_DERIVE_TA_UNIQUE_KEY`
-  （HUK + TA UUID 派生，HUK 不出芯片，REE 拿不到同源材料）。
+  （HUK + TA UUID 派生，REE 拿不到同源材料）。
+
+> **⚠️ 别把这写成"HUK 不出芯片"**（登记表 DOC-2）。在**本项目当前这种未供给
+> 形态**下，上游 `core/drivers/zynqmp_huk.c` 看 CSU STATUS 的 AUTH 位，位为 0
+> 就**静默降级**成 development HUK = 纯 `SHA-256(Device DNA)`，而 DNA 从 EL1
+> 经 SMC 读得到（本项目就是这么读到的）。所以它给的是**设备绑定/防克隆**，
+> 不是"密钥受硬件保护"。
+>
+> 同样别把这条写成硅的属性：供给到位后 HUK 走 CSU AES-GCM + device key，
+> 那才是真的硬件保护。弱的是"红线不烧 eFUSE、因而认证启动与秘密根都未启用"
+> 这个**形态**，不是这颗片子。口径与 `src/crypto/kdr_dna.c`、
+> `include/pqchsm/profile.h` 保持一致，三处改动要同步。
 
 ## 2. 密钥体系
 
@@ -131,7 +142,10 @@ cd tee/tests && cc -O2 -I../ta -I../ta/config -I../include \
 - **liboqs 0.16 互操作（最接近 KAT 的验证）**：ML-KEM 三参数集同种子
   keypair 与 liboqs **逐字节相同**，双向 encaps/decaps 互通；ML-DSA 三
   参数集双向 sign/verify（含 ctx）互通。15/15 全过。
-- 尚未做：TA 上板实测（依赖 P4 OP-TEE 镜像启动，当前卡在 BL32 入口，
+- ~~尚未做：TA 上板实测~~ **已做（2026-08-26）**：TA 在板上跑通，见
+  `board/logs/RESULT_b2_ta_threshold.txt`（会话+GET_INFO）与
+  `RESULT_b2_ta_keyops.txt`（KeyGen/Sign/Decaps 端到端）。以下原文保留：
+- ~~尚未做：TA 上板实测（依赖 P4 OP-TEE 镜像启动，当前卡在 BL32 入口，
   见进展报告）；堆叠 TA 栈用量实测（ML-DSA-87 签名栈峰值的真机确认，
   预留了 512KB）。
 
@@ -140,6 +154,6 @@ cd tee/tests && cc -O2 -I../ta -I../ta/config -I../include \
 1. `tee/ta/out/4e2d9c1a-7b35-4f68-9a2c-d15e88406fa3.ta` 放入根fs
    `/lib/optee_armtz/`（Buildroot 包 `tee/` 目录或手动进镜像）。
 2. 普通世界侧：`optee_client` 的 libteec + `tee/host/pqchsm_ta_client.c`，
-   槽位管理器把后端从 `pqc_backend_liboqs()` 切到 TA 客户端。
+   槽位管理器把后端从 `pqc_backend_native()` 切到 TA 客户端。
 3. 自检顺序：GET_INFO → KEK_SET → KEYGEN(512) → DECAPS 往返 →
    SIGN/VERIFY（验签在普通世界用软件后端做）。

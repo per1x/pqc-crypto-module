@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Volumes/Work/projects/code/pqc-hsm-fpga/build-host/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

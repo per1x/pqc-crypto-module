@@ -124,6 +124,7 @@ static size_t sign_with_slot0(hsm_token_t *tok, const uint8_t *msg, size_t msg_l
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	setvbuf(stdout, NULL, _IONBF, 0);   /* abort 时别把已打印的内容吞掉 */
 	int pid = (int)getpid();
 	snprintf(g_ks, sizeof(g_ks), "/tmp/pqchsm_e2e_%d.ks", pid);

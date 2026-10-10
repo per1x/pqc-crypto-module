@@ -36,38 +36,53 @@
 /*
  * CMD_GET_INFO：握手/自检。
  *   [0] value.out: a = 协议版本(PQCHSM_TA_PROTO_VERSION), b = 特性位
- * 特性位：bit0 = 支持 KDF；bit1 = 支持 WRAP/UNWRAP；bit2 = 支持 ML-KEM；
- *        bit3 = 支持 ML-DSA
+ * 特性位：bit0 = 支持 KDF（**已删除，恒 0**）；
+ *        bit1 = 支持 WRAP/UNWRAP（**已删除，恒 0**）；
+ *        bit2 = 支持 ML-KEM；bit3 = 支持 ML-DSA
+ * bit0/bit1 保留位置而不是让后面的位往前挪：挪了的话旧 host 会把
+ * "支持 ML-KEM" 读成 "支持 KDF"。
  */
 #define TA_PQCHSM_CMD_GET_INFO        0
 
-/*
- * CMD_KDF_DERIVE：由 TA 内 KDR 派生子密钥（KMAC-256）。
- *   [0] memref.in:     label（NUL 结尾字符串，域分隔用，非空）
- *   [1] memref.in:     salt（可为空）
- *   [2] memref.output: 派生结果（调用方给定长度，≤256B）
- * 返回 TEE_SUCCESS 或 TEE_ERROR_BAD_PARAMETERS。
+/* ============================================================================
+ * 【已删除的三条命令：1 / 3 / 4 —— 编号永久保留，不得复用】
+ * ============================================================================
+ * 它们是登记表 PS-22 / PS-24 那两颗地雷。删掉而不是收紧，是因为**产品路径
+ * 一条都不用它们**（KEYGEN 返回包裹好的 blob，SIGN/DECAPS 在 TA 内部自己
+ * 解包），而它们各自都是一个完整的谕言机：
+ *
+ *  · CMD_KDF_DERIVE（1）：拿 TA 内的 KDR 按**调用方给的任意 label + 任意
+ *    salt** 派生并把结果交出来。于是任何普通世界进程只要写
+ *        label = "pqc-hsm/storage-kek"、salt = keystore 头部那 16 字节明文
+ *    就能把**存储 KEK 原样要出来**。KDR 的全部意义是"只进不出"，而这条
+ *    命令是一个带域分隔参数的读出口。
+ *    ⚠️ 今天泄的还只是由 SHA-256(DNA) 退化根派生出来的 KEK；**等量产接上
+ *    真 HUK，泄的就是真 KEK** —— 信任根越真，这个洞越值钱。
+ *
+ *  · CMD_KEK_SET（2，保留）+ CMD_UNWRAP（4）：前者让调用方指定 salt 来定
+ *    KEK，后者拿这个 KEK 解开**任意** blob。两条合起来就是一台通用解包机：
+ *    拿到 keystore 文件 → 读出它的明文 salt → KEK_SET → UNWRAP 每一条记录。
+ *    KEK_SET 本身单独留着无害（它只在 TA 内缓存一个值，没有出口），
+ *    真正要拿掉的是那个出口。
+ *
+ *  · CMD_WRAP（3）：与 UNWRAP 成对，是同一个 KEK 下的加密谕言机。危害小于
+ *    解包，但同样没有产品用途，一起删干净 —— 留着半对更容易被将来补全。
+ *
+ * **编号 1/3/4 永久保留不复用**：普通世界可能还有旧客户端在发它们，把编号
+ * 让给新命令的话，一个旧调用会安静地触发一件完全不同的事。
+ * TA 侧对它们不再有 case，落到 default 返回 TEE_ERROR_NOT_SUPPORTED。
  */
-#define TA_PQCHSM_CMD_KDF_DERIVE      1
+#define TA_PQCHSM_CMD_RETIRED_KDF_DERIVE  1
+#define TA_PQCHSM_CMD_RETIRED_WRAP        3
+#define TA_PQCHSM_CMD_RETIRED_UNWRAP      4
 
 /*
  * CMD_KEK_SET：指定密钥库 salt，派生并缓存本实例 KEK（KEK 不出 TA）。
  *   [0] memref.in: salt（16B，密钥库头部所存）
- * 之后 WRAP/UNWRAP/KEYGEN 系列/SIGN/DECAPS 均使用该 KEK 包裹私钥。
+ * 之后 KEYGEN 系列 / SIGN / DECAPS 均使用该 KEK 包裹、解包私钥 blob。
+ * 它没有任何把 KEK 或明文交出去的路径 —— 那条路径（CMD_UNWRAP）已经删掉。
  */
 #define TA_PQCHSM_CMD_KEK_SET         2
-
-/*
- * CMD_WRAP / CMD_UNWRAP：KEK(AES-256-GCM) 包裹/解包。
- *   WRAP:   [0] memref.in aad, [1] memref.in 明文,
- *           [2] memref.inout blob（.size 输入容量/输出实际，容量不足返回
- *               TEE_ERROR_SHORT_BUFFER 并把 .size 置为需要值）
- *   UNWRAP: [0] memref.in aad, [1] memref.in blob,
- *           [2] memref.inout 明文（同上的 SHORT_BUFFER 语义）；
- *           认证失败返回 TEE_ERROR_MAC_INVALID，且输出缓冲已清零。
- */
-#define TA_PQCHSM_CMD_WRAP            3
-#define TA_PQCHSM_CMD_UNWRAP          4
 
 /*
  * CMD_KEYGEN：生成密钥对。私钥以 PWRP blob 返回，公钥明文返回。
@@ -107,6 +122,62 @@
  * 世界的软件后端里）；协议保留扩展位，需要时加 CMD_SIGN_DERAND。
  */
 #define TA_PQCHSM_CMD_SIGN            8
+
+/*
+ * CMD_SEED_TO_PL：**批 2 的落点** —— 把 PL 密码核这一次运算要用的种子，
+ * 由 TA 自己生成、经安全世界送进 PL 的暂存口。
+ *
+ *   params[0].value.a = 目标（0 = ML-KEM 的 d‖z，1 = ML-DSA 的 ξ）
+ *   params[0].value.b = 出参：实际送进去的字数（16 或 8）
+ *
+ * ⚠️ **这条命令不收、也不回任何种子字节。** 参数里根本没有能放种子的字段，
+ *    这是有意的：接口形状本身就该说明「这条路上不流通密钥材料」。
+ *
+ * 路径：TA(S-EL0) → pqchsm_seed.pta(S-EL1) → SMC 0x8200ff15 → EL3 → PL。
+ * 中间没有任何一段经过普通世界。EL3 那一侧无条件只认安全世界事务，
+ * PL 那一侧只认 AxPROT[1]=0 —— 两道门各自成立、不互相依赖。
+ *
+ * 与批 1 的 CMD 编号 0x8200ff14（EL3 自己取熵）的关系：那条还在，但
+ * PQCHSM_SEED_NS_ALLOWED 已经改成 0，普通世界再也触发不了它。
+ * 批 1 那条现在只是「安全世界的另一种取熵方式」，保管方是同一个。
+ */
+#define TA_PQCHSM_CMD_SEED_TO_PL      9
+
+/*
+ * CMD_SEED_NEW / CMD_SEED_REPLAY —— **A+C 合流的落点**。
+ *
+ * PL 那侧批 2 之后是**无状态**的：没有槽、没有 valid 位，展开区在每次运算的
+ * S_FIN 无条件擦。于是"这把私钥"这件事的载体只能是**种子**，而种子的保管方
+ * 是 TA。普通世界拿到的只有一个 PWRP blob（TA 内 KEK 包裹，KEK 没有出口）。
+ *
+ *   CMD_SEED_NEW(target) → 生成种子、送进 PL 暂存口、**并把种子包成 blob 返回**
+ *       params[0].value.a = 目标（0 = ML-KEM，1 = ML-DSA）
+ *       params[1] = memref_output：blob
+ *     调用方随后发一条 SEED_STAGED 的 KeyGen，拿到公钥；blob 就是这把密钥
+ *     在普通世界的全部形态。
+ *
+ *   CMD_SEED_REPLAY(target, blob) → 解开 blob、把同一份种子再送进 PL 暂存口
+ *       params[0].value.a = 目标
+ *       params[1] = memref_input：blob
+ *     调用方随后发一条 CHAIN 的 Decaps/Sign，PL 现展开私钥、算完即擦。
+ *
+ * ⚠️ **两条命令都不回、也不收任何种子字节。** blob 是密文，解不开的人拿到的
+ *    是一段随机数据；解得开的只有这个 TA（KEK 由 KDR 派生，不出 TA）。
+ *
+ * ⚠️ **CMD_SEED_REPLAY 不是解包谕言机。** 它解开之后**只往 PL 的暂存口写**，
+ *    没有任何把明文交回调用方的路径 —— 这正是批 1 删掉 CMD_UNWRAP 的理由，
+ *    这里不能把它以另一个名字放回来。
+ */
+#define TA_PQCHSM_CMD_SEED_NEW        10
+#define TA_PQCHSM_CMD_SEED_REPLAY     11
+
+/* 种子长度：ML-KEM 的 d‖z = 64，ML-DSA 的 ξ = 32 */
+#define TA_SEED_LEN_MLKEM   64U
+#define TA_SEED_LEN_MLDSA   32U
+
+/* 种子目标，与 EL3 的 PQCHSM_SEED_TGT_* 同值 */
+#define TA_SEED_TGT_MLKEM   0U
+#define TA_SEED_TGT_MLDSA   1U
 
 /* 单条命令各 memref 的尺寸上限（host 与 TA 共同遵守） */
 #define TA_PQCHSM_MAX_LABEL    64

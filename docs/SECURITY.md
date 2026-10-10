@@ -8,6 +8,19 @@ length — what has not. To report a vulnerability, see [../SECURITY.md](../SECU
 This is a research prototype. Nothing here is certified, and it should not be
 used to protect anything real.
 
+> **⚠️ Form note (batch 1, in progress).** The seed for ML-KEM (`d‖z`) and
+> ML-DSA (`ξ`) has been moved out of the normal-world daemon: BL31 now draws it
+> in EL3 and writes it straight into a PL staging port that only accepts secure
+> transactions and has no read-back path. The PL cores also gained a real erase
+> machine (their internal BRAM had none). **None of that is verified on the
+> board yet** — the board is away — so the body of this document still describes
+> the *previous* form throughout. It is deliberately left unchanged: rewriting a
+> certification-grade document ahead of the evidence would be promising a
+> capability that has not been delivered. It will be rewritten in one pass once
+> the EL3 seed path, the SiP gating and the erase coverage have all run on
+> silicon. What changed and what is still pending is tracked in
+> [reference/FINAL-PLAN.zh-CN.md](reference/FINAL-PLAN.zh-CN.md) §8.
+
 - [⛔ Irreversible-operation red lines](#-irreversible-operation-red-lines)
 - [The boundary](#the-boundary)
 - [Threat model](#threat-model)
@@ -325,6 +338,8 @@ so this document is not mistaken for a statement of readiness.
 | **SO PIN lockout not enforced** | Failures are counted but the slot is not locked, because locking it would brick the device; recovery is by M-of-N |
 | **`CKM_HASH_ML_DSA_*` not implemented** | PKCS#11 multi-part signing buffers the whole message instead of streaming a digest |
 | **Host RNG is OpenSSL** | The PL entropy source is inside the boundary, but the host software still seeds from the operating system through OpenSSL |
+| **Key seeds passed through the normal-world daemon** (registry CODE-1) | Until batch 1, `pqchsm_fpgad` read `d‖z` / `ξ` out of the TRNG **into its own stack** and wrote them back into the core's `IN_DATA`. A seed fully determines the private key, so root could read it — and, worse, **substitute** one it knew, after which every key this board generates is computable while the board keeps working and the ACVP vectors keep passing. Batch 1 moves generation into EL3 (BL31 draws the entropy and writes it straight into a PL staging port that only accepts secure transactions and has no read-back path) and excludes that offset from the generic `PL_WR` whitelist, so root cannot route around it either. **Not yet verified on the board.** |
+| **ML-DSA `rnd` still passes through the normal world** | The 32-byte hedged-signing randomness is still supplied by the daemon. It does not determine the private key — leaking it degrades a hedged signature to a deterministic one — so it was left out of the batch-1 seed path rather than reshaping the Sign input layout for it. Recorded here rather than fixed silently |
 | **Hold-timing margin is thin** | Effective hold margin is 0.110 ns after explicit management. A hold violation cannot be fixed by slowing the clock, so this number must be re-checked whenever the RTL changes; the implementation flow aborts below a 0.050 ns floor |
 
 **Exactly one of these is permanently excluded rather than merely unfinished:**

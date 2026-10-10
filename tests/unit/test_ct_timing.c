@@ -270,6 +270,7 @@ static void test_timing(void)
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	test_correctness();
 	test_timing();
 	return test_report("test_ct_timing");

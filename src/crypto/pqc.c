@@ -9,7 +9,7 @@
 
 #include <string.h>
 
-/* 长度取自 FIPS 203/204，并在 test_pqc_meta 中与 liboqs 的运行时值逐项断言，
+/* 长度取自 FIPS 203/204，并在 test_pqc_meta 中与后端的运行时值逐项断言，
  * 防止这张表与后端脱节。 */
 static const pqc_alg_info_t g_algs[] = {
 	/* alg, kind, name, pk, sk, ct, ss, sig, seed */
@@ -141,7 +141,7 @@ void pqc_set_backend(const pqc_backend_t *be)
 const pqc_backend_t *pqc_get_backend(void)
 {
 	if (!g_backend) {
-		g_backend = pqc_backend_liboqs();
+		g_backend = pqc_backend_native();
 	}
 	return g_backend;
 }

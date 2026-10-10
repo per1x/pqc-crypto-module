@@ -1,0 +1,17 @@
+=== 批 2：TA 密钥操作上板端到端 ===
+✓ TA 会话已建立
+✓ CMD_KEK_SET —— KEK 已在 TA 内派生并缓存（它没有出口）
+
+[ML-DSA-44] TA KeyGen → TA Sign → 普通世界验签
+    ✓ KeyGen：pk 1312 字节，私钥以 PWRP blob 返回 2604 字节（明文私钥一个字节都没出 TA）
+    ✓ Sign：σ 2420 字节
+    ✓ 普通世界用 mldsa-native 独立验签通过
+    ✓ 改一字节即验不过（验签器本身是有效的）
+
+[ML-KEM-768] TA KeyGen → 普通世界 Encaps → TA Decaps
+    ✓ KeyGen：pk 1184 字节，blob 2444 字节
+    ✓ 普通世界对着这把 pk 做了 Encaps
+    ✓ 两边共享密钥逐字节一致 —— 一次完整的 KEM 在 TA 里跑通
+
+ta_keyops: 全部通过 —— TA 里的 PQC 算得对，且明文私钥从未出过安全世界
+rc=0

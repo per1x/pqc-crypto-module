@@ -12,10 +12,18 @@
  *   · provider 的 `hardware_backed` **是 0**，不是 1。
  *   · 谁把它写成"硬件密钥根"，谁就重复了 H5/H6 那类夸大。
  *
- * 顺带一提：OP-TEE 在这颗片子上的 HUK 也是 SHA-256(Device DNA)（M5 已查证），
- * 性质完全一样。所以"不做 TA、直接读 DNA"并没有比走 OP-TEE 弱 —— 弱的是
- * 这颗片子本身没有可用的秘密硬件根（那需要烧 eFUSE 或用 PUF，前者本项目
- * 永久排除）。
+ * 顺带一提：OP-TEE 的 HUK 在**当前这种未供给形态下**也退化成 SHA-256(Device DNA)，
+ * 性质完全一样。所以"不做 TA、直接读 DNA"并没有比走 OP-TEE 弱。
+ *
+ * ⚠️ 但别把这句话记成"这颗片子的属性"—— 它是**形态的属性**。上游
+ *    core/drivers/zynqmp_huk.c 会看 CSU STATUS 的 AUTH 位：位为 0 才走
+ *    development HUK（纯 SHA-256(DNA)，只打一行 IMSG）；供给到位后 HUK 是
+ *    SHA-256(DNA + 选中的 USER eFUSE) 再经 CSU AES-GCM 用 device key 加密，
+ *    那是真正的硬件保护。弱的不是这颗硅，是"本项目红线不烧 eFUSE、
+ *    因而认证启动与秘密根都未启用"这个形态。
+ *    失败形态很阴险：即便烧了 PUF/eFUSE AES，只要认证启动没同时成立，
+ *    AUTH 位仍为 0、HUK 仍退化，而一切"看起来跑通了"。
+ *    详见 docs/reference/HSM-COMPARISON.md §4.2。
  *
  * ============================================================================
  * 【DNA 从哪来：两条路，别只做一条】

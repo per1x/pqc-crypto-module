@@ -1,0 +1,32 @@
+载入演示位流 zu3eg_hsm_dev.bit
+cp: '/lib/firmware/zu3eg_hsm_dev.bit' and '/lib/firmware/zu3eg_hsm_dev.bit' are the same file
+Time taken to load BIN is 2696.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+fpga_manager state = operating
+位流刚重配，PL 是干净的：SY_STATUS=0x00000001  低三位=0x1  KVOK=0
+
+===== A_old：/media/sd-mmcblk1p2/hsm/pqchsm_fpgad.pre_b1 =====
+  起点（刚手工 ZEROIZE 过）  SY_STATUS=0x00000001  低三位=0x1  KVOK=0
+  在跑的 daemon PID：[1569 ]
+  ✓ 本轮由 PID 1569（pqchsm_fpgad.pre_b1）提供服务
+  sdf_demo rc=0  ✅ 计数 16
+  会话结束后  SY_STATUS=0x0000000A  低三位=0x2  KVOK=1
+  → 低三位 0x2 ≠ 标定 0x1：**没发 SY_CTRL**
+
+===== B_new：/media/sd-mmcblk1p2/hsm/pqchsm_fpgad.b1new =====
+  起点（刚手工 ZEROIZE 过）  SY_STATUS=0x00000009  低三位=0x1  KVOK=1
+  在跑的 daemon PID：[1646 ]
+  ✓ 本轮由 PID 1646（pqchsm_fpgad.b1new）提供服务
+  sdf_demo rc=0  ✅ 计数 16
+  会话结束后  SY_STATUS=0x00000009  低三位=0x1  KVOK=1
+  → 低三位与本轮标定的「刚擦过」一致（0x1）：**发过 SY_CTRL**
+
+===== 判据 =====
+  A_old = dirty   （期望 dirty —— Z-05 那个缺陷）
+  B_new = zeroed   （期望 zeroed —— 已修）
+  ✓ 第 3 项成立：新 daemon 会话结束时确实发了 SY_CTRL.ZEROIZE
+
+收尾：正式装上新 daemon，PID [1720 ]
+fe2871d400eceeba99d2e66bfa844d70  /media/sd-mmcblk1p2/hsm/pqchsm_fpgad
+fe2871d400eceeba99d2e66bfa844d70  /media/sd-mmcblk1p2/hsm/pqchsm_fpgad.b1new
+fail=0

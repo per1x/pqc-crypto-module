@@ -2,7 +2,7 @@
  *
  * 暴露与真 PL **完全相同**的寄存器语义：
  *     写 MODE / PARAM / IN_LEN → 送数据 → 写 CTRL.START → 轮询 STATUS.DONE → 读数据
- * 内部调 liboqs 完成实际运算。
+ * 内部调软件后端（pqc_backend_native）完成实际运算。
  *
  * 真板到手后把本文件换成 accel_mmap.c（/dev/mem + mmap），
  * pqc_accel.c 与其上的一切一行不改。
@@ -221,7 +221,7 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 		memcpy(seed, g_buf, in_len);
 		/* 桩内部直接调软件后端 —— 注意用 liboqs 后端而不是当前后端，
 		 * 否则会自己调自己形成递归。 */
-		const pqc_backend_t *sw = pqc_backend_liboqs();
+		const pqc_backend_t *sw = pqc_backend_native();
 		if (sw->keypair_from_seed(alg, seed, in_len, g_buf, g_buf + info->pk_len) != PQC_OK) {
 			pqc_secure_zero(seed, sizeof(seed));
 			set_err(2);
@@ -239,7 +239,7 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 		uint8_t pk[2048], m[32];
 		memcpy(pk, g_buf, info->pk_len);
 		memcpy(m, g_buf + info->pk_len, 32);
-		const pqc_backend_t *sw = pqc_backend_liboqs();
+		const pqc_backend_t *sw = pqc_backend_native();
 		if (sw->encaps_derand(alg, pk, m, 32, g_buf, g_buf + info->ct_len) != PQC_OK) {
 			set_err(2);
 			return;
@@ -255,7 +255,7 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 		uint8_t sk[4096], ct[2048];
 		memcpy(sk, g_buf, info->sk_len);
 		memcpy(ct, g_buf + info->sk_len, info->ct_len);
-		const pqc_backend_t *sw = pqc_backend_liboqs();
+		const pqc_backend_t *sw = pqc_backend_native();
 		int rc = sw->decaps(alg, sk, ct, g_buf) != PQC_OK;
 		pqc_secure_zero(sk, sizeof(sk));
 		if (rc) {
@@ -292,7 +292,7 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 		static uint8_t msg[ACCEL_BUF_MAX];
 		memcpy(msg, p, msg_len);
 		size_t sig_len = info->sig_len;
-		const pqc_backend_t *sw = pqc_backend_liboqs();
+		const pqc_backend_t *sw = pqc_backend_native();
 		/* rnd 全 0 视为"让后端自取 TRNG"，与 pqc_sign(rnd=NULL) 语义一致：
 		 * 寄存器接口里没法传 NULL，只能约定一个哨兵。
 		 *
@@ -342,7 +342,7 @@ static void stub_write_reg(uint32_t off, uint32_t val)
 		const uint8_t *ctx = p;
 		p += ctx_len;
 		size_t msg_len = in_len - (size_t)(p - g_buf);
-		const pqc_backend_t *sw = pqc_backend_liboqs();
+		const pqc_backend_t *sw = pqc_backend_native();
 		pqc_status_t st = sw->verify(alg, pk, p, msg_len, ctx_len ? ctx : NULL, ctx_len,
 		                             sig, sig_len);
 		/* 验签不过是"结果"，用 OUT_LEN 回传：1 = 通过，0 = 不通过 */

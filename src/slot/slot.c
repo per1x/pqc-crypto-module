@@ -11,6 +11,8 @@
  */
 #include "pqchsm/slot.h"
 
+#include "pqchsm/profile.h"
+
 #include "slot_internal.h"
 #include "pqchsm/audit.h"
 #include "pqchsm/kdf.h"
@@ -854,6 +856,32 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 	return HSM_OK;
 }
 
+/* ============================================================================
+ * 【PRODUCTION 形态**拒绝** SLOT_POLICY_SEED_STORAGE（PS-07）】
+ * ============================================================================
+ * SEED_STORAGE 的语义是"槽里只留种子，私钥用时重展开"。在软件密钥栈的年代
+ * 它是个省空间的优化；在 TEE 主线里它变成了**第二条种子路径**：
+ *
+ *   种子 → slot_t.seed → hsm_keystore_save → **落到普通世界的文件里**
+ *
+ * 而种子完全决定私钥。也就是说这条策略把"密钥种子归 TEE 保管"这句话在
+ * keystore 那一头直接推翻了 —— 一份拿到 SD 卡的拷贝加上 KDR 就能还原私钥，
+ * 中间不需要碰这块板。
+ *
+ * **拒绝，而不是忽略。**（这一条是有意的，两者差别很大：）
+ *   · 忽略 = 调用方以为自己拿到的是"只存种子"的槽，实际是"存完整私钥"的槽，
+ *     两种形态的备份/导出语义不同，而它无从知道；
+ *   · 拒绝 = 调用方当场拿到 HSM_ERR_POLICY，自己决定改策略还是报错。
+ * 宁可吵，不可静 —— 与 RTL 那一侧"喂不够就不许启动"是同一条纪律。
+ *
+ * DEV 形态照旧放行：演示与既有回归用例都用它，而 DEV 形态本来就自陈
+ * "信任根是一个公开常量"，多这一条不改变任何结论。
+ */
+static int policy_denied_by_profile(uint32_t policy)
+{
+	return pqc_profile_is_production() && (policy & SLOT_POLICY_SEED_STORAGE);
+}
+
 static hsm_status_t create_object(hsm_token_t *tok, hsm_session_t sess,
                                   pqc_alg_t alg, uint32_t usage, uint32_t policy,
                                   const uint8_t *seed, size_t seed_len,
@@ -866,6 +894,9 @@ static hsm_status_t create_object(hsm_token_t *tok, hsm_session_t sess,
 	}
 	if (!out || !pqc_alg_info(alg)) {
 		return HSM_ERR_BAD_ARG;
+	}
+	if (policy_denied_by_profile(policy)) {
+		return HSM_ERR_POLICY;
 	}
 	slot_t *s = slot_at(tok, id);
 	if (!s) {

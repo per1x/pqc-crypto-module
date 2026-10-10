@@ -226,7 +226,7 @@ static int is_hw_alg(pqc_alg_t alg)
 
 static const pqc_backend_t *sw(void)
 {
-	return pqc_backend_liboqs();
+	return pqc_backend_native();
 }
 
 static pqc_status_t sdfe_keypair(pqc_alg_t alg, uint8_t *pk, uint8_t *sk)

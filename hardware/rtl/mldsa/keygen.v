@@ -37,6 +37,12 @@ module mldsa_keygen (
     input  wire        clk,
     input  wire        rst_n,
 
+    // ---- 擦除广播（engine 里那一台擦除机，见 mldsa_engine.v 文件头）----
+    // wipe 期间本核在复位里，下面每一块 ram_dp 的 B 口被强制成
+    // addr=wipe_addr、we=1、din=0 —— BRAM 不因复位清零，必须真写一遍。
+    input  wire        wipe,
+    input  wire [12:0] wipe_addr,
+
     input  wire [1:0]  pset,         // 0=44 1=65 2=87，start 那一拍锁存
     input  wire        start,        // 脉冲
     input  wire [255:0] xi,          // 32 字节种子；xi[7:0] 是第 0 字节
@@ -157,10 +163,10 @@ module mldsa_keygen (
     reg  [10:0] s1_raddr, s2_raddr;
     ram_dp #(.DW(32), .AW(11)) u_s1 (
         .clk(clk), .a_we(s1_we), .a_addr(s1_waddr), .a_din(s1_din), .a_dout(),
-        .b_we(1'b0), .b_addr(s1_raddr), .b_din(32'd0), .b_dout(s1_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[10:0] : (s1_raddr)), .b_din(wipe ? 32'd0 : (32'd0)), .b_dout(s1_dout));
     ram_dp #(.DW(32), .AW(11)) u_s2 (
         .clk(clk), .a_we(s2_we), .a_addr(s2_waddr), .a_din(s2_din), .a_dout(),
-        .b_we(1'b0), .b_addr(s2_raddr), .b_din(32'd0), .b_dout(s2_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[10:0] : (s2_raddr)), .b_din(wipe ? 32'd0 : (32'd0)), .b_dout(s2_dout));
 
 
     // ---- NTT 核（第 ③ 段：对 ℓ 条 s₁ 做正变换，就地覆盖成 ŝ₁）----
@@ -198,7 +204,7 @@ module mldsa_keygen (
     reg  [10:0] ac_raddr; wire signed [31:0] ac_dout;
     ram_dp #(.DW(32), .AW(11)) u_acc (
         .clk(clk), .a_we(ac_we), .a_addr(ac_waddr), .a_din(ac_din), .a_dout(),
-        .b_we(1'b0), .b_addr(ac_raddr), .b_din(32'd0), .b_dout(ac_dout));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[10:0] : (ac_raddr)), .b_din(wipe ? 32'd0 : (32'd0)), .b_dout(ac_dout));
 
     // 调试读口挂 b 口（done 后才用，与写不重叠）
     //   sel[3]=0        → s₁（后面被 NTT 覆盖成 ŝ₁）
@@ -259,7 +265,7 @@ module mldsa_keygen (
     reg         sk_we;  reg [12:0] sk_waddr; reg [7:0] sk_din;
     ram_dp #(.DW(8), .AW(13)) u_sk (
         .clk(clk), .a_we(sk_we), .a_addr(sk_waddr), .a_din(sk_din), .a_dout(),
-        .b_we(1'b0), .b_addr(sk_addr), .b_din(8'd0), .b_dout(sk_data));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[12:0] : (sk_addr)), .b_din(wipe ? 8'd0 : (8'd0)), .b_dout(sk_data));
 
     // ---- η 打包器（s₁/s₂ → sk，在 ② ExpandS 阶段趁 s₁ 还是原始值时打包）----
     // ⚠️ 必须在 ③ NTT 之前打包 s₁：NTT 会就地覆盖 s₁ 成 ŝ₁，之后原始值就没了。
@@ -283,7 +289,7 @@ module mldsa_keygen (
     wire [7:0] pk_adout;
     ram_dp #(.DW(8), .AW(13)) u_pk (
         .clk(clk), .a_we(pk_we), .a_addr(pk_waddr), .a_din(pk_din), .a_dout(pk_adout),
-        .b_we(1'b0), .b_addr(pk_addr), .b_din(8'd0), .b_dout(pk_data));
+        .b_we(wipe), .b_addr(wipe ? wipe_addr[12:0] : (pk_addr)), .b_din(wipe ? 8'd0 : (8'd0)), .b_dout(pk_data));
 
     // ---- ⑥b：caddq → power2round → t₁(pk) / t₀(sk) ----
     wire signed [31:0] cad_out;

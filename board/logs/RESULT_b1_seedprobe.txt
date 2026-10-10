@@ -1,0 +1,83 @@
+=== 批 1 · 种子暂存口与擦除机的上板验证（2026-08-25）===
+
+形态：**演示位流** zu3eg_hsm_dev.bit（SECURE_ONLY=0），BL31 仍是当前 golden
+（BOOT.BIN = 0ea6e443… = BOOT_SECMMIO_XMPU.BIN，**不带**种子 SiP）。
+选演示位流是有意的：送检位流下防火墙会把非安全访问先拦掉，测到的是防火墙
+而不是种子口自己那道门。要单独测那道门，只能在门敞开的这一份上测。
+
+验掉的三条（探针 board/src/seedprobe.c，全部经 /dev/mem 发**非安全**事务）：
+
+  ① 种子口只认安全事务：非安全写 4 笔，SEED_STAT 字计数 **0**、被拒计数 **+4**。
+  ② **被拒的写不产生总线错误** —— 这条是今天最要紧的。RTL 第一版让它回
+     SLVERR，而 AXI 的写是 posted 的，SLVERR 会以 SError 打回内核、只能 panic，
+     代价是一次断电。改成 RAZ/WI（丢弃 + 计数）之后，
+     **"四笔写完板子还活着"本身就是判据** —— 探针故意去写那个口，写完继续跑。
+  ③ 无读回路径：读 SEED_DATA 四次全 0；整个寄存器窗口 0x00-0x3C 扫一遍，
+     刚写进去的 0xDEADBE0x 一处都不出现。
+  ④ **擦除拍数确证**（第 1/2 项的上板 pending）：ZEROIZE → WIPING 实测持续
+     **885 µs**。RTL 计数是 65536 拍 @75 MHz = **874 µs**，差 11 µs 是软件
+     轮询开销。docs/REGISTERS 里那个统一后的数字对上了。
+
+⚠️ **仍然 pending 的两条**，都卡在"换不了 BL31"：
+   · 第 5 项 EL3 种子逻辑正确性（主体）
+   · EL3 白名单排除（root 经通用 PL_WR 转一手也被挡）
+   新 BOOT.BIN 已建好并落到板上非 golden 的 **BOOT0006.BIN**
+   （md5 961ef695…），但切 multiboot 到槽 6 必须走 JTAG 或串口：
+   CSU_MULTI_BOOT(0xFFCA0010) 在 EL1 **读不到也写不得**
+   （board/src/xmpu_probe.c 把"读不到"当作正确结果；写它是 SError）。
+   当天两根线都不可用：JTAG 在 Windows 上是 FTDI Code 10（软禁用/启用无效），
+   串口是已知的 EINVAL 状态且未重新枚举。两者都要物理拔插。
+
+golden 复核（动手前后各一次，一字节未变）：
+   BOOT.BIN     0ea6e4437698abc7b44b3a235b49ce78
+   BOOT0001.BIN bb3402ea4efae7e1062a65632fe684b4
+   BOOT0002.BIN 8d42d1a58b62c8ca95501bf486fbb45d（= BOOT_GOLDEN.BIN）
+
+------------------------------------------------------------------------------
+以下是 harness 原始日志
+------------------------------------------------------------------------------
+=== harness 开始 Tue Aug 18 05:36:47 UTC 2026 payload=/media/sd-mmcblk1p2/hsm/pay_seedprobe.sh ===
+已解绑 10 个 PL 驱动
+--- payload 开始 ---
+装演示位流 zu3eg_hsm_dev.bit
+Time taken to load BIN is 2695.000000 Milli Seconds
+
+BIN FILE loaded through FPGA manager successfully
+
+fpga state = operating
+---------------- seedprobe ----------------
+mlkem_axi VERSION = 0x00010000
+SEED_STAT 初值 = 0x00000000（字数=0 被拒计数=0）
+
+[1] 用非安全事务往 SEED_DATA 写 4 笔（这一步在旧 RTL 上会 SError → panic → 断电）
+    ✓ 四笔写完，板子还活着 —— 被拒的写没有产生总线错误
+    SEED_STAT 现在 = 0x00040000（字数=0 被拒计数=4）
+    ✓ 字计数一步没动
+    ✓ 被拒计数 +4，留痕了
+
+[2] 读 SEED_DATA（应当恒为 0，它没有读回路径）
+    ✓ 四次读回全是 0
+
+[3] 扫整个寄存器窗口 0x00-0x3C，不许出现 0xDEADBE0x
+    ✓ 一处都没有
+
+[4] ZEROIZE → 量 WIPING 实际持续多久（RTL 数出来是 65536 拍 @75 MHz ≈ 874 µs，加三个核自己那几台）
+    ✓ WIPING 起于 1 µs、落于 886 µs，持续约 885 µs
+      （含软件轮询开销；RTL 计数是 65536 拍 ≈ 874 µs）
+
+[5] 擦除之后 SEED_STAT = 0x00040000（字数应为 0）
+    ✓ 字数为 0
+
+seedprobe: 全部通过
+seedprobe rc=0
+--- payload 结束 rc=0 ---
+恢复：装回厂家 bitstream
+cp: '/lib/firmware/factory.bit' and '/lib/firmware/factory.bit' are the same file
+Time taken to load BIN is 2239.000000 Milli Seconds
+
+BIN FILE loaded through FPGA manager successfully
+
+恢复：重新 bind 驱动
+恢复：eth0 地址
+eth0: 7: eth0    inet 192.168.50.174/24 scope global eth0\       valid_lft forever preferred_lft forever
+=== harness 结束 ===

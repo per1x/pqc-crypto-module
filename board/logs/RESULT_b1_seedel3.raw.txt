@@ -1,0 +1,78 @@
+载入带种子暂存口的演示位流 zu3eg_hsm_dev.bit
+cp: '/lib/firmware/zu3eg_hsm_dev.bit' and '/lib/firmware/zu3eg_hsm_dev.bit' are the same file
+Time taken to load BIN is 2696.000000 Milli Seconds
+BIN FILE loaded through FPGA manager successfully
+fpga_manager state = operating
+装 secmmio.ko
+insmod: can't insert '/media/sd-mmcblk1p2/hsm/secmmio.ko': File exists
+crw-------    1 root     root       10,  59 Aug 18 07:16 /dev/secmmio
+=== seedel3 ===
+经 EL3 读 ML-KEM VERSION = 0x00010000
+
+起点 SEED_STAT = 0x00000000（字数=0 被拒=0）
+
+[1] 发一条 SECMMIO_SEED（SMC 0x8200ff14，target=0 → ML-KEM）
+    ✓ 返回，world=0
+    ✓ 如实回报调用方是普通世界（批 2/3 关掉 NS_ALLOWED 后这里才会是 1）
+    SEED_STAT = 0x00000110（字数=16 READY=1）
+    ✓ 16 个字都到了，且这条路上没有任何密钥材料经过普通世界
+    ✓ 被拒计数没动，说明这 16 笔是以安全事务进去的
+
+[2] MODE.SEED_STAGED=1 的 KeyGen，**一个字节 IN_DATA 都不喂**
+    IN_PTR = 0（老路要 64 才准启动，这里是 0）
+    STATUS = 0x00000002  OUT_LEN = 3584
+    ✓ 跑完了，OUT_LEN=3584 —— 种子确实是从暂存口进的核
+    跑完之后 SEED_STAT = 0x00000400（字数=0）
+    ✓ 字数已清零
+
+[3] 不重新送种子，直接再 START 一次 —— 必须被拒且点亮 SEED_ERR
+    STATUS = 0x00000060  OUT_LEN = 0
+    ✓ SEED_ERR 点亮，第二次被拒
+    ✓ 上一次的 OUT_LEN 一并作废了
+
+[4a] root 经 EL3 的通用 PL_WR 往 SEED_DATA 写（白名单排除，应当 EACCES）
+    ✓ 被 EL3 拒了（errno=EACCES）
+    ✓ ML-DSA 的 SEED_DATA 也被拒了
+    ✓ 字数一步没动
+    ✓ 同一块从机的 CTRL 仍然写得进，排除是**逐偏移**的
+
+[4b] 普通世界经 /dev/mem 直接写 SEED_DATA（PL 侧拒 + 不产生总线错误）
+    ✓ 四笔写完板子还活着（RAZ/WI，不是 SLVERR）
+    SEED_STAT 00000400 → 00040400（字数 0→0 被拒 0→4）
+    ✓ 字数一步没动
+    ✓ 被拒计数 +4，留痕了
+
+[5] ZEROIZE → 量 WIPING 实际持续多久（RTL 是 65536 拍 @75 MHz ≈ 874 µs）
+    ✓ WIPING 持续约 884 µs（经 EL3 轮询，开销比 /dev/mem 大）
+
+[6] ML-DSA 侧：SECMMIO_SEED(target=1) 应当装进 8 个字（ξ）
+    SEED_STAT = 0x00000108（字数=8 READY=1）
+    ✓ 8 个字（32 字节 ξ）都到了
+
+seedel3: 全部通过
+seedel3 rc=0
+=== seedprobe（非安全世界那一侧的独立复核）===
+mlkem_axi VERSION = 0x00010000
+SEED_STAT 初值 = 0x00040400（字数=0 被拒计数=4）
+
+[1] 用非安全事务往 SEED_DATA 写 4 笔（这一步在旧 RTL 上会 SError → panic → 断电）
+    ✓ 四笔写完，板子还活着 —— 被拒的写没有产生总线错误
+    SEED_STAT 现在 = 0x00080400（字数=0 被拒计数=8）
+    ✓ 字计数一步没动
+    ✓ 被拒计数 +4，留痕了
+
+[2] 读 SEED_DATA（应当恒为 0，它没有读回路径）
+    ✓ 四次读回全是 0
+
+[3] 扫整个寄存器窗口 0x00-0x3C，不许出现 0xDEADBE0x
+    ✓ 一处都没有
+
+[4] ZEROIZE → 量 WIPING 实际持续多久（RTL 数出来是 65536 拍 @75 MHz ≈ 874 µs，加三个核自己那几台）
+    ✓ WIPING 起于 2 µs、落于 886 µs，持续约 884 µs
+      （含软件轮询开销；RTL 计数是 65536 拍 ≈ 874 µs）
+
+[5] 擦除之后 SEED_STAT = 0x00080400（字数应为 0）
+    ✓ 字数为 0
+
+seedprobe: 全部通过
+seedprobe rc=0

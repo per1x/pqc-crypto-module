@@ -121,6 +121,15 @@ else
 PDEF := -P$(TOPLEVEL).
 endif
 
+# 整块从机的 AxPROT 门控开关。默认 1（送检形态）；跑成 0 是为了验**演示位流**
+# 下的那半条命题：整块从机对普通世界敞开时，**种子暂存口仍然只认安全事务**。
+# 那条门在 SECURE_ONLY=1 下根本轮不到它生效（防火墙先把访问 RAZ/WI 掉了），
+# 所以不专门跑一遍 0，它等于没测。
+ifneq ($(PARAM_SECURE_ONLY),)
+COMPILE_ARGS += $(PDEF)SECURE_ONLY=$(PARAM_SECURE_ONLY)
+export PARAM_SECURE_ONLY
+endif
+
 # 参数化模块（例如 mlkem_compress 的 D）用 PARAM_D 传进来，
 # 覆盖顶层参数，RTL 里不留仅供测试的分支。
 ifneq ($(PARAM_D),)

@@ -33,10 +33,10 @@ axi4lite_xbar 文件头里写的那个坑 —— 改一处忘另一处，而且�
     槽 0  0x8000_0000  trng_axi        0x00-0x3C   读 写
     槽 1  0x8001_0000  key_vault_axi   0x00-0x3C   读 写
     槽 2  0x8002_0000  sym_axi         0x00-0x7C   读 写
-    槽 3  0x8003_0000  mlkem_axi       0x00-0x3C   读 写
+    槽 3  0x8003_0000  mlkem_axi       0x00-0x44   读 写
     槽 4  0x8004_0000  金丝雀           0x00-0x3C   读 ——   （对照，写它没有用途）
     槽 5  0x8005_0000  fan_ctrl_axi    ——   ——     整核排除
-    槽 6  0x8006_0000  mldsa_axi       0x00-0x3C   读 写
+    槽 6  0x8006_0000  mldsa_axi       0x00-0x44   读 写
 
 另有一个**不在 PL 里**的只读窗口：
 
@@ -115,6 +115,128 @@ DEFS = BEG + '''
 #define ZYNQMP_SIP_SVC_PL_WR\t\t0x8200ff13
 
 /*
+ * ---- 种子装载：**EL3 自己生成、自己写进 PL，普通世界看不到明文** ----------
+ *
+ *   0x8200ff14  x1 = 目标（0 = ML-KEM 槽 3，1 = ML-DSA 槽 6）
+ *               → x0 = 0/错误码，x1 = 调用方世界（1 = 安全世界）
+ *
+ * 【它修的是 CODE-1】
+ * 以前 ML-KEM 的 d‖z 与 ML-DSA 的 ξ 是这样来的：普通世界的 daemon 经这个
+ * SiP 把 TRNG 的随机字**读回自己的栈**，再经这个 SiP 逐字节写进核的
+ * IN_DATA。于是种子在普通世界的进程内存里待过一趟 —— 有 root 的人能读
+ * （种子完全决定私钥）、更能换（灌一个自己知道的，此后每把密钥他都算得出来，
+ * 而板子照常工作、ACVP 照常过）。
+ *
+ * 现在整条路收进 EL3：本服务在**自己的栈上**取 TRNG 的字、写进 PL 的种子
+ * 暂存口、当场擦掉栈上的副本，只回一个成功/失败。EL3 的栈普通世界映射不到。
+ *
+ * ⚠️ **这一半单独不成立。** 还要两件事同时在：
+ *   ① PL 侧的种子暂存口只认 AxPROT[1]=0（已做，见 mlkem_axi.v/mldsa_axi.v）；
+ *   ② 通用 PL_WR **必须把种子偏移排除掉**（下面 pl_permit 里那一条）——
+ *      否则 root 直接 PL_WR 到 0x8003_0038 就把种子自己塞进去了，
+ *      前面那些一点用都没有。
+ *
+ * 【为什么是过渡态，以及它为什么长成这样】
+ * 最终架构里保管方是 OP-TEE 的 TA（批 2）。那时这段逻辑整体上移，
+ * **PL 侧的暂存口一个字都不用改** —— 换的只是"谁在写它"。
+ * 所以这里刻意不往 PL 里塞任何"种子自生"的能力：那是被否掉的另一条路线。
+ *
+ * 【调用方世界分级】
+ * 批 1 里安全世界还没有客户端（OP-TEE 卡在 BL32 入口），所以这条服务
+ * 现在**也服务普通世界** —— 但普通世界拿到的只有一个返回码。
+ * PQCHSM_SEED_NS_ALLOWED 是那个开关：批 2/3 TA 上来之后改成 0，
+ * 非安全调用者一律拒。判据代码现在就在路径上，不是等到那时候再写。
+ * 返回 x1 = 调用方世界，好让普通世界侧**如实记录**"我是从非安全世界调的"。
+ */
+#define ZYNQMP_SIP_SVC_PQC_SEED\t\t0x8200ff14
+/* 批 2：**EL3 退成纯通路**。种子不再由 EL3 自己取熵，而是由 OP-TEE 的 TA
+ * 生成、经 PTA（S-EL1）逐字送进来。这条服务只做一件事：把一个 32 位字写进
+ * PL 的种子暂存口 —— 它自己不产生、不保存、不回读任何种子。
+ *
+ * x1 = 目标（0 = ML-KEM，1 = ML-DSA），x2 = 那个字。
+ *
+ * ⚠️ **只认安全世界调用方，没有开关**（与 PQC_SEED 那条不同：那条有
+ *    PQCHSM_SEED_NS_ALLOWED，是批 1 的过渡）。理由：这条路上流的是**种子明文**，
+ *    放行普通世界等于把 CODE-1 原样搬回来。 */
+#define ZYNQMP_SIP_SVC_PQC_SEED_WORD\t0x8200ff15
+
+/* 批 1：安全世界还没有客户端，先放行普通世界（只回返回码，不回种子）。
+ * 批 2/3：改成 0，非安全调用者一律拒。**改这一行就是那道闸门**。 */
+/* 批 2 起改成 0：安全世界已经有客户端了（OP-TEE TA 上板跑通，见
+ * board/logs/RESULT_b2_ta_threshold.txt），普通世界不再需要这条路。
+ * 改成 0 之后 daemon 直接发 SECMMIO_SEED 会被 EL3 拒掉 —— 那正是判据。 */
+#define PQCHSM_SEED_NS_ALLOWED\t\t0
+
+/* 目标选择 */
+#define PQCHSM_SEED_TGT_MLKEM\t\t0U
+#define PQCHSM_SEED_TGT_MLDSA\t\t1U
+
+/* 错误码（回在 x0，取值刻意与 0/~0 之外区分，便于定位） */
+#define PQCHSM_SEED_EBADTGT\t\t2U
+#define PQCHSM_SEED_EWORLD\t\t3U
+#define PQCHSM_SEED_ETRNG\t\t4U
+#define PQCHSM_SEED_EFULL\t\t5U
+#define PQCHSM_SEED_EVERIFY\t\t5U
+
+/* PL 寄存器（与 RTL 一一对应，改 RTL 要同时改这里）。
+ * TRNG 在槽 0：STATUS[0]=READY [1]=DATA_VALID [2]=ALARM。 */
+#define PQCHSM_TRNG_STATUS\t\t0x80000004ULL
+#define PQCHSM_TRNG_RDATA\t\t0x80000008ULL
+#define PQCHSM_MLKEM_SEED_DATA\t\t0x80030038ULL
+#define PQCHSM_MLKEM_SEED_STAT\t\t0x8003003CULL
+#define PQCHSM_MLDSA_SEED_DATA\t\t0x80060034ULL
+#define PQCHSM_MLDSA_SEED_STAT\t\t0x80060038ULL
+
+/* 等一个 TRNG 字。轮询上限是**必须有**的：熵源告警之后 DATA_VALID 永远
+ * 不来，而在 EL3 里死循环等于把这颗核挂死，没有任何东西接得住。 */
+static int pqchsm_trng_word(uint32_t *out)
+{
+	uint32_t st;
+	int i;
+
+	for (i = 0; i < 2000000; i++) {
+		st = mmio_read_32((uintptr_t)PQCHSM_TRNG_STATUS);
+		if ((st & 0x4U) != 0U)      /* ALARM：这一批数据全部作废 */
+			return -1;
+		if ((st & 0x1U) == 0U)      /* READY 还没起来（启动检测没过） */
+			continue;
+		if ((st & 0x2U) != 0U) {    /* DATA_VALID */
+			*out = mmio_read_32((uintptr_t)PQCHSM_TRNG_RDATA);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+/*
+ * 取 n 个字送进目标的种子暂存口。
+ *
+ * ⚠️ **不在 EL3 里攒一份完整的种子再一起写。** 逐字取、逐字写、当场覆盖
+ *    那个临时变量 —— EL3 的栈虽然普通世界映射不到，但少留一份就是少一份。
+ *    这也让"EL3 手上从来没有过完整的种子"成为一句字面上成立的话。
+ */
+static int pqchsm_seed_load(uint64_t data_reg, uint64_t stat_reg, uint32_t words)
+{
+	uint32_t w = 0;
+	uint32_t i, cnt;
+
+	for (i = 0U; i < words; i++) {
+		if (pqchsm_trng_word(&w) != 0) {
+			w = 0U;
+			return -1;
+		}
+		mmio_write_32((uintptr_t)data_reg, w);
+		w = 0U;
+	}
+	/* 核对：SEED_STAT 的低位是已收字数。写进去几个字要能读回来几个 ——
+	 * 对不上说明 PL 那边拒了（AxPROT 不对 / 正在擦除 / 收满了），
+	 * 这时候绝不能报成功，否则上层会拿一份半截种子去生成密钥。
+	 * ⚠️ 这个寄存器**只报字数与闩锁，不报任何种子字节**（见 RTL）。 */
+	cnt = mmio_read_32((uintptr_t)stat_reg) & 0x1FU;
+	return (cnt == words) ? 0 : -1;
+}
+
+/*
  * ---- 设备 DNA 只读窗口 ------------------------------------------------------
  * 0xFFCA0050..0xFFCA005C 在 CSU 里，**EL1 直接读会挨总线错误**（板上实测：
  * devmem 读这几个地址一律 "Bus error"，进程被 SIGBUS 打掉，板子本身没事 ——
@@ -124,9 +246,14 @@ DEFS = BEG + '''
  * 换句话说把 keystore 整个拷到另一块板上照样能打开。绑到 DNA 之后就不能了。
  *
  * ⚠️ **DNA 不是秘密。** 谁有 JTAG 谁就能读到它（本项目就是这么读到的）。
- *    所以它给的是**设备绑定 / 防克隆**，不是"密钥受硬件保护"。OP-TEE 在这颗
- *    片子上的 HUK 也是 SHA-256(Device DNA)，性质完全一样 —— 不比它强，也不比
- *    它弱。文档里必须按这个口径写，别升级成"硬件密钥根"。
+ *    所以它给的是**设备绑定 / 防克隆**，不是"密钥受硬件保护"。OP-TEE 的 HUK
+ *    在**当前这种未供给形态下**也退化成 SHA-256(Device DNA)，性质完全一样 ——
+ *    不比它强，也不比它弱。文档里必须按这个口径写，别升级成"硬件密钥根"。
+ *
+ *    但同样别把它写成"这颗片子的属性"：上游 zynqmp_huk.c 看 CSU STATUS 的
+ *    AUTH 位，位为 0 才退化；供给到位后 HUK 走 CSU AES-GCM + device key。
+ *    弱的是"红线不烧 eFUSE、认证启动未启用"这个形态，不是这颗硅。
+ *    口径与 src/crypto/kdr_dna.c 保持一致，两处改动要同步。
  *
  * ⚠️ 这些字**跨复位不变**是实测的（多次重启 + 一轮 BBRAM 烧写之间逐字相同）。
  *    但"它在不同芯片之间不同"**没有验证过** —— 手上只有一块板，无法证伪。
@@ -190,10 +317,10 @@ static const uint32_t pl_off_max[PL_NSLOT] = {
 \t0x3C,\t/* 0 trng_axi       araddr[5:2]        */
 \t0x3C,\t/* 1 key_vault_axi  ADDR_MASK 0xC0     */
 \t0x7C,\t/* 2 sym_axi        ADDR_MASK 0x80     */
-\t0x3C,\t/* 3 mlkem_axi      ADDR_MASK 0xC0     */
+\t0x44,\t/* 3 mlkem_axi      ADDR_MASK 0x80     */
 \t0x3C,\t/* 4 金丝雀（只读，对照用）            */
 \t0x00,\t/* 5 fan_ctrl_axi   整核排除           */
-\t0x3C,\t/* 6 mldsa_axi      ADDR_MASK 0xC0     */
+\t0x44,\t/* 6 mldsa_axi      ADDR_MASK 0x80     */
 };
 static const uint8_t pl_rd_ok[PL_NSLOT] = { 1, 1, 1, 1, 1, 0, 1 };
 static const uint8_t pl_wr_ok[PL_NSLOT] = { 1, 1, 1, 1, 0, 0, 1 };
@@ -224,8 +351,36 @@ static int pl_permit(uint64_t a, int is_write)
 \t\treturn 0;
 \tslot = (uint32_t)(rel >> PL_SLOT_SHIFT);
 \toff = rel & 0xFFFFULL;
-\t/* 这一条同时收掉了 addr[15:8] != 0：上界最大也只有 0x7C */
+\t/* 这一条同时收掉了 addr[15:8] != 0：上界最大也只有 0x7C
+\t *
+\t * ⚠️ 槽 3/6 的上界 2026-08-25 从 0x3C 放到 **0x44**：D11 的 4 字节打包口
+\t * 在 0x40（IN_DATA4）与 0x44（OUT_DATA4），两个核的防火墙窗口也同时从
+\t * 0x3F 放到了 0x7F。**只放到 0x44 而不是 0x7C** —— 白名单永远取"该核实际
+\t * 存在的寄存器"，不取"防火墙允许的最大范围"。
+\t *
+\t * 这一条漏掉的症状实测过一次：位流已经带打包口、daemon 也改成打包搬运，
+\t * 但**经 EL3 那条路**每一笔打包写都被 EL3 拒掉 —— 表现是 IN_PTR 对不上、
+\t * 每次运算返回 -1。而**同一份位流经 /dev/mem 直连完全正常**，于是很容易
+\t * 去怀疑 RTL。两处策略各说各话，就是要让这种漏配变成吵闹的失败。 */
 \tif (off > (uint64_t)pl_off_max[slot])
+\t\treturn 0;
+\t/* ⚠️ **种子暂存口从通用读写里整个排除** —— 读写都不放行。
+\t *
+\t * 这一条与 PL 侧那道 AxPROT 门是**一对**，缺一个整套就白做：
+\t *   · PL 侧只认 AxPROT[1]=0，挡住普通世界自己发的事务；
+\t *   · 但这个 SiP 是**从 EL3 发的**，事务天然是安全的 —— 也就是说
+\t *     root 只要 PL_WR 到 0x8003_0038 转一手，就绕过了那道门，把自己
+\t *     知道的种子塞进去。此后这块板生成的每一把密钥他都算得出来，
+\t *     而板子照常工作、ACVP 照常过、没有任何一处报错。
+\t *
+\t * 写要拒是显然的。**读也要拒**：那个偏移在 RTL 里没有读回路径（恒 0），
+\t * 但白名单不该依赖"对面恰好没实现" —— 哪天 RTL 加了个调试读口，
+\t * 这里就成了现成的出口。窄的那一侧永远由白名单守。
+\t *
+\t * 种子只能经 ZYNQMP_SIP_SVC_PQC_SEED 装载，而那条服务在 EL3 里自己
+\t * 取熵、自己写，普通世界拿到的只有一个返回码。
+\t */
+\tif ((a == PQCHSM_MLKEM_SEED_DATA) || (a == PQCHSM_MLDSA_SEED_DATA))
 \t\treturn 0;
 \treturn is_write ? (int)pl_wr_ok[slot] : (int)pl_rd_ok[slot];
 }
@@ -245,6 +400,73 @@ CASES = '\t' + BEG + '''
 \t\t}
 \t\tmmio_write_32((uintptr_t)x1, (uint32_t)x2);
 \t\tSMC_RET2(handle, (uint64_t)0, (uint64_t)0);
+
+\tcase ZYNQMP_SIP_SVC_PQC_SEED: {
+\t\tuint64_t caller_secure = is_caller_secure(flags) ? 1ULL : 0ULL;
+\t\tuint64_t dreg, sreg;
+\t\tuint32_t words;
+
+\t\t/* 调用方世界分级。批 1 放行普通世界（安全世界还没有客户端 ——
+\t\t * OP-TEE 卡在 BL32 入口），批 2/3 把 PQCHSM_SEED_NS_ALLOWED 改成 0
+\t\t * 就成了硬闸门。判据代码现在就在路径上，不是到那时候再写。
+\t\t * 无论哪一档，**种子明文都不出 EL3** —— 回去的只有返回码。 */
+\t\tif ((caller_secure == 0ULL) && (PQCHSM_SEED_NS_ALLOWED == 0)) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EWORLD, caller_secure);
+\t\t}
+
+\t\tif ((uint32_t)x1 == PQCHSM_SEED_TGT_MLKEM) {
+\t\t\tdreg = PQCHSM_MLKEM_SEED_DATA;
+\t\t\tsreg = PQCHSM_MLKEM_SEED_STAT;
+\t\t\twords = 16U;            /* d‖z = 64 字节 */
+\t\t} else if ((uint32_t)x1 == PQCHSM_SEED_TGT_MLDSA) {
+\t\t\tdreg = PQCHSM_MLDSA_SEED_DATA;
+\t\t\tsreg = PQCHSM_MLDSA_SEED_STAT;
+\t\t\twords = 8U;             /* ξ = 32 字节 */
+\t\t} else {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EBADTGT, caller_secure);
+\t\t}
+
+\t\tif (pqchsm_seed_load(dreg, sreg, words) != 0) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_ETRNG, caller_secure);
+\t\t}
+\t\tSMC_RET2(handle, (uint64_t)0, caller_secure);
+\t}
+
+\tcase ZYNQMP_SIP_SVC_PQC_SEED_WORD: {
+\t\tuint64_t dreg, sreg;
+\t\tuint32_t cap, cnt;
+
+\t\t/* ⚠️ **无条件只认安全世界**，没有过渡开关。这条路上流的是种子
+\t\t * 明文；放行普通世界等于把 CODE-1 原样搬回来（见常量处说明）。 */
+\t\tif (!is_caller_secure(flags)) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EWORLD, (uint64_t)0);
+\t\t}
+
+\t\tif ((uint32_t)x1 == PQCHSM_SEED_TGT_MLKEM) {
+\t\t\tdreg = PQCHSM_MLKEM_SEED_DATA;
+\t\t\tsreg = PQCHSM_MLKEM_SEED_STAT;
+\t\t\tcap  = 16U;
+\t\t} else if ((uint32_t)x1 == PQCHSM_SEED_TGT_MLDSA) {
+\t\t\tdreg = PQCHSM_MLDSA_SEED_DATA;
+\t\t\tsreg = PQCHSM_MLDSA_SEED_STAT;
+\t\t\tcap  = 8U;
+\t\t} else {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EBADTGT, (uint64_t)1);
+\t\t}
+
+\t\t/* 收满了当场拒，别指望 PL 那侧的 SEED_OVF —— 那是个只该在 bug 时
+\t\t * 亮的锁存位，不是给正常流程用的回执。 */
+\t\tcnt = mmio_read_32((uintptr_t)sreg) & 0x1FU;
+\t\tif (cnt >= cap) {
+\t\t\tSMC_RET2(handle, (uint64_t)PQCHSM_SEED_EFULL, (uint64_t)1);
+\t\t}
+
+\t\tmmio_write_32((uintptr_t)dreg, (uint32_t)x2);
+\t\t/* 回去的是**写完之后的字计数**，不是种子。调用方据此核对进度，
+\t\t * 这个数字本身不泄漏任何种子字节。 */
+\t\tSMC_RET2(handle, (uint64_t)0,
+\t\t\t (uint64_t)(mmio_read_32((uintptr_t)sreg) & 0x1FU));
+\t}
 ''' + '\t' + END
 
 
@@ -536,6 +758,13 @@ def main():
     if '#include <lib/mmio.h>' not in s:
         s = s.replace('#include <common/runtime_svc.h>',
                       '#include <common/runtime_svc.h>\n#include <lib/mmio.h>', 1)
+    # is_caller_secure() 在 include/lib/smccc.h（这棵树上核对过）。
+    # runtime_svc.h 大概率间接带进来，但**不要赌**：漏了它的表现是
+    # "隐式声明"警告 + 在 -Werror 下整个 BL31 编不过，而那时错误信息指向的是
+    # 这段补丁而不是缺 include。显式写上，重复 include 有 guard，代价为零。
+    if '#include <lib/smccc.h>' not in s:
+        s = s.replace('#include <common/runtime_svc.h>',
+                      '#include <common/runtime_svc.h>\n#include <lib/smccc.h>', 1)
     open(SIP, 'w', encoding='utf-8').write(s)
     print('SiP：已装 PL_RD/PL_WR；PROT_READ 与 PL_SECREAD 已删除')
 

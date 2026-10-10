@@ -211,11 +211,12 @@ static void test_unsupported_modes(const accel_transport_t *axi)
 	free(pk);
 	free(sk);
 
-	pqc_set_backend(pqc_backend_liboqs());
+	pqc_set_backend(pqc_backend_native());
 }
 
 int main(void)
 {
+	test_use_stub_kdr();   /* 显式装桩：库里没有自动回退了 */
 	const accel_transport_t *axi = accel_transport_axi();
 	if (!axi) {
 		printf("test_accel_axi: SKIP —— 没编 Verilator 支持，"
