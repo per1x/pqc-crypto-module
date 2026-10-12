@@ -59,7 +59,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "vmap")) {
         vm0 = rd(KV_VMAP);
         printf("%s  VALID_MAP = 0x%02x%s\n", vm0 ? "FAIL" : "PASS", vm0,
-               vm0 ? "（会话结束后对称金库没擦干净）" : "（段末即擦）");
+               vm0 ? "（会话结束后对称密钥寄存器没清空）" : "（段末即擦）");
         return vm0 ? 1 : 0;
     }
 

@@ -4,7 +4,7 @@
 
 ## Checks run
 
-- [ ] `./tools/rtl_lint.sh` — zero warnings
+- [ ] `./tools/rtl_lint.sh` — no new warnings
 - [ ] `./tools/rtl_sim.sh` — all cocotb tests pass
 - [ ] `./tools/rtl_synth_check.sh` — every module synthesises
 - [ ] `ctest --test-dir build --output-on-failure`

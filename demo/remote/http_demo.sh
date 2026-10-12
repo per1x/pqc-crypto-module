@@ -20,7 +20,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 for f in hsm_ca.crt client.crt client.key; do
-  [ -r "$PKI/$f" ] || { echo "缺 $PKI/$f（先跑 tools/demo_remote.sh <IP> --provision）"; exit 1; }
+  [ -r "$PKI/$f" ] || { echo "缺 ${PKI}/${f}（先跑 tools/demo_remote.sh <IP> --provision）"; exit 1; }
 done
 
 # ⚠️ --noproxy：开着系统代理（HTTPS_PROXY）时 curl 会把请求交给代理，

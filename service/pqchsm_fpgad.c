@@ -2,9 +2,7 @@
 //
 //   pqchsm_fpgad [-f]
 //     -f      前台运行（板上调试用）
-//     -lock   **已废弃**（V-04/D-02），接受但忽略。
-//             交付/演示形态用它；跑 ACVP 的 KeyGen 向量时不能用（那要核对 dk），
-//             而闩锁只有重新装载位流才解得开。
+//     -lock   已废弃（V-04/D-02），接受但忽略（私钥导出闩锁已删除）。
 //
 // ============================================================================
 // 【它在栈里的位置，以及为什么这一层不能省】
@@ -25,18 +23,16 @@
 //     **PL 里没有按槽常驻的私钥，本进程里也没有。**
 //
 //   · **对称密钥**（D7）：由 TA 生成或解包，经 PTA → EL3 SiP 0x8200ff16 装进
-//     PL 的 key_vault。本进程**没有一个能放对称密钥明文的缓冲区**：生成时交给
+//     PL 的 key_vault（对称密钥寄存器）。本进程**没有一个能放对称密钥明文的缓冲区**：生成时交给
 //     调用方的是 blob，重装时收的也是 blob。key_vault 在 RTL 上没有通往总线的
 //     读路径，装载口只认安全事务，送检形态下 BL31 把它整槽排除 —— 本进程连
 //     它的元数据都读不到，只按槽号经 sym_axi 使唤它（分组运算不走 SMC）。
 //
-//     ⚠️ 这一段以前写的是"对称密钥进 PL 的 key_vault"（由本进程明文写入）与
-//     "dk/sk 进 PL 的片内金库槽"—— 前者是 D7 之前、后者是批 2 之前的旧稿。
-//     注释与代码倒挂在安全叙事上是**最贵**的一种：读注释的人会以为密钥在
-//     某处而其实不在，或者反过来。改代码时这段必须跟着改。
+//     旧稿说过"对称密钥由本进程明文写进 key_vault"和"dk/sk 进 PL 的片内金库槽"，
+//     两种做法都已删除。改代码时这一段要一起改。
 //
 //   · **会话即连接。** 连接一断：句柄表清零；给两个 PQC 展开区各发 ZEROIZE；
-//     给 sym_axi 发 ZEROIZE —— RTL 里那一笔**连对称金库一起擦**（D7 加的那根线）。
+//     给 sym_axi 发 ZEROIZE —— RTL 里那一笔**连对称密钥寄存器一起擦**（D7 加的那根线）。
 //     少了这一条，A 连接装的对称密钥，B 连接重连之后照样能按槽号拿来加解密。
 //
 // ============================================================================
@@ -123,7 +119,7 @@
  * 能力（CTRL[0]，见 hardware/rtl/bus/sym_axi.v），而 daemon 从来没发过 ——
  * "对称密钥用完会被擦掉"这句话在交付形态下是假的。 */
 #define SY_CTRL   (S_SYM + 0x04)
-#define SYC_ZEROIZE 1u                   /* CTRL[0]：擦三个核**与对称金库**（D7 的 ext_zeroize） */
+#define SYC_ZEROIZE 1u                   /* CTRL[0]：擦三个核**与对称密钥寄存器**（D7 的 ext_zeroize） */
 #define SY_STATUS (S_SYM + 0x08)
 #define SY_ALG    (S_SYM + 0x0C)
 #define SY_SLOT   (S_SYM + 0x10)
@@ -161,7 +157,7 @@
 #define MKC_INRST 4u
 /* CTRL[4] 原来是 DK_LOCK（一次性闩锁）。**已随 V-04 删除** —— 它守在与
  * 「密钥归 TEE」相反的方向。关闭私钥导出的闸门改落 TEE 策略侧。 */
-#define MKC_ZEROIZE 2u                   /* CTRL[1]：擦金库（见 mlkem_axi.v A_CTRL） */
+#define MKC_ZEROIZE 2u                   /* CTRL[1]：擦展开区（见 mlkem_axi.v A_CTRL） */
 #define MKC_SEEDCLR 0x40u                /* CTRL[6]：作废暂存的那份种子 */
 #define MKS_EXPWIPE 0x1u                 /* KEYSTAT[0]：展开区正在擦 */
 #define MK_KEYSTAT (S_MLKEM + 0x30)
@@ -217,7 +213,7 @@
 #define MDC_CLEAR  0x02u              /* CTRL[1] */
 /* CTRL[4] 原来是 SK_LOCK。**已随 V-04 删除**（同 mlkem 那条）。 */
 #define MDC_SEEDCLR 0x40u             /* CTRL[6]：作废暂存的那份 ξ（mldsa_axi.v A_CTRL） */
-#define MDC_ZEROIZE 0x04u             /* CTRL[2]：擦金库（见 mldsa_axi.v A_CTRL） */
+#define MDC_ZEROIZE 0x04u             /* CTRL[2]：擦展开区（见 mldsa_axi.v A_CTRL） */
 
 #define MDS_BUSY   (1u << 0)
 #define MDS_DONE   (1u << 1)
@@ -547,7 +543,7 @@ static int sec_seed_load(uint32_t target, uint32_t *world)
 /* ============================================================================
  * 【D7：对称密钥装载归 TA，本进程只搬 blob】
  * ============================================================================
- * 与种子同形：TA 生成/解包 → PTA → EL3 SiP 0x8200ff16 → PL key_vault。
+ * 与种子同形：TA 生成/解包 → PTA → EL3 SiP 0x8200ff16 → PL key_vault（对称密钥寄存器）。
  * 这里的参数里**没有能放明文密钥的字段**：GEN 收槽号+长度、回 blob；
  * LOAD 收槽号+blob；KAT 收编号。 */
 static int ta_symkey_cmd_raw(uint32_t cmd, uint32_t a, uint32_t b,
@@ -601,7 +597,7 @@ static int ta_symkey_cmd(uint32_t cmd, uint32_t a, uint32_t b,
 	} else {
 		lay("[TEE]", "TA 取出公开测试向量密钥 #%u", b);
 	}
-	lay("[TEE→PL]", "密钥经 PTA → EL3 写进 PL 对称金库槽 %u（普通世界不经手）", a);
+	lay("[TEE→PL]", "密钥经 PTA → EL3 写进 PL 对称密钥寄存器槽 %u（普通世界不经手）", a);
 	return 0;
 }
 
@@ -952,32 +948,22 @@ static int mldsa_run(uint32_t op, uint32_t pset, uint32_t mode_extra,
 	return rc;
 }
 
-/* ---- 句柄表：dk 留在这里，不给应用 ---- */
 /* ============================================================================
- * 【句柄表：现在它里面没有私钥了】
+ * 【句柄表：里面没有私钥】
  * ============================================================================
- * 以前这里存着 dk 本身（3200 字节一把）—— 因为 KeyGen 会把 ek‖dk 一起从
- * OUT_DATA 交出来，dk 必须落到某个地方，而"某个地方"就是本进程的堆。
- * 于是"私钥不出**接口**"成立（应用只拿到句柄），"私钥不出**硬件**"不成立。
- *
- * 现在 dk 整个留在 PL 的片内金库里，本表只记"哪个槽、什么参数集"。
- * 句柄数因此从 16 降到 4（金库槽数），这是实打实的容量代价，
- * 换来的是**这个进程的内存里再也没有私钥**。
+ * 表项只记参数集和 TA 包好的种子 blob。dk 在每次 Decaps 时由 PL 从种子现展开，
+ * 算完即擦；本进程的内存里没有私钥，也没有种子明文。
  */
 #define MAX_KEYS PL_KEY_SLOTS
 /* 句柄表：**只放不透明的 blob**（D-01）。
- * 原来这里的句柄"就是"PL 金库的槽号 —— 密钥的生命周期管理落在普通世界，
- * TEE 完全不出现。现在句柄只是本表的下标，表里放的是 TA 包好的种子密文；
- * 本进程解不开它，也没有任何理由去解。daemon 退化成纯搬运。 */
+ * 句柄只是本表的下标，表里放的是 TA 包好的种子密文；
+ * 本进程解不开它，也没有任何理由去解。daemon 只负责搬运。 */
 #define SEED_BLOB_MAX 128
 static struct { int used; uint32_t pset;
                 uint8_t blob[SEED_BLOB_MAX]; size_t blob_len; } keys[MAX_KEYS];
 
-/* 签名私钥的句柄表。**与上面那张分开**，不是重复代码：
- * 两个核各有自己的金库，槽号空间互不相干（ML-KEM 16 个、ML-DSA 8 个）。
- * 合成一张表就得再引一个"这是哪个核"的字段，而那个字段一旦弄错，
- * 后果是拿签名槽的号去 ML-KEM 的金库里取私钥 —— 恰恰是句柄不做间接映射
- * 要避免的那类错。两张表、各自槽号即句柄，对不上的可能性为零。 */
+/* 签名私钥的句柄表，与上面那张分开：两张表容量不同（ML-KEM 16 个、ML-DSA 8 个），
+ * 各自的下标即句柄，不需要再记"这是哪个核"。 */
 static struct { int used; uint32_t pset;
                 uint8_t blob[SEED_BLOB_MAX]; size_t blob_len; } dsa_keys[MLDSA_KEY_SLOTS];
 
@@ -988,24 +974,17 @@ static void keys_wipe(void)
 }
 
 /* ============================================================================
- * 【会话结束：句柄失效，硬件里的私钥也擦掉】
+ * 【会话结束：句柄失效，PL 里的残留也擦掉】
  * ============================================================================
  * daemon **一次只服务一个连接**（硬件序列必须串行化，见文件头），所以"会话"
  * 与"连接"是一回事，隔离用不着 owner 字段：连接一断把两张表清零就够了。
  *
- * ⚠️ 但只清表是不够的 —— 表清了，**私钥还在 PL 的金库槽里**。下一个连接
- * 拿不到句柄（`used == 0` 就被拒），可它只要自己做一次 KeyGen 就会拿到同一个
- * 槽号，而"上一个人的私钥还在那儿"这件事本身就不该成立。所以这里同时给两个
- * PQC 金库各发一次 ZEROIZE。
+ * PQC 私钥正常情况下算完即擦，这里仍给两个核的展开区各发一次 ZEROIZE，
+ * 清掉异常中断留下的残余。种子暂存口的闩锁（SEED_LOCK）不受 ZEROIZE 影响，
+ * 本进程也不设置它。
  *
- * ⚠️ **一次性闩锁不受影响**：mldsa_axi / mlkem_axi 的 SK_LOCK 都明确写着
- * "ZEROIZE 不清它" —— 擦秘密不等于撤防线。交付形态开机置上的那道闩锁，
- * 会一直在。
- *
- * 对称密钥（D7）：**也在这里擦**。以前这里写的是"key_vault 不在这里擦，
- * 生命周期归调用方"—— 那是明文导入时代的口径，而且当时 SY_CTRL.ZEROIZE
- * 根本接不到金库，"擦了"本来也是假的。D7 之后权威副本在 TA（调用方手里
- * 那份 blob），PL 只是**单段使用容器**：段末即擦，下次会话用 blob 重装。
+ * 对称密钥（D7）也在这里擦。权威副本在 TA（调用方手里那份 blob），
+ * PL 的 key_vault 只是单段使用容器：段末即擦，下次会话用 blob 重装。
  */
 /* ============================================================================
  * 【⚠️ 擦除没落地就写下一笔 = 丢板子。等它落下来，而且只能用读来等】
@@ -1022,8 +1001,8 @@ static void keys_wipe(void)
  * 外部中止，接得住；写被拒是 posted 的，接不住。这条不是风格，是这块板上
  * "能不能远程恢复"的分界线。
  *
- * 擦一遍 64 KB 金库约 8192 拍 @ ~150 MHz ≈ 55 µs，ML-DSA 那边 16 KB 更短；
- * 自旋上限给到远大于它的数，超时就如实记一笔并放弃（不再写任何东西）。
+ * 擦一遍展开区 BRAM 远小于 1 ms；自旋上限给到远大于它的数，
+ * 超时就如实记一笔并放弃（不再写任何东西）。
  */
 static int wait_not_wiping(unsigned reg, uint32_t bit, const char *who)
 {
@@ -1109,24 +1088,23 @@ static void session_end(void)
 	if (wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA") == 0)
 		wr(MD_CTRL, MDC_ZEROIZE);
 	/* 对称那一路（登记表 Z-05 + D7）。这一笔擦三个核的轮密钥，**并经
-	 * sym_axi → key_vault 的 ext_zeroize 把整个对称金库一起擦掉** ——
+	 * sym_axi → key_vault 的 ext_zeroize 把整个对称密钥寄存器一起擦掉** ——
 	 * 送检形态下本进程够不到槽 1，这是普通世界唯一的擦除路径，也够了：
 	 * 擦除永远是安全方向，不需要安全世界来做。
 	 *
-	 * ⚠️ **它没有 WIPING 可等，这不是漏了。** 对称金库是**寄存器阵列**
-	 * （key_vault.v），一拍全清；两个 PQC 金库是 BRAM，只能逐地址写，
-	 * 所以才有 WIPING 那个"擦了一半"的窗口要暴露、要等。
-	 * 形态不同，纪律就不同 —— 在这里硬套 wait_not_wiping 会去读一个
-	 * 根本不存在的状态位，读回 0 之后"等到了"，那是自欺。
+	 * ⚠️ **它没有 WIPING 可等，这不是漏了。** 对称密钥寄存器是寄存器阵列
+	 * （key_vault.v），一拍全清；两个 PQC 展开区是 BRAM，只能逐地址写，
+	 * 所以才有 WIPING 窗口要等。在这里套 wait_not_wiping 会去读一个
+	 * 不存在的状态位。
 	 *
-	 * 顺序放在两个 PQC 金库之后：它们要等，早发早等。 */
+	 * 顺序放在两个 PQC 展开区之后：它们要等，早发早等。 */
 	wr(SY_CTRL, SYC_ZEROIZE);
 	/* 自证：擦完之后当前选中的那一槽 KV_VALID 必须落下。读，不写。
-	 * 落不下说明位流不是 D7 那一版（SY_CTRL 还接不到金库）—— 如实记一笔。 */
+	 * 落不下说明位流不是 D7 那一版（SY_CTRL 还接不到 key_vault）—— 如实记一笔。 */
 	if (rd(SY_STATUS) & SYS_KVOK)
 		logf_("SY_CTRL.ZEROIZE 之后 KV_VALID 仍为 1 —— 位流没有 D7 的"
-		      " sym→vault 擦除线？对称密钥**没有**随会话擦掉");
-	lay("[PL]", "会话结束：PQC 展开区、对称金库与三个分组核已发擦除");
+		      " sym→key_vault 擦除线？对称密钥**没有**随会话擦掉");
+	lay("[PL]", "会话结束：PQC 展开区、对称密钥寄存器与三个分组核已发擦除");
 	/* ⚠️ 关键的一步：**等擦完再返回**。下一个连接的第一笔写不能落在 WIPING 上。 */
 	wait_not_wiping(MK_STATUS, MKS_WIPING, "ML-KEM");
 	wait_not_wiping(MD_STATUS, MDS_WIPING, "ML-DSA");
@@ -1176,7 +1154,7 @@ static int sym_block(uint32_t alg, uint32_t slot, int dec,
  * sym_axi 只做单分组变换（16 字节进、16 字节出，密钥按槽号使唤）。CBC/CTR/
  * CFB/OFB 的链接、计数、异或都在本函数里，每个分组仍然各走一次硬件。
  *
- * 于是"密钥不出金库"这条性质在模式下**原样成立** —— 本进程从头到尾没有密钥
+ * 于是"密钥不出 PL"这条性质在模式下**原样成立** —— 本进程从头到尾没有密钥
  * 字节，只有 IV 与数据。而"硬件做的是什么"必须说准：**是分组变换，不是模式**。
  *
  * ⚠️ CTR / OFB / CFB 三种只用**加密方向**的分组变换，解密也一样 ——
@@ -1291,7 +1269,7 @@ static int sym_crypt(uint32_t alg, uint32_t slot, int dec, uint32_t mode,
 	int rc = sym_crypt_raw(alg, slot, dec, mode, iv, in, out, len);
 
 	if (!rc && alg < 3 && mode < 5)
-		lay("[PL]", "%s-%s %s %u 字节：%u 个分组逐个在 PL 里算，密钥取自金库槽 %u（%.2f ms）",
+		lay("[PL]", "%s-%s %s %u 字节：%u 个分组逐个在 PL 里算，密钥取自 key_vault 槽 %u（%.2f ms）",
 		    an[alg], mn[mode], dec ? "解密" : "加密", len, (len + 15u) / 16u, slot,
 		    ms_now() - t0);
 	return rc;
@@ -1469,8 +1447,8 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		mlkem_len(keys[h].pset, &eklen, &dklen, &ctlen);
 		if (q->len != ctlen || ctlen > sizeof in)
 			return SDR_INARGERR;
-		/* **只送密文**。dk 由 PL 从自己的金库里取，一个字节都不经过总线，
-		 * 也不经过本进程 —— 这里连一个能放 dk 的缓冲区都不存在了。 */
+		/* **只送密文**。dk 由 PL 从暂存种子现展开，一个字节都不经过总线，
+		 * 也不经过本进程 —— 这里没有能放 dk 的缓冲区。 */
 		memcpy(in, pay, ctlen);
 		/* 先请 TA 把这把密钥的种子重放进 PL 的暂存口，然后一条 CHAIN
 		 * 的 Decaps —— PL 现展开 dk、解完即擦。dk 既没经过总线，
@@ -1524,7 +1502,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 			return SDR_HARDFAIL;
 		world = 1;
 
-		/* SK_TO_SLOT：sk 进片内金库，不从 OUT_DATA 出来。
+		/* CHAIN + SEED_STAGED：sk 在展开区里，不从 OUT_DATA 出来。
 		 * 于是 OUT_LEN 应当恰好是 pk 的长度 —— 这一条要断言，
 		 * 它是"私钥没出硬件"在软件侧唯一能自己核对的证据。 */
 		/* 一个输入字节都不送：ξ 在 PL 的暂存口里（EL3 刚写进去的），
@@ -1562,8 +1540,8 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		 *
 		 * ⚠️ 这里原来只送 msg，注释还写着"只送消息" —— 那是 RTL 加进
 		 *    rnd/ctx **之前**的旧约定。RTL 现在的输入排布是
-		 *        [sk，仅当不走金库] ‖ rnd(32) ‖ ctx ‖ msg
-		 *    走金库时 START 的长度门槛是 32+ctx_len+msg_len。只送 msg 的话
+		 *        [sk，仅当不走 CHAIN] ‖ rnd(32) ‖ ctx ‖ msg
+		 *    走 CHAIN 时 START 的长度门槛是 32+ctx_len+msg_len。只送 msg 的话
 		 *    IN_PTR 差 32 字节，**START 必被 LEN_ERR 拒、根本不启动**——
 		 *    也就是说签名在真硬件上一次都成功不了。
 		 *    仿真侧发现不了它：cocotb 的用例是照 RTL 的排布喂的，
@@ -1656,7 +1634,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 				  out, PQCS_SYMKEY_BLOB_MAX, &blen, 1))
 			return SDR_HARDFAIL;
 		*out_len = (uint32_t)blen;
-		logf_("SYMKEY_GEN 槽 %u（%u 字节）—— TA 生成并装进金库，"
+		logf_("SYMKEY_GEN 槽 %u（%u 字节）—— TA 生成并装进 key_vault，"
 		      "本进程只拿到 %zu 字节 blob", q->a0, q->a1, blen);
 		return SDR_OK;
 	}
@@ -1668,7 +1646,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		if (ta_symkey_cmd(TA_PQCHSM_CMD_SYMKEY_LOAD, q->a0, 0,
 				  (void *)pay, q->len, NULL, 0))
 			return SDR_KEYNOTEXIST;   /* 多半是 blob 不是本设备/本 KEK 包的 */
-		logf_("SYMKEY_LOAD 槽 %u —— TA 解开 blob 装进金库", q->a0);
+		logf_("SYMKEY_LOAD 槽 %u —— TA 解开 blob 装进 key_vault", q->a0);
 		return SDR_OK;
 
 	/* ---- 后量子密钥的种子 blob：导出 / 导入（daemon 只搬密文）----------------
@@ -1797,7 +1775,7 @@ static uint32_t handle_op(const struct pqcs_req *q, const uint8_t *pay,
 		if (sym_crypt(alg, slot, (int)dec, mode, pay, pay + 16, out, dlen))
 			return SDR_HARDFAIL;
 		*out_len = dlen;
-		logf_("SYM_CRYPT alg=%u 模式=%u %s 槽 %u，%u 字节（密钥没出金库）",
+		logf_("SYM_CRYPT alg=%u 模式=%u %s 槽 %u，%u 字节（密钥没出 PL）",
 		      alg, mode, dec ? "解密" : "加密", slot, dlen);
 		return SDR_OK;
 	}
@@ -2220,7 +2198,7 @@ int main(int argc, char **argv)
 		hw_fault = 0;
 		session_end();
 		hw_fault = 0;
-		logf_("客户端断开（句柄表已清；两个 PQC 展开区与对称金库已擦）");
+		logf_("客户端断开（句柄表已清；两个 PQC 展开区与对称密钥寄存器已擦）");
 	}
 	return 0;
 }

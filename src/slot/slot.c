@@ -95,9 +95,9 @@ void slot_wipe_key_material(slot_t *s)
 	s->seed_len = 0;
 	s->has_seed = 0;
 	/* 硬件槽的句柄也要跟着作废。**这里只作废本进程的引用** ——
-	 * PL 金库里那份 dk 由硬件的 zeroize 或下一次 PL 重配清掉，
+	 * daemon 句柄表里的种子 blob 在会话结束时清掉，
 	 * 不是这个函数能做到的事。留着一个指向已销毁对象的句柄更危险：
-	 * 槽位复用之后它会指向别人的私钥。 */
+	 * 句柄复用之后它会指向别人的私钥。 */
 	s->hw_handle = 0;
 	s->hw_resident = 0;
 }
@@ -781,7 +781,7 @@ static hsm_status_t install_key(slot_t *s, pqc_alg_t alg, uint32_t usage, uint32
 			}
 			return HSM_OK;
 		} else {
-			/* 硬件**真的失败了**（金库满、通信断、核报错）：不静默退回软件。
+			/* 硬件**真的失败了**（句柄表满、通信断、核报错）：不静默退回软件。
 			 * 上层要的是"私钥在硬件里"，悄悄给一把软件密钥是把承诺变成谎话。 */
 			pqc_secure_free(hpk, info->pk_len);
 			return HSM_ERR_CRYPTO;
@@ -1108,7 +1108,7 @@ hsm_status_t hsm_object_sign(hsm_token_t *tok, hsm_session_t sess, hsm_handle_t 
 			 * 硬件路径上 rnd 只能是 NULL：核的 rnd 由 PL 的 TRNG 供给，
 			 * 寄存器面没有喂它的入口（见 pqc.h 的 sign_hw 注释）。 */
 			if (s->hw_resident) {
-				/* 私钥在 PL 的片内金库里：只把句柄和消息交下去。
+				/* 私钥只以 TA 包裹的种子存在（daemon 句柄表）：只把句柄和消息交下去。
 				 * 与 hsm_object_decaps 那一支同构 —— 上面 begin_use
 				 * 借到的 sk 在这条路上恒为 NULL，而借的动作仍然要做，
 				 * 因为它同时管着句柄校验、用途检查和状态机，
@@ -1162,7 +1162,7 @@ hsm_status_t hsm_object_decaps(hsm_token_t *tok, hsm_session_t sess, hsm_handle_
 		if (!ct || !ss || !ss_len || ct_len != info->ct_len || cap < info->ss_len) {
 			op = HSM_ERR_BAD_ARG;
 		} else if (s->hw_resident) {
-			/* 私钥在 PL 的片内金库里：只把句柄和密文交下去。
+			/* 私钥只以 TA 包裹的种子存在（daemon 句柄表）：只把句柄和密文交下去。
 			 * 上面 begin_use 借到的 sk 在这条路上恒为 NULL —— 借的动作仍然要做，
 			 * 因为它同时管着句柄校验、用途检查和状态机，那几件事与私钥在哪无关。 */
 			op = (pqc_decaps_hw(s->meta.alg, s->hw_handle, ct, ss) == PQC_OK)

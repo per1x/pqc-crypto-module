@@ -81,7 +81,7 @@ int SDFE_GetDeviceInfo(SDFE_HANDLE hSession, char *buf, size_t cap);
 /* 随机数——来自 PL 里的环形振荡器源，不是软件 PRNG */
 int SDFE_GenerateRandom(SDFE_HANDLE hSession, uint32_t len, uint8_t *out);
 
-/* ML-KEM —— dk 进 PL 的片内金库（**不是**留在守护进程内存里）；应用拿到的是句柄 */
+/* ML-KEM —— dk 只以 TA 包裹的种子存在；应用拿到的是句柄 */
 int SDFE_GenerateKeyPair_MLKEM(SDFE_HANDLE hSession, uint32_t pset,
                                uint8_t *ek, uint32_t *ek_len,
                                uint32_t *key_handle);
@@ -113,7 +113,7 @@ int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
 
 /* 工作模式（CBC / CTR / CFB / OFB）：一次一段数据，iv 恒 16 字节。
  * ⚠️ **分组变换在硬件里，链接与异或在 daemon 里** —— RTL 里没有模式状态机，
- *    别把它说成"硬件 CBC"。密钥仍然只按槽号使唤，一个字节都不出金库。
+ *    别把它说成"硬件 CBC"。密钥仍然只按槽号使唤，一个字节都不出 PL。
  * ⚠️ 不做填充：ECB/CBC 要求长度是 16 的非零整数倍，CTR/CFB/OFB 任意长度。
  * ⚠️ IV 由调用方给。CTR/OFB/CFB 的 (密钥, IV) **绝不能重复**（密钥流复用）。 */
 int SDFE_EncryptMode(SDFE_HANDLE hSession, uint32_t alg, uint32_t mode,
@@ -180,7 +180,7 @@ SDF 中*内部密钥*的概念天然对应 `key_vault`：`SDF_InternalSign` 接�
 | 杂凑 | `SDFE_Hash_SM3`（一次一段） | **硬件** SM3 核，对上 GB/T 32905 A.1 |
 | 设备标识 | `SDFE_GetDeviceDNA`（16 字节） | ⚠️ **返回的不是密钥，是一个公开的芯片编号**。用途只有一个：让上层把 keystore 之类的东西绑到这块板（换板打不开 = 防克隆）。有 JTAG 的人能读到同样的值，所以任何"它来自硬件所以安全"的推理都是错的。经 BL31 白名单的只读窗口 `0xFFCA0050-5C` 取，EL1 直读是总线错误 |
 | 密钥管理（对称密钥进片内、只按槽号使唤） | `SDFE_GenerateKey` / `LoadKey` / `LoadKatKey`（`ImportKey` 恒回 `SDR_NOTSUPPORT`） | 密钥在 **TEE 内生成并装载**进硬件 `key_vault`，RTL 上没有读出通路 |
-| 非对称（后量子） | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **硬件**，私钥在片内金库，只交出公钥与槽号 |
+| 非对称（后量子） | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **硬件**；私钥只以 TA 包裹的种子存在，每次运算由 PL 现展开，只交出公钥与句柄 |
 | 公钥加密任意长度数据 | `SDFE_PKEncrypt` / `PKDecrypt` | KEM 走硬件；DEM 的 AES-GCM 走软件（口径见 `sdfe_pkenc.h`） |
 
 **故意没做的，逐条写明理由：**
@@ -238,9 +238,7 @@ NTT 与 Keccak 两个算子，整算法的硬件 transport 尚不存在。
 
 | 密钥 | 存在哪里 | 会离开硬件吗？ |
 |---|---|---|
-| 对称（AES / SM4） | `key_vault` 寄存器阵列；权威副本是调用方持有的、TA 包裹的 PWRP blob | **不会。** RTL 里没有总线侧的读出路径，普通世界（含守护进程）从不见明文：密钥由 TA 生成，经 SiP `PQC_SYMKEY` 装入。守护进程在会话结束时擦金库 |
-| ML-KEM `dk` | 目前由 `KeyGen` 返回；由守护进程持有 | ⚠️ **会，它会离开硬件**——但不会离开*接口*。应用手里始终只有一个句柄 |
+| 对称（AES / SM4） | `key_vault` 寄存器阵列；权威副本是调用方持有的、TA 包裹的 PWRP blob | **不会。** RTL 里没有总线侧的读出路径，普通世界（含守护进程）从不见明文：密钥由 TA 生成，经 SiP `PQC_SYMKEY` 装入。守护进程在会话结束时擦密钥寄存器 |
+| ML-KEM `dk` / ML-DSA `sk` | 只以 TA 包裹的种子 blob 存在（放在守护进程的句柄表里）；PL 每次运算现展开、算完即擦 | **不会。** 应用和守护进程都见不到私钥，应用手里只有句柄。例外是 ACVP 的 KeyGen 路径（种子由软件给），它返回的是调用方自己选的种子对应的密钥 |
 
-第二行是当前状态，不能简化成"私钥永不离开硬件"。要让那句话成立，需要在
-`mlkem_axi` 内部实现私钥存储与按句柄使用，那是产品级的工作，不是原型级的。见
-[SECURITY.zh-CN.md](SECURITY.zh-CN.md)。
+边界与剩余风险见 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。

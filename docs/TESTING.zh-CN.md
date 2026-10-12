@@ -17,8 +17,8 @@
 
 | 检查项 | 结果 | 位置 |
 |---|---|---|
-| cocotb RTL 回归 | 200 个测试，0 失败 | `./tools/rtl_sim.sh` |
-| Verilator `-Wall` + Icarus lint | 70 个模块，0 警告 | `./tools/rtl_lint.sh` |
+| cocotb RTL 回归 | 272 个测试（`@cocotb.test` 计数） | `./tools/rtl_sim.sh` |
+| Verilator `-Wall` + Icarus lint | 7 个模块仍有告警（mldsa_axi、mldsa_engine、mldsa_keygen、mldsa_sign、mldsa_verify、mlkem_axi、zu3eg_hsm_top），其余无告警 | `./tools/rtl_lint.sh` |
 | Yosys 可综合性 | 68 个模块，全部可综合 | `./tools/rtl_synth_check.sh` |
 | ML-KEM 512/768/1024 对照 NIST ACVP，真硅上 | 20 / 20 逐字节一致 | `board/logs/RESULT_seckem3.txt` |
 | 板级自测 | 24 / 24 | `board/logs/RESULT_hwtest.txt` |
@@ -76,25 +76,25 @@
 
 ## RTL 验证
 
-跨 26 个顶层的 251 个 cocotb 测试，在 Icarus Verilog 下运行（`tools/rtl_sim.sh`）：
+42 个测试模块里的 272 个 cocotb 测试，在 Icarus Verilog 下运行（`tools/rtl_sim.sh`）：
 
 | 组 | 测试 |
 |---|---|
 | ML-KEM 算子与数据通路 | `mont_reduce`、`butterfly`、`basemul`、`ntt_core`、`compress`/`decompress`（5 种位宽）、`sample`、`bitpack`，以及完整的 KeyGen/Encaps/Decaps |
 | ML-DSA 算子 | `tb_mldsa_units`（8）、`mldsa_ntt_core`（5）、`tb_mldsa_keygen`（8） |
 | Keccak | `keccak_f1600`（5）、`sha3_core`（9） |
-| 总线 | `axi4lite_xbar`（8，另按板级 NS=7 再跑 8）、`axi4lite_firewall`（6）、`pqc_accel_axi`（16）、`key_vault`（4）、`key_vault_axi`（6）、`mlkem_axi`（13）、`mldsa_axi`（24） |
-| 对称与商密 | `aes_core`（5）、`sm4_core`（6）、`sm3_core`（6）、`sym_vault_top`（5） |
-| 风扇 | `fan_ctrl`（7）、`sysmon_drp`（3） |
+| 总线 | `axi4lite_xbar`（8，另按板级 NS=7 再跑 8）、`axi4lite_firewall`（6）、`pqc_accel_axi`（16）、`key_vault`（4）、`key_vault_axi`（9）、`mlkem_axi`（27）、`mldsa_axi`（35） |
+| 对称与商密 | `aes_core`（5）、`sm4_core`（6）、`sm3_core`（6）、`sym_vault_top`（6） |
+| 风扇 | `fan_ctrl`（8）、`sysmon_drp`（3） |
 | TRNG | `trng_health`（8）、`trng_source`（3）、`trng_cond`（4）、`trng_top`（4 + 2 不丢弃 + 1 丢弃）、`trng_axi`（6）、告警路径（4）、原始抽头（3） |
 
-⚠️ **`mldsa_axi` 那 24 条是整条链路的端到端对拍，不是"总线层"而已。**
+⚠️ **`mldsa_axi` 那 35 条是整条链路的端到端对拍，不是"总线层"而已。**
 它接的是真 `mldsa_engine`（行为级替身已删），判据是 **ACVP 官方向量**
 （KeyGen 的 pk/sk、Sign 的 σ 逐字节；Verify 的 pass 与 fail 两种判定）加
 `hardware/model/mldsa_oracle.py`（用在官方向量给不出期望值的地方，主要是
-**按槽签名** —— 金库里的 sk 只能来自一次真 KeyGen，而 90 条 ACVP siggen 的 sk
+**链式签名**（暂存种子） —— PL 展开出的 sk 只能来自一次真 KeyGen，而 90 条 ACVP siggen 的 sk
 没有一条出现在 keygen 向量里）。同一条 σ 因此被两条独立的路钉住：自送 sk 的
-那条对官方 ACVP，按槽签的那条对 oracle，且两条必须逐字节相同。
+那条对官方 ACVP，链式签的那条对 oracle，且两条必须逐字节相同。
 
 上面这一轮只覆盖 **ML-DSA-44**（不带参数就是它）。三个参数集的全量矩阵是
 `tools/mldsa_grid.sh` 的**十二格**（KeyGen / Sign / Verify / **AXI** × 44 / 65 / 87，
@@ -138,7 +138,7 @@ set_clock_uncertainty -hold 0.100 [get_clocks -of_objects [get_pins u_div/O]]
 ## 真硅结果
 
 **ML-DSA，两种位流形态各验一遍。** 三个参数集的
-KeyGen/Sign/Verify 逐字节对上 ACVP，加上片内签名金库与运行时切参数集：
+KeyGen/Sign/Verify 逐字节对上 ACVP，加上 sk 不出总线的检查与运行时切参数集：
 
 | 判据 | 演示形态 `SECURE_ONLY=0` | 送检形态 `SECURE_ONLY=1` |
 |---|---|---|
@@ -146,8 +146,8 @@ KeyGen/Sign/Verify 逐字节对上 ACVP，加上片内签名金库与运行时�
 | daemon 经 `/dev/secmmio` → EL3 白名单 | 三参数集端到端通 | 三参数集端到端通（同上日志 ④ 段） |
 | 孤立单验（跨参数集、跨判定）| 61/61 与 ACVP 一致（`RESULT_ctbprobe_demoform.txt`） | — |
 
-金库那三条同时钉住"私钥不出硬件"：`OUT_LEN` 恰好只到 pk 的长度，把读游标
-seek 到 sk 那一段读回全 0，而按槽签出来的 σ 与自送 sk 逐字节相同。
+`mldsa_hwtest` 里的 `Vault` 用例（名字沿用旧称）钉住 CHAIN 路径的私钥不上总线：`OUT_LEN` 恰好只到 pk 的长度，把读游标
+seek 到 sk 那一段读回全 0。链式签与自送 sk 的对比要安全世界先送种子，普通世界的工具做不到，由 daemon 那条路和 cocotb 覆盖。
 
 > **送检形态下 ML-DSA 可达，前提是 BL31 的 SiP 白名单里有槽 6**
 > （`0x8006_0000`）。那张表一度只到槽 5，于是"位流装好了、核也在，却什么都
@@ -156,7 +156,7 @@ seek 到 sk 那一段读回全 0，而按槽签出来的 σ 与自送 sk 逐字�
 
 > ⚠️ 上板同时抓到一个**仿真看不见**的 Verify 缺陷：c̃ 的判定是整 512 位比较，
 > 而寄存器每次只写低 ctb 字节，高位是上一次运算的残留。仿真里复位把高位清成
-> 0，而板上装载之后再也不复位。已修，回归见 `mldsa_axi` 那 24 条与坑表 V8。
+> 0，而板上装载之后再也不复位。已修，回归见 `mldsa_axi` 那 35 条与坑表 V8。
 
 **算法。** ML-KEM 512/768/1024 的 KeyGen/Encaps/Decaps 对照 NIST ACVP 的
 prompt/expectedResults 配对：20/20 逐字节一致。长度由 RTL 从 `pset` 字段推导，
@@ -174,13 +174,10 @@ GB/T 32907 A.1，SM3 对照 GB/T 32905 A.1。
   > **在 RAZ/WI 位流上重跑这一条还欠着** —— 板子的 SSH key 没扛过上次断电。
   > 新观测量由仿真覆盖（`test_xbar` 8/8，含 64 KB 全扫）。
 - *清零*，4/4——`STATUS.WIPING` 置起，持续 112.5 µs，对照理论值 109.2 µs
-  *（这次测量早于片内私钥金库；擦除现在要多盖一块 16 KB，共 16384 拍 ≈ 218 µs，待重测）*
-  > **⚠️ 这两个数都过时了。** 金库是 16 槽 / 64 KB，擦除计数器 16 位，本层跑
-  > **65536 拍**（@75 MHz ≈ 874 µs）；批 1 之后三个 ML-KEM 核还各有自己的擦除机。
-  > 这个数字**以 `REGISTERS.zh-CN.md` 为唯一口径**。上面那些实测值保留，因为它们
-  > 记录的是当时**在更早那版 bitstream 上**真的量到了什么 —— 重测待上板。
   （8192 个周期 @ 75 MHz；差值是轮询开销），之后 `OUT_LEN = IN_PTR = 0`，且相同
   输入重现出 2432 个完全一致的字节。
+  > **⚠️ 这些数已过时。** 它们是在更早的 bitstream 上量的，那时槽位金库还没删，
+  > ML-KEM 核也还没有各自的擦除机。当前擦除长度以 `REGISTERS.zh-CN.md` 为准，重测待上板。
 - *TRNG*，3/3——在无人读取期间吸收了 `BLOCKS = 17892` 而 `DROPS = 0`。修复之前
   这个计数器读出来是 65535，已经饱和。
 - *非法参数*，4/4——`mode=3`、`pset=3`，以及两者同时：`PARAM_ERR` 置位，`BUSY`
@@ -325,7 +322,7 @@ samples/s 下意味着每 0.11 s 一次误报——**α 必须按采样率来选
 本节中没有任何一项需要板子。
 
 ```bash
-./tools/rtl_sim.sh                     # 251 个 cocotb 测试
+./tools/rtl_sim.sh                     # 272 个 cocotb 测试
 sh tools/mldsa_grid.sh                 # ML-DSA 十二格矩阵（Verilator，约 15 分钟）
 sh tools/mldsa_grid.sh icarus          # 同一套矩阵走 Icarus —— 合并前的收尾关卡
 ./tools/rtl_lint.sh                    # Verilator -Wall + Icarus

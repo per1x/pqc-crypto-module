@@ -18,8 +18,8 @@ repository.
 
 | Check | Result | Where |
 |---|---|---|
-| cocotb RTL regression | 200 tests, 0 failures | `./tools/rtl_sim.sh` |
-| Verilator `-Wall` + Icarus lint | 70 modules, 0 warnings | `./tools/rtl_lint.sh` |
+| cocotb RTL regression | 272 tests (`@cocotb.test` count) | `./tools/rtl_sim.sh` |
+| Verilator `-Wall` + Icarus lint | 7 modules still warn (mldsa_axi, mldsa_engine, mldsa_keygen, mldsa_sign, mldsa_verify, mlkem_axi, zu3eg_hsm_top); the rest are clean | `./tools/rtl_lint.sh` |
 | Yosys synthesisability | 68 modules, all synthesise | `./tools/rtl_synth_check.sh` |
 | ML-KEM 512/768/1024 vs NIST ACVP, on silicon | 20 / 20 byte-exact | `board/logs/RESULT_seckem3.txt` |
 | Board self-test | 24 / 24 | `board/logs/RESULT_hwtest.txt` |
@@ -88,27 +88,27 @@ key was never loaded.
 
 ## RTL verification
 
-251 cocotb tests across 26 top levels, run under Icarus Verilog (`tools/rtl_sim.sh`):
+272 cocotb tests in 42 test modules, run under Icarus Verilog (`tools/rtl_sim.sh`):
 
 | Group | Tests |
 |---|---|
 | ML-KEM operators and datapath | `mont_reduce`, `butterfly`, `basemul`, `ntt_core`, `compress`/`decompress` (5 widths), `sample`, `bitpack`, whole KeyGen/Encaps/Decaps |
 | ML-DSA operators | `tb_mldsa_units` (8), `mldsa_ntt_core` (5), `tb_mldsa_keygen` (8) |
 | Keccak | `keccak_f1600` (5), `sha3_core` (9) |
-| Bus | `axi4lite_xbar` (8, plus 8 more at the board's NS=7), `axi4lite_firewall` (6), `pqc_accel_axi` (16), `key_vault` (4), `key_vault_axi` (6), `mlkem_axi` (13), `mldsa_axi` (24) |
-| Symmetric and SM | `aes_core` (5), `sm4_core` (6), `sm3_core` (6), `sym_vault_top` (5) |
-| Fan | `fan_ctrl` (7), `sysmon_drp` (3) |
+| Bus | `axi4lite_xbar` (8, plus 8 more at the board's NS=7), `axi4lite_firewall` (6), `pqc_accel_axi` (16), `key_vault` (4), `key_vault_axi` (9), `mlkem_axi` (27), `mldsa_axi` (35) |
+| Symmetric and SM | `aes_core` (5), `sm4_core` (6), `sm3_core` (6), `sym_vault_top` (6) |
+| Fan | `fan_ctrl` (8), `sysmon_drp` (3) |
 | TRNG | `trng_health` (8), `trng_source` (3), `trng_cond` (4), `trng_top` (4 + 2 no-drop + 1 drop), `trng_axi` (6), alarm path (4), raw tap (3) |
 
-⚠️ **The 24 `mldsa_axi` tests are an end-to-end check of the whole chain, not
+⚠️ **The 35 `mldsa_axi` tests are an end-to-end check of the whole chain, not
 just a bus-layer one.** They drive the real `mldsa_engine` (the behavioural stub
 is gone) and are judged against the **official ACVP vectors** (KeyGen's pk/sk and
 Sign's σ byte for byte; Verify's pass *and* fail verdicts) plus
 `hardware/model/mldsa_oracle.py`, which covers the cases ACVP cannot express —
-chiefly **signing from a key slot**: an sk can only reach the vault through a real
+chiefly **chained signing from a staged seed**: the sk expanded in the PL can only come from a real
 KeyGen, and none of the 90 ACVP siggen secret keys appears in the keygen vectors.
 The same σ is therefore pinned by two independent paths: the software-supplied-sk
-path against official ACVP, the from-slot path against the oracle, and the two
+path against official ACVP, the chained path against the oracle, and the two
 must be byte-identical.
 
 That run covers **ML-DSA-44 only** (the default when no parameters are passed).
@@ -160,8 +160,8 @@ shipped silently.
 ## On-silicon results
 
 **ML-DSA, verified in both bitstream forms.** All three parameter
-sets' KeyGen/Sign/Verify match ACVP byte for byte, plus the on-chip signing
-vault and runtime parameter-set switching:
+sets' KeyGen/Sign/Verify match ACVP byte for byte, plus the sk-stays-off-the-bus check
+and runtime parameter-set switching:
 
 | Check | Demo form `SECURE_ONLY=0` | Secure form `SECURE_ONLY=1` |
 |---|---|---|
@@ -169,10 +169,9 @@ vault and runtime parameter-set switching:
 | Daemon via `/dev/secmmio` → EL3 whitelist | End to end for all three sets | End to end for all three sets (same log, section ④) |
 | Isolated verify, across sets and verdicts | 61/61 agreeing with ACVP (`RESULT_ctbprobe_demoform.txt`) | — |
 
-Those vault checks pin "the private key never leaves the hardware": `OUT_LEN`
-stops exactly at the public key's length, seeking the read cursor into the sk
-region returns all zeros, and the signature produced from the slot is byte-identical
-to the one produced when software supplies sk itself.
+Those checks (the `Vault` cases in `mldsa_hwtest`, which predate the slot ABI removal) pin that the CHAIN-path private key stays off the bus: `OUT_LEN`
+stops exactly at the public key's length and seeking the read cursor into the sk
+region returns all zeros. The chained-sign comparison against software-supplied sk is covered by the daemon path and cocotb, because the staging port is secure-only.
 
 > ML-DSA is only reachable in the secure form because the BL31 SiP whitelist now
 > covers slot 6 (`0x8006_0000`). That table used to stop at slot 5, so the core
@@ -204,16 +203,12 @@ decode, the erase machine and the TRNG sampling FIFO:
   > new observable (`test_xbar`, 8/8, including the exhaustive 64 KB sweep).
 - *Zeroize*, 4/4 — `STATUS.WIPING` asserts, holds 112.5 µs against a theoretical
   109.2 µs (8192 cycles @ 75 MHz; the difference is polling overhead), and
-  *(that measurement predates the on-chip key vault; the wipe now covers a
-  third, 16 KB block and takes 16384 cycles ≈ 218 µs — re-measurement pending)*
-  > **⚠️ Both figures are stale.** The vault is 16 slots / 64 KB, so the wipe
-  > counter is 16 bits and this layer runs **65536 cycles** (≈ 874 µs at
-  > 75 MHz); since batch 1 the three ML-KEM cores have their own erase
-  > machines on top. `REGISTERS.md` is the single source for that number.
-  > The measurements above are kept as the record of what was actually timed,
-  > **on an older bitstream** — re-measurement is board-pending.
   afterwards `OUT_LEN = IN_PTR = 0` with the same input reproducing 2432
   identical bytes.
+  > **⚠️ These figures are stale.** They were timed on an older bitstream, before
+  > the slot vault was removed and before the ML-KEM cores got their own erase
+  > machines. `REGISTERS.md` is the reference for the current wipe length;
+  > re-measurement is board-pending.
 - *TRNG*, 3/3 — `DROPS = 0` with `BLOCKS = 17892` absorbed while nobody was
   reading. Before the fix this counter read 65535, saturated.
 - *Illegal parameters*, 4/4 — `mode=3`, `pset=3`, and both: `PARAM_ERR` sets,
@@ -328,7 +323,7 @@ Sanitiser and platform runs: ASan + UBSan clean; ThreadSanitizer 0 races
 Nothing in this section needs the board.
 
 ```bash
-./tools/rtl_sim.sh                     # 251 cocotb tests
+./tools/rtl_sim.sh                     # 272 cocotb tests
 sh tools/mldsa_grid.sh                 # ML-DSA twelve-cell matrix (Verilator, ~15 min)
 sh tools/mldsa_grid.sh icarus          # same matrix under Icarus — the pre-merge gate
 ./tools/rtl_lint.sh                    # Verilator -Wall + Icarus

@@ -12,19 +12,19 @@
  *       → 输出 ct ‖ iv ‖ tag ‖ ciphertext
  *
  *   PKDecrypt(handle, blob):
- *       ss = ML-KEM.Decaps(handle, ct)         KEM：私钥在硬件片内金库，按句柄
+ *       ss = ML-KEM.Decaps(handle, ct)         KEM：私钥由 PL 按句柄对应的种子现展开
  *       data = AES-256-GCM_open(ss, iv, tag, ciphertext)   认证失败即拒绝
  *
  * ============================================================================
  * 【诚实口径：哪一半在硬件、哪一半在软件】
  * ============================================================================
  *   · **KEM 那一半在硬件**：Encaps/Decaps 走 FPGA 的 ML-KEM 核，
- *     私钥 dk 从生成到使用一步不出片内金库（PKDecrypt 只传句柄）。
+ *     私钥 dk 从生成到使用一步不出硬件（PKDecrypt 只传句柄，dk 由 PL 现展开、算完即擦）。
  *   · **DEM 那一半在软件**：ss 从 Decaps 出来后就是一个对称密钥，
  *     用它做 AES-256-GCM 是在本进程里用 OpenSSL 完成的。
  *
  * 这不是妥协，是 KEM-DEM 的本来形态 —— 共享秘密必然要变成对称密钥被用掉。
- * 真正要守住的「私钥不出硬件」守住了（dk 从不出片内）。文档里不把这句
+ * 真正要守住的「私钥不出硬件」守住了（dk 不出 PL）。文档里不把这句
  * 含糊成「整个加密都在硬件」。
  *
  * DEM 用 **带认证的 AES-256-GCM**，不是裸 ECB：密文被篡改（包括 tag、iv、
@@ -53,7 +53,7 @@ int SDFE_PKEncrypt(SDFE_HANDLE hSession, uint32_t pset,
                    const uint8_t *data, uint32_t data_len,
                    uint8_t *out, uint32_t *out_len);
 
-/* 公钥解密。key_handle 指向硬件片内金库里的 ML-KEM 私钥。
+/* 公钥解密。key_handle 指向 daemon 句柄表里的 ML-KEM 私钥（TA 包裹的种子）。
  * 认证失败（密文被改）返回非 0，且不产生任何明文。 */
 int SDFE_PKDecrypt(SDFE_HANDLE hSession, uint32_t key_handle,
                    const uint8_t *blob, uint32_t blob_len,

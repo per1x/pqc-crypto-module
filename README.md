@@ -112,9 +112,11 @@ brew install icarus-verilog verilator      # or your distribution's packages
 
 ./tools/rtl_sim_fast.sh     # day-to-day: per module, Verilator, seconds to minutes
 ./tools/rtl_sim.sh          # full suite, 272 cocotb tests on Icarus, about 40 min; run before merging
-./tools/rtl_lint.sh         # Verilator -Wall + Icarus, every module under hardware/rtl, zero warnings
+./tools/rtl_lint.sh         # Verilator -Wall + Icarus, every module under hardware/rtl
 ./tools/rtl_synth_check.sh  # Yosys synthesisability
 ```
+
+`rtl_lint.sh` currently fails: seven modules (mldsa_axi, mldsa_engine, mldsa_keygen, mldsa_sign, mldsa_verify, mlkem_axi, zu3eg_hsm_top) still have Verilator warnings, mostly constant width extension and unused signals. The other modules are clean.
 
 Host software and the PKCS#11 module (CMake ≥ 3.20, OpenSSL 3). The post-quantum
 algorithms come from the bundled mlkem-native / mldsa-native
@@ -285,7 +287,7 @@ Measured on the board in the configuration described in
 | TRNG min-entropy, 1,048,576 pre-conditioning samples | 0.871234 bit/sample; RCT cutoff 47, APT cutoff 672 |
 | Decaps timing, valid vs implicit-reject, 200 runs each | median difference 0.000 % |
 | ML-KEM-512 throughput at 75 MHz | 924 / 1339 / 1018 ops/s (KeyGen / Encaps / Decaps) |
-| cocotb regression, Verilator lint, Yosys | 272 tests; 0 warnings per module; all synthesise |
+| cocotb regression | 272 tests |
 
 Methods: [docs/TESTING.md](docs/TESTING.md). Raw board output: [board/logs/](board/logs/).
 

@@ -84,7 +84,7 @@ int SDFE_GetDeviceInfo(SDFE_HANDLE hSession, char *buf, size_t cap);
 /* random — from the PL ring-oscillator source, not a software PRNG */
 int SDFE_GenerateRandom(SDFE_HANDLE hSession, uint32_t len, uint8_t *out);
 
-/* ML-KEM — dk stays with the daemon; the application gets a handle */
+/* ML-KEM — dk exists only as a TA-wrapped seed; the application gets a handle */
 int SDFE_GenerateKeyPair_MLKEM(SDFE_HANDLE hSession, uint32_t pset,
                                uint8_t *ek, uint32_t *ek_len,
                                uint32_t *key_handle);
@@ -118,7 +118,7 @@ int SDFE_Decrypt(SDFE_HANDLE hSession, uint32_t alg, uint32_t slot,
  * NOTE: **the block transform is in hardware, the chaining and XOR are in the
  *       daemon** — there is no mode state machine in RTL, so do not call this
  *       "hardware CBC". The key is still only ever used by slot and never leaves
- *       the vault.
+ *       the PL.
  * NOTE: no padding. ECB/CBC require a non-zero multiple of 16; CTR/CFB/OFB take
  *       any length. The IV comes from the caller, and for CTR/OFB/CFB the
  *       (key, IV) pair must never repeat — that is key-stream reuse. */
@@ -230,7 +230,7 @@ C_GetInterface(NULL, NULL, &iface, 0);      /* v3.2 mechanisms live here */
 | Hash | `SDFE_Hash_SM3` (one-shot) | **hardware** SM3 core, matches GB/T 32905 A.1 |
 | Device identity | `SDFE_GetDeviceDNA` (16 bytes) | ⚠️ **This is not a key — it is a public chip serial.** Its one use is letting a caller bind something (a keystore, say) to this board, so a copy taken to another board will not open. Anyone with JTAG reads the same value, so "it came from hardware, therefore it is secret" is wrong. Fetched through the read-only BL31 window at `0xFFCA0050-5C`; reading it directly from EL1 is a bus error |
 | Key management | `SDFE_GenerateKey` / `LoadKey` / `LoadKatKey` (`ImportKey` → `SDR_NOTSUPPORT`) | Key generated and loaded **inside the TEE** into hardware `key_vault`; no read path in RTL |
-| Post-quantum asymmetric | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **hardware**, private keys stay in the on-chip vault |
+| Post-quantum asymmetric | `SDFE_*_MLKEM` / `SDFE_*_MLDSA` | **hardware**; private keys exist only as TA-wrapped seeds and are expanded in the PL per operation |
 | Public-key encryption of arbitrary data | `SDFE_PKEncrypt` / `PKDecrypt` | KEM in hardware, AES-GCM DEM in software |
 
 Deliberate gaps, each with its reason: **SM2** (no core and no software
@@ -263,10 +263,7 @@ Two cases that must not be collapsed into one sentence.
 
 | Key | Where it lives | Leaves the hardware? |
 |---|---|---|
-| Symmetric (AES / SM4) | `key_vault` register array; the authoritative copy is a TA-wrapped PWRP blob held by the caller | **No.** The RTL has no bus-side read path, and the normal world (daemon included) never sees plaintext: the TA generates the key and loads it via SiP `PQC_SYMKEY`. The daemon wipes the vault at session end |
-| ML-KEM `dk` | Returned by `KeyGen` today; held by the daemon | ⚠️ **Yes, it leaves the hardware** — but not the *interface*. The application only ever holds a handle |
+| Symmetric (AES / SM4) | `key_vault` register array; the authoritative copy is a TA-wrapped PWRP blob held by the caller | **No.** The RTL has no bus-side read path, and the normal world (daemon included) never sees plaintext: the TA generates the key and loads it via SiP `PQC_SYMKEY`. The daemon wipes the key registers at session end |
+| ML-KEM `dk` / ML-DSA `sk` | Only as a TA-wrapped seed blob (held in the daemon's handle table); the PL expands the key for one operation and wipes it afterwards | **No.** Neither the application nor the daemon sees the private key; the application holds a handle. The exception is the ACVP KeyGen path (software supplies the seed), which returns the key for a seed the caller chose |
 
-The second row is the current state and cannot be shortened to "private keys
-never leave the hardware". Making that sentence true requires private-key
-storage and handle-based use inside `mlkem_axi`, which is product work, not
-prototype work. See [SECURITY.md](SECURITY.md#limitations).
+See [SECURITY.md](SECURITY.md#limitations) for what this does and does not protect against.

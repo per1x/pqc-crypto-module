@@ -13,7 +13,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=${DEMO_OUT:-$PWD/demo-out}
 mkdir -p "$OUT"
 
-echo "════════ 第一部分：板上命令行（ssh root@$HOST） ════════"
+echo "════════ 第一部分：板上命令行（ssh root@${HOST}） ════════"
 ssh -o HostKeyAlgorithms=+ssh-rsa "root@$HOST" 'sh /media/sd-mmcblk1p2/demo/run.sh' | tee "$OUT/cli.txt"
 
 echo

@@ -155,7 +155,7 @@ when this class of incident happens.
 ## The boundary
 
 **The cryptographic boundary is hardware.** The ML-KEM cores, the symmetric
-cores (AES-128/256, SM4, SM3), the ring-oscillator entropy source, the key vault
+cores (AES-128/256, SM4, SM3), the ring-oscillator entropy source, the symmetric key registers (`key_vault_axi`)
 and the access gate all live in FPGA fabric. The host software — keystore, slot
 metadata, wrapping, PKCS#11 — runs *outside* it.
 
@@ -187,7 +187,7 @@ even fully configured they would not reach the PL.)
 **Defended against.** An attacker with normal-world (EL1-NS) code execution,
 including root, who wants to *read* key material out of the module. They can
 issue arbitrary AXI transactions through `/dev/mem` and can scan the whole
-window; they cannot recover a symmetric key from the vault, and cannot read any
+window; they cannot recover a symmetric key from the key registers, and cannot read any
 slave built with `SECURE_ONLY=1`.
 
 **Not defended against.**
@@ -199,7 +199,7 @@ slave built with `SECURE_ONLY=1`.
   is not provisioned (see [Limitations](#limitations)).
 - An attacker with **physical access**. There is no enclosure, no tamper
   response wired up, no environmental protection. The RTL has a `tamper` input
-  that zeroizes the vault; nothing drives it.
+  that zeroizes the key registers; nothing drives it.
 - An attacker measuring **power or electromagnetic emissions**. Out of scope,
   deliberately — see below.
 - An attacker who can **read host process memory**. The host stack is outside
@@ -210,8 +210,9 @@ slave built with `SECURE_ONLY=1`.
 
 The EL3 SiP exposes whitelisted MMIO reads and writes, with the operation
 sequence assembled by a **normal-world** daemon. The normal world cannot *read*
-key material (the vault has no read path in RTL), but root can still load, erase
-and use key-vault slots — it can **use** the keys, it just cannot **see** them.
+key material (`key_vault` has no read path in RTL) and cannot load keys (the load port accepts
+only secure transactions), but root can still erase and use the keys already
+loaded — it can **use** the keys, it just cannot **see** them.
 
 ⚠️ **Narrowing the whitelist does not close this.** The root cause is not that
 the whitelist is too wide but that **the SiP does not authenticate its caller**:
@@ -323,12 +324,12 @@ so this document is not mistaken for a statement of readiness.
 
 | | |
 |---|---|
-| **A key-export path still exists in the RTL** | `MODE.DK_TO_SLOT` keeps `dk` on-chip and `DK_FROM_SLOT` decapsulates by slot, which is what the daemon uses; ML-DSA's `sk` works the same way. The **non-vault** path remains, because ACVP verification has to read the private key out. In the delivery posture it is closed by a one-way latch — a latch, not a fuse, so it is re-opened by a power cycle |
+| **The ACVP KeyGen path still returns the private key** | With `MODE.CHAIN=0` (software supplies `d‖z`), `mlkem_axi` and `mldsa_axi` return `dk` / `sk` through `OUT_DATA`, because ACVP verification compares them. The slot ABI, `DK_TO_SLOT` and the one-time `DK_LOCK` latch that used to guard this are removed. The key returned is for a seed the caller chose, not a key held by the TA. The path used for TA-held keys (`MODE.CHAIN=1`, seed from the staging port) never puts the private key on the bus |
 | **Device binding is off by default** | The derivation root can be bound to this chip's Device DNA (`src/crypto/kdr_dna.c`), read through a **read-only** window in the BL31 whitelist (`0xFFCA0050-5C`); reading it directly from EL1 is a bus error. `PQCHSM_KDR=device-dna` switches to it. Off by default because changing the root makes an existing keystore unopenable with symptoms identical to tampering. ⚠️ **DNA is not a secret** — anyone with JTAG reads it — so the provider reports `device_bound=1`, `hardware_backed=0`: anti-cloning, not confidentiality |
 | **No secure boot** | The PL configuration is loaded at runtime, not from a signed golden image, and on this board it cannot be otherwise — see [Boot and the trust root](#boot-and-the-trust-root) |
 | **No module integrity check** | Nothing verifies the module image before use |
 | **Secure memory is fenced against reads only** | BL31 poisons OP-TEE's DDR carve-out at boot, so the normal world cannot read it. It can still ask the hardware to compute — see [Memory isolation on DDR](#memory-isolation-on-ddr-xmpu) |
-| **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the vault; nothing is wired to it |
+| **No physical security** | Logical enforcement only. The `tamper` input exists in RTL and zeroizes the key registers; nothing is wired to it |
 | **Conditional self-tests missing** | No pairwise consistency test on generated key pairs, no continuous RNG test |
 | **No SM2** | SM4 and SM3 are implemented; the SM2 asymmetric algorithm is not |
 | **No algorithm certificates** | ACVP vectors are run locally. That is evidence of correctness, not a certificate |

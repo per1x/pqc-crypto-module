@@ -18,7 +18,7 @@
  *   ⑤ ZEROIZE 之后 WIPING 的**实际持续时间**（擦除拍数确证，第 1/2 项的
  *      上板 pending）。
  *
- * ⚠️ 它不碰 CTRL 的 SEED_LOCK / DK_LOCK：那两位一次性、只有重配位流能放开，
+ * ⚠️ 它不碰 CTRL 的 SEED_LOCK：它是闩锁，只有复位/重配位流能放开，
  *    在探针里置上等于给后面的测试挖坑。
  */
 #include <fcntl.h>

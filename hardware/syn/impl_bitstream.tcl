@@ -105,34 +105,12 @@ set devopen [expr {[info exists ::env(PQC_DEV_OPEN)]
 set bitname [expr {$characterize ? "zu3eg_hsm_char"
                    : ($devopen ? "zu3eg_hsm_dev" : "zu3eg_hsm")}]
 
-# ---- ML-DSA 参数集 -----------------------------------------------------------
-# 一份 bitstream 里只有一套（三个核这一版是编译期参数化的）。默认 2 = ML-DSA-87，
-# 也就是最大的那一套 —— "塞不塞得下"问的就是它。
-# 塞不下时的退路：`PQC_MLDSA_PSET=1`（65）或 `=0`（44）。
-# ⚠️ 退到 65/44 是合法的工程取舍，但**必须写清楚上的是哪一套**，
-#    含糊成"ML-DSA 全在硬件"就不是了。所以这个数会打进日志与
-#    timing_<bitname>.txt，跟着产物走。
-set mldsa_pset [expr {[info exists ::env(PQC_MLDSA_PSET)]
-                      ? $::env(PQC_MLDSA_PSET) : 2}]
-set mldsa_name [lindex {ML-DSA-44 ML-DSA-65 ML-DSA-87} $mldsa_pset]
-if {$mldsa_name eq ""} {
-    puts "错误：PQC_MLDSA_PSET = $mldsa_pset，只认 0/1/2"
-    exit 1
-}
-# ⚠️ **退到 65/44 的产物必须改名。** 与 dev / char 那两档同一条理由：
-#    这几份只差一个参数，长得一模一样，名字一样就必然有人拿错 —— 而拿错的
-#    后果是"照着 87 的文档去驱动一份 65 的位流"，pset 对不上会被拒绝启动，
-#    而排查方向会指向软件。默认（87）保持 zu3eg_hsm.bit 不动：板上脚本、
-#    boot/persist/boot_j1_pl.bif 都按这个名字走，改了会一起坏。
-if {$mldsa_pset != 2} {
-    append bitname "_mldsa$mldsa_name"
-    set bitname [string map {ML-DSA- ""} $bitname]
-}
+# ML-DSA 的参数集在运行时由 mldsa_axi 的 MODE.PSET 选择，一份位流同时支持
+# 44 / 65 / 87，顶层没有参数集参数（见 zu3eg_hsm_top.v）。
 puts "=========================================================="
-puts "  ML-DSA 参数集：$mldsa_name （MLDSA_PSET=$mldsa_pset）"
-puts "  产物：$bitname.bit"
+puts "  产物：$bitname.bit（ML-DSA 44/65/87 运行时可选）"
 puts "=========================================================="
-set gen_args [list -generic MLDSA_PSET=$mldsa_pset]
+set gen_args [list]
 if {$characterize} {
     puts "=========================================================="
     puts "  ⚠️ 表征构建：风扇低阈值 + TRNG 原始抽头打开"
@@ -357,7 +335,7 @@ puts "  有效保持余量 = WHS $whs + 不确定度 $hold_unc = $whs_eff ns"
 
 set fh [open $outdir/timing_$bitname.txt w]
 puts $fh "wns=$wns whs=$whs hold_unc=$hold_unc whs_eff=$whs_eff"
-puts $fh "mldsa_pset=$mldsa_pset mldsa=$mldsa_name"
+puts $fh "mldsa=44/65/87 runtime"
 close $fh
 
 # ---- 保持时间的**下限**，不只是"非负" ----------------------------------------

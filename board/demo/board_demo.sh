@@ -76,8 +76,8 @@ cat <<'EOF'
   这块板上更细的证据（原始输出，未经整理）：
       ls /media/sd-mmcblk1p2/hsm/RESULT_*.txt
 
-  密钥仓反证（密钥装在 FPGA 里、密文算对的同时，扫遍金库与对称核的地址窗口，
-  密钥的字一个都不出现）—— daemon 在跑也能做：
+  对称密钥寄存器没有读出通路（密钥装进 PL、密文算对的同时，扫遍密钥寄存器与
+  对称核的地址窗口，密钥字一个都不出现），daemon 在跑时也能做：
       /media/sd-mmcblk1p2/hsm/d7bench
 EOF
 echo

@@ -15,10 +15,10 @@
 //   ① 三个 op × 三个参数集，逐字节对 ACVP 官方向量；
 //   ② Verify 的 **pass 与 fail 两种判定都验** —— 只验通过的一半，一个恒返回
 //      "通过"的实现照样全过；
-//   ③ **片内金库**：SK_TO_SLOT 生成之后 sk 不出现在 OUT_DATA（OUT_LEN 只到 pk
-//      的长度，而且把读游标 seek 过去也一个字节都拿不到），再用 SK_FROM_SLOT
-//      按槽签名，签出来与"自送 sk 签"逐字节相同 —— 这一条是整个项目
-//      "私钥不出硬件"在板上的证据；
+//   ③ **sk 不出总线**（Vault 用例）：CHAIN 路径的 KeyGen 之后 sk 不出现在
+//      OUT_DATA（OUT_LEN 只到 pk 的长度，把读游标 seek 过去也一个字节都拿不到）。
+//      链式签名需要安全世界先送 ξ，普通世界的这个工具做不到，该步骤跳过，
+//      由 daemon 那条路与 cocotb 覆盖；
 //   ④ **运行时切参数集**：同一次运行里 44 → 65 → 87 → 65 → 44，不重装位流。
 //
 // 顺带量一件事：每条运算都报**实测耗时**。service/pqchsm_fpgad.c 里的
@@ -84,10 +84,8 @@
 #define C_START   (1u << 0)
 #define C_CLEAR   (1u << 1)
 #define C_ZEROIZE (1u << 2)
-/* CTRL[4] 是 SK_LOCK。**本程序绝不写它** —— 它是一次性闩锁，置上之后
- * KeyGen 再也不把 sk 交出来，而 CTRL 里没有清它的位、ZEROIZE 也不清，
- * 只有重新装载位流能解开。而 ACVP 的 KeyGen 向量要核对 sk，闩上就等于
- * 把这个程序自己的第①条用例永久废掉。闩锁该由交付流程去置，不是由测试程序。 */
+/* CTRL[4] 原来是 SK_LOCK，已随 V-04 删除；本程序不写 CTRL[4]。
+ * 现在 ACVP 的 KeyGen（不带 CHAIN，软件自带 ξ）直接把 pk‖sk 交出来。 */
 
 #define ST_BUSY   (1u << 0)
 #define ST_DONE   (1u << 1)
@@ -110,7 +108,7 @@
 #define KS_LOCK   (1u << 8)      /* KEYSTAT[8] */
 
 /* FIPS 204 表 2。pk/sk 的长度直接取自向量表（生成脚本已核对过），这里只留
- * σ 的 —— 金库那条用例要签一条 ACVP 给不出期望值的消息，长度得自己算。 */
+ * σ 的 —— Vault 那条用例要签一条 ACVP 给不出期望值的消息，长度得自己算。 */
 static const unsigned SIG_LEN[3] = { 2420, 3309, 4627 };
 
 #define IN_MAX   16384           /* 最大输入流：Verify 87 = pk+sig+ctx+msg */
@@ -273,7 +271,7 @@ static long timeout_ms(unsigned op, unsigned pset, unsigned in_len)
  * 一份时序，自创顺序会踩到下面这条）：
  *
  *   ⚠️ **必须先写 MODE 再灌数据。** 软件写的字节落在 engine 输入存储的哪个
- *      偏移取决于 MODE（SK_FROM_SLOT 那趟前面要让开 sk_len 个字节），所以
+ *      偏移取决于 MODE（非 CHAIN 的 Sign 要在前面放 sk，CHAIN 不放），所以
  *      写 MODE 会把 IN_PTR 清零。先灌后改 MODE 的话，指针归零 → START 处报
  *      欠填（LEN_ERR），而不是安静地按另一份排布解读旧字节。
  *
@@ -369,8 +367,7 @@ static const unsigned char RND0[32] = { 0 };   /* 确定性签名：rnd = 0³² 
 /* ============================================================================
  * ① KeyGen —— pk‖sk 逐字节对 ACVP
  * ============================================================================
- * 这一条**不走金库**（SK_TO_SLOT=0），因为判据就是 sk 本身。能这么做的前提是
- * sk_lock 没被置上；本程序不置它，理由见 C_ZEROIZE 上面那段。
+ * 这一条不带 CHAIN（软件自带 ξ），KeyGen 把 pk‖sk 都交出来，因为判据就是 sk 本身。
  */
 static void test_keygen(void)
 {
@@ -389,24 +386,14 @@ static void test_keygen(void)
         }
         want = v->pk_len + v->sk_len;
         if (n != want) {
-            /* ⚠️ 最常见的原因**不是**硬件坏了，而是 SK_LOCK 已经闩上了。
-             *
-             * SK_LOCK 是交付形态那道一次性闩锁：闩上之后 KeyGen 只吐 pk，
-             * sk 永远留在片内金库。而 ACVP 的 KeyGen 向量要逐字节比对私钥，
-             * 所以这几条**必然**过不去 —— 那是闩锁在正常工作，不是回归。
-             *
-             * daemon 一起来就会闩它。于是"跑过一次 daemon 之后再跑本程序"
-             * 就会看到一片 ❌，而 Sign/Verify 全绿 —— 这个组合看着极像
-             * "KeyGen 坏了"，实际什么都没坏。这里把话说破，省下一小时排查。
-             *
-             * 要拿 KeyGen 的 ACVP 证据，必须在**闩锁之前**跑：重新装一遍位流
-             * （SK_LOCK 随 PL 重配清掉），并且**别让 daemon 先起来**。
-             * 存档证据在 board/logs/RESULT_mldsa_after.txt（sk_lock=0，32/0）。 */
+            /* 长度不对。当前位流没有 SK_LOCK（已随 V-04 删除），下面的
+             * KS_LOCK 分支只会在跑旧位流时命中：旧位流上 SK_LOCK 一旦闩上，
+             * KeyGen 只吐 pk，ACVP 的 KeyGen 向量必然比对不了，那不是回归，
+             * 要先重配 PL。存档证据在 board/logs/RESULT_mldsa_after.txt。 */
             if (rd(MD_KEYSTAT) & KS_LOCK) {
                 res(0, v->pset, "KeyGen", v->tc,
-                    "OUT_LEN=%u（只有 pk）—— **SK_LOCK 已闩上，这是设计行为**："
-                    "sk 不再出片，ACVP 的 KeyGen 向量因此无法比对。"
-                    "要取证据请先重配 PL 再跑，且别先起 daemon", n);
+                    "OUT_LEN=%u（只有 pk）—— 旧位流的 SK_LOCK 已闩上，"
+                    "ACVP 的 KeyGen 向量无法比对。请先重配 PL 再跑", n);
             } else {
                 res(0, v->pset, "KeyGen", v->tc,
                     "OUT_LEN=%u，应当是 pk+sk 的 %u", n, want);
@@ -519,20 +506,19 @@ static void test_verify(void)
 }
 
 /* ============================================================================
- * ④ 片内金库 —— "私钥不出硬件"在板上的证据
+ * ④ Vault 用例 —— sk 不出总线（用例名沿用旧称，现在的机制是 CHAIN）
  * ============================================================================
  * 四半都要成立，缺一半就有一个能糊弄过去的实现：
  *   · **出不来**：OUT_LEN 恰好是 pk 的长度，一个字节不多；而且把读游标 seek
  *     到 sk 那一段也一个字节都拿不到（只查 OUT_LEN 是不够的 —— 读指针要是
  *     没被卡住，软件照样能把 sk 捞出来），越界读还不能推动读游标；
- *   · **进去了**：KEYSTAT 里那个槽被标成有效，而且记着的参数集是对的；
- *   · **还能用**：拿槽里的 sk 去签，σ 与"软件自己送 sk"那一路逐字节相同。
+ *   · **进去了**、**还能用**（这两半依赖槽位，槽位已删，见下面代码里的说明）：拿暂存 ξ 展开的 sk 去签，σ 与"软件自己送 sk"那一路逐字节相同。
  *     少了这一半，一个"把 sk 直接丢掉"的实现也能过掉上面两条；
  *   · **而且是对的**：那条 σ 还要能被**片内 Verify 用 ACVP 的 pk** 验过。
  *     少了这一半，两条路一起错成同一个样子也能过 —— 相等只证明一致，
  *     不证明正确。
  *
- * ⚠️ 这里的判据为什么不是 ACVP 的 σ：金库里的 sk 只能来自一次真 KeyGen，
+ * ⚠️ 这里的判据为什么不是 ACVP 的 σ：CHAIN 路径的 sk 只能来自一次真 KeyGen，
  *    而 ACVP 的 siggen 条目自带另一把 sk（两边对不上号）。cocotb 那边用
  *    mldsa_oracle.py 当第三方判据，板上没有 python，所以换成"用 ACVP 的 pk
  *    在片内验一次"——Verify 是与 Sign 不同的一条硬件路径，它点头就说明
@@ -622,11 +608,11 @@ static void test_vault(void)
                    M_CHAIN | M_SEED_STAGED, inbuf, in_len,
                    sizeof msg, sizeof ctx,
                    outbuf, sizeof outbuf, &n, NULL, &ms, why, sizeof why)) {
-            res(0, v->pset, "Vault", v->tc, "按槽签失败：%s", why);
+            res(0, v->pset, "Vault", v->tc, "链式签失败：%s", why);
             continue;
         }
         if (n != SIG_LEN[v->pset]) {
-            res(0, v->pset, "Vault", v->tc, "按槽签的 OUT_LEN=%u，应当是 %u",
+            res(0, v->pset, "Vault", v->tc, "链式签的 OUT_LEN=%u，应当是 %u",
                 n, SIG_LEN[v->pset]);
             continue;
         }
@@ -646,7 +632,7 @@ static void test_vault(void)
         d = cmp_bytes(outbuf, outbuf2, SIG_LEN[v->pset], diff, sizeof diff);
         if (d) {
             res(0, v->pset, "Vault", v->tc,
-                "按槽签与自送 sk 签不一样（%s）—— 金库里的 sk、或者它进 "
+                "链式签与自送 sk 签不一样（%s）—— 展开出的 sk、或者它进 "
                 "engine 的位置是错的", d);
             continue;
         }
@@ -666,12 +652,12 @@ static void test_vault(void)
         }
         if (!vok) {
             res(0, v->pset, "Vault", v->tc,
-                "按槽签出来的 σ 用 ACVP 的 pk 验不过 —— 两条路一致但都是错的");
+                "链式签出来的 σ 用 ACVP 的 pk 验不过 —— 两条路一致但都是错的");
             continue;
         }
         res(1, v->pset, "Vault", v->tc,
             "sk 全程在片内（OUT_LEN=%u 正好 pk，seek 到 sk 段读回全 0）；"
-            "槽 %u 按槽签的 σ 与自送 sk 逐字节相同，且用 ACVP 的 pk 验得过",
+            "链式签的 σ 与自送 sk 逐字节相同，且用 ACVP 的 pk 验得过",
             v->pk_len, slot);
     }
 }
@@ -825,7 +811,7 @@ static void usage(const char *me)
         "           整屏往回拉很慢，落文件再取更稳）\n"
         "  -n       **只读探测**：读 VERSION/STATUS/KEYSTAT/VIOL 就退出，\n"
         "           一个字节都不写。第一次上板建议先跑这个。\n"
-        "  -z       跑完发一次 ZEROIZE 把 64 KB 金库擦掉（默认不擦）\n", me);
+        "  -z       跑完发一次 ZEROIZE 擦掉展开区（默认不擦）\n", me);
 }
 
 int main(int argc, char **argv)

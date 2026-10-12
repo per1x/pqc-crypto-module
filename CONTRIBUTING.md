@@ -34,7 +34,7 @@ software project.
 ## What a change has to pass
 
 ```bash
-./tools/rtl_lint.sh          # Verilator -Wall + Icarus — zero warnings, 70 modules
+./tools/rtl_lint.sh          # Verilator -Wall + Icarus, every module (7 ML-DSA/ML-KEM/top modules still have warnings)
 ./tools/rtl_sim.sh           # 197 cocotb tests
 ./tools/rtl_synth_check.sh   # Yosys — every module must synthesise
 ctest --test-dir build --output-on-failure   # host software, 45 targets

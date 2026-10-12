@@ -343,7 +343,7 @@ int main(int argc, char **argv)
 
 	/* ---- 8'. SM3：位流里一直有这个核，只是从来没接出来 ----
 	 * 判据是 GB/T 32905 附录 A.1 的官方向量 SM3("abc")。
-	 * 无密钥，不碰金库；一次一段（不是 GM/T 0018 的三段式，理由见 sdfe.h）。 */
+	 * 不用密钥，不碰密钥寄存器；一次一段（不是 GM/T 0018 的三段式，理由见 sdfe.h）。 */
 	{
 		static const unsigned char WANT[32] = {
 			0x66,0xc7,0xf0,0xf4,0x62,0xee,0xed,0xd9,
@@ -367,8 +367,8 @@ int main(int argc, char **argv)
 	/* ---- 9. 反证：句柄是**会话内**的，断开就作废 ----
 	 * 上面第 [2] 步拿到的句柄 kh 在本连接内一直可用。现在断开重连，
 	 * 同一个句柄必须**不再可用** —— 否则任何人连上来都能使唤上一个人的私钥。
-	 * daemon 那边断连时清句柄表并给两个 PQC 金库各发一次 ZEROIZE，
-	 * 所以私钥既不在进程里、也不在硬件里。 */
+	 * daemon 那边断连时清句柄表，并给 PQC 核和对称密钥寄存器发 ZEROIZE；
+	 * 私钥平时只以 TA 包裹的种子 blob 存在，进程里和硬件里都不留。 */
 	printf("\n[9] 反证：断开重连之后，上一会话的句柄必须失效\n");
 	SDFE_CloseSession(ses);
 	SDFE_CloseDevice(dev);

@@ -103,9 +103,11 @@ brew install icarus-verilog verilator      # 或用发行版自带的包
 
 ./tools/rtl_sim_fast.sh     # 平时用：按模块跑，Verilator，几十秒到几分钟
 ./tools/rtl_sim.sh          # 全套 272 条 cocotb 用例，Icarus，约 40 分钟，合入前跑
-./tools/rtl_lint.sh         # Verilator -Wall + Icarus，hardware/rtl 下逐个模块，要求零告警
+./tools/rtl_lint.sh         # Verilator -Wall + Icarus，hardware/rtl 下逐个模块
 ./tools/rtl_synth_check.sh  # Yosys 可综合性检查
 ```
+
+`rtl_lint.sh` 目前不通过：mldsa_axi、mldsa_engine、mldsa_keygen、mldsa_sign、mldsa_verify、mlkem_axi、zu3eg_hsm_top 七个模块还有 Verilator 告警（大多是常量位宽扩展和未使用的信号），其余模块无告警。
 
 主机软件和 PKCS#11 模块（需要 CMake ≥ 3.20、OpenSSL 3）。后量子算法用仓库里自带的
 mlkem-native / mldsa-native（`third_party/pqc-native/`，OP-TEE TA 也用这一份），不依赖 liboqs。
@@ -308,7 +310,7 @@ printf 'POST /v1/sm3 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 14\r\nConnec
 | TRNG 最小熵，1,048,576 个调理前样本 | 0.871234 bit/样本，RCT 截止 47、APT 截止 672 |
 | Decaps 时序，有效密文与隐式拒绝各 200 次 | 中位数差 0.000 % |
 | ML-KEM-512 吞吐，75 MHz | 924 / 1339 / 1018 次/秒（KeyGen / Encaps / Decaps） |
-| cocotb 回归、Verilator lint、Yosys | 272 条用例；逐模块 0 告警；全部可综合 |
+| cocotb 回归 | 272 条用例 |
 
 测试方法见 [docs/TESTING.zh-CN.md](docs/TESTING.zh-CN.md)，板上的原始输出在
 [board/logs/](board/logs/)。

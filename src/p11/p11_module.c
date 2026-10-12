@@ -251,9 +251,9 @@ static void secrets_drop_owner(CK_SESSION_HANDLE owner)
  * 【诚实口径：这一步在软件，不在 FPGA】
  * 这个 GCM 用 OpenSSL 在本进程里算，密钥是会话密钥对象里的字节（AES-128/192/256）。
  * KEM-DEM 的场景下，这个密钥就是 ML-KEM 解封装出来的共享秘密 —— 解封装那步
- * （私钥 dk）在 FPGA 片内金库完成，dk 一步不出硬件；到了 DEM 这步，共享秘密
+ * （私钥 dk）在 FPGA 完成，dk 由 PL 从 TA 保管的种子现展开、算完即擦；到了 DEM 这步，共享秘密
  * 已经是一个普通对称密钥，用它做认证加密是软件的活。这与 sdfe_pkenc 的边界
- * 一致，不把它含糊成「对称也在硬件」。FPGA 的 AES 核（key_vault、单块）走的是
+ * 一致，不把它含糊成「对称也在硬件」。FPGA 的 AES 核（密钥取自 key_vault、单块）走的是
  * SDF 面的 SDFE_Encrypt，与这里的会话密钥对象是两条路。
  *
  * 硬件 GCM 要 GHASH 的 RTL，属未做项；补齐后可把这层换成硬件、口径同步更新。 */
@@ -533,7 +533,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_Initialize)(CK_VOID_PTR pInitArgs)
 
 	/* ---- 算法后端：PQCHSM_BACKEND=sdfe 时 ML-KEM 整条走 FPGA ----
 	 *
-	 * 装上之后 C_GenerateKeyPair 生成的 ML-KEM 私钥**留在 PL 的片内金库**，
+	 * 装上之后 C_GenerateKeyPair 生成的 ML-KEM 私钥**以 TA 包裹的种子保管**，
 	 * 本进程只拿到公钥和一个句柄；C_Decapsulate 把句柄交给硬件，
 	 * 私钥连指针都不存在。ML-DSA 的 C_Sign 走的是同一套（keypair_hw + sign_hw）。
 	 *

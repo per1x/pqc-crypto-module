@@ -151,8 +151,9 @@ unset PARAM_SECURE_ONLY
 run test_mlkem_axi   mlkem_axi
 # mldsa_axi 现在接的是**真 engine**（替身已删），判据就是 ACVP 官方向量：
 # 这一条是 AXI → engine → 三个核**整条链路**的端到端对拍，同时还验 AXI 那一层
-# （寄存器时序、长度校验、私钥金库、一次性闩锁、非法输入、陈旧状态）。
-# ⚠️ 不带参数就是 ML-DSA-44。另外两个参数集在 tools/mldsa_grid.sh 的九格里跑。
+# （寄存器时序、长度校验、展开区与链式运算、SEED_LOCK、非法输入、陈旧状态）。
+# 不带参数用 ML-DSA-44 的向量（MLDSA_ALG 选）。另外两个参数集在
+# tools/mldsa_grid.sh 里跑。
 run test_mldsa_axi   mldsa_axi
 # 演示位流（SECURE_ONLY=0）再跑一遍两个 PQC 从机：那时防火墙对普通世界敞开，
 # 只剩**种子暂存口**自己的 AxPROT 门挡着（test_*_axi 里有专测）。

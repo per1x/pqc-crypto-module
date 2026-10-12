@@ -157,7 +157,7 @@ int SDFE_PKDecrypt(SDFE_HANDLE hSession, uint32_t key_handle,
 	ciph = tag + SDFE_PKENC_TAGLEN;
 	ciph_len = blob_len - (8 + ctl + SDFE_PKENC_IVLEN + SDFE_PKENC_TAGLEN);
 
-	/* KEM：私钥在硬件片内金库，按句柄 decaps */
+	/* KEM：dk 由 PL 按句柄现展开，按句柄 decaps */
 	rv = SDFE_Decapsulate_MLKEM(hSession, key_handle, ct, ctl, ss, &ss_len);
 	if (rv != SDR_OK) {
 		/* 失败也可能已经往 ss 里写过一部分 —— 按"写过就清"处理 */

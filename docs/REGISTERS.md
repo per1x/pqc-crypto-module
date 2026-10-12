@@ -14,7 +14,7 @@ discarded** (RAZ/WI) — no side effect, and no bus error.
 > ### ⚠️ What a refused access looks like: zeros, not an error
 >
 > **The default bitstream (`zu3eg_hsm.bit`) gives the normal world *zero*
-> reachability.** All four functional slaves are built with `SECURE_ONLY=1`, so
+> reachability.** All five functional slaves are built with `SECURE_ONLY=1`, so
 > every access from Linux — which always carries `AxPROT[1]=1` — is refused at
 > the bus. Only the secure world (EL3, via the BL31 SiP) can drive them.
 >
@@ -68,7 +68,7 @@ discarded** (RAZ/WI) — no side effect, and no bus error.
 
 - [Slot map](#slot-map)
 - [`trng_axi`](#trng_axi--slot-0)
-- [`key_vault_axi`](#key_vault_axi--slot-1)
+- [`key_vault_axi` (symmetric key registers)](#key_vault_axi--slot-1)
 - [`sym_axi`](#sym_axi--slot-2)
 - [`mlkem_axi`](#mlkem_axi--slot-3)
 - [`mldsa_axi`](#mldsa_axi--slot-6)
@@ -158,18 +158,18 @@ see [TESTING.md](TESTING.md#entropy).
 
 ## `key_vault_axi` — slot 1
 
-Window `0x00`–`0x3F`; anything beyond reads 0 and discards writes. RTL
+The symmetric key registers: 8 slots (0–6 for business keys, 7 only for public
+KAT keys), each holding one 256-bit key for the duration of a session. Keys are
+generated and wrapped by the OP-TEE TA; the PL keeps no long-term key. Window
+`0x00`–`0x3F`; anything beyond reads 0 and discards writes. RTL
 `hardware/rtl/bus/key_vault_axi.v`, tests
 `hardware/tb/cocotb/test_key_vault.py`.
 
-This peripheral exists to make "keys do not leave the cryptographic boundary" a
-**property of the circuit rather than a discipline**. The usual approach puts
-keys in memory and relies on software not reading them, which requires every
-access site to remember to check a permission — miss one and there is a silent
-hole. Here there is simply **no wire** between the key registers and
-`s_axi_rdata`. Software can write a key, mark it locked, erase it, and ask
-whether a slot is loaded. To *use* a key, a core in the PL takes it over the
-`use` port, and that bundle never leaves the chip.
+There is **no wire** between the key registers and `s_axi_rdata`. Software can
+write a key (secure world only), mark it locked, erase it, and ask whether a
+slot is loaded. To *use* a key, a core in the PL takes it over the `use` port,
+and that bundle never leaves the chip. All slots are wiped at session end and on
+tamper.
 
 | Offset | Name | Access | Description |
 |---|---|---|---|
@@ -193,8 +193,8 @@ whether a slot is loaded. To *use* a key, a core in the PL takes it over the
 forms; a non-secure write is RAZ/WI and increments `LOAD_REJ`. `CTRL.ZEROIZE`
 (`0x04`) is deliberately **not** gated — wiping is the safe direction. On the
 EL3 side, BL31 removes slot 1 from the generic `PL_RD`/`PL_WR` SiP whitelist
-entirely (both reads and writes, both worlds); keys reach the vault only via
-TA → PTA → SiP `0x8200ff16` (`PQC_SYMKEY`, secure callers only).
+entirely (both reads and writes, both worlds); keys reach these registers only
+via TA → PTA → SiP `0x8200ff16` (`PQC_SYMKEY`, secure callers only).
 
 **No address in this table returns key material.** `KEY_IN` is write-only and
 reads as 0 — not "gated to 0", but never connected to the key registers in the
@@ -216,7 +216,7 @@ SLOT_CTRL = LOCK         optional; afterwards it can be neither written nor eras
 ```
 
 **A half-loaded key is not a key**: only `COMMIT` makes a slot usable. **Erase
-completes in one cycle** — the whole vault, not a word-by-word sweep — so there
+completes in one cycle** — all slots at once, not a word-by-word sweep — so there
 is no window in which half a key survives. **Tamper is one-way**: it can erase,
 never un-erase.
 
@@ -228,7 +228,7 @@ Window `0x00`–`0x7F`. RTL `hardware/rtl/bus/sym_axi.v`.
 software write a key into key registers for the cipher core to read — which puts
 the key on the bus and leaves it sitting in a register, so anyone who can read
 that range has the key. Here software writes only `KEY_SLOT`, a 3-bit slot
-number; the key itself arrives from `key_vault`'s `use` port on 256 wires that
+number; the key itself arrives from `key_vault_axi`'s `use` port on 256 wires that
 never leave the PL. Software says "use the key in slot 3", never "the key is
 0x…". "Read the key" therefore has **no address on the bus**, rather than an
 address that is gated.
@@ -236,10 +236,10 @@ address that is gated.
 | Offset | Name | Access | Description |
 |---|---|---|---|
 | `0x00` | `VERSION` | R | Constant |
-| `0x04` | `CTRL` | W | `[0]` ZEROIZE (write-1, self-clearing; erases all three cores **and the whole `key_vault`**, via an internal wire — it is not a bus write to slot 1) |
+| `0x04` | `CTRL` | W | `[0]` ZEROIZE (write-1, self-clearing; erases all three cores **and all `key_vault_axi` slots**, via an internal wire — it is not a bus write to slot 1) |
 | `0x08` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` KEY_READY, `[3]` KV_VALID |
 | `0x0C` | `ALG` | RW | `[1:0]` 0 = AES-128, 1 = AES-256, 2 = SM4, 3 = SM3; `[2]` DECRYPT |
-| `0x10` | `KEY_SLOT` | RW | `[2:0]` which key vault slot to use |
+| `0x10` | `KEY_SLOT` | RW | `[2:0]` which `key_vault_axi` slot to use |
 | `0x14` | `CMD` | W | `[0]` LOAD_KEY, `[1]` BLOCK, `[2]` HASH_START, `[3]` HASH_FINAL |
 | `0x18` | `HASH_IN` | W | `[7:0]` one byte into SM3 |
 | `0x1C` | `VIOL_CNT` | R | `{read[31:16], write[15:0]}` |
@@ -256,9 +256,9 @@ RTL `hardware/rtl/bus/mlkem_axi.v`, tests
 | Offset | Name | Access | Description |
 |---|---|---|---|
 | `0x00` | `VERSION` | R | Constant `0x0001_0000` |
-| `0x04` | `CTRL` | W | `[0]` START, `[1]` ZEROIZE, `[2]` IN_RST, `[3]` OUT_RST, `[4]` DK_LOCK (one-way), `[5]` SEED_LOCK (one-way), `[6]` SEED_CLR |
+| `0x04` | `CTRL` | W | `[0]` START, `[1]` ZEROIZE, `[2]` IN_RST, `[3]` OUT_RST, `[5]` SEED_LOCK (one-way; cleared only by a PL reset, the daemon does not set it), `[6]` SEED_CLR. `[4]` was DK_LOCK and was removed (V-04); writing it has no effect |
 | `0x08` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` HASH_OK, `[3]` TAMPER, `[4]` WIPING, `[5]` PARAM_ERR, `[6]` SEED_ERR |
-| `0x0C` | `MODE` | RW | `[1:0]` operation (0 KeyGen, 1 Encaps, 2 Decaps), `[3:2]` parameter set (0 = 512, 1 = 768, 2 = 1024), `[4]` DK_TO_SLOT, `[5]` DK_FROM_SLOT, `[9:6]` SLOT (4 bits — **16 slots, not 4**), `[10]` SEED_STAGED |
+| `0x0C` | `MODE` | RW | `[1:0]` operation (0 KeyGen, 1 Encaps, 2 Decaps), `[3:2]` parameter set (0 = 512, 1 = 768, 2 = 1024), `[4]` CHAIN (expand the private key from the staged seed first, then run the operation, then wipe), `[10]` SEED_STAGED (KeyGen takes `d‖z` from `SEED_DATA`, not `IN_DATA`). Reads back the whole word. `DK_TO_SLOT`, `DK_FROM_SLOT` and `SLOT[9:6]` were removed with the slot ABI: writes to those bits are ignored and read back 0 |
 | `0x10` | `IN_DATA` | W | Input byte stream; the write pointer advances automatically |
 | `0x14` | `IN_PTR` | RW | Input write pointer |
 | `0x18` | `OUT_DATA` | R | Output byte stream |
@@ -267,16 +267,14 @@ RTL `hardware/rtl/bus/mlkem_axi.v`, tests
 | `0x24` | `VIOL_CNT` | R | Firewall violation counters |
 | `0x28` | `PARAM0` | R | Capability word |
 | `0x2C` | `XBAR_VIOL` | R | **Decoder** violations — accesses that hit no slot at all |
-| `0x30` | `KEYSTAT` | R | `[15:0]` occupied vault slots (**16**), `[16]` private-key export latch, `[17]` seed latch |
-| `0x34` | `KEYPSET` | R | Parameter set per slot, 2 bits each — **its own register**: with 16 slots the per-slot `pset` needs 32 bits and no longer fits alongside the valid bits |
+| `0x30` | `KEYSTAT` | R | `[0]` EXP_WIPING (the expansion region is being wiped; software waits for it to clear before the next START), `[1]` SEED_LOCK. No key-related state is reported |
+| `0x34` | `KEYPSET` | R | Always 0 (per-slot parameter sets were removed with the slots) |
 | `0x38` | `SEED_DATA` | W | Secure-world seed staging: 16 little-endian 32-bit words = `d‖z`. **Only accepts `AxPROT[1]=0`, regardless of `SECURE_ONLY`; there is no read-back path (reads return 0); consumed at START** |
-| `0x3C` | `SEED_STAT` | R | `[4:0]` words staged (0..16), `[8]` SEED_READY, `[9]` SEED_LOCK, `[10]` SEED_STAGED, `[31:16]` non-secure writes refused (saturating). **No seed byte appears here** |
+| `0x3C` | `SEED_STAT` | R | `[4:0]` words staged (0..16), `[8]` SEED_READY, `[9]` SEED_LOCK, `[10]` SEED_STAGED, `[11]` SEED_OVF (a write after the 16 words were full, latched), `[31:16]` non-secure writes refused (saturating). **No seed byte appears here** |
+| `0x40` | `IN_DATA4` | W | Four input bytes in one write (little-endian: `wdata[7:0]` lands first); advances the write pointer by 4 |
+| `0x44` | `OUT_DATA4` | R | Four output bytes in one read; returns 0 and does not advance when fewer than 4 bytes remain |
 
-> **⚠️ This table was wrong in three ways before, and each was the kind of wrong
-> that costs a debugging session** (registry DOC-3): it said 4 vault slots when
-> the RTL has 16; it folded `KEYPSET` into `KEYSTAT` when `0x34` is its own
-> register; and `MODE` listed only two of its six fields, so a driver could not
-> check what it had written. `MODE` is now fully read-back-able in RTL too.
+`MODE` reads back all of its fields, so a driver can check what it wrote.
 
 **Everything goes in through one buffer, in the order the standard defines it**,
 because the three cores' input shapes are entirely different and one register
@@ -302,38 +300,33 @@ another configuration; it is a thing that does not exist. Writing it sets
 `PARAM_ERR`, `BUSY` never rises, and any previous `DONE`/`OUT_LEN` are
 invalidated. Reads remain permitted so that software can still poll.
 
-**Zeroize really erases the BRAM.** An earlier version cleared only
-`in_ptr`/`out_len`/`out_rd`/`seed`. From software nothing was readable
-(`OUT_LEN = 0`), but every byte of the previous operation's `dk` was still in
-the two 8 KB BRAMs — that is tearing out the index while the text remains.
-Every path back was still open: the next operation only overwrites the range it
-uses, leaving the old private key in the tail; bitstream readback or a scan
-chain could recover it; or one could simply push `in_ptr` into the old region
-and start an operation. So there is a real erase machine — triggered on the
-**rising edge** of tamper or zeroize, both BRAMs written to zero address by
-address in parallel, with `WIPING = 1` and output reads refused throughout.
+**Zeroize really erases the BRAM.** Clearing only the pointers would leave the
+previous operation's `dk` in the two 8 KB BRAMs, recoverable by bitstream
+readback, a scan chain, or by pushing `in_ptr` into the old region and starting
+an operation. So there is a real erase machine, triggered on the **rising edge**
+of tamper or zeroize: both BRAMs are written to zero address by address in
+parallel, with `WIPING = 1` and output reads refused throughout.
 
-> **How many cycles — the one number three documents used to disagree about.**
-> The wipe counter is 16 bits because the largest block it covers is the 64 KB
-> private-key vault, so this layer's machine runs **65536 cycles** (≈ 874 µs at
-> 75 MHz). The two 8 KB buffers only use the low 13 bits and are therefore
-> written several times over; writing zero repeatedly is the same as writing it
-> once, and a second counter is not worth it.
->
-> The stale figures were 8192 (this file — the pre-vault machine, when only the
-> two 8 KB buffers existed) and 16384 (`TESTING.md`). Both predate the 16-slot
-> vault. **Software polling `WIPING` must size its timeout against 65536, not
-> 8192** — that is why the disagreement mattered rather than being cosmetic.
->
-> Since batch 1 the three ML-KEM cores have their own erase machines as well
-> (their internal BRAM previously had none at all), and `STATUS[4]` is now the
-> OR of this layer's machine and all three cores'. **Measured cycle counts are
-> board-pending** — the numbers above are what the RTL counts, not a stopwatch.
+> **Cycle counts.** The wipe counter is 13 bits: this layer's machine runs
+> **8192 cycles** (about 109 µs at 75 MHz). Software polling `WIPING` should size
+> its timeout against that. The three ML-KEM cores have their own erase machines
+> and `STATUS[4]` is the OR of this layer's machine and all three cores'. Measured
+> cycle counts on the board are still pending; the figures above are what the RTL
+> counts.
 
-**What does and does not reach the buffer.** ML-KEM's `dk` is genuinely
-returned to software — it is the protocol's private key, which the module wraps
-and stores externally — so private key bytes really are readable from
-`OUT_DATA`. That is the interface definition, not a leak. The boundary is that
+**Expansion region wipe (`KEYSTAT[0]`).** With `MODE.CHAIN`, the private key is
+expanded from the staged seed into a 4 KB expansion region inside the PL, used by
+the operation, and wiped by hardware at the end of every operation (4096 cycles).
+The region has no slot number and no valid bit, so nothing can refer to a
+previous operation's contents. START is refused while `KEYSTAT[0]` is set, so
+software waits for it to clear after each operation.
+`CHAIN` needs a complete staged seed; without one START is refused with
+`PARAM_ERR`. START is also refused (with `PARAM_ERR`) while `KEYSTAT[0]` is set.
+
+**What does and does not reach the buffer.** Without `CHAIN` (the ACVP path,
+where software supplies `d‖z`), ML-KEM's `dk` is returned to software through
+`OUT_DATA`; that is the interface definition. With `CHAIN` on KeyGen, `dk` goes
+only to the expansion region and `OUT_LEN` covers `ek` only. The boundary is that
 **no intermediate value** (ŝ, ê, Â, r̂, m′, or the re-encrypted c′) ever enters
 the buffer; they exist only in BRAM inside the cores. `DEBUG_BANK` is hard-wired
 to 0 here, so the polynomial storage read port is not brought out at all, and a
@@ -345,15 +338,15 @@ exactly the bytes the algorithm definition says it should get. (Whether `dk`
 ## `mldsa_axi` — slot 6
 
 RTL in `hardware/rtl/bus/mldsa_axi.v`, tests in
-`hardware/tb/cocotb/test_mldsa_axi.py` (24 of them, judged against the official
-ACVP vectors and `hardware/model/mldsa_oracle.py`).
+`hardware/tb/cocotb/test_mldsa_axi.py` (judged against the official ACVP
+vectors and `hardware/model/mldsa_oracle.py`).
 
 | Offset | Name | Access | Notes |
 |---|---|---|---|
 | `0x00` | `VERSION` | R | Constant `0x0001_0000` |
-| `0x04` | `CTRL` | W | `[0]` START, `[1]` CLEAR, `[2]` ZEROIZE, `[4]` SK_LOCK (one-way latch) |
-| `0x08` | `MODE` | RW | `[1:0]` op (0 KeyGen, 1 Sign, 2 Verify), `[3:2]` parameter set (0 = 44, 1 = 65, 2 = 87), `[4]` SK_TO_SLOT, `[5]` SK_FROM_SLOT, `[9:6]` slot |
-| `0x0C` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` VERIFY_OK, `[3]` PARAM_ERR, `[4]` LEN_ERR, `[5]` TAMPER, `[6]` WIPING |
+| `0x04` | `CTRL` | W | `[0]` START, `[1]` CLEAR, `[2]` ZEROIZE, `[5]` SEED_LOCK (one-way latch; cleared only by a PL reset), `[6]` SEED_CLR. `[4]` was SK_LOCK and was removed (V-04); writing it has no effect |
+| `0x08` | `MODE` | RW | `[1:0]` op (0 KeyGen, 1 Sign, 2 Verify), `[3:2]` parameter set (0 = 44, 1 = 65, 2 = 87), `[4]` CHAIN (Sign: expand sk from the staged ξ, sign, then wipe; KeyGen: return only pk), `[10]` SEED_STAGED (KeyGen takes ξ from `SEED_DATA`, not `IN_DATA`). Reads back the whole word. `SK_TO_SLOT`, `SK_FROM_SLOT` and `slot[9:6]` were removed with the slot ABI. Writing `MODE` resets `IN_PTR` to 0 |
+| `0x0C` | `STATUS` | R | `[0]` BUSY, `[1]` DONE, `[2]` VERIFY_OK, `[3]` PARAM_ERR, `[4]` LEN_ERR, `[5]` TAMPER, `[6]` WIPING, `[7]` SEED_ERR (a staged-seed KeyGen was started with no complete ξ staged) |
 | `0x10` | `IN_DATA` | W | Input byte stream; the write pointer advances |
 | `0x14` | `IN_PTR` | RW | Input write pointer. **Only zero may be written** — an arbitrary setting would be a path around the "enough bytes fed" check |
 | `0x18` | `OUT_DATA` | R | Output byte stream; bytes are handed over only while `OUT_PTR < OUT_LEN`, otherwise zero |
@@ -361,8 +354,12 @@ ACVP vectors and `hardware/model/mldsa_oracle.py`).
 | `0x20` | `OUT_LEN` | R | Output length, written by hardware |
 | `0x24` | `MSG_LEN` | RW | Message bytes, at most 8192 (the core's `u_msg` is AW=13) |
 | `0x28` | `CTX_LEN` | RW | FIPS 204 context string length, at most 255 |
-| `0x2C` | `KEYSTAT` | R | `[7:0]` which signing-vault slots are loaded, `[8]` private-key export latch, `[31:16]` two bits of parameter set per slot |
+| `0x2C` | `KEYSTAT` | R | `[0]` EXP_WIPING (the expansion region is being wiped; wait for it to clear before the next START), `[1]` SEED_LOCK. No key-related state is reported |
 | `0x30` | `VIOL` | R | `[15:0]` write violations, `[31:16]` read violations |
+| `0x34` | `SEED_DATA` | W | Secure-world ξ staging: 8 little-endian 32-bit words. **Only accepts `AxPROT[1]=0`, regardless of `SECURE_ONLY`; reads return 0; consumed at START** |
+| `0x38` | `SEED_STAT` | R | `[3:0]` words staged (0..8), `[8]` SEED_READY, `[9]` SEED_LOCK, `[10]` SEED_STAGED, `[11]` SEED_OVF, `[31:16]` non-secure writes refused (saturating). No seed byte appears here |
+| `0x40` | `IN_DATA4` | W | Four input bytes in one write (little-endian) |
+| `0x44` | `OUT_DATA4` | R | Four output bytes in one read; returns 0 and does not advance when fewer than 4 bytes remain |
 
 **⚠️ `MODE` is at `0x08` and `STATUS` at `0x0C` — the opposite of `mlkem_axi`.**
 The two were once swapped in the daemon, and the symptom was deceptive:
@@ -379,7 +376,7 @@ standard):
 
 ```
 KeyGen : xi(32)
-Sign   : [sk(skLen), only when not using the vault] || rnd(32) || ctx(ctx_len) || msg(msg_len)
+Sign   : [sk(skLen), only when CHAIN=0] || rnd(32) || ctx(ctx_len) || msg(msg_len)
 Verify : pk(pkLen) || sig(sigLen) || ctx(ctx_len) || msg(msg_len)
 ```
 
@@ -388,19 +385,23 @@ signing**, which makes the signature a pure function of the message and removes
 a layer of fault-injection and side-channel defence; determinism is only needed
 when matching ACVP's deterministic vectors.
 
-**On-chip signing vault (8 slots).** With `SK_TO_SLOT`, KeyGen's sk goes straight
-into the on-chip vault: `OUT_LEN` stops exactly at the public key's length, and
-seeking the read cursor into the sk region yields nothing. With `SK_FROM_SLOT`
-you can sign without supplying sk, and **the parameter set recorded for the slot
-must match this run's `MODE`** or START is refused — otherwise you would get a
-signature that is well-formed but made with the wrong private key. Once `SK_LOCK`
-is set, KeyGen never hands out sk again, and there is **no clearing path**:
-ZEROIZE does not clear it; only reloading the bitstream does.
+**Expansion region (`CHAIN`).** The PL does not store signing keys. With
+`CHAIN`, the TA first writes ξ to the staging port; the layer expands sk into an
+8 KB expansion region (no slot number, no valid bit), copies it into the engine,
+signs from `rnd‖ctx‖msg`, and hardware wipes the region at the end of the
+operation. `OUT_LEN` covers σ only, and seeking the read cursor into the sk
+region yields nothing. KeyGen with `CHAIN` returns only pk. Without `CHAIN`
+(the ACVP path, software supplies ξ or sk) KeyGen returns `pk‖sk` and Sign takes
+sk from the input stream. `SEED_LOCK`, once set, forces KeyGen to use the staged
+seed; there is **no clearing path**: ZEROIZE does not clear it, only a PL reset
+does.
 
 **Checks before START** (on failure `PARAM_ERR`/`LEN_ERR` are set and the engine
-**does not start at all**): `op` and `pset` are only meaningful as 0/1/2; slot
-< 8; `ctx_len <= 255`; `msg_len <= 8192`; software fed enough bytes; the total
-fits the input buffer. **Whether or not the START is accepted, the previous
+**does not start at all**): `op` and `pset` are only meaningful as 0/1/2;
+`ctx_len <= 255`; `msg_len <= 8192`; software fed enough bytes; the total
+fits the input buffer; a complete staged ξ exists when KeyGen uses one (otherwise
+`SEED_ERR` as well) or when `CHAIN` is set; the expansion region is not still
+being wiped. **Whether or not the START is accepted, the previous
 `DONE`/`OUT_LEN`/`VERIFY_OK` are invalidated on the spot** — without that,
 software polls a stale `DONE` and reads the previous run's output as this run's
 result, which looks like success.

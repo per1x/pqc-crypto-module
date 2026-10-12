@@ -13,41 +13,41 @@
   · **ACVP 官方向量**（vectors/mldsa_{keygen,siggen,sigver}.kat）——
     KeyGen 的 pk/sk、Sign 的 σ、Verify 的 pass/fail 都逐字节/逐判定对官方值；
   · **hardware/model/mldsa_oracle.py**（已对上全部 ACVP 的黄金模型）——
-    用在"官方向量给不出期望值"的地方，典型是**按槽签名**：金库里的 sk 来自
-    一次真 KeyGen，而 ACVP 的 siggen 条目自带另一把 sk，两边对不上号
-    （实测 90 条 siggen 的 sk 没有一条出现在 keygen 向量里）。于是那条改成
-    "KeyGen(ACVP 种子) → 槽 → 按槽签 → 对 oracle 用同一把 sk 算出来的 σ"。
+    用在"官方向量给不出期望值"的地方。链式签名的 sk 由暂存的 ξ 现展开，
+    而 ACVP 的 siggen 条目自带另一把 sk，两边对不上号（实测 90 条 siggen
+    的 sk 没有一条出现在 keygen 向量里）。所以链式签名用 ACVP keygen 的 ξ，
+    σ 与同一把 sk 自送签出来的结果逐字节比对。
 
 也就是说**同一条 σ 被两条独立的路钉住**：自送 sk 的那条对官方 ACVP，
-按槽签的那条对 oracle，且两条必须逐字节相同。
+链式签名那条对自送 sk 的结果。
 
 ============================================================================
-【⚠️ 这一套必须带参数集跑】
+【参数集：用 MLDSA_ALG 选向量】
 ============================================================================
-三个核这一版仍是**编译期参数化**的，engine 与 mldsa_axi 也是：`pset` 端口与
-综合进去的 `PSET` 参数对不上就拒绝启动。所以不带参数直接 make 就是 ML-DSA-44，
-另外两个参数集要显式传（PARAM_K/L/ETA/… 与 MLDSA_ALG），见 tools/mldsa_grid.sh。
+engine 与 mldsa_axi 在运行时支持 44/65/87，参数集由 MODE.PSET 逐次选择。
+环境变量 MLDSA_ALG 只决定本次用哪个参数集的 ACVP 向量，不带就是 ML-DSA-44，
+另外两个要显式传，见 tools/mldsa_grid.sh。
 
 输入字节流的排布（与 engine 那条线共用的契约）：
     KeyGen : ξ(32)
-    Sign   : [sk，仅当 SK_FROM_SLOT=0] ‖ rnd(32) ‖ ctx(CTX_LEN) ‖ msg(MSG_LEN)
+    Sign   : [sk，仅当 CHAIN=0] ‖ rnd(32) ‖ ctx(CTX_LEN) ‖ msg(MSG_LEN)
     Verify : pk ‖ sig ‖ ctx(CTX_LEN) ‖ msg(MSG_LEN)
 
 覆盖：
   ① 算法：KeyGen 的 pk/sk、Sign 的 σ 逐字节对 ACVP；Verify 的 pass 与 fail
      两种判定都对 ACVP sigver；
-  ② 金库：SK_TO_SLOT 时 sk 一个字节都不出 OUT_DATA（OUT_LEN 只到 pk 长度，
-     且把读游标 seek 过去也拿不到）；SK_FROM_SLOT 时不送 sk 也能签，
-     签出来的 σ 与自送 sk 逐字节相同、且对得上 oracle；
+  ② 展开区：CHAIN 的 Sign 里 sk 一个字节都不出 OUT_DATA（OUT_LEN 只到 σ
+     长度），不送 sk 也能签，σ 对得上预期值；槽位 ABI 在寄存器面上确实没有；
   ③ START 前的长度校验：喂不够就 PARAM_ERR|LEN_ERR 且**不启动**
-     （走金库/不走金库 × ctx 空/非空 四种组合都覆盖）；
+     （CHAIN/非 CHAIN × ctx 空/非空 四种组合都覆盖）；
   ④ 消息上限 8192（核里 u_msg 是 AW=13）：超一个字节就必须被拒；
-  ⑤ 一次性闩锁：置上后强制走金库，且**没有任何写法能把它清掉**（反证）；
-  ⑥ 非法 OP / PSET / SLOT / ctx_len 被拒；pset 与综合参数集不符也被拒；
+  ⑤ SEED_LOCK 一次性闩锁：置上后 KeyGen 强制走暂存口，且没有任何写法能把它
+     清掉（反证）；
+  ⑥ 非法 OP / PSET / ctx_len 被拒；
   ⑦ 陈旧状态：被拒的 START 不留上一次的 DONE/OUT_LEN；CLEAR 清得干净；
   ⑧ 同一个 OP 连跑两次（残留 done 那个上板才暴露的坑）；
   ⑨ 防火墙：non-secure 被拦且无副作用；
-  ⑩ ZEROIZE / tamper 真的把 64 KB 金库逐字节擦掉；
+  ⑩ ZEROIZE / tamper 真的把 8 KB 展开区逐字节擦掉；
   ⑪ 排布相关的两条防呆：写 MODE 清写指针、运行途中改参数回 SLVERR。
 """
 import os
@@ -72,8 +72,7 @@ ALG = os.environ.get("MLDSA_ALG", "ML-DSA-44")
 PSET_OF = {"ML-DSA-44": 0, "ML-DSA-65": 1, "ML-DSA-87": 2}
 PSET = PSET_OF[ALG]
 # 与本次综合**不符**的那个 pset：用来验"对不上就拒绝启动"
-# 与本次跑的参数集不同的一个**合法** pset。运行时化之后它不再是"非法值"，
-# 只用来触发"槽里记的 pset 与本次运算的 pset 对不上"那条防线（那条还在）。
+# 与本次跑的参数集不同的一个**合法** pset（三个 pset 都合法，只有 3 非法）。
 PSET_BAD = (PSET + 1) % 3
 
 # ---- 寄存器映射（槽内偏移）----
@@ -88,9 +87,9 @@ ST_PARAMERR, ST_LENERR = 1 << 3, 1 << 4
 ST_TAMPER, ST_WIPING = 1 << 5, 1 << 6
 
 OP_KEYGEN, OP_SIGN, OP_VERIFY = 0, 1, 2
-# 批 2：槽位 ABI 已删（V-02/V-04/V-05/V-06）。MODE 只剩 OP/PSET/CHAIN/SEED_STAGED。
-# CHAIN：本次 Sign 先从暂存的 ξ 展开 sk，再签，算完无条件擦 —— 替代 SK_FROM_SLOT，
-# 差别在于 sk 是这条命令自己现展开的，不是上一条命令留下的。
+# 槽位 ABI 已删（V-02/V-04/V-05/V-06）。MODE 只有 OP/PSET/CHAIN/SEED_STAGED。
+# CHAIN：本次 Sign 先从暂存的 ξ 展开 sk，再签，算完无条件擦。
+# sk 是这条命令自己现展开的，不是上一条命令留下的。
 M_CHAIN = 1 << 4
 
 # KEYSTAT 现在只有与密钥无关的健康位
@@ -185,7 +184,7 @@ def diff(got: bytes, want: bytes, what: str) -> str:
 
 
 def sign_payload(sk, rnd, ctx, msg, *, chain=False):
-    """软件该往 IN_DATA 里灌什么 —— 走金库时不送 sk"""
+    """软件该往 IN_DATA 里灌什么 —— CHAIN 时不送 sk"""
     return (b"" if chain else sk) + rnd + ctx + msg
 
 
@@ -273,7 +272,7 @@ async def wr(dut, addr, data, prot=PROT_SECURE):
 async def wait_exp_idle(dut, limit=40000):
     """等展开区擦完再发下一条命令。
 
-    ⚠️ **批 2 新增的软件纪律，不是测试技巧。** 展开区在每次运算之后由硬件
+    ⚠️ **这是软件纪律，不是测试技巧。** 展开区在每次运算之后由硬件
     无条件擦（§7.2 条件①），期间 START 会被拒（置 PARAM_ERR 并作废上一次的
     结果）。daemon 那侧也是同样的等法。
     """
@@ -536,17 +535,15 @@ async def test_verify_matches_acvp_sigver(dut):
 
 
 # ============================================================================
-# ② 私钥金库 —— 这一条最硬
+# ② 展开区与链式运算 —— 这一条最硬
 # ============================================================================
 @cocotb.test()
 async def test_chained_sign_from_staged_xi(dut):
-    """**批 2 的落点**：一条命令里先从暂存 ξ 展开 sk、再签、算完就擦
+    """链式签名：一条命令里先从暂存 ξ 展开 sk、再签、算完就擦
 
-    替代原来的 `test_sk_stays_on_chip_and_slot_signs_correctly`。那条证的是
-    "sk 留在槽里、Sign 按槽取"——正是登记表 V-02 要消掉的性质。
-
-    现在的判据（判据用 ACVP，比"两条路一致"更硬）：
-      · 同一份 ξ，链式签出来的 σ 与官方向量逐字节相同；
+    判据：
+      · 暂存 ξ 展开出来的 sk 与 ACVP keygen 的 sk 逐字节相同；
+      · 链式签出来的 σ 与同一份 sk 自送签出来的 σ 逐字节相同；
       · 整条链里 OUT_LEN 只有 σ 那么长，sk 一个字节都读不到。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
@@ -588,8 +585,8 @@ async def test_chained_sign_from_staged_xi(dut):
 async def test_chain_without_staged_xi_refused(dut):
     """链式签名**没有备好的 ξ** 时必须当场被拒
 
-    替代原来的"空槽/参数集不符"那条 —— 槽没有了，取而代之的失败形态是
-    "要链式展开，但暂存口里没有种子"。
+    失败形态是"要链式展开，但暂存口里没有种子"（槽已删除，不再有
+    空槽/参数集不符）。
 
     ⚠️ 这条不挡住的后果不是报错：展开相位会退回"从 IN_DATA 读 ξ"那条路，
     而软件送的字节落在 sw_base 之后，那 32 个字节是残留（冷启动全 0）。
@@ -650,11 +647,11 @@ async def test_underfill_refused_and_not_started(dut):
 
 @cocotb.test()
 async def test_length_check_covers_all_stream_shapes(dut):
-    """长度校验：走金库/不走金库 × ctx 空/非空，**少一个字节就必须被拒**
+    """长度校验：CHAIN/非 CHAIN × ctx 空/非空，**少一个字节就必须被拒**
 
     这四种组合的欠填门槛各不相同：
-        不走金库 : sk + 32(rnd) + ctx + msg
-        走金库   : 32(rnd) + ctx + msg          ← sk 不由软件送，不能算进去
+        非 CHAIN : sk + 32(rnd) + ctx + msg
+        CHAIN    : 32(rnd) + ctx + msg          ← sk 不由软件送，不能算进去
     算错任何一边都会出安静的错误：门槛算高了，一个完全正确的调用被判参数错；
     算低了，engine 拿残留当 rnd 或 sk 去签 —— 签出来的东西**照样能验过**
     （用的是同一份坏材料对应的 pk），没有任何痕迹。
@@ -702,7 +699,7 @@ async def test_length_check_covers_all_stream_shapes(dut):
             assert await out_bytes(dut, 0, SIGL) == golden_sig(sk, msg, ctx, rnd), \
                 f"{label}：σ 与 oracle 对不上 —— 排布或长度算错了"
 
-    dut._log.info("四种流形态（走金库/自送 × ctx 空/非空）：少一字节全被拒，"
+    dut._log.info("四种流形态（CHAIN/自送 × ctx 空/非空）：少一字节全被拒，"
                   "喂满的 σ 全对上 oracle")
 
 
@@ -836,14 +833,13 @@ async def test_rnd_reaches_engine(dut):
 
 
 # ============================================================================
-# ④ 一次性闩锁
+# ④ 槽位 ABI 已删
 # ============================================================================
 @cocotb.test()
 async def test_mldsa_slot_abi_is_gone(dut):
     """槽位 ABI 与 SK_LOCK 在**寄存器面上**确实没有了（V-02/V-04/V-05/V-06）
 
-    替代原来的 `test_sk_lock_is_one_way`。那条证的是"闩上之后强制走金库、
-    而且清不掉"——闩守在与"密钥归 TEE"相反的方向，随 V-04 删除。
+    SK_LOCK（守在与"密钥归 TEE"相反的方向）随 V-04 删除。
 
     判据不是"软件不再用它"，而是**寄存器读回来就是没有**：
     只把软件改成不用，硬件那条路还在，任何能发 AXI 事务的人照样能用。
@@ -958,8 +954,8 @@ async def test_in_ptr_only_accepts_zero(dut):
 async def test_mode_write_resets_in_ptr(dut):
     """写 MODE 就清写指针 —— 挡的是"先灌字节再改 MODE"
 
-    软件字节落在 engine 的哪个偏移**取决于 MODE**（SK_FROM_SLOT 那趟要给
-    金库的 sk 让开前面 skLen 个字节）。所以"灌完再改 MODE"必须变成一个
+    软件字节落在 engine 的哪个偏移**取决于 MODE**（CHAIN 的 Sign 那趟要给
+    展开区供的 sk 让开前面 skLen 个字节）。所以"灌完再改 MODE"必须变成一个
     吵闹的错误，而不是按新排布去解读旧字节 —— 后者没有任何痕迹。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
@@ -970,7 +966,7 @@ async def test_mode_write_resets_in_ptr(dut):
     p, _ = await rd(dut, IN_PTR)
     assert p == 32
 
-    # 改 MODE（哪怕只是把 SK_TO_SLOT 打开）→ 指针归零
+    # 改 MODE（哪怕写的是同一个值）→ 指针归零
     assert await wr(dut, MODE, mode_word(OP_KEYGEN)) == RESP_OKAY
     p, _ = await rd(dut, IN_PTR)
     assert p == 0, f"写 MODE 之后 IN_PTR={p}，应当被清零"
@@ -1266,15 +1262,13 @@ def _mem_nonzero(mem):
 
 @cocotb.test()
 async def test_zeroize_really_wipes_vault(dut):
-    """ZEROIZE 之后**读回 64 KB 金库的每一个字节**，必须全是 0
+    """ZEROIZE 之后**读回 8 KB 展开区的每一个字节**，必须全是 0
 
-    判据不能是"槽的有效位清了"或"OUT_LEN 变 0" —— 那只证明目录页被撕了，
+    判据不能是"OUT_LEN 变 0" —— 那只证明目录页被撕了，
     正文还在不在它答不了。而正文就是 sk 本身：位流回读、扫描链、或者哪天
-    有人给金库加个调试读口，都能把它捞出来。
+    有人给展开区加个调试读口，都能把它捞出来。
 
-    残留分两种，都要覆盖：
-      · **真实残留**：真跑一次存槽 KeyGen，金库里就是真的 sk 字节；
-      · **全量残留**：把 8192 个地址按固定步长撒满非零，证明擦的是整个
+    残留用**全量残留**：把 8192 个地址按固定步长撒满非零，证明擦的是整个
         地址空间，不是"用到的那一段"（只擦用过的那段是个很容易犯、
         而且看起来一样有效的错）。
     """
@@ -1284,19 +1278,17 @@ async def test_zeroize_really_wipes_vault(dut):
     mem = dut.u_expand.mem
     depth = len(mem)
     assert depth == 8192, \
-        f"展开区深度 {depth}，应当是 8192（批 2：8 槽 × 8 KB 的金库降级成一块 8 KB 的匿名展开区）"
+        f"展开区深度 {depth}，应当是 8192（一块 8 KB 的匿名展开区）"
 
-    # ⚠️ 原来这里先跑一次"存槽的 KeyGen"，再断言金库里躺的就是 ACVP 那把 sk。
-    # 批 2 之后**没有"存起来"这回事**了：展开区只在链式运算的两个相位之间
-    # 活着，S_FIN 无条件擦。所以那个先决条件在这里造不出来，也不该造 ——
-    # "展开相位写进去的是对的字节"由 test_chained_sign_from_staged_xi 钉着
-    # （判据是 σ 对得上，比逐字节比对更硬）。
+    # 展开区没有"存起来"这回事：它只在链式运算的两个相位之间活着，
+    # S_FIN 无条件擦。"展开相位写进去的是对的字节"由
+    # test_chained_sign_from_staged_xi 钉着（判据是 σ 对得上）。
     #
-    # 这条用例剩下的任务是**ZEROIZE 真的逐地址擦**，用人工残留就够，
-    # 而且比真 sk 更强：真 sk 只占前 SKL 个字节，人工残留铺满整个地址空间。
+    # 这条用例只验 **ZEROIZE 真的逐地址擦**，用人工残留：
+    # 真 sk 只占前 SKL 个字节，人工残留铺满整个地址空间。
 
     # 全量残留：按步长撒满整个地址空间（逐个写太慢，
-    # 步长取质数 97，覆盖每个槽、每个 BRAM 页）
+    # 步长取质数 97，覆盖每个 BRAM 页）
     for i in range(0, depth, 97):
         mem[i].value = 0xAB
     await RisingEdge(dut.clk)
@@ -1309,7 +1301,7 @@ async def test_zeroize_really_wipes_vault(dut):
 
     bad, first = _mem_nonzero(mem)
     assert bad == 0, (
-        f"擦除之后金库还有 {bad}/{depth} 个字节非零，"
+        f"擦除之后展开区还有 {bad}/{depth} 个字节非零，"
         f"第一个在 [{first[0]}] = 0x{first[1]:02x}")
 
     ks, _ = await rd(dut, KEYSTAT)
@@ -1327,11 +1319,8 @@ async def test_zeroize_really_wipes_vault(dut):
 async def test_zeroize_also_kills_the_staged_seed_path(dut):
     """ZEROIZE 之后，链式签名**没有可用的种子**，于是当场被拒
 
-    替代原来的 `test_zeroize_invalidates_slots_not_just_the_bytes`。那条证的是
-    "擦字节还不够，槽的有效位也要作废"——槽没有了，那个失败形态也就没有了。
-
-    换成对等的一条：批 2 里"下一次运算能不能用上一次的东西"这个问题的载体
-    从槽变成了**暂存的种子**。ZEROIZE 必须把它一起作废，否则擦完之后
+    "下一次运算能不能用上一次的东西"这个问题的载体是**暂存的种子**
+    （槽已删除）。ZEROIZE 必须把它一起作废，否则擦完之后
     链式签名照样跑得起来 —— 用的是擦除前那份 ξ。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
@@ -1395,10 +1384,10 @@ async def test_tamper_wipes_vault_and_closes_bus(dut):
 
     bad, first = _mem_nonzero(mem)
     assert bad == 0, (
-        f"tamper 之后金库还有 {bad} 个字节非零，"
+        f"tamper 之后展开区还有 {bad} 个字节非零，"
         f"第一个在 [{first[0]}] = 0x{first[1]:02x}")
 
-    dut._log.info("tamper 触发一次完整擦除，64 KB 金库读回全 0，总线全程被拒")
+    dut._log.info("tamper 触发一次完整擦除，8 KB 展开区读回全 0，总线全程被拒")
 
 
 # ============================================================================
@@ -1606,10 +1595,9 @@ async def test_xi_seed_clr_partial_and_overfull(dut):
 
 @cocotb.test()
 async def test_xi_seed_lock_independent_of_sk_lock(dut):
-    """SEED_LOCK 一次性、zeroize 撤不回，且**不连动 SK_LOCK**
+    """SEED_LOCK 一次性、zeroize 撤不回；KEYSTAT 里除了健康位没有别的
 
-    最后半条是有意验的：SK_LOCK 与 SEED_LOCK 守的方向相反
-    （FINAL-PLAN §7 V-04 要删掉前者），两者必须互相独立。
+    SK_LOCK 已随 V-04 删除，SEED_LOCK 不应带出任何别的位。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -1619,8 +1607,7 @@ async def test_xi_seed_lock_independent_of_sk_lock(dut):
     assert await wr(dut, CTRL, C_SEED_LOCK) == RESP_OKAY
     ks, _ = await rd(dut, KEYSTAT)
     assert ks & KS_SEED_LOCK, "SEED_LOCK 没置上"
-    # 原来这里还断言"SEED_LOCK 没顺手把 SK_LOCK 也置上"。SK_LOCK 已随 V-04
-    # 删除，那条断言的对象没有了 —— 换成"KEYSTAT 里除了健康位没有别的"。
+    # KEYSTAT 里除了健康位没有别的。
     assert (ks >> 2) == 0, \
         "SEED_LOCK 顺手把 SK_LOCK 也置上了 —— 两把闩方向相反，不能连动"
 

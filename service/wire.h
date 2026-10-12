@@ -51,7 +51,7 @@ enum {
 	 * 寄存器映射以 hardware/rtl/bus/mldsa_axi.v 的 A_* 为准，
 	 * pqchsm_fpgad.c 的 MD_* 必须逐行对着它核 —— MODE/STATUS 曾经在那里写反过，
 	 * 而症状是"每次等 done 超时"，与"核算不出来"分不开。 */
-	OP_MLDSA_KEYGEN  = 9,   /* a0=pset → [4 字节句柄][pk]（sk 进片内金库，不出总线） */
+	OP_MLDSA_KEYGEN  = 9,   /* a0=pset → [4 字节句柄][pk]（sk 由 PL 按需从种子展开，不出总线） */
 	OP_MLDSA_SIGN    = 10,  /* a0=句柄, a1=ctx_len, 载荷=msg → sig */
 	OP_MLDSA_VERIFY  = 11,  /* a0=pset, a1=ctx_len, 载荷=pk‖sig‖msg → 空 */
 
@@ -60,7 +60,7 @@ enum {
 	 * 载荷 = IV(16) ‖ 数据 → 等长的数据
 	 *
 	 * ⚠️ **链接与异或在 daemon 里，分组变换在硬件里。** 每一个分组都走一次
-	 *    sym_axi（密钥仍然只按槽号使唤，一个字节都不出金库），但 CBC 的异或、
+	 *    sym_axi（密钥仍然只按槽号使唤，一个字节都不出 PL），但 CBC 的异或、
 	 *    CTR 的计数器都是本进程算的。**不要**把这说成"硬件 CBC" ——
 	 *    RTL 里没有模式状态机，只有单分组变换。
 	 *
@@ -75,7 +75,7 @@ enum {
 	OP_SYM_CRYPT     = 12,
 
 	/* ---- SM3 杂凑（sym_axi 里那个核，一直在位流里但从没接出来）----------
-	 * 载荷 = 待杂凑的数据 → 32 字节摘要。无密钥，不碰金库。
+	 * 载荷 = 待杂凑的数据 → 32 字节摘要。无密钥，不碰 key_vault。
 	 *
 	 * ⚠️ 一次一段（one-shot），**不是** GM/T 0018 的 Init/Update/Final 三段式。
 	 *    三段式要在 daemon 里替每个连接存一份杂凑中间态，而 sym_axi 里只有
@@ -93,14 +93,14 @@ enum {
 	OP_DEVICE_DNA    = 14,
 
 	/* ---- 对称密钥装载归 TEE（D7）---------------------------------------
-	 * daemon 只搬密文：密钥由 TA 生成/解包，经 PTA → EL3 SiP → PL 装进金库，
+	 * daemon 只搬密文：密钥由 TA 生成/解包，经 PTA → EL3 SiP → PL 装进 key_vault，
 	 * **本进程没有一个能放对称密钥明文的缓冲区**。分组运算不变（OP_SYM_BLOCK /
 	 * OP_SYM_CRYPT 按槽号驱动 PL，一个分组都不走 SMC）。
 	 *
 	 * 槽：产品槽 0..6；槽 7 是 KAT 专用（只装公开测试向量密钥）。
 	 * blob：TA 的 PWRP（AES-256-GCM，KEK 不出 TA）。它就是这把密钥在普通世界的
 	 * 全部形态 —— 调用方自己保存，下次会话用 OP_SYMKEY_LOAD 重装。
-	 * 会话结束 daemon 发 SY_CTRL.ZEROIZE，金库连同三个核一起擦。 */
+	 * 会话结束 daemon 发 SY_CTRL.ZEROIZE，key_vault 连同三个核一起擦。 */
 	OP_SYMKEY_GEN    = 15,  /* a0=槽(0..6), a1=密钥长度(16/32) → blob */
 	OP_SYMKEY_LOAD   = 16,  /* a0=槽(0..6), 载荷=blob → 空 */
 	OP_SYMKEY_KAT    = 17,  /* a0=向量编号（见 sdfe.h SDFE_KAT_*）→ 空；固定进槽 7 */

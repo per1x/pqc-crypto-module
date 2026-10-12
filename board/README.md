@@ -21,7 +21,7 @@ Code, scripts and recorded output for the AXU3EGB board (XCZU3EG).
 2. Configures `eth1` (`192.168.50.175`, the PS GEM) and waits for link. Without link it stops before touching the PL.
 3. Unbinds the PL drivers and loads `zu3eg_hsm_dev.bit` with `fpgautil`. If the PL does not reach `operating`, it reloads `factory.bit` and rebinds.
 4. Loads `secmmio.ko`, copies `*.ta` from the SD card to `/lib/optee_armtz/` (`/lib` is an initramfs), and starts `tee-supplicant` if it is not running.
-5. Starts `pqchsm_fpgad` (the `-lock` argument is accepted and ignored) and `hsm_httpd 8443 8080` with the keystore in `/media/sd-mmcblk1p2/keys`.
+5. Starts `pqchsm_fpgad` and `hsm_httpd 8443 8080` with the keystore in `/media/sd-mmcblk1p2/keys`.
 
 Progress is written to `hsm/HSM_STATUS` and `hsm/hsm-boot.log`. `READY=yes` is the last line of a complete boot. Without `zu3eg_hsm_dev.bit` on the card the PL stays on the vendor bitstream. `zu3eg_hsm.bit` (`SECURE_ONLY=1`) can be loaded at run time with `pl_deadman.sh <bit> <seconds>`, which rolls back unless someone logs in over `eth1` and touches `hsm/PL_KEEP` within the grace period.
 

@@ -371,10 +371,8 @@ def _mem_nonzero(mem):
 
 
 async def _wait_wipe(dut, limit=40000):
-    # 上限随金库一起放大：金库从 16 KB 加到 64 KB（4→16 槽）之后，擦除机要走
-    # 65536 拍 —— 三块 BRAM 里最大的那块决定节拍数。每次轮询是一笔 AXI 读、
+    # 擦除机走 8192 拍（两块 8 KB 缓冲决定节拍数）。每次轮询是一笔 AXI 读、
     # 占好几拍，所以 40000 次轮询足够覆盖。
-    # 这个上限被动过两次了，每次都是加金库容量的直接代价，不是偶然。
     """等 WIPING 落下来，顺便断言它确实曾经高过
 
     用软件可见的 STATUS 位来等，而不是偷看内部信号 —— 板上程序能依赖的
@@ -482,9 +480,9 @@ async def test_tamper_wipes_bram_and_blocks_output(dut):
     # 等擦完（tamper 后总线关了，只能看内部的 wiping —— 这一处是唯一
     # 无法从软件侧观测的，因为软件侧此时已经被整体拒绝了）
     # ⚠️ 这个循环是**逐时钟周期**轮询（不像别处是经 AXI 读 STATUS，
-    # 一次读要好几拍）。所以上限必须大于擦除的拍数本身：金库 64 KB →
-    # 65536 拍。上一版填 60000 就差在这里 —— 比 65536 少，
-    # 于是报"WIPING 一直没落下来"，看着像触发方式写错了，其实只是没等够。
+    # 一次读要好几拍）。所以上限必须大于擦除的拍数本身（8192 拍，
+    # 这里留了很大余量）。上限不够时报"WIPING 一直没落下来"，
+    # 看着像触发方式写错了，其实只是没等够。
     for _ in range(80000):
         await RisingEdge(dut.clk)
         if not int(dut.wiping.value):
@@ -673,21 +671,21 @@ async def test_underfill_refused_and_z_not_stale(dut):
 
 
 # ============================================================================
-# 片内私钥金库：dk 从头到尾不越过总线
+# 单操作展开区：CHAIN 路径上 dk 从头到尾不越过总线
 # ============================================================================
 KEYSTAT = 0x30
-KEYPSET = 0x34          # 批 2：槽位删除后恒读 0，留着是为了钉住"它确实是 0"
+KEYPSET = 0x34          # 槽位删除后恒读 0，留着是为了钉住"它确实是 0"
 
 # ============================================================================
-# 批 2：槽位 ABI 已删除（登记表 V-01/V-04/V-05/V-06）
+# 槽位 ABI 已删除（登记表 V-01/V-04/V-05/V-06）
 # ============================================================================
-# 原来这里有 C_DK_LOCK（CTRL 的一次性闩锁）、M_DK_TO_SLOT / M_DK_FROM_SLOT
-# 与 4 位槽号。它们编码的是"私钥常驻 PL、按槽引用"——与"密钥归 TEE、PL 无状态"
-# 正面冲突。现在 MODE 只剩 OP / PSET / CHAIN / SEED_STAGED。
+# 已删除：C_DK_LOCK、M_DK_TO_SLOT / M_DK_FROM_SLOT、4 位槽号（私钥常驻 PL、
+# 按槽引用，与"密钥归 TEE、PL 无状态"冲突）。MODE 只有 OP / PSET / CHAIN /
+# SEED_STAGED。
 #
 # CHAIN 的语义：**本次运算先从暂存种子展开私钥，再做 OP，算完无条件擦**。
-# 它替代的正是 DK_FROM_SLOT ——差别在于 dk 是这条命令自己现展开的，
-# 不是上一条命令留下的。所以它占了原 DK_TO_SLOT 的位置 [4]。
+# dk 是这条命令自己现展开的，不是上一条命令留下的。占 MODE[4]
+# （原 DK_TO_SLOT 的位置）。
 M_CHAIN = 1 << 4
 
 # KEYSTAT 现在只报与密钥无关的健康位
@@ -703,7 +701,7 @@ def mode_word(mode, name, *, chain=False):
 async def wait_exp_idle(dut, limit=20000):
     """等展开区擦完再发下一条命令。
 
-    ⚠️ **这是批 2 新增的软件纪律，不是测试技巧。** 展开区在每次运算之后由
+    ⚠️ **这是软件纪律，不是测试技巧。** 展开区在每次运算之后由
     硬件无条件擦（§7.2 条件①），期间 START 会被拒（置 PARAM_ERR 并作废上一次
     的结果）。所以"跑完一条马上跑下一条"必须先等这个窗口 —— daemon 那侧
     也是同样的等法。
@@ -740,12 +738,9 @@ async def run_raw(dut, mword, payload, limit=400_000):
 
 @cocotb.test()
 async def test_chained_decaps_from_staged_seed(dut):
-    """**批 2 的落点**：一条命令里先从暂存种子展开 dk、再 Decaps、算完就擦
+    """链式 Decaps：一条命令里先从暂存种子展开 dk、再 Decaps、算完就擦
 
-    这条用例替代了原来的 `test_dk_stays_on_chip`。原来那条证的是
-    "dk 留在 PL 的槽里、Decaps 按槽取"——而那正是登记表 V-01 要消掉的性质。
-
-    现在要证的是三件事，缺一条这个改动就不成立：
+    要证的是三件事，缺一条这个设计就不成立：
 
       · **算得对**：链式 Decaps 解出来的 K，与 Encaps 那一端一致。
         少了这一半，一个"把 dk 丢掉"的实现也能通过下面两条。
@@ -1170,12 +1165,11 @@ async def test_seed_clr_and_partial_seed_refused(dut):
 
 
 @cocotb.test()
-async def test_seed_lock_is_one_way_and_independent_of_dk_lock(dut):
-    """SEED_LOCK：置上之后 MODE 说了不算；zeroize 撤不回；**不连动 DK_LOCK**
+async def test_seed_lock_is_one_way(dut):
+    """SEED_LOCK：置上之后 MODE 说了不算；zeroize 撤不回
 
-    最后那半条是有意验的：DK_LOCK 与 SEED_LOCK 守的方向相反
-    （FINAL-PLAN §7 V-04 要删掉前者），所以两者必须互相独立。
-    一旦有人"顺手"把它们连起来，这条用例会立刻发现。
+    KEYSTAT 里除了 EXP_WIPING / SEED_LOCK 两个健康位没有别的位
+    （DK_LOCK 已随 V-04 删除）。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -1190,8 +1184,7 @@ async def test_seed_lock_is_one_way_and_independent_of_dk_lock(dut):
     assert await wr(dut, CTRL, C_SEED_LOCK) == RESP_OKAY
     ks, _ = await rd(dut, KEYSTAT)
     assert ks & KS_SEED_LOCK, "SEED_LOCK 没置上"
-    # 原来这里还断言 "SEED_LOCK 没顺手把 DK_LOCK 也置上"。DK_LOCK 已随 V-04
-    # 删除，那条断言的对象没有了 —— 换成"KEYSTAT 里除了健康位没有别的"。
+    # KEYSTAT 里除了健康位没有别的。
     assert (ks >> 2) == 0, \
         f"KEYSTAT = 0x{ks:08x} —— 除了 EXP_WIPING/SEED_LOCK 还有别的位"
     ss, _ = await rd(dut, SEED_STAT)
@@ -1215,7 +1208,7 @@ async def test_seed_lock_is_one_way_and_independent_of_dk_lock(dut):
     ks, _ = await rd(dut, KEYSTAT)
     assert ks & KS_SEED_LOCK, "zeroize 把 SEED_LOCK 清掉了 —— 它不该有这个能力"
 
-    dut._log.info("SEED_LOCK 一次性生效、zeroize 撤不回、且与 DK_LOCK 互相独立")
+    dut._log.info("SEED_LOCK 一次性生效、zeroize 撤不回")
 
 
 @cocotb.test()
@@ -1252,9 +1245,8 @@ async def test_mode_reads_back_all_fields(dut):
     """MODE 整字回读（DOC-3）
 
     原来只回读 mode/pset，别的字段写进去就再也读不回来 —— 驱动没法核对
-    自己写对了没有。批 2 之后 MODE 只剩 OP / PSET / CHAIN / SEED_STAGED，
-    这条用例跟着收窄（槽位那几个字段的"回读"由 test_slot_abi_is_gone 管，
-    判据正好相反：写进去必须**不留**）。
+    自己写对了没有。MODE 只有 OP / PSET / CHAIN / SEED_STAGED
+    （槽位那几个字段由 test_slot_abi_is_gone 管，判据相反：写进去必须**不留**）。
     """
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset(dut)
@@ -1272,7 +1264,7 @@ async def test_mode_reads_back_all_fields(dut):
 # ============================================================================
 # 核内 BRAM 的擦除（登记表 Z-03 / Z-04）—— 这以前**根本没有**
 # ============================================================================
-# 上一版的 zeroize 只擦 mlkem_axi 自己那两块 8 KB 缓冲与 16 槽金库。三个核
+# 早先的 zeroize 只擦 mlkem_axi 自己那两块 8 KB 缓冲与展开区。三个核
 # **内部**的多项式银行（ŝ、ê、Â、重加密中间态）一个字节都没擦 —— 那些核连
 # zeroize 端口都没有。于是每跑完一次 KeyGen/Decaps，私钥系数就原样留在核里，
 # 直到下一次运算碰巧覆盖同一个地址为止，而 ZEROIZE 报告"擦完了"。
@@ -1336,7 +1328,7 @@ async def test_wiping_covers_the_cores_not_just_this_layer(dut):
 
     assert await wr(dut, CTRL, C_ZEROIZE) == RESP_OKAY
 
-    # 采样 WIPING 的持续时间。本层那台擦 64 KB 金库要 65536 拍；核里那三台
+    # 采样 WIPING 的持续时间。本层那台擦 8 KB 缓冲要 8192 拍；核里那三台
     # 各自 4096/2048 字。判据不是"恰好多少拍"（那会把用例钉死在实现细节上），
     # 而是**核的 wiping 确实被算进去了** —— 直接看那三根线。
     saw_core_wiping = False

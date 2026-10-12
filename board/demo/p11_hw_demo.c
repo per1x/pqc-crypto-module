@@ -8,12 +8,12 @@
  * 拿一个标准 C_* 调用过来，密钥就在 FPGA 里生成、私钥永不离开硬件。
  *
  * 具体证四件事（打印顺序 ①②③④）：
- *   ① C_GenerateKeyPair 生成 ML-KEM 密钥对 —— 私钥进 PL 的片内金库，
- *      应用只拿到公钥和一个对象句柄，dk 连一个字节都没经过软件；
+ *   ① C_GenerateKeyPair 生成 ML-KEM 密钥对 —— 私钥只以 TA 包裹的种子存在，
+ *      每次解封装由 PL 现展开，应用只拿到公钥和一个对象句柄，dk 连一个字节都没经过软件；
  *   ② 私钥对象的 CKA_EXTRACTABLE 是 false —— 想导出会被拒；
  *   ③ C_Encapsulate（用公钥）→ C_Decapsulate（用句柄）两端共享密钥一致；
  *   ④ 用标准 C_Encrypt/C_Decrypt(CKM_AES_GCM) 公钥加密任意长度数据 ——
- *      KEM 封装在 FPGA、私钥留片内，DEM 是带认证的对称加密（KEM-DEM）。
+ *      KEM 封装在 FPGA、私钥不出硬件，DEM 是带认证的对称加密（KEM-DEM）。
  *
  * 后端由环境变量选：PQCHSM_BACKEND=sdfe 打开 FPGA 路径。不设就是软件后端，
  * 同一段代码、同样通过 —— 这正是"标准接口"的意思：应用不需要知道底下是谁。
@@ -101,7 +101,7 @@ int main(int argc, char **argv)
 	printf("① C_GenerateKeyPair(ML-KEM-768)\n");
 	printf("   公钥对象 %lu，私钥对象 %lu\n", (unsigned long)pk, (unsigned long)sk);
 	printf("   ← %s\n\n",
-	       hw ? "私钥在 FPGA 片内金库，应用只拿到句柄"
+	       hw ? "私钥只以 TA 包裹的种子存在，应用只拿到句柄"
 	          : "私钥在软件后端内存里（本机演示逻辑用）");
 
 	/* ② 私钥不可导出：读 CKA_VALUE 必须被拒 */
@@ -168,7 +168,7 @@ int main(int argc, char **argv)
 		printf("④ C_EncryptInit/C_Encrypt(CKM_AES_GCM) → C_Decrypt\n");
 		printf("   %s（%lu 字节明文 → %lu 字节密文包）\n",
 		       dem_ok
-		         ? (hw ? "✅ 公钥加密任意数据 —— KEM 封装在 FPGA、私钥留片内，DEM 带认证"
+		         ? (hw ? "✅ 公钥加密任意数据 —— KEM 封装在 FPGA、私钥不出硬件，DEM 带认证"
 		            : "✅ 公钥加密任意数据 —— 完整 KEM-DEM（软件后端），DEM 带认证")
 		         : "❌ 往返不一致",
 		       (unsigned long)ptlen, (unsigned long)blen);
