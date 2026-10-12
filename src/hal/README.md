@@ -2,101 +2,98 @@
 
 # Hardware abstraction layer
 
-This directory implements the seam between the cryptographic core and whatever actually
-performs the arithmetic. Everything above it — slot manager, keystore, wrapping, backup,
-audit, PKCS#11 — is written against handles and never learns which backend is in use.
+This directory sits between the host-side cryptographic code (slot manager,
+keystore, backup, audit, PKCS#11) and whatever performs the arithmetic. The code
+above it works with handles and does not depend on which backend is installed.
 
-## Two levels of abstraction
+## Two interfaces
 
-**`pqc_backend_t`** (declared in `include/pqchsm/pqc.h`) is the vtable for
-keygen/encaps/decaps/sign/verify. `src/crypto/pqc_native.c` implements it in software
-(vendored mlkem-native / mldsa-native, the same source tree the OP-TEE TA uses);
-`pqc_accel.c` here implements the same vtable on top of a register interface, and
-`pqc_sdfe.c` implements it by calling the FPGA through the `pqchsm_fpgad` service.
+`pqc_backend_t` (`include/pqchsm/pqc.h`) is the vtable for
+keygen/encaps/decaps/sign/verify. There are three implementations:
 
-**`accel_transport_t`** (declared in `include/pqchsm/accel.h`) is that register
-interface: an AXI-style map of `CTRL`, `STATUS`, `MODE`, `PARAM`, `IN_LEN`, `OUT_LEN`
-and `ERRCODE`, with bulk data moved separately because a real design would use AXI-DMA
-rather than register reads. The map was fixed before any RTL was written, so interface
-mistakes surface in software rather than during board bring-up.
+| Implementation | Where | What it does |
+|---|---|---|
+| `src/crypto/pqc_native.c` | software | Vendored mlkem-native / mldsa-native, the same sources the OP-TEE TA uses |
+| `pqc_accel.c` | this directory | Drives the `accel_transport_t` register interface below |
+| `pqc_sdfe.c` | this directory | Calls the board's cores through `libsdfe` and `pqchsm_fpgad` |
+
+`accel_transport_t` (`include/pqchsm/accel.h`) is an AXI-style register map:
+`CTRL`, `STATUS`, `MODE`, `PARAM`, `IN_LEN`, `OUT_LEN`, `ERRCODE`, with bulk data
+moved separately. It targets the `pqc_accel_axi` accelerator in
+`hardware/rtl/bus/`, which is not part of the board bitstream
+(`hardware/rtl/board/zu3eg_hsm_top.v` explains why). On the board the ML-KEM and
+ML-DSA cores are reached through `pqc_sdfe.c`.
 
 ## Files
 
 | File | Role |
 |---|---|
 | `pqc_accel.c` | `pqc_backend_t` over the register interface; also `accel_ntt()`, `accel_keccak_f1600()`, `accel_shake()` |
-| `accel_stub.c` | Software transport. Implements the register semantics exactly, calling the software backend (`pqc_backend_native()`) internally. Always available. |
-| `accel_verilator.c` | Transport driving Verilator-simulated RTL. Compiled only when Verilator is present; otherwise `accel_transport_verilator()` returns `NULL`. |
-| `accel_axi.c` | Transport driving the simulated RTL through real AXI4-Lite register transactions and AXI4-Stream packets (the `docs/REGISTERS.md` contract). Compiled only when Verilator is present; otherwise `accel_transport_axi()` returns `NULL`. |
-| `verilator/ntt_sim.cpp` | C wrapper around the Verilated `ntt_core` |
-| `verilator/keccak_sim.cpp` | C wrapper around the Verilated `keccak_f1600` |
-| `verilator/axi_sim.cpp` | C wrapper around the Verilated AXI-fronted accelerator, used by `accel_axi.c` |
-| `accel_mmap.c` | `/dev/mem` + `mmap` transport for real programmable logic. Returns `NULL` unless `PQCHSM_ACCEL_MMAP_BASE` and `PQCHSM_ACCEL_MMAP_BUF` are supplied at build time. Not yet driven against real PL. |
-| `hwrng.c` | Driver for the PL entropy source (`trng_axi`), following the contract in `docs/REGISTERS.md` |
-| `hwrng_stub.c` | Software model of `trng_axi`'s register semantics. FIFO filled by OpenSSL — this models the *interface*, not entropy. |
-| `hwrng_mmap.c` | `/dev/mem` + `mmap` transport for the PL TRNG. Returns `NULL` unless `PQCHSM_HWRNG_MMAP_BASE` is supplied at build time; with the delivered `SECURE_ONLY` configuration the normal world cannot reach the registers, so this is for debug bitstreams and as a TA-driver prototype |
-| `hwrng_sdfe.c` | Byte-level entropy source (`hwrng_byte_source_sdfe()`) that fetches TRNG bytes through `libsdfe` → `pqchsm_fpgad`; the path that works in the delivered form |
-| `pqc_sdfe.c` | `pqc_backend_t` (`pqc_backend_sdfe()`) that runs ML-KEM / ML-DSA on the FPGA via the service. Byte-form keygen/decaps/sign are deliberately not implemented: private keys stay in hardware and are used through handles |
-| `sdfe_conn.c`, `sdfe_conn.h` | The single shared connection to the service (local socket, or mTLS TCP when `PQCHSM_SDFE_HOST` + `PQCHSM_SDFE_PKI` are set), used by both `hwrng_sdfe.c` and `pqc_sdfe.c`; the daemon serves one connection at a time |
-| `hwrng_stub.h` | Internal fault-injection hooks for the software TRNG model (tests only) |
+| `accel_stub.c` | Software transport. Implements the register semantics and calls `pqc_backend_native()` internally. Always available |
+| `accel_verilator.c` | Transport that drives Verilator-simulated RTL. Compiled only when Verilator is present, otherwise `accel_transport_verilator()` returns `NULL` |
+| `accel_axi.c` | Transport that drives the simulated RTL with AXI4-Lite register transactions and AXI4-Stream packets (the contract in `docs/REGISTERS.md`). Same Verilator condition; otherwise `accel_transport_axi()` returns `NULL` |
+| `verilator/ntt_sim.cpp`, `keccak_sim.cpp`, `axi_sim.cpp` | C wrappers around the Verilated `ntt_core`, `keccak_f1600` and the AXI-fronted accelerator |
+| `accel_mmap.c` | `/dev/mem` + `mmap` transport. Returns `NULL` unless `PQCHSM_ACCEL_MMAP_BASE` and `PQCHSM_ACCEL_MMAP_BUF` are defined at build time. Has not been run against real PL |
+| `hwrng.c` | Driver for the TRNG register contract (`trng_axi`, `docs/REGISTERS.md`) |
+| `hwrng_stub.c`, `hwrng_stub.h` | Software model of the `trng_axi` registers. The FIFO is filled by OpenSSL, so it models the interface and provides no hardware entropy. The header has fault-injection hooks for tests |
+| `hwrng_mmap.c` | `/dev/mem` + `mmap` transport for the TRNG. Returns `NULL` unless `PQCHSM_HWRNG_MMAP_BASE` is defined at build time. In the default bitstream (`SECURE_ONLY=1`) the normal world cannot reach these registers, so it is only useful with the debug bitstream |
+| `hwrng_sdfe.c` | Byte-level entropy source `hwrng_byte_source_sdfe()`: fetches TRNG bytes through `libsdfe` and `pqchsm_fpgad`. This is the path that works on the board |
+| `pqc_sdfe.c` | `pqc_backend_sdfe()`: ML-KEM and ML-DSA on the PL through the service. Encaps and the `*_hw` calls (keypair, decaps, sign by handle) go to the board. The byte-form keypair, decaps and sign return `PQC_ERR_UNSUPPORTED` for ML-KEM/ML-DSA so that private keys are never handed out as bytes. Verify stays in software, which gives an independent check of the hardware signatures |
+| `sdfe_conn.c`, `sdfe_conn.h` | The one connection to the service that `hwrng_sdfe.c` and `pqc_sdfe.c` share (local socket, or mTLS TCP when `PQCHSM_SDFE_HOST` and `PQCHSM_SDFE_PKI` are set; `PQCHSM_SDFE_PORT` and `PQCHSM_SDFE_DEVICE_CN` are also read). The daemon serves one connection at a time, so two connections from one process stall |
 
-## The entropy source is a separate peripheral
+The PKCS#11 module selects the board paths with environment variables
+(`src/p11/p11_module.c`): `PQCHSM_HWRNG=sdfe` installs the hardware entropy
+source, `PQCHSM_BACKEND=sdfe` installs `pqc_backend_sdfe()`.
 
-`hwrng.h` is a second transport seam, deliberately not folded into `accel.h`'s opcode
-space. Three architectural reasons, the same ones that keep them separate in the RTL:
-their lifecycles differ (the accelerator is command/complete, the TRNG free-runs), their
-access policies differ (entropy is usually guarded more tightly than algorithm cores),
-and their fault domains differ (a TRNG alarm must report independently, not queue behind
-the accelerator's busy state).
+## Entropy source
 
-Once a hardware entropy source (register transport or byte source) is installed,
-`pqc_random_bytes()` draws from it and **does not fall back to software on failure**.
-The software stub reports `is_hardware = 0`, so installing it does not change where
-`pqc_random_bytes()` gets its bytes (OpenSSL). Silent fallback would make
-"the entropy comes from hardware" quietly false at exactly the moment it matters.
+`hwrng.h` is a second transport interface and is kept apart from the `accel.h`
+opcodes. The accelerator is command/complete while the TRNG free-runs, the TRNG
+usually has stricter access control, and a TRNG alarm has to be reported
+independently of the accelerator's busy state. The RTL keeps them in separate
+slaves for the same reasons.
 
-## Division of labour between hardware and software
+Once a hardware entropy source (register transport or byte source) is
+installed, `pqc_random_bytes()` draws from it and returns an error when it
+fails; it does not fall back to software. The software stub reports
+`is_hardware = 0`, so installing it leaves `pqc_random_bytes()` on OpenSSL.
+With a byte source installed, the register-level calls (`hwrng_status`,
+`hwrng_zeroize`, health counters) are unavailable.
 
-`accel_shake()` has two paths and prefers the hardware sponge:
+## SHAKE and Keccak
 
-- **Mode 10 (`ACCEL_MODE_SHAKE`)** — the whole sponge runs inside the PL; only the
-  message and the digest cross the bus. This is the default, taken whenever the message
-  and the output both fit in `ACCEL_SHAKE_MAX` (512 bytes, the size of the PL-side
-  buffer). Rate, domain-separation suffix and output length are packed into `PARAM`
-  (see `ACCEL_SHAKE_PARAM`).
-- **Mode 9 (`ACCEL_MODE_KECCAK_F1600`)** — when the message exceeds that limit, or the
-  transport does not implement mode 10 (it answers `ERRCODE=3`), framing falls back to C
-  and only the permutation goes to hardware.
+`accel_shake()` has two paths:
 
-**Why the first path matters** is not speed but that the sponge's intermediate state
-never leaves the crypto boundary. Mode 9 ships 200 bytes of state in and out for every
-permutation, and in ML-KEM that intermediate state *is* the context of the ρ/σ expansion.
+- Mode 10 (`ACCEL_MODE_SHAKE`): the whole sponge runs in the PL and only the
+  message and digest cross the bus. It is used when the message and the output
+  both fit in `ACCEL_SHAKE_MAX` (512 bytes, the PL buffer size). Rate,
+  domain-separation suffix and output length are packed into `PARAM`
+  (`ACCEL_SHAKE_PARAM`).
+- Mode 9 (`ACCEL_MODE_KECCAK_F1600`): used when the message or output is larger,
+  or when the transport answers `ERRCODE=3` (mode not implemented). Padding and
+  absorb/squeeze framing are done in C and only the permutation runs in
+  hardware. Each permutation moves 200 bytes of state in and out.
 
-**This fallback is not the same thing as the entropy source's "never fall back".** SHAKE
-is a public function: falling back to software framing costs no confidentiality
-guarantee, only that extra layer of depth. Falling back to a software RNG would change
-the security root itself. That difference is why one is allowed and the other fails hard.
+Only `ERRCODE=3` triggers the fallback. Any other failure is returned to the
+caller. SHAKE is a public function, so falling back to software framing does
+not weaken confidentiality; a software fallback for the entropy source would,
+which is why that one is not allowed.
 
-**The fallback triggers on `ERRCODE=3` only** (mode not implemented). Any other failure
-is reported upward as-is — an accelerator that is broken but always caught by software is
-an accelerator nobody will ever notice is broken.
+## Simulated transports
 
-## What the simulated backend covers
+The Verilator and AXI transports implement `NTT_FWD`, `NTT_INV` and
+`KECCAK_F1600`. Every other mode sets `STATUS.ERR` with `ERRCODE=3`, which
+surfaces as `PQC_ERR_UNSUPPORTED`. There is no software fallback in these
+transports. The full ML-KEM and ML-DSA cores (`hardware/rtl/mlkem`,
+`hardware/rtl/mldsa`) are not reachable through them.
 
-The Verilator and AXI transports implement `NTT_FWD`, `NTT_INV` and `KECCAK_F1600`.
-Every other mode sets `STATUS.ERR` with `ERRCODE=3` and surfaces as
-`PQC_ERR_UNSUPPORTED`. They deliberately do **not** fall back to software: a silent
-fallback would make "the RTL path works" an illusion. The full ML-KEM/ML-DSA cores
-(`hardware/rtl/mlkem`, `hardware/rtl/mldsa`) are not reachable through these simulated
-transports; on the board they are used through `pqc_sdfe.c`.
+## Consistency tests
 
-## Consistency requirement
+The stub and the simulated RTL must return identical bytes through the same
+register interface. `tests/unit/test_accel.c` (direct) and
+`tests/unit/test_accel_axi.c` (over AXI transactions) check both NTT directions
+and the SHA3/SHAKE path, the latter against OpenSSL. A hardware transport would
+be held to the same tests.
 
-The stub and the simulated RTL must produce byte-identical results through the same
-register interface. `tests/unit/test_accel.c` (direct) and `tests/unit/test_accel_axi.c`
-(over AXI transactions) assert this for both NTT directions and for the whole SHA3/SHAKE
-path, and cross-check the latter against OpenSSL. The same
-requirement will apply to a real hardware transport.
-
-See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for how this layer fits into the
-rest of the module.
+See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for how this layer fits
+into the module.

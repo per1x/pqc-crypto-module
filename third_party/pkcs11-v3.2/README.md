@@ -2,17 +2,17 @@
 
 # OASIS PKCS#11 v3.2 headers (vendored)
 
-Source: <https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/include/pkcs11-v3.2/>
-Retrieved 2026-07-29, **unmodified**.
+`pkcs11.h`, `pkcs11f.h` and `pkcs11t.h` from
+<https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/include/pkcs11-v3.2/>,
+retrieved 2026-07-29 and not modified.
 
-These are vendored rather than taken from a system package for two reasons. PKCS#11 is
-an ABI contract, so the header version must be exactly controlled. And v3.2 is the first
-revision to define ML-KEM and ML-DSA natively — `CKM_ML_KEM`, `CKM_ML_DSA`,
-`CKK_ML_KEM`, `CKK_ML_DSA`, the `CKP_*` parameter sets, and the `C_EncapsulateKey` /
-`C_DecapsulateKey` functions. Distributions typically still ship v3.0 or v3.1 via
-OpenSC, which lacks all of them.
+They are vendored because PKCS#11 is an ABI, so the header version has to be
+fixed, and because v3.2 is the first revision that defines ML-KEM and ML-DSA:
+`CKM_ML_KEM`, `CKM_ML_DSA`, `CKK_ML_KEM`, `CKK_ML_DSA`, the `CKP_*` parameter
+sets, and `C_EncapsulateKey` / `C_DecapsulateKey`. Distributions usually ship
+v3.0 or v3.1 (for example with OpenSC), which has none of these.
 
-The headers deliberately omit platform macros (`CK_PTR`, `CK_DECLARE_FUNCTION`, and so
-on); those are supplied by `src/p11/p11_config.h`.
+The headers do not define the platform macros (`CK_PTR`, `CK_DECLARE_FUNCTION`
+and so on); `src/p11/p11_config.h` defines them.
 
-These three files may be freely copied and used under the OASIS terms.
+The files are used under the OASIS terms that come with them.

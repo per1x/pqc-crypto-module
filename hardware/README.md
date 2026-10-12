@@ -2,225 +2,227 @@
 
 # Hardware
 
-RTL sources, verification, the reference model that produces golden vectors, and
-synthesis scripts.
+RTL for the PL (FPGA) side of the HSM, the cocotb testbenches, the Python reference
+models that produce golden vectors, and the Vivado scripts. The PL does the
+cryptographic computation (ML-KEM, ML-DSA, SHA-3, AES, SM4, SM3) and hosts the TRNG.
+It stores no long-term keys: the OP-TEE trusted application holds keys as wrapped blobs
+and loads them into the PL only for the duration of an operation (see
+[../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) and [../docs/SECURITY.md](../docs/SECURITY.md)).
 
-> **This directory is no longer simulation-only.** On branch `zu3eg-fpga-crypto` these
-> sources are synthesised into a bitstream and run on an XCZU3EG board: ML-KEM
-> 512/768/1024 match NIST ACVP vectors byte-for-byte **on silicon**, and the AXI
-> firewall's access gate has been proven in both directions. The simulation harness
-> described below is still the first gate — 272 cocotb tests — but it is no longer the
-> last one. See [../docs/SECURITY.md](../docs/SECURITY.md).
+The sources are built into the bitstream that runs on the XCZU3EG board. The simulation
+suite described below is the first check; ACVP and the on-board tests are the second
+(see [../docs/TESTING.md](../docs/TESTING.md)).
 
 ```
 hardware/
-├── rtl/            Cryptographic RTL
-│   ├── mlkem/      NTT, base multiply, reduction, sampling, compression,
-│   │               packing, and whole KeyGen / Encaps / Decaps cores
-│   ├── mldsa/      ML-DSA operators — NTT, rounding, hints, sampling — and the
-│   │               whole KeyGen / Sign / Verify cores plus the `mldsa_engine` adapter
+├── rtl/
+│   ├── mlkem/      ML-KEM: NTT, base multiply, reduction, sampling, compression,
+│   │               packing, and the KeyGen / Encaps / Decaps cores
+│   ├── mldsa/      ML-DSA: NTT, rounding, hints, sampling, packing, parameter table,
+│   │               the KeyGen / Sign / Verify cores, and the mldsa_engine adapter
 │   ├── keccak/     keccak_f1600.v, sha3_core.v
 │   ├── sym/        aes_core.v, sbox.v, sm4_core.v, sm3_core.v
-│   ├── trng/       ring_osc, source, health (RCT/APT), conditioning, AXI
-│   ├── bus/        firewall, key_vault, and the per-core AXI wrappers
+│   ├── trng/       ring oscillators, health tests (RCT/APT), conditioning, AXI slave
+│   ├── bus/        AXI4-Lite firewall, symmetric key registers, per-core AXI slaves
 │   ├── board/      axi4lite_xbar.v, zu3eg_hsm_top.v
-│   └── common/     ram_dp.v, sync_fifo.v
-├── platform/       Non-crypto fabric logic (fan control) — see its README
+│   ├── common/     ram_dp.v, sync_fifo.v
+│   └── lint_waivers.vlt
+├── platform/       Fan control (not cryptographic), see platform/README.md
 ├── tb/cocotb/      cocotb testbenches, simulation-only top levels, Makefile
-├── tb/lint/        Vendor-primitive stubs — lint only, never synthesised
-├── model/          Python reference model, vector export, independent oracles
+├── tb/lint/        Vendor-primitive stubs for lint (not synthesised)
+├── model/          Python reference models, vector export, independent oracles
 └── syn/            Vivado out-of-context synthesis and the bitstream flow
 ```
 
-Every algorithm core is plain inferrable Verilog-2001 with no vendor primitive, so those
-sources target Xilinx, Intel, or Lattice unchanged. The only vendor primitives and IP
-live outside them: `BUFGCE_DIV` and the PS instance in `rtl/board/zu3eg_hsm_top.v`, and
-`SYSMONE4` in `platform/fan_ctrl/fan_sysmon.v`.
+The algorithm cores are plain Verilog-2001 with no vendor primitive. The vendor
+primitives and IP are `BUFGCE_DIV` and the PS instance in `rtl/board/zu3eg_hsm_top.v`
+and `SYSMONE4` in `platform/fan_ctrl/fan_sysmon.v`.
 
-## What exists
+## Board top level
 
-| Module | Structure | Cycles |
+`zu3eg_hsm_top` connects the PS port `M_AXI_HPM0_LPD` (AXI4, treated as AXI4-Lite with
+`rlast = rvalid` and the IDs echoed back) to `axi4lite_xbar`, which decodes
+64 KB slots starting at `0x8000_0000`. The crypto cores run at 75 MHz (`pl_clk0` at
+150 MHz through `BUFGCE_DIV` /2). A miss in the decoder, and any access rejected by a
+firewall, is answered RAZ/WI (reads 0, write dropped, response OKAY), so a stray access
+cannot raise an AXI error.
+
+| Slot | Address | Module | Contents |
+|---|---|---|---|
+| 0 | `0x8000_0000` | `trng_axi` | TRNG |
+| 1 | `0x8001_0000` | `key_vault_axi` | symmetric key registers (8 slots x 256 bit) |
+| 2 | `0x8002_0000` | `sym_axi` | AES / SM4 / SM3 (slots 1 and 2 are the two slaves of `sym_vault_top`) |
+| 3 | `0x8003_0000` | `mlkem_axi` | ML-KEM-512/768/1024 |
+| 4 | `0x8004_0000` | `key_vault_axi` | canary, a copy of slot 1 with `SECURE_ONLY` fixed at 1 and no use port connected |
+| 5 | `0x8005_0000` | `fan_ctrl_axi` | fan observation port (no AxPROT gating) |
+| 6 | `0x8006_0000` | `mldsa_axi` | ML-DSA-44/65/87 |
+
+In the default build the functional slaves (slots 0, 1, 2, 3, 6) are built with
+`SECURE_ONLY=1`: only transactions with `AxPROT[1]=0` (secure) reach them. Building with
+`PQC_DEV_OPEN=1` gives `zu3eg_hsm_dev.bit`, where these slaves use `SECURE_ONLY=0` so
+Linux can drive them directly for KAT runs. Even then the key-register load port
+(`SLOT_SEL`, `KEY_IN`, `SLOT_CTRL`) and the seed-staging ports of `mlkem_axi` and
+`mldsa_axi` accept secure writes only. Register layouts are in
+[../docs/REGISTERS.md](../docs/REGISTERS.md).
+
+## Key handling in the PL
+
+- `key_vault` (wrapped by `key_vault_axi`) is a set of 8 key registers, 256 bit each.
+  A key is written through the load port (`SLOT_SEL`, `SLOT_CTRL` BEGIN, eight `KEY_IN`
+  words, `SLOT_CTRL` COMMIT) and read only by the symmetric cores through the use port.
+  No register address returns key material.
+- Loads from the normal world are dropped and counted in `LOAD_REJ` (`0x34`).
+  `CTRL.ZEROIZE` is not gated. `sym_axi` also drives `ext_zeroize` into the key registers.
+- The registers are wiped in one cycle on `tamper`; after that, loads are refused until
+  reset. On the board `tamper` comes from the `SYSMONE4` over-temperature output.
+- For ML-KEM and ML-DSA, `MODE[4]=CHAIN` makes the PL expand the private key from a
+  staged seed, run the operation, and wipe the expanded key. Software waits for
+  `KEYSTAT[0]` (`EXP_WIPING`) to clear after each operation. `CTRL.SEED_LOCK` is a latch
+  that only a power cycle clears. The ACVP KeyGen path, where software supplies `d‖z`,
+  still returns `dk` through `OUT_DATA`.
+
+## Modules
+
+### `rtl/mlkem/`
+
+| File | Modules |
+|---|---|
+| `mont_reduce.v` | `mont_reduce` (combinational) |
+| `butterfly.v` | `barrett_reduce`, `butterfly_ct`, `butterfly_gs`, each built from `_head` + `_tail` |
+| `ntt_core.v` | `ntt_core`: one butterfly unit, 7-layer NTT, coefficients in `ram_dp`; 3457 cycles per transform |
+| `basemul.v` | `mlkem_basemul` (five Montgomery multiplies, `_head` + `_tail`), `mlkem_bmzeta` (the ζ table for base multiply) |
+| `compress.v` | `mlkem_compress`, `mlkem_decompress`, parameterised by `D` |
+| `sample.v` | `mlkem_cbd2`, `mlkem_cbd3`, `mlkem_rej_pair`, `mlkem_rej_uniform` |
+| `cbd_stream.v` | `mlkem_cbd_stream`: SHAKE256 byte stream to 256 CBD coefficients |
+| `pack.v` | `mlkem_encode12`, `mlkem_decode12` |
+| `bitpack.v` | `mlkem_bitpack`, `mlkem_bitunpack`: ByteEncode_d / ByteDecode_d with `d` as a runtime input |
+| `keygen.v`, `encaps.v`, `decaps.v` | `mlkem_keygen`, `mlkem_encaps`, `mlkem_decaps`: the complete FIPS 203 internal algorithms. Decaps re-encrypts by instantiating `mlkem_encaps`, compares ciphertexts in constant time, and uses implicit rejection J(z‖c) |
+
+### `rtl/mldsa/`
+
+| File | Modules |
+|---|---|
+| `mont_reduce.v` | `mldsa_mont_reduce`, `mldsa_mont_mul_pipe` (5-stage `mont(x·y)`, shared by the NTT and pointwise loops) |
+| `butterfly.v` | `mldsa_butterfly_ct`, `mldsa_butterfly_gs` (reference forms), `mldsa_butterfly_pipe` (CT / GS / scaling on one multiplier) |
+| `ntt_core.v` | `mldsa_ntt_core`: pipelined, 8 layers, ping-pong `ram_dp`; 1081 cycles forward, 1344 inverse |
+| `reduce.v`, `rounding.v` | `mldsa_reduce32`, `mldsa_caddq`, `mldsa_power2round`, `mldsa_decompose`, `mldsa_make_hint`, `mldsa_use_hint` |
+| `sample.v` | `mldsa_rej_uniform`, `mldsa_rej_eta`, `mldsa_rej_uniform_buf` |
+| `sampler.v`, `expand_mask.v`, `sample_in_ball.v` | `mldsa_poly_uniform`, `mldsa_poly_eta`, `mldsa_expand_mask`, `mldsa_sample_in_ball` (drive the shared `sha3_core`) |
+| `pack.v`, `unpack.v` | `mldsa_bitpack`, `mldsa_polyt1_pack`, `mldsa_polyt0_pack`, `mldsa_polyeta_pack`, `mldsa_bitunpack` |
+| `params.v` | `mldsa_params`: the FIPS 204 parameter table, indexed by parameter set |
+| `keygen.v`, `sign.v`, `verify.v` | `mldsa_keygen`, `mldsa_sign`, `mldsa_verify` |
+| `mldsa_engine.v` | `mldsa_engine`: one byte-stream write port in front of the three cores. The parameter set (44/65/87) is chosen per operation at run time |
+
+The header comments of `keygen.v`, `sign.v` and `verify.v` still describe the first
+implementation stage; the files contain the complete algorithms.
+
+### Other directories
+
+| File | Module | Notes |
 |---|---|---|
-| `mont_reduce`, `barrett_reduce` | combinational | — |
-| `butterfly_ct`, `butterfly_gs` | combinational; likewise composed of `_head` + `_tail`, with `ntt_core` registering between the halves | — |
-| `ntt_core` | single butterfly unit, 7-layer ML-KEM NTT, coefficients in a true dual-port BRAM (`ram_dp`), instantiates the above | 3457 per transform (3 cycles per butterfly) |
-| `mlkem_basemul` | combinational, five Montgomery multiplies; composed of `_head` + `_tail` so a timing-critical core can register between the halves | — |
-| `mlkem_bmzeta` | the base-multiply ζ table (ZETAS[64..127]) and its indexing, shared by all three cores | — |
-| `mlkem_compress`, `mlkem_decompress` | combinational, parameterised by `D` | — |
-| `mlkem_cbd2`, `mlkem_cbd3` | combinational, bit-parallel binomial sampling | — |
-| `mlkem_rej_pair` | combinational candidate extraction | — |
-| `mlkem_rej_uniform` | collector, one 3-byte group per cycle; results live in a `ram_dp` (1-cycle read latency) | ~430 per polynomial |
-| `mlkem_encode12`, `mlkem_decode12` | combinational | — |
-| `mldsa_mont_reduce`, `mldsa_reduce32`, `mldsa_caddq` | combinational | — |
-| `mldsa_butterfly_ct`, `mldsa_butterfly_gs` | combinational; reference implementations of the maths, pinned to `mldsa_butterfly_pipe` by shared vectors | — |
-| `mldsa_mont_mul_pipe` | 5-stage pipelined `mont(x·y)`; the single multiply chain shared by the NTT and by the pointwise/MAC loops | 5 |
-| `mldsa_butterfly_pipe` | CT / GS / scaling on one `mldsa_mont_mul_pipe`; bypass travels in the tag | 5 |
-| `mldsa_ntt_core` | pipelined butterfly, full 8-layer ML-DSA NTT, ping-pong `ram_dp` buffers (read one, write the other — no intra-layer RAW) | 1081 forward, 1344 inverse (1 cycle per butterfly) |
-| `mldsa_power2round`, `mldsa_decompose` | combinational, parameterised by `MODE` | — |
-| `mldsa_make_hint`, `mldsa_use_hint` | combinational, parameterised by `MODE` | — |
-| `mldsa_rej_uniform`, `mldsa_rej_eta` | combinational | — |
-| `mldsa_rej_uniform_buf` | collector, one 3-byte group per cycle; results live in a `ram_dp` (1-cycle read latency) | ~340 per polynomial |
-| `keccak_f1600` | single-round iterative, `round_cnt` over 24 rounds | 24 per permutation |
-| `mlkem_cbd_stream` | PRF byte stream → 256 CBD coefficients, streamed out | ~384 (η=2) / ~448 (η=3) |
-| `mlkem_bitpack`, `mlkem_bitunpack` | variable-width ByteEncode_d / ByteDecode_d; `d` is a runtime input (du/dv change with the parameter set) | one byte or one coefficient per cycle |
-| `mlkem_keygen` | **full ML-KEM.KeyGen_internal**: G/PRF/XOF/H, sampling, NTT, base multiply and packing all in PL | ~50.2k per keygen (768) |
-| `mlkem_encaps` | **full ML-KEM.Encaps_internal**: H(ek), G, matrix A, r̂/e₁/e₂ sampling, NTT and inverse NTT, compression and packing all in PL | ~50.6k per encaps (768) |
-| `mlkem_decaps` | **full ML-KEM.Decaps_internal**: decrypt, re-encrypt by instantiating `mlkem_encaps`, **constant-time** ciphertext comparison, implicit rejection J(z‖c) | ~78.0k per decaps (768) |
-| `ram_dp` | parameterised true dual-port synchronous RAM, inferred as block RAM | 1 cycle read latency |
-| `axi4lite_regs` | AXI4-Lite slave, control and status registers | — |
-| `axi4lite_firewall` | AXI4-Lite firewall: AxPROT / address-window / tamper gating; a rejected transaction **never reaches the downstream port** and is answered RAZ/WI (reads 0, write dropped, OKAY — not DECERR); violation counters | 3-4 cycles per access |
-| `key_vault` | in-PL key vault, 8 slots x 256 bit in registers; write-only load port plus a use port that stays inside the PL; tamper wipes everything in one cycle and latches | 1 cycle to wipe |
-| `key_vault_axi` | the vault as an AXI4-Lite slave = firewall + metadata registers + vault; the load port accepts secure writes only (`AxPROT[1]=0`), rejected normal-world loads are counted in `LOAD_REJ` (0x34); `ext_zeroize` input | — |
-| `aes_sbox`, `aes_inv_sbox`, `sm4_sbox` | combinational lookup tables, generated by `sym_oracle.py --emit-sbox` | — |
-| `aes_core` | AES-128/256 block encrypt and decrypt (FIPS 197); key schedule and block are two separate commands | 41/53 to load a key, 11/15 per block |
-| `sm4_core` | SM4 block encrypt and decrypt (GB/T 32907); decryption reuses the encryption datapath with reversed round keys | 32 to load a key, 33 per block |
-| `sm3_core` | SM3 hash (GB/T 32905), padding done inside the core | 65 per 64-byte block |
-| `sym_axi` | AXI4-Lite slave for AES/SM4/SM3; **there is no KEY register** — the key arrives on `key_vault`'s use port; `kv_zeroize` output | — |
-| `sym_vault_top` | vault plus symmetric cores; two slaves, one firewall each, one shared tamper line | — |
-| `pqc_accel_axi` | accelerator top level: AXI4-Lite + AXI4-Stream + cores (simulation and synthesis only — not in the board image) | — |
-| `mldsa_keygen`, `mldsa_sign`, `mldsa_verify` | the three whole ML-DSA cores (FIPS 204); ML-DSA-44/65/87 | — |
-| `mldsa_engine` | adapter that turns one byte-stream write port into the native ports of the three ML-DSA cores | — |
-| `mlkem_axi` | AXI4-Lite slave for the three ML-KEM cores = firewall + 8 KB input/output buffers; `MODE[4]=CHAIN` expands the private key inside the PL and wipes it after the operation, so the PL holds no key state between operations — software waits for `KEYSTAT[0]` (EXP_WIPING) to clear after each one | — |
-| `mldsa_axi` | AXI4-Lite slave for `mldsa_engine`; ML-DSA-44/65/87 selected at runtime (`MODE.PSET`), same `CHAIN` / `KEYSTAT` convention as `mlkem_axi` | — |
-| `trng_axi` | AXI4-Lite slave for the TRNG (`trng_top`: ring oscillators, health tests, conditioning) | — |
-| `axi4lite_xbar` | one-master / N-slave AXI4-Lite address decode, 64 KB per slot; a miss is answered RAZ/WI | — |
-| `zu3eg_hsm_top` | board top level: PS `M_AXI_HPM0_LPD` → xbar → slots at `0x8000_0000 + slot*0x1_0000`: 0 `trng_axi`, 1 `key_vault_axi`, 2 `sym_axi` (1 and 2 are the two slaves of `sym_vault_top`), 3 `mlkem_axi`, 4 canary `key_vault_axi`, 5 fan observation port, 6 `mldsa_axi`. The default build sets `SECURE_ONLY=1` on the five functional slaves and on the canary; `PQC_DEV_OPEN=1` builds `zu3eg_hsm_dev.bit` with `SECURE_ONLY=0` | — |
+| `keccak/keccak_f1600.v` | `keccak_f1600` | one round per cycle, 24 cycles per permutation |
+| `keccak/sha3_core.v` | `sha3_core` | sponge (padding, absorb, squeeze) around the permutation |
+| `sym/aes_core.v` | `aes_core` | AES-128/256, encrypt and decrypt; loading a key takes 41 (AES-128) or 53 (AES-256) cycles, a block 11 or 15 |
+| `sym/sm4_core.v` | `sm4_core` | 32 cycles for the key schedule, 33 per block |
+| `sym/sm3_core.v` | `sm3_core` | SM3 with padding inside the core |
+| `sym/sbox.v` | `aes_sbox`, `aes_inv_sbox`, `sm4_sbox` | lookup tables generated by `sym_oracle.py --emit-sbox` |
+| `trng/` | `ring_osc`, `trng_source`, `trng_health`, `trng_cond`, `trng_top`, `trng_axi` | multi-ring-oscillator source, RCT/APT health tests (SP 800-90B), Keccak conditioner, FIFO, AXI slave |
+| `common/ram_dp.v` | `ram_dp` | true dual-port synchronous RAM, inferred as block RAM, one cycle read latency |
+| `common/sync_fifo.v` | `sync_fifo` | first-word-fall-through FIFO; `flush` overwrites the contents with zeros |
+| `bus/axi4lite_firewall.v` | `axi4lite_firewall` | gates on `AxPROT`, address window and `tamper`; a rejected transaction does not reach the downstream port. Policy is set by parameters, not registers. Counts violations |
+| `bus/key_vault.v`, `bus/key_vault_axi.v` | `key_vault`, `key_vault_axi` | symmetric key registers and their AXI slave (see above) |
+| `bus/sym_axi.v`, `bus/sym_vault_top.v` | `sym_axi`, `sym_vault_top` | AES/SM4/SM3 slave with no key register (it selects a key slot instead), and the wrapper that joins it to the key registers |
+| `bus/mlkem_axi.v` | `mlkem_axi` | slave for the three ML-KEM cores, with 8 KB input and output buffers |
+| `bus/mldsa_axi.v` | `mldsa_axi` | slave for `mldsa_engine` |
+| `bus/axi4lite_regs.v`, `bus/pqc_accel_axi.v` | `axi4lite_regs`, `pqc_accel_axi` | register block and accelerator top (AXI4-Lite control, AXI4-Stream data) used by the C simulation backend and cocotb. Not in the board image |
+| `board/axi4lite_xbar.v` | `axi4lite_xbar` | one master, N slaves, 64 KB per slot |
+| `board/zu3eg_hsm_top.v` | `zu3eg_hsm_top` | board top level |
 
-ML-KEM and ML-DSA use different arithmetic — different modulus (3329 against 8380417),
-different Montgomery base (2^16 against 2^32), different coefficient width — so the two
-sets of modules are separate and share nothing. The ML-DSA NTT runs the full eight
-layers, which is why multiplication in the transform domain is a plain pointwise product
-rather than the 2x2 base multiplication ML-KEM needs after seven layers.
+## Design notes
 
-`mldsa_decompose` and `mldsa_reduce32` replace division by a constant with a
-multiply-and-shift in the same way `mlkem_compress` does. Both `MODE` values are
-instantiated side by side in the testbench, so a constant that is wrong in only one
-parameter set cannot pass unnoticed.
-
-`mlkem_compress` replaces the division by `q` with a multiply by `ceil(2^33/q)` followed
-by a shift. The two are equal over the whole input domain, which is only 3329 values, so
-the testbench verifies the substitution **exhaustively** rather than by sampling.
-
-`pqc_accel_axi`'s data buffer is sized to the largest operation the hardware actually
-implements — 512 bytes for the NTT — rather than to `ACCEL_BUF_MAX`, which is the
-software-side bound of 16 KiB. At 16 KiB the buffer would be 131072 bits; sizing it to
-what the implemented operation codes need brings it to 4096 bits.
-
-It used to be a plain register array with several combinational read ports, and that was
-measured, not assumed: Vivado mapped it to `LUT as Memory = 0` and spread it across
-roughly 30000 LUTs of multiplexer tree. It is now one `ram_dp` block RAM (port A shared
-between stream-in, load and write-back; port B dedicated to stream-out), which is what
-took the accelerator top level from 88.89% of the device down to 6.76%.
-`tools/rtl_synth_check.sh` reports every memory that gets spread into registers for
-exactly this reason.
-
-`ByteEncode_d` for `d < 12` is omitted deliberately: packing coefficients that already
-fit in `d` bits is pure wiring, with no logic to get wrong. Only the 12-bit path, which
-additionally folds signed coefficients back into `[0, q)`, exists as a module.
-
-`keccak_f1600` is deliberately **not** a 24-round unrolled design. Unrolling multiplies
-the round logic by 24 for no benefit at the call rates involved: 24 cycles at 100 MHz is
-240 ns per permutation, and an ML-KEM-768 key generation needs 43 of them — about 1000
-cycles in total, against roughly 20700 for the NTTs. The bottleneck is elsewhere.
-
-`pqc_accel_axi` is the accelerator as a system would see it: AXI4-Lite for the control
-and status registers, AXI4-Stream for bulk data, and the algorithm cores underneath. The
-register semantics it implements are the ones `include/pqchsm/accel.h` was written
-against — START self-clearing, DONE latched as a level, status registers written by
-hardware and read-only to software. [docs/REGISTERS.md](../docs/REGISTERS.md) is
-the contract; `test_axi.py` verifies it clause by clause with a hand-written bus
-functional model and no third-party AXI library.
-
-The cores are also driven from C through the same register interface, which means the
-same RTL is exercised by cocotb and by the C test suite.
+- ML-KEM (q = 3329, Montgomery base 2^16) and ML-DSA (q = 8380417, base 2^32) share no
+  arithmetic modules. The ML-DSA NTT runs all eight layers, so its transform-domain
+  product is a pointwise multiply; ML-KEM stops after seven layers and needs the 2x2
+  base multiply.
+- `mlkem_compress` replaces division by q with a multiply by `ceil(2^33/q)` and a shift.
+  The input domain has only 3329 values, and the testbench checks all of them.
+  `mldsa_decompose` and `mldsa_reduce32` use the same technique, and the testbench
+  instantiates both `MODE` values so a constant that is wrong in one parameter set fails.
+- `ByteEncode_d` for `d < 12` is not a module: the coefficients already fit in `d` bits,
+  so packing is wiring. `mlkem_encode12` exists because it also folds signed
+  coefficients back into `[0, q)`.
+- `keccak_f1600` is one round per cycle rather than a 24-round unrolled datapath. An
+  ML-KEM-768 key generation needs 43 permutations, about 1000 cycles, against roughly
+  20700 for the NTTs.
+- Large memories are written as `ram_dp` so they map to block RAM. A register array with
+  several combinational read ports is spread over LUTs (the `pqc_accel_axi` data buffer
+  took about 30000 LUTs that way). `tools/rtl_synth_check.sh` lists every memory that
+  Yosys spreads into registers.
+- `pqc_accel_axi` implements the register semantics of `include/pqchsm/accel.h`: START
+  self-clears, DONE is a latched level, status registers are written by hardware and
+  read-only to software. [../docs/REGISTERS.md](../docs/REGISTERS.md) is the contract and
+  `test_axi.py` checks it clause by clause with a hand-written bus functional model.
+  The C build verilates `ntt_core`, `keccak_f1600` and `pqc_accel_axi` and
+  `tests/unit/test_accel.c` compares the simulated RTL with the software stub.
 
 ## Verification
 
 ```bash
-./tools/rtl_sim_fast.sh                   # fast loop: per-module cocotb on Verilator (default set)
-./tools/rtl_sim.sh                        # full cocotb regression, Icarus Verilog (slow — run at gates)
+./tools/rtl_sim_fast.sh                   # per-module cocotb on Verilator (default set)
+./tools/rtl_sim_fast.sh --list            # names it accepts
+./tools/rtl_sim.sh                        # full cocotb regression on Icarus Verilog
 ./tools/rtl_lint.sh                       # Verilator -Wall + Icarus, every module as top
-./tools/rtl_synth_check.sh                # Yosys: synthesisability, vendor-neutral
-python3 hardware/model/ntt_oracle.py      # the two independent NTT oracles
-python3 hardware/model/mlkem_oracle.py    # oracles for the rest of the ML-KEM datapath
-python3 hardware/model/mldsa_oracle.py    # oracles for the ML-DSA datapath
+./tools/rtl_synth_check.sh                # Yosys synthesisability
+python3 hardware/model/ntt_oracle.py      # NTT oracles
+python3 hardware/model/mlkem_oracle.py    # ML-KEM datapath oracles
+python3 hardware/model/mldsa_oracle.py    # ML-DSA datapath oracles
 ```
 
-The C-side build also verilates both cores and asserts that the simulated RTL and the
-software stub agree byte-for-byte (`tests/unit/test_accel.c`).
+There are 272 `@cocotb.test` cases in `tb/cocotb`. `rtl_sim_fast.sh` takes a few
+minutes for its default set. `rtl_sim.sh` takes about 40 minutes and should be run
+before merging, because Verilator is two-valued and does not propagate X: three bugs
+were found only under Icarus (an unconnected new port, an undriven input, a read of
+a RAM that was never written). cocotb does not support Vivado `xsim`, so the sources
+under test stay free of vendor primitives; `rtl_lint.sh` uses the stubs in `tb/lint`.
+
+Yosys checks something neither simulator does: whether the source means the same to a
+synthesiser. For example, an asynchronous reset branch that also tests a signal missing
+from the sensitivity list simulates as written but synthesises differently, and Yosys
+rejects it. Run `tools/rtl_synth_check.sh` after changing RTL; a reg driven from two
+`always @(posedge clk)` blocks passes lint and simulation and is rejected only by
+synthesis.
 
 ### Independent oracles
 
-A result is not trusted because it matches this project's own reference model — a
-self-consistent but wrong twiddle table would pass such a check. Each core is therefore
-pinned to something external:
+The golden vectors come from `ref_model.py` and `mldsa_model.py`, so agreement with them
+only shows that the RTL matches the model. The oracles check the model's operators
+against something independent. `mlkem_oracle.py` and `mldsa_oracle.py` also run negative
+controls (a perturbed constant or table must make the oracle fail) on every invocation.
 
-- **NTT, oracle A** — a schoolbook negacyclic convolution in `Z_q[x]/(x^256+1)` that
-  never touches the twiddle table, used to verify that
-  `invntt(basemul(ntt(a), ntt(b))) == schoolbook(a, b)`. This tests the *semantics* of
-  the transform, not its self-consistency.
-- **NTT, oracle B** — FIPS 203 K-PKE key generation reimplemented in Python calling the
-  reference model's `ntt()`, reproducing NIST ACVP `ek`/`dk` byte-for-byte. This pins
-  the transform to the one ML-KEM actually uses.
-- **Compression** — `Compress_d` and `Decompress_d` computed from the FIPS 203 §4.2.1
-  definition in exact rational arithmetic, compared against the integer implementation
-  over every one of the 3329 possible inputs, for every `d` ML-KEM uses. The round-trip
-  error is separately checked against the `round(q/2^(d+1))` bound the standard states.
-- **Binomial sampling** — the FIPS 203 Alg 8 definition (count the Hamming weight of two
-  bit runs) against the bit-parallel implementation, exhaustively over each coefficient's
-  bit group with the surrounding bits held at zero, at one, and at random. This covers
-  both "each group is right" and "groups do not interfere".
-- **Rejection sampling** — a full `SampleNTT` run over a real SHAKE128 stream, compared
-  coefficient by coefficient with an independent implementation written straight from
-  FIPS 203 Alg 7.
-- **The datapath as a whole** — ML-KEM key generation rebuilt from `rej_pair`, `cbd2`,
-  `cbd3`, `basemul`, and `encode12`, reproducing NIST ACVP `ek`/`dk` byte-for-byte. This
-  pins every one of those operators to the algorithm as standardised, not merely to a
-  self-consistent set of formulas.
-- **ML-DSA NTT** — the same schoolbook negacyclic convolution argument, in
-  `Z_q[x]/(x^256+1)` with `q = 8380417`. Because the ML-DSA transform runs all eight
-  layers, the check is `invntt(ntt(a) * ntt(b)) == schoolbook(a, b)` with an ordinary
-  pointwise product in the middle.
-- **Rounding and hints** — `Power2Round` and `Decompose` checked against their defining
-  decompositions and value ranges across representatives of the whole coefficient field;
-  the hint bits checked against the property FIPS 204 actually depends on, namely that
-  `UseHint(r+e, MakeHint(r0+e, r1)) == r1` for every perturbation with `|e| <= gamma2`.
-- **The ML-DSA datapath as a whole** — ML-DSA key generation rebuilt from
-  `rej_uniform_coeff`, `rej_eta_coeff`, `ntt`, `invntt_tomont`, `montgomery_reduce`, and
-  `power2round`, reproducing NIST ACVP `pk`/`sk` byte-for-byte.
-- **Keccak, oracle 1** — the published all-zero-input Keccak-f[1600] permutation output,
-  hard-coded as a constant and not generated by any code in this repository.
-- **Keccak, oracle 2** — SHAKE128/256 and SHA3-256 built as a sponge *on top of the RTL
-  core* and compared byte-for-byte with `hashlib` (and with OpenSSL on the C side). This
-  covers padding, rate, lane endianness, and multi-block absorb/squeeze, not just the
-  permutation.
-
-Each oracle has been validated with a negative control — perturbing a twiddle factor,
-dropping an NTT layer, flipping one bit of a Keccak round constant, shifting the
-compression rounding constant by one, inverting the sign convention of the binomial
-sampler, offsetting a base-multiplication twiddle — and confirmed to fail in each case.
-`hardware/model/mlkem_oracle.py` runs its own negative controls as part of every
-invocation, so a check that has stopped being able to fail reports itself.
-
-## Simulator choice
-
-Self-contained algorithm cores are verified with Verilator and Icarus Verilog under
-cocotb; cocotb does not support Vivado `xsim`, so any future top level containing vendor
-IP would be simulated separately. The side effect is useful: it forces the algorithm
-cores to stay free of vendor primitives, which is also what makes them portable.
-
-Verilator's 2-state semantics and Icarus's 4-state semantics disagree on width
-truncation, and that disagreement has caught real bugs. Both are run.
-
-A third tool answers a question neither simulator can: whether the source means the same
-thing to a synthesiser. Yosys rejects, for instance, an asynchronous reset branch that
-also tests a signal absent from the sensitivity list — a construct both simulators
-execute exactly as written while synthesis produces different hardware.
-`tools/rtl_synth_check.sh` runs it over every module.
+- NTT, oracle A: a schoolbook negacyclic convolution in `Z_q[x]/(x^256+1)`, which does
+  not use the twiddle table, compared with `invntt(basemul(ntt(a), ntt(b)))`.
+- NTT, oracle B: K-PKE key generation from FIPS 203 reimplemented in Python on top of the
+  reference model's `ntt()`, reproducing NIST ACVP `ek` and `dk`.
+- ML-KEM compression: `Compress_d` / `Decompress_d` from the FIPS 203 §4.2.1 definition
+  in exact rational arithmetic, over all 3329 inputs for every `d` used, plus the
+  `round(q/2^(d+1))` error bound.
+- Binomial sampling: the FIPS 203 Alg 8 definition against the bit-parallel
+  implementation, exhaustive per coefficient bit group with the other bits at zero, one
+  and random.
+- Rebuilding whole algorithms from the individual operators and comparing with ACVP:
+  KeyGen (`ek`/`dk`), Encaps (`c`, `K`) and Decaps (`K`, including implicit rejection)
+  for ML-KEM; KeyGen (`pk`/`sk`), siggen and sigver for ML-DSA.
+- ML-DSA NTT: `invntt(ntt(a) * ntt(b)) == schoolbook(a, b)` modulo 8380417.
+- Rounding and hints: `Power2Round` and `Decompose` against their defining
+  decompositions; `UseHint(r+e, MakeHint(r0+e, r1)) == r1` for `|e| <= gamma2`.
+- Keccak: the published Keccak-f[1600] output for an all-zero input, hard-coded in
+  `test_keccak.py`; and SHAKE128/256 and SHA3-256 built as a sponge on the RTL
+  permutation and compared with `hashlib` (the C side compares with OpenSSL).
+- AES, SM4, SM3: `sym_oracle.py`, written from the standards without a crypto library.
+- TRNG: `trng_health_model.py` computes the RCT/APT thresholds from their definitions,
+  and `trng_cond_model.py` models the conditioner bit for bit.
 
 ## Synthesis
 
-Scripts are in `syn/`. Vivado is not installed on the Mac, so they run on the build
-machine (Vivado 2020.1); the utilisation and Fmax figures in
-[docs/TESTING.md](../docs/TESTING.md) all come from there, post-route.
-See [syn/README.md](syn/README.md).
+Scripts are in `syn/`. Vivado 2020.1 runs on the build machine only; see
+[syn/README.md](syn/README.md).

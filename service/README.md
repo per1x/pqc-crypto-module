@@ -1,129 +1,162 @@
 # service/
 
-The layer that lets an ordinary application use the FPGA cores through a
-standard crypto-module interface, without knowing that registers exist.
+Normal-world software that lets an application use the module through a
+crypto-module style interface. Applications never touch registers.
 
 ```
-application → libsdfe → pqchsm_fpgad → /dev/secmmio → EL3 SiP → AXI firewall → cores
+application → libsdfe → pqchsm_fpgad → /dev/secmmio → BL31 SiP → PL
+                                     ↘ OP-TEE TA (key generation, wrap/unwrap)
 ```
 
 | File | Role |
 |---|---|
-| `sdfe.h`, `libsdfe.c` | SDF-style client library. Stateless; several processes may each link it |
-| `pqchsm_fpgad.c` | Daemon: sessions, handles, serialisation of access to the cores; carries only TA-wrapped key blobs, never holds a private key or a symmetric key in the clear |
-| `wire.h` | The request/response encoding between the two |
-| `pqcs_tls.h`, `pqcs_tls.c` | mTLS for the remote port: why, and what it does and does not buy |
-| `sdfe_pkenc.h`, `sdfe_pkenc.c` | Post-quantum public-key encryption of arbitrary data (ML-KEM + AES-256-GCM, KEM-DEM) on top of `libsdfe`; built by the top-level CMake, not by this Makefile |
-| `sdf_demo.c` | A worked example application |
-| `hsmops.h`, `hsmops.c` | Business operations (keystore, encrypt/sign/encapsulate, backup …) shared by `hsmctl` and `hsm_httpd` |
-| `hsmctl.c` | Command-line tool: thin terminal shell over `hsmops.c`, one command per business operation (see below) |
-| `hsm_httpd.c` | JSON-over-HTTP(S) gateway: thin shell over `hsmops.c` (see below) |
-| `tls_test.c`, `wire_fuzz.py` | mTLS transport regression (also driven by `tools/tls_regress.sh`); malformed-request fuzzer for the daemon's wire protocol (needs a board) |
+| `sdfe.h`, `libsdfe.c` | SDF-style client library. Stateless; several processes can each link it |
+| `pqchsm_fpgad.c` | Daemon. Keeps sessions and handles, serialises access to the PL cores, issues register accesses through `/dev/secmmio`, and passes key blobs between the application and the TA. It never sees a plaintext key |
+| `wire.h` | Request/response encoding between `libsdfe` and the daemon |
+| `pqcs_tls.h`, `pqcs_tls.c` | mTLS used on the daemon's remote port (TCP 9797) |
+| `sdfe_pkenc.h`, `sdfe_pkenc.c` | Public-key encryption of arbitrary data (ML-KEM + AES-256-GCM, KEM-DEM) on top of `libsdfe`. Built by the top-level CMake, not by this Makefile. The AES-GCM part runs in software with OpenSSL |
+| `sdf_demo.c` | Example application |
+| `hsmops.h`, `hsmops.c` | Business operations (keystore, encrypt, sign, encapsulate, backup) shared by `hsmctl` and `hsm_httpd` |
+| `hsmctl.c` | Command-line tool, one command per operation |
+| `hsm_httpd.c` | JSON-over-HTTP(S) gateway |
+| `tls_test.c` | mTLS transport regression (run by `tools/tls_regress.sh`) |
+| `wire_fuzz.py` | Sends malformed requests to the daemon's remote port; needs a board |
+
+## Build
 
 ```bash
-make                              # host build
+make                                                      # host build
 make CROSS=aarch64-linux-gnu- \
      SYSROOT=<target sysroot> SSLROOT=<cross-built openssl>   # for the board
 ```
 
-The remote port is **mTLS** (`pqcs_tls.c`), so both sides link OpenSSL.
+Targets: `pqchsm_fpgad`, `libsdfe.a`, `sdf_demo`, `hsmctl`, `hsm_httpd`. The
+remote port uses mTLS, so the daemon and the client library link OpenSSL.
 
-⚠️ The board build is **not** fully static any more. Linking this prebuilt
-OpenSSL 1.1.1d statically segfaults on the target *before `main`* — a constructor
-of our own never gets to print, and it happens whenever `libssl.a` enters the
-link. The board build therefore links OpenSSL dynamically, ships
-`libssl.so.1.1` / `libcrypto.so.1.1` in `hsm/lib/` on the SD card, and pins the
-lookup path with `-rpath`. The full reasoning is in the header of `Makefile`.
+The board build links OpenSSL dynamically. A static link of the prebuilt
+OpenSSL 1.1.1d crashes on the target before `main` whenever `libssl.a` is
+linked. The binaries expect `libssl.so.1.1` and `libcrypto.so.1.1` in
+`/media/sd-mmcblk1p2/hsm/lib` (set with `-rpath`; override with `BOARD_SSL_DIR`).
+The `Makefile` header has the details, including why `SYSROOT` and `SSLROOT` are
+separate.
 
-## Why the daemon cannot be dropped
+## Why there is a daemon
 
-All three cores are stateful sequences — write registers, start, poll, read
-result. Two processes interleaving on one core produce results that are mutually
-misaligned but individually plausible. Serialisation needs a single point, and
-that point has to remember sessions.
+Each PL core is driven by a register sequence (write inputs, start, poll, read
+the result). Two processes interleaving on one core get wrong results. The
+daemon is the single point that serialises access, and it holds the session
+state.
 
-## Why `sdf_demo` implements no cryptography
+## Keys
 
-`sdf_demo` links `libsdfe` and OpenSSL, and **OpenSSL is used for TLS transport
-only** — there is no ML-KEM, ML-DSA, SM4 or SM3 implementation available to it at
-all, so it cannot compute anything itself. Every correct value it prints came out
-of the FPGA. That is the point of the demo, and it should stay that way.
+Keys are generated by the OP-TEE TA and wrapped with its KEK. The daemon and
+the applications only handle the wrapped blobs.
 
-The file also contains no hardware detail: no registers, no `/dev/mem`, no SMC.
-Swap in a different crypto module that implements the same interface and not one
-line of it changes.
-
-## Private keys
-
-| Key | Where | Leaves the hardware? |
+| Key | What exists outside the TA | Where the plaintext goes |
 |---|---|---|
-| Symmetric (AES/SM4) | `key_vault` (authoritative copy: TA-wrapped blob held by the caller) | **No** — the RTL has no bus-side read path, and the daemon never sees plaintext |
-| ML-KEM `dk` | Not stored anywhere in expanded form: the TA keeps the **seed** as a wrapped blob; per operation the TA stages the seed into the PL, which expands, computes and wipes (batch 2, stateless PL) | **No** — the daemon holds only the blob; the slot ABI and `-lock` latch were removed |
-| ML-DSA `sk` | Same (seed `ξ` as a TA blob) | **No**, same |
+| AES / SM4 | KEK-wrapped blob, kept by the caller | The TA writes it to a symmetric key register slot in the PL (`key_vault_axi`); the slot is wiped when the session ends |
+| ML-KEM `dk` | Wrapped seed blob and the public key | The TA stages the seed into the PL for each operation; the PL expands it, computes, and the hardware wipes it |
+| ML-DSA `sk` | Same, with the seed ξ | Same |
 
-Symmetric keys are generated and loaded by the TA (`SDFE_GenerateKey` /
-`SDFE_LoadKey` / `SDFE_LoadKatKey`; wire ops `OP_SYMKEY_GEN`/`LOAD`/`KAT`, 15–17).
-Post-quantum seed blobs cross sessions through `SDFE_ExportKeyBlob` /
-`SDFE_ImportKeyBlob` (ops `OP_PQC_BLOB_EXPORT`/`IMPORT`, 18–19).
-The daemon only carries the blob; slots 0..6 are product slots, slot 7 is
-KAT-only. `SDFE_ImportKey` (plaintext, op 6) always returns `SDR_NOTSUPPORT`,
-and the daemon wipes the symmetric vault at session end. Block encryption is
-unchanged: it runs in the PL by slot number, with no SMC per block.
+Related calls and wire ops:
 
-⚠️ The `dk` row used to read "returned by KeyGen, held by the daemon" (true before
-`dk_to_slot`), and later "on-chip key vault slot + `-lock` latch" (true before
-batch 2). A stale comment on a security claim is the most
-expensive kind: a reader concludes the private key leaves the hardware when it
-does not, or the reverse. See
+- `SDFE_GenerateKey`, `SDFE_LoadKey`, `SDFE_LoadKatKey` (ops `OP_SYMKEY_GEN`, `OP_SYMKEY_LOAD`, `OP_SYMKEY_KAT`, 15 to 17). Slots 0 to 6 are for business use; slot 7 only takes the public KAT keys.
+- `SDFE_ExportKeyBlob`, `SDFE_ImportKeyBlob` (ops 18 and 19) move PQC seed blobs across sessions.
+- `SDFE_ImportKey` (plaintext import, op 6) always returns `SDR_NOTSUPPORT`.
+- Block encryption runs in the PL by slot number; it does not go through the TEE per block.
+
+Interface reference: [../docs/API.md](../docs/API.md). Security model:
 [../docs/SECURITY.md](../docs/SECURITY.md#limitations).
 
-Interface reference: [../docs/API.md](../docs/API.md).
+## sdf_demo
 
-## `hsmctl` — command reference
+`sdf_demo` links `libsdfe` and OpenSSL. OpenSSL is used only for the TLS
+transport; the program contains no ML-KEM, ML-DSA, SM4 or SM3 implementation, so
+every result it prints was computed on the board. It has no register, `/dev/mem`
+or SMC code. It runs locally (`./sdf_demo`) or against a remote board
+(`./sdf_demo <board-ip> <credentials-dir> [port] [expected-device-CN]`); the two
+cases use the same code after the device is opened.
 
-`hsmctl` runs on the board (local UNIX socket to `pqchsm_fpgad`). Like `sdf_demo` it
-links only `libsdfe` and performs no cryptography itself. Build: `make hsmctl`.
-The full Chinese manual is in the repository root `README.zh-CN.md`
-(「命令行：hsmctl 使用手册」).
+## hsmctl
 
-Keys live in a keystore directory, one `<name>.key` file per key
-(`HSM_KEYSTORE`, default `./keystore`). A key file never holds a plaintext key:
-symmetric keys are stored as the TA's KEK-wrapped blob, post-quantum keys as the
-public key plus the TA-wrapped seed blob. Only the TA on this board can unwrap them.
+`hsmctl` runs on the board and talks to `pqchsm_fpgad` over the local UNIX
+socket (`/tmp/pqchsm_fpgad.sock`). It links only `libsdfe` and does no
+cryptography itself. Build with `make hsmctl`. The Chinese manual is in the
+root [README.zh-CN.md](../README.zh-CN.md) (section "命令行：hsmctl").
+
+Keys are stored in the directory named by `HSM_KEYSTORE` (default `./keystore`,
+created if missing), one `<name>.key` file per key with mode 0600. A key file
+holds no plaintext key: symmetric keys are the TA's wrapped blob, post-quantum
+keys are the public key plus the TA-wrapped seed blob. Only the TA on the board
+that wrote the file can unwrap it.
 
 | Command | Purpose |
 |---|---|
-| `info` | Device info and keystore location |
-| `keygen <alg> <name>` | Generate a key: `sm4 aes128 aes256 mlkem512 mlkem768 mlkem1024 mldsa44 mldsa65 mldsa87` |
-| `list` / `show <name>` | List the keystore / inspect one key file (public-key SM3 fingerprint, blob head) |
-| `encrypt <name> <in> <out>` / `decrypt <name> <in> <out>` | Symmetric CBC + PKCS#7; IV from the PL TRNG; output = IV ‖ ciphertext |
-| `sign <name> <file> <sig>` / `verify <name> <file> <sig>` | ML-DSA |
-| `encap <name> <ct>` / `decap <name> <ct>` | ML-KEM; both print the shared secret |
-| `hash <file>` / `random <n>` | SM3 / TRNG bytes |
-| `backup <bundle>` / `restore <bundle>` | Keystore bundle with a per-entry SM3; restore verifies everything before writing anything |
-| `destroy <name>` | Overwrite and delete a key file |
+| `info` | PL core versions and keystore location |
+| `keygen <alg> <name>` | Generate a key. `alg`: `sm4 aes128 aes256 mlkem512 mlkem768 mlkem1024 mldsa44 mldsa65 mldsa87` |
+| `list` | List keys: name, algorithm, public key length, blob length, creation time |
+| `show <name>` | Show a key file: public key digest, SM3 fingerprint, first bytes of the blob |
+| `encrypt <name> <in> <out>` | CBC with PKCS#7 padding, IV from the PL TRNG. Output is IV (16 bytes) followed by ciphertext |
+| `decrypt <name> <in> <out>` | Decrypt and check padding |
+| `sign <name> <file> <sig>` | ML-DSA signature; file at most 8 KB |
+| `verify <name> <file> <sig>` | ML-DSA verification |
+| `encap <name> <ct>` | ML-KEM encapsulation with the public key; prints the shared secret |
+| `decap <name> <ct>` | ML-KEM decapsulation; prints the shared secret |
+| `hash <file>` | SM3; file at most 16 KB |
+| `random <n>` | `n` random bytes from the TRNG, 1 to 256 |
+| `backup <bundle>` | Pack the keystore; each entry carries an SM3 digest |
+| `restore <bundle>` | Verify every entry first; if any check fails nothing is written |
+| `destroy <name>` | Overwrite and delete the key file |
 
-Exit status: `0` success, `1` error (including the TA refusing a tampered or
-foreign blob), `2` a business "no" (signature does not verify, bundle checksum mismatch).
+Exit status: `0` success; `1` error (bad arguments, file I/O, the module
+rejecting a key, for example a tampered blob or one made on another board); `2`
+the answer is "no" (signature does not verify, bundle checksum mismatch).
 
-Each layer the daemon calls logs a tagged line once that call has succeeded —
-`[TEE]` (TA), `[TEE→PL]` (secure path into the FPGA), `[PL]` (FPGA core, with
-latency), `[NW]` (daemon only moves ciphertext blobs) — in `hsm/hsm-boot.log`.
-The board demo `demo/run.sh` runs the full business flow with those traces;
-`tools/demo_to_html.py` turns its output into a report
+The daemon appends a tagged line to `hsm/hsm-boot.log` after each layer
+returns successfully:
+
+| Tag | Layer |
+|---|---|
+| `[TEE]` | TA: generate, wrap, unwrap |
+| `[TEE→PL]` | TA writing key material into the PL through PTA and EL3 |
+| `[PL]` | PL operation, with latency |
+| `[NW]` | Daemon; only moves blobs |
+| `[HTTP]` | Request received by `hsm_httpd` |
+
+`board/demo/business_demo.sh` (deployed as `demo/run.sh`) runs the whole flow
+with these traces. `tools/demo_to_html.py` turns its output into a report
 (sample: `docs/demo/business_demo.html`).
 
-## `hsm_httpd` — JSON gateway
+## hsm_httpd
 
-Same business code as `hsmctl` (`hsmops.c`), exposed as JSON over HTTP.
-Two listeners: `127.0.0.1:8080` plain HTTP bound to loopback only (on-board
-apps and the demo; same trust boundary as running `hsmctl`), and `:8443`
-HTTPS with mutual TLS (client cert must chain to `hsm/pki/hsm_ca.crt`; no
-listener if credentials are missing). Usage: `hsm_httpd [tls_port [local_port]]`,
-defaults 8443 / 8080, `0` disables one.
+Uses the same business code as `hsmctl` (`hsmops.c`). Usage:
+`hsm_httpd [tls_port [local_port]]`, defaults 8443 and 8080; `0` disables a
+listener.
 
-Routes: `GET /v1/info`, `GET|POST /v1/keys`, `GET|DELETE /v1/keys/{name}`,
-`POST /v1/keys/{name}/{encrypt,decrypt,sign,verify,encapsulate,decapsulate}`,
-`POST /v1/sm3`, `POST /v1/random`. Binary fields are base64 (`*_b64`), digests
-and shared secrets hex. Add `?trace=1` to get the per-layer log lines for that
-request. Part 8 of `demo/run.sh` calls every route on the board via `nc`.
+| Port | Protocol | Access |
+|---|---|---|
+| `127.0.0.1:8080` | HTTP | Loopback only, no authentication. Same trust boundary as being able to run `hsmctl` on the board |
+| `:8443` | HTTPS, mutual TLS | Client certificate must be issued by `hsm/pki/hsm_ca.crt`. No listener is opened if the credentials are missing |
+
+Routes (JSON; binary fields are base64 with a `_b64` suffix, digests and shared
+secrets are hex):
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/v1/info` | | Device info |
+| GET | `/v1/keys` | | Key list |
+| POST | `/v1/keys` | `{"name","alg"}` | 201, key info with public key |
+| GET, DELETE | `/v1/keys/{name}` | | Show / destroy |
+| POST | `/v1/keys/{name}/encrypt` | `{"plaintext"}` or `{"plaintext_b64"}` | `ciphertext_b64` (IV + CBC ciphertext) |
+| POST | `/v1/keys/{name}/decrypt` | `{"ciphertext_b64"}` | `plaintext_b64`, plus `plaintext` if it is UTF-8 |
+| POST | `/v1/keys/{name}/sign` | `{"message"}` or `{"message_b64"}` | `signature_b64` |
+| POST | `/v1/keys/{name}/verify` | message as above plus `"signature_b64"` | `{"valid": true/false}` |
+| POST | `/v1/keys/{name}/encapsulate` | `{}` | `ciphertext_b64`, `shared_secret_hex` |
+| POST | `/v1/keys/{name}/decapsulate` | `{"ciphertext_b64"}` | `shared_secret_hex` |
+| POST | `/v1/sm3` | `{"data"}` or `{"data_b64"}` | `sm3_hex` |
+| POST | `/v1/random` | `{"length"}`, at most 1024 | `random_hex` |
+
+Error statuses: 400 bad argument, 404 no such key, 409 name already exists, 422
+the TA refused the key. Adding `?trace=1` to a request adds a `trace` array
+with the layer log lines produced by that request. Part 8 of the board demo
+calls every route through `nc` (the board has no curl).

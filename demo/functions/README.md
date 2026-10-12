@@ -2,66 +2,51 @@
 
 # Crypto-module function tour
 
-One command through the management surface a crypto module is expected to have:
-algorithm support, entropy source, slot management, key management, backup and
-restore (M-of-N threshold), and secure storage.
+Walks through the management functions of the host-side crypto module (`pqchsmd`): algorithm support, entropy source, slot management, key management, backup and restore (M-of-N), and secure storage.
 
 ```bash
 cmake -S . -B build && cmake --build build -j
 ./demo/functions/run.sh
 ```
 
-Self-contained: temporary keystore, its own daemon, cleaned up on exit. **No board
-required**, and it touches nothing you already have.
+The script starts its own daemon with a temporary keystore and removes both on exit. It needs no board and does not touch any existing keystore. It uses `cc` (to build `mechs` and `roundtrip`) and `python3` (to flip a bit in section 6).
 
-## ⚠️ Which crypto module this is
+Environment: `BUILD=` (default `build`), `PORT=` (default 19099), `SO_PIN=`, `USER_PIN=`.
 
-There are two of them in this repository, with completely different surfaces:
+## Which module this is
 
-| | On the board: `pqchsm_fpgad` | On the host: `pqchsmd` (this demo) |
+The repository has two modules with different feature sets:
+
+| | Board: `pqchsm_fpgad` | Host: `pqchsmd` (this demo) |
 |---|---|---|
-| Slot management | ❌ No slot state machine. Keys are owned by the OP-TEE TA and handed out as handles plus wrapped blobs; "slots" 0-7 are PL key-vault entries the TA loads symmetric keys into | ✅ State machine, labels, policy |
-| PIN / session / role | ❌ | ✅ SO / User, login, failure counting |
-| Keystore | ❌ No PIN-protected keystore; the `hsmctl` / `hsm_httpd` keystore directory holds only TA-wrapped blobs (no plaintext key, readable only by this board's TA) | ✅ AES-GCM wrapped, KEK from the KDR, whole-file MAC, epoch anti-rollback |
-| Backup / restore | `hsmctl backup` / `restore`: a whole-keystore bundle with a per-entry SM3, no M-of-N | ✅ M-of-N Shamir shares |
-| Cryptographic operations | ✅ All in the FPGA | liboqs, or forwarded to the board |
+| Slot management | None. Keys belong to the OP-TEE TA and are handed out as handles and wrapped blobs. Symmetric keys are loaded by the TA into the PL's symmetric key registers (slots 0 to 6 for business keys, 7 for public KAT keys) | State machine, labels, policy |
+| PIN, session, role | None | SO and User, login, failure counting |
+| Keystore | None with a PIN. The `hsmctl` / `hsm_httpd` keystore directory holds only TA-wrapped blobs | AES-GCM wrapping, KEK derived from the KDR, whole-file MAC, epoch anti-rollback |
+| Backup and restore | `hsmctl backup` / `restore`: one bundle of the whole keystore with an SM3 per entry, no M-of-N | M-of-N Shamir shares |
+| Cryptographic operations | In the PL | liboqs, or forwarded to the board |
 
-**Slot, backup and storage management all live on the host side.** The board half is
-in [demo/remote/](../remote/) and [board/demo/](../../board/demo/).
+Slot, backup and storage management in this demo are therefore the host side. The board side is in [demo/remote/](../remote/) and [board/demo/](../../board/demo/README.zh-CN.md).
 
-The two connect: with `PQCHSM_BACKEND=sdfe`, ML-KEM key generation goes to the board —
-the TA holds the seed as a wrapped blob and the FPGA expands it per operation — so slots and
-backups are managed on the host while the key material stays on the board. That comes
-with a real trade-off, below.
+The two can be combined. With `PQCHSM_BACKEND=sdfe`, ML-KEM key generation is done on the board: the TA keeps the seed as a wrapped blob and the PL expands it for each operation. The host slot then holds only the public key and a handle, and nothing is written to the host keystore for it.
 
-## What each section proves
+## Sections
 
-| Section | The point |
+| Section | What it shows |
 |---|---|
-| 1. Algorithm support | `C_GetMechanismList` + `C_GetMechanismInfo` — **ask the module itself**, not its documentation. Where they disagree, this wins |
-| 2. Entropy source | The host side's randomness comes from OpenSSL, **not** the PL entropy source. The hardware source (8 ring oscillators, H = 0.871) is on the board |
-| 3. Slot management | Enumerate every slot, the `UNINIT → EMPTY → LOADED` state machine, SO and User roles. **Negative: generating without logging in is refused** |
-| 4. Key management | Generate / export public key / sign / destroy. **There is no "export private key" command — that is a structural fact, not an omission** |
-| 5. Backup and restore | A policy bit decides what can be backed up; 2-of-3 threshold. **Negative: one share must fail**; a different pair still works, so it is a real threshold scheme |
-| 6. Secure storage | **Negative A**: flip one bit → refuses to load **and does not rewrite the file**. **Negative B**: replay an old snapshot → refused by the epoch anchor |
-| 7. Calling the algorithms | Support is not use. The signature path runs `C_GenerateKeyPair → C_Sign → C_Verify`, then verifies again with **one bit flipped in the message, and again with one bit flipped in the signature — both must fail**. The KEM path runs encapsulate → decapsulate → AES-GCM (KEM-DEM), and shows the private-key export being refused |
+| 1. Algorithm support | `C_GetMechanismList` and `C_GetMechanismInfo`, asked of the module itself (5 mechanisms) |
+| 2. Entropy source | Host-side randomness comes from OpenSSL. The board's TRNG (8 ring oscillators, H = 0.871 bit/sample, see [docs/SECURITY.md](../../docs/SECURITY.md)) is used only with `PQCHSM_HWRNG=sdfe` |
+| 3. Slot management | List the four slots, the `UNINIT`, `EMPTY`, `LOADED` states, SO and User roles. Generating a key without logging in is refused (`not authorized`) |
+| 4. Key management | Generate, export the public key, sign, destroy. There is no command to export a private key. Sizes are checked against FIPS 204 (ML-DSA-44: 1312-byte public key, 2420-byte signature) |
+| 5. Backup and restore | Only slots with the `BACKUPABLE` policy are backed up. A 2-of-3 backup restores from shares 1 and 3 and from shares 1 and 2, and one share alone is refused |
+| 6. Secure storage | Flipping one bit makes the keystore refuse to load and the file is not rewritten. An old snapshot is refused by the epoch anchor. `rotate-kek` re-wraps without changing keys |
+| 7. Calling the algorithms | `roundtrip` runs `C_GenerateKeyPair`, `C_Sign`, `C_Verify`, then verifies again with one bit of the message flipped and with one bit of the signature flipped; both must fail. `board/demo/p11_hw_demo.c` runs the ML-KEM encapsulate, decapsulate and AES-GCM (KEM-DEM) path and checks that the private key cannot be read |
 
-The negatives are the point. A crypto module is defined by what it **refuses**, not by
-what it computes.
+## Two things that are easy to misread
 
-## Two things that are easy to read backwards
+The `<slot>` argument of `backup` selects whose SO PIN authorises the backup. It does not select what is backed up: every slot with the `BACKUPABLE` policy is exported. The `pqchsm-admin` help text is ambiguous about this.
 
-**`backup`'s `<slot>` argument is not "which slot to back up"** — it is *whose SO PIN
-authorises the backup*. What gets exported is every slot carrying the `BACKUPABLE`
-policy. The `pqchsm-admin` help string is ambiguous here.
+A key that is backed up and a key that stays on the board exclude each other in this keystore. A host-side backup contains the seed. A key generated on the board exists only as a TA-wrapped blob that only this board's TA can open, so the host keystore cannot export it. The board's own bundle (`hsmctl backup`) restores only onto the same board.
 
-**"Backupable" and "stays on the board" are mutually exclusive in this keystore.** A
-host-side backup carries the seed, and a key that lives on the board is held there as a
-TA-wrapped blob that only this board's TA can open — the host keystore cannot export it.
-Recoverable ↔ non-exportable: pick one. That is not a defect; it is a decision the
-operator has to make. (The board's own bundle, `hsmctl backup`, restores only onto the
-same board.)
+## Default key-derivation root
 
-## Environment
-
-`BUILD=` (default `build`), `PORT=` (default 19099), `SO_PIN=`, `USER_PIN=`.
+The default KDR is a public constant compiled into the binary (the daemon prints a `DEV` warning at start), so keystore confidentiality in this configuration is zero. A PRODUCTION build refuses to start without a hardware-derived root. See the build-profile section of [docs/SECURITY.md](../../docs/SECURITY.md).

@@ -1,16 +1,15 @@
 **English** · [中文](README.zh-CN.md)
 
-# One-command remote demo
+# Remote demo
 
-Drives the crypto module on the board over its remote port from any machine that
-can reach it. No SSH, no configuration, no credential wrangling.
+Runs the SDF-interface demo (`service/sdf_demo.c`) against the board over its mTLS port (9797) from any machine that can reach it. No SSH is needed.
 
 ```bash
 git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
 ./demo/remote/run.sh
 ```
 
-**Run it with no arguments and it asks**, so there is nothing to look up first:
+With no arguments the script asks for the board address and the mode (the prompts are in Chinese):
 
 ```
 这台密码机在哪？
@@ -27,66 +26,38 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
   选 [1-3，回车= 1]：
 ```
 
-Once it works it offers to remember the address, so later runs need nothing at
-all. Everything can also be given up front:
+After a successful run it offers to save the address. Everything can also be given on the command line:
 
-| | |
+| Command | Effect |
 |---|---|
-| `./demo/remote/run.sh 192.168.1.50` | the full nine-section demo |
-| `./demo/remote/run.sh 192.168.1.50 --smoke` | headline results only |
-| `./demo/remote/run.sh 192.168.1.50 --status` | just connect and print the device banner |
-| `./demo/remote/run.sh 192.168.1.50 --save` | remember this address without being asked |
+| `./demo/remote/run.sh 192.168.1.50` | Full demo, nine sections (`[1]` to `[9]` in `sdf_demo`: hardware random, ML-KEM, TA-held SM4 keys, ML-DSA, cipher modes, SM3, handle invalid after reconnect) |
+| `./demo/remote/run.sh 192.168.1.50 --smoke` | Headline results only |
+| `./demo/remote/run.sh 192.168.1.50 --status` | Connect and print the device banner |
+| `./demo/remote/run.sh 192.168.1.50 --save` | Save the address to `demo/remote/board.conf` (not tracked) |
 
-**The address is never a baked-in constant** — your board is not on our network.
-It is resolved from the command line, then `$BOARD`, then `demo/remote/board.conf`
-(not tracked), and only then by asking. The script **only prompts when a person is
-actually at the keyboard**; from a pipe, CI or cron it prints usage and exits 2
-rather than blocking on a keystroke that will never come. It never guesses an
-address: a wrong guess surfaces as "cannot connect", which is far harder to
-diagnose than "you did not give me an address".
+The board address is looked up in this order: command line, `$BOARD`, `demo/remote/board.conf`, then a prompt. It is asked for only when stdin is a terminal; otherwise the script prints usage and exits with status 2. There is no default address.
 
-Other overrides: `PORT=… DEVICE_CN=… CREDS=… ./demo/remote/run.sh <board-ip>`
+Overrides: `PORT=` (default 9797), `DEVICE_CN=` (default `axu3egb-hsm-01`), `CREDS=` (default `demo/remote/creds`).
 
-The client is built from three files (`sdf_demo.c`, `libsdfe.c`, `pqcs_tls.c`) on
-first run. It links **no cryptographic algorithm library** — the OpenSSL it links
-serves the mTLS transport only — so every correct answer it prints can only have
-come from the FPGA.
+On first run the script builds the client from `service/sdf_demo.c`, `service/libsdfe.c` and `service/pqcs_tls.c` into `build-demo/sdf_demo`. The client contains no cryptographic algorithm implementation; the OpenSSL it links is used only for the mTLS transport. It needs a C compiler and OpenSSL 3. macOS ships LibreSSL, which lacks the TLS 1.3 API, so install `openssl@3` with Homebrew.
 
-**Requirements**: a C compiler and **OpenSSL 3**. macOS ships LibreSSL, which
-lacks the TLS 1.3 API, so `brew install openssl@3` is needed there; the script
-finds it and says so plainly if it is missing.
+## The credentials in `creds/` are public
 
-## ⚠️ The credentials in `creds/` are public, on purpose
+⚠️ `creds/` holds a client certificate and its private key, committed to this public repository so that the command above works without setup. Anyone who can reach the board on port 9797 (or the HTTPS gateway on 8443, which uses the same CA) can drive the crypto module with them. This is acceptable only because the board sits on a private LAN. mTLS on this link then no longer prevents impersonation.
 
-`creds/` holds a client certificate **and its private key**, committed to this
-public repository. That is deliberate — it is what makes the command above work
-with no setup — and the cost has to be stated rather than glossed over:
+The CA private key and the device private key are not in the repository. A real deployment generates its own CA with `tools/mkpki.sh`, distributes credentials out of band, and can restrict clients by CN with `pki/hsm_acl` on the board. See [docs/SECURITY.md](../../docs/SECURITY.md#the-remote-port).
 
-- **Anyone who can reach the board on port 9797 (or the HTTPS gateway on 8443, same CA) can drive this crypto module.**
-  The only thing making that acceptable is that the board sits on a private LAN
-  with no route in from outside.
-- **This is not the security argument for the remote port.** mTLS buys "holds a
-  private key" instead of "knows a string"; publishing the private key gives that
-  distinction away on this one link. A real deployment generates its own CA
-  (`tools/mkpki.sh`), distributes credentials out of band, and restricts by CN
-  through the board's `hsm_acl`. See
-  [docs/SECURITY.md — The remote port](../../docs/SECURITY.md#the-remote-port).
-- **The CA private key and the device private key are not here and never will
-  be.** Those would let anyone issue new certificates or impersonate the device,
-  which is a different order of problem.
-
-To use your own credentials instead, point `CREDS` at them:
+To use your own credentials:
 
 ```bash
 CREDS=~/.config/pqchsm/pki ./demo/remote/run.sh
 ```
 
-Provisioning a board with a fresh, private PKI is
-`tools/demo_remote.sh <board-ip> --provision`.
+`tools/demo_remote.sh <board-ip> --provision` generates a private PKI and installs it on the board.
 
-## Also here: the board-CLI + HTTPS tour
+## Board command line and HTTPS
 
 | Script | What it does |
 |---|---|
-| `http_demo.sh <board-ip> [creds-dir]` | Walks the business flow from this machine with `curl` over HTTPS + mTLS to the gateway on port 8443 (default creds dir `~/.config/pqchsm/pki`; needs `curl` and `python3`). Output has the same shape as the on-board demo |
-| `full_demo.sh <board-ip> [creds-dir]` | Runs `/media/sd-mmcblk1p2/demo/run.sh` on the board over ssh, then `http_demo.sh`, and merges both into `demo-out/demo.html` with `tools/demo_to_html.py`. Unlike `run.sh`, this one does use SSH |
+| `http_demo.sh <board-ip> [creds-dir]` | Runs the business flow from this machine with `curl` over HTTPS and mTLS to the gateway on port 8443. Default creds dir `~/.config/pqchsm/pki`; needs `curl` and `python3`. Output has the same format as the on-board demo |
+| `full_demo.sh <board-ip> [creds-dir]` | Runs `/media/sd-mmcblk1p2/demo/run.sh` on the board over ssh, then `http_demo.sh`, and merges both outputs into `demo-out/demo.html` with `tools/demo_to_html.py`. This one uses SSH |

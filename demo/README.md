@@ -2,22 +2,19 @@
 
 # Demos
 
-| | |
+| Directory | Contents |
 |---|---|
-| [functions/](functions/) | **The crypto-module function tour**: algorithm support, entropy, slots, keys, M-of-N backup, secure storage. No board needed. |
-| [remote/](remote/) | **One command against the real board**: `./demo/remote/run.sh` — it asks for the address, no SSH, no credential setup. Start here. |
-| Python / Java below | The PKCS#11 provider, driven through a full key lifecycle. Software backend by default; no board needed. |
+| [functions/](functions/) | Management-function tour of the host-side crypto module: algorithm support, entropy, slots, keys, M-of-N backup, secure storage. No board needed |
+| [remote/](remote/) | Runs the SDF-interface demo against the board over mTLS: `./demo/remote/run.sh` |
+| `python/`, `java/` | PKCS#11 provider demos (below). Software backend by default, no board needed |
+
+The on-board demos are described in [`../board/demo/README.zh-CN.md`](../board/demo/README.zh-CN.md).
 
 ## PKCS#11 provider demos
 
-Two demonstrations of loading the module as a PKCS#11 provider and driving a complete
-key lifecycle from Python and from Java: `C_Initialize` → initialise the token and PINs
-→ log in → generate ML-DSA and ML-KEM keys into slots → sign and verify → read
-attributes → enumerate objects.
+The two demos load the module as a PKCS#11 provider and run a full key lifecycle: `C_Initialize`, initialise the token and PINs, log in, generate ML-DSA and ML-KEM keys, sign and verify, read attributes, enumerate objects. All commands run from the repository root.
 
-All commands assume the repository root as the working directory.
-
-## Python (PyKCS11, 25 assertions)
+### Python (PyKCS11, 25 assertions)
 
 ```bash
 cmake --build build --target pqchsm-p11
@@ -25,7 +22,9 @@ python3 -m venv .venv-p11 && ./.venv-p11/bin/pip install -q PyKCS11
 ./.venv-p11/bin/python demo/python/pqchsm_demo.py
 ```
 
-## Java (JDK 22+ FFM, no external dependencies, 30 assertions)
+The script creates its own temporary keystore (`PQCHSM_SLOTS=3`). The module path may be given as the first argument.
+
+### Java (JDK 22+ FFM, no external dependencies, 30 assertions)
 
 ```bash
 cmake --build build --target pqchsm-p11
@@ -35,91 +34,49 @@ PQCHSM_KEYSTORE=$(mktemp -d)/keystore.bin \
   demo/java/PqcHsmDemo.java
 ```
 
-This demo starts from `C_InitToken`, so it needs a keystore that has not been
-initialised yet — hence the fresh `PQCHSM_KEYSTORE`. Run against an existing one
-it reports 18 passed, 12 failed. The Python demo creates its own temporary
-keystore and does not have this property. The module path may be passed as the
-first argument; without it, `build/` is probed for `.so` and `.dylib` according to
-platform. On a system without a UTF-8 locale, add `LANG=C.UTF-8` or the Chinese
-output renders as `?`.
+The demo starts with `C_InitToken`, so it needs a keystore that is not yet initialised; use a fresh `PQCHSM_KEYSTORE` as above. Against an existing keystore it reports 18 passed and 12 failed. The module path may be given as the first argument; otherwise `build/pqchsm-pkcs11.so` and `.dylib` are tried. Without a UTF-8 locale, set `LANG=C.UTF-8`, or the Chinese output prints as `?`.
 
-## Compatibility with higher-level frameworks
+`tools/demo_p11.sh` runs both demos and skips them if the environment is missing.
 
-Both demos deliberately use the **low-level** PKCS#11 binding and pass mechanism codes
-directly. The high-level provider frameworks in both ecosystems do not yet support
-ML-KEM/ML-DSA over PKCS#11. The findings below are measured, not assumed.
+## Why the low-level bindings
+
+Both demos use a low-level PKCS#11 binding and pass the mechanism codes directly, because the high-level frameworks do not yet support ML-KEM and ML-DSA over PKCS#11.
 
 ### Python
 
 | Route | ML-KEM / ML-DSA | Notes |
 |---|---|---|
-| **PyKCS11** (SWIG wrapper over the C API) | **works** | used by this demo |
+| PyKCS11 (SWIG wrapper over the C API) | works | used here |
 | python-pkcs11 (high-level) | does not work | mechanisms and attributes are its own enums, with no ML-KEM/ML-DSA entries |
 
-PyKCS11 works but is not turnkey. Three adaptation gaps apply; each is handled inline
-in `demo/python/pqchsm_demo.py`:
+PyKCS11 needs three workarounds, all in `demo/python/pqchsm_demo.py`:
 
-1. `lib.getMechanismList(slot)` raises `KeyError: 28`. It reverse-looks-up mechanism
-   code `0x1C` in its bundled `CKM` dictionary and fails when the entry is absent.
-   *Workaround:* `PyKCS11.CKM` / `CKA` / `CKK` are ordinary Python dicts — register the
-   PQC constants into them (`register_pqc_constants()` in the demo).
-2. Passing `CKA_PARAMETER_SET` raises
-   `TypeError: argument 3 of type 'std::vector<unsigned char> const &'`. PyKCS11 uses an
-   internal type table to choose between `SetNum`/`SetBool`/`SetBin`; unknown attributes
-   default to `SetBin`. *Workaround:* encode the `CK_ULONG` as little-endian bytes.
-3. Reading numeric attributes hits the same table. *Workaround:* request
-   `allAsBinary=True` and decode the raw bytes.
-
-In short: PyKCS11 lacks constant and type tables, not capability.
+1. `lib.getMechanismList(slot)` raises `KeyError: 28`: it looks up mechanism code `0x1C` in its `CKM` dictionary. `PyKCS11.CKM`, `CKA` and `CKK` are plain dicts, so the demo registers the PQC constants into them (`register_pqc_constants()`).
+2. Passing `CKA_PARAMETER_SET` raises `TypeError`: PyKCS11 picks `SetNum`/`SetBool`/`SetBin` from an internal type table and treats unknown attributes as binary. The demo encodes the `CK_ULONG` as little-endian bytes.
+3. Reading numeric attributes hits the same table. The demo requests `allAsBinary=True` and decodes the bytes.
 
 ### Java
 
 | Route | ML-KEM / ML-DSA | Notes |
 |---|---|---|
-| **JDK FFM calling the C ABI** | **works** | used by this demo, zero external dependencies |
-| SunPKCS11 (high-level JCA) | does not work | see below |
-| IAIK PKCS#11 Wrapper, jacknji11 | would work | both require additional jars; FFM was sufficient |
+| JDK FFM calling the C ABI | works | used here, no jar needed |
+| SunPKCS11 (JCA) | does not work | see below |
+| IAIK PKCS#11 Wrapper, jacknji11 | not tried | both need extra jars |
 
-`demo/java/SunP11Probe.java` measures the exact limitation on JDK 26:
+`demo/java/SunP11Probe.java` shows the SunPKCS11 limitation (measured on JDK 26). The provider loads this module and works as a `KeyStore`, but it exposes only that one service. Its table from PKCS#11 mechanism codes to JCA algorithm names has no entry for the PKCS#11 v3.2 mechanisms `CKM_ML_DSA` (0x1D) and `CKM_ML_KEM` (0x17), so `KeyPairGenerator.getInstance("ML-DSA", p11Provider)` and the ML-KEM equivalents throw `NoSuchAlgorithmException`. JDK 26's own JCA does support ML-DSA and ML-KEM with the software implementation; only the path through a PKCS#11 provider is missing. Any PKCS#11 module offering ML-DSA is affected in the same way.
 
-```
-provider = SunPKCS11-pqchsm  version 26
-services exposed = 1
-   KeyStore / PKCS11
-  ML-DSA     via P11 : unavailable -> NoSuchAlgorithmException
-  ML-DSA-65  via P11 : unavailable -> NoSuchAlgorithmException
-  ML-KEM     via P11 : unavailable -> NoSuchAlgorithmException
-  ML-KEM-768 via P11 : unavailable -> NoSuchAlgorithmException
-```
-
-SunPKCS11 loads this module successfully — the provider constructs and works as a
-`KeyStore` — but its mapping from PKCS#11 mechanism codes to JCA algorithm names does
-not yet include v3.2's `CKM_ML_DSA` (0x1D) or `CKM_ML_KEM` (0x17), so no
-`KeyPairGenerator` or `Signature` service is registered.
-
-Two distinct things are worth separating:
-
-- JDK 26's JCA **does** know ML-DSA and ML-KEM — `KeyPairGenerator.getInstance("ML-DSA")`
-  works with the software implementation (JEP 496/497).
-- What is missing is the path *through a PKCS#11 provider* to an external module.
-
-This is not specific to this module: any PKCS#11 module offering ML-DSA would be
-equally invisible to SunPKCS11. It requires JDK to add the mechanisms to
-`sun.security.pkcs11.wrapper.PKCS11Constants` and to the `SunPKCS11` service registry.
-
-FFM was chosen over IAIK/jacknji11 because it ships with JDK 22+ and needs no jar, and
-because this module exports every `C_*` entry point as a global symbol — so
-`SymbolLookup.find()` by name is enough, with no need to walk `CK_FUNCTION_LIST` struct
-offsets.
+FFM is used because it ships with JDK 22+ and the module exports every `C_*` function as a global symbol, so `SymbolLookup.find()` by name is enough and the `CK_FUNCTION_LIST` offsets are not needed.
 
 ## Environment variables
 
-Both demos configure the module through environment variables (see
-`src/p11/p11_module.c`):
+Read by the module (`src/p11/p11_module.c`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PQCHSM_KEYSTORE` | `$HOME/.pqchsm/keystore.bin` | keystore path |
-| `PQCHSM_SLOTS` | 4 | number of slots |
+| `PQCHSM_KEYSTORE` | `$HOME/.pqchsm/keystore.bin` | Keystore path |
+| `PQCHSM_SLOTS` | 4 | Number of slots (1 to 64) |
+| `PQCHSM_BACKEND` | software (liboqs) | `sdfe`: ML-KEM key generation goes to the board through `libsdfe` |
+| `PQCHSM_HWRNG` | software | `sdfe`: random numbers come from the board's TRNG |
+| `PQCHSM_SDFE_HOST`, `_PORT`, `_PKI`, `_DEVICE_CN` | | Board address, port, credential directory and expected device CN for the `sdfe` options |
 
-The demos point at a temporary keystore and do not touch the default one.
+Both demos use a temporary keystore and do not touch the default one.

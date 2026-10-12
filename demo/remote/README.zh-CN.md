@@ -1,16 +1,15 @@
 [English](README.md) · **中文**
 
-# 一条命令跑完远程演示
+# 远程演示
 
-在任何一台够得着板子的机器上驱动板上的密码机，不需要 SSH、不需要配置、
-不需要摆弄凭据。
+在任何能连到板子的机器上，经 mTLS 端口（9797）运行 SDF 接口演示（`service/sdf_demo.c`）。不需要 SSH。
 
 ```bash
 git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
 ./demo/remote/run.sh
 ```
 
-**什么都不带跑，它会问你**，所以不必先去查用法：
+不带参数运行时，脚本会询问板子地址和运行模式：
 
 ```
 这台密码机在哪？
@@ -27,56 +26,38 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
   选 [1-3，回车= 1]：
 ```
 
-跑通之后它会问要不要记住这个地址，之后再跑就什么都不用给了。当然也可以一次
-性全写在命令行上：
+运行成功后脚本会提示是否记住地址。也可以直接在命令行给出：
 
-| | |
+| 命令 | 作用 |
 |---|---|
-| `./demo/remote/run.sh 192.168.1.50` | 完整九节演示 |
+| `./demo/remote/run.sh 192.168.1.50` | 完整演示，九节（`sdf_demo` 的 `[1]` 到 `[9]`：硬件随机数、ML-KEM、TA 保管的 SM4 密钥、ML-DSA、分组模式、SM3、重连后句柄失效） |
 | `./demo/remote/run.sh 192.168.1.50 --smoke` | 只打关键结论 |
-| `./demo/remote/run.sh 192.168.1.50 --status` | 只连一下，打印设备横幅 |
-| `./demo/remote/run.sh 192.168.1.50 --save` | 不用问就记住这个地址 |
+| `./demo/remote/run.sh 192.168.1.50 --status` | 只连接并打印设备信息 |
+| `./demo/remote/run.sh 192.168.1.50 --save` | 把地址写入 `demo/remote/board.conf`（不进仓库） |
 
-**地址在任何情况下都不是写死的常量** —— 你的板子不在我们的网段上。取值顺序是
-命令行参数 → `$BOARD` → `demo/remote/board.conf`（不进仓库），最后才问人。
-而且**只在真的有人在敲键盘时才问**：从管道、CI、cron 里跑一律打印用法并退出
-（退出码 2），不会挂在那儿等一个永远不来的回车。它也从不猜地址 —— 猜错的表现
-是"连不上"，比"你没给地址"难查得多。
+地址的取值顺序是：命令行、`$BOARD`、`demo/remote/board.conf`、交互询问。只有标准输入是终端时才询问，否则打印用法并以状态 2 退出。没有默认地址。
 
-其余可覆盖：`PORT=… DEVICE_CN=… CREDS=… ./demo/remote/run.sh <板子IP>`
+可用环境变量覆盖：`PORT=`（默认 9797）、`DEVICE_CN=`（默认 `axu3egb-hsm-01`）、`CREDS=`（默认 `demo/remote/creds`）。
 
-客户端在第一次运行时由三个文件现编（`sdf_demo.c`、`libsdfe.c`、`pqcs_tls.c`）。
-它**不链接任何密码算法库** —— 链的 OpenSSL 只做 mTLS 传输 —— 所以它打印出的
-任何正确结果都只可能来自 FPGA。
+首次运行时，脚本用 `service/sdf_demo.c`、`service/libsdfe.c`、`service/pqcs_tls.c` 编译出客户端 `build-demo/sdf_demo`。客户端不含任何密码算法实现，链接的 OpenSSL 只用于 mTLS 传输。需要 C 编译器和 OpenSSL 3。macOS 自带的 LibreSSL 缺 TLS 1.3 的 API，需要用 Homebrew 装 `openssl@3`。
 
-**前置**：一个 C 编译器与 **OpenSSL 3**。macOS 自带的是 LibreSSL，缺 TLS 1.3
-那套 API，需要 `brew install openssl@3`；脚本会自己找，找不到就当场说清楚。
+## `creds/` 里的凭据是公开的
 
-## ⚠️ `creds/` 里的凭据是**公开的**，这是有意的
+⚠️ `creds/` 里有一份客户端证书和它的私钥，提交在这个公开仓库中，目的是让上面的命令不用任何配置就能运行。任何能连到板子 9797 端口（或同一个 CA 的 HTTPS 网关 8443 端口）的人，都可以用它驱动密码机。只有板子处在私有局域网内，这样才可以接受。在这条链路上，mTLS 因此不再能防止冒充。
 
-`creds/` 里放着一张客户端证书**和它的私钥**，就提交在这个公开仓库里。这样做
-是为了让上面那条命令零配置可用，但代价必须说清楚，不能含糊过去：
+CA 私钥和设备私钥不在仓库里。正式部署应该用 `tools/mkpki.sh` 生成自己的 CA，带外分发凭据，并可以用板上的 `pki/hsm_acl` 按 CN 限制客户端。见 [docs/SECURITY.zh-CN.md](../../docs/SECURITY.zh-CN.md#远程口)。
 
-- **任何够得着板子 9797 口（或同一 CA 的 8443 HTTPS 网关）的人都能驱动这台密码机。** 它成立的前提只有一条 ——
-  板子在内网，外面路由不进来。
-- **它不是远程口的安全论证。** mTLS 买到的是"持有私钥"而不是"知道一个字符串"；
-  把私钥公开发布，等于在这一条链路上自愿放弃那个区别。真实部署要自己生成 CA
-  （`tools/mkpki.sh`）、凭据带外分发，必要时用板上的 `hsm_acl` 按 CN 限制。
-  见 [docs/SECURITY.zh-CN.md — 远程口](../../docs/SECURITY.zh-CN.md#远程口)。
-- **CA 私钥与设备私钥不在这里，也永远不该进来。** 有它们就能签发新证书、
-  冒充这台设备，那是另一个量级的事。
-
-想用自己的凭据，把 `CREDS` 指过去即可：
+使用自己的凭据：
 
 ```bash
 CREDS=~/.config/pqchsm/pki ./demo/remote/run.sh
 ```
 
-给一块板子装一套全新的、私有的 PKI，用 `tools/demo_remote.sh <板子IP> --provision`。
+`tools/demo_remote.sh <板子IP> --provision` 会生成一套私有 PKI 并装到板子上。
 
-## 这里还有：板上命令行 + HTTPS 联跑
+## 板上命令行与 HTTPS
 
 | 脚本 | 作用 |
 |---|---|
-| `http_demo.sh <板子IP> [凭据目录]` | 在本机用 `curl` 经 HTTPS + mTLS 调板上 8443 口的网关，按业务流程走一遍（凭据目录默认 `~/.config/pqchsm/pki`；需要 `curl` 和 `python3`）。输出格式与板上的业务演示相同 |
-| `full_demo.sh <板子IP> [凭据目录]` | 先经 ssh 在板上跑 `/media/sd-mmcblk1p2/demo/run.sh`，再跑 `http_demo.sh`，用 `tools/demo_to_html.py` 合成 `demo-out/demo.html`。与 `run.sh` 不同，这一条要用 SSH |
+| `http_demo.sh <板子IP> [凭据目录]` | 在本机用 `curl` 经 HTTPS 和 mTLS 调用板上 8443 端口的网关，走一遍业务流程。凭据目录默认 `~/.config/pqchsm/pki`；需要 `curl` 和 `python3`。输出格式与板上演示相同 |
+| `full_demo.sh <板子IP> [凭据目录]` | 经 ssh 在板上运行 `/media/sd-mmcblk1p2/demo/run.sh`，再运行 `http_demo.sh`，用 `tools/demo_to_html.py` 把两份输出合成 `demo-out/demo.html`。这个脚本用 SSH |

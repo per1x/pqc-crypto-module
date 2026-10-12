@@ -2,11 +2,26 @@
 
 # Synthesis
 
-Out-of-context synthesis scripts producing utilisation and timing reports.
+Vivado scripts for module-level out-of-context (OOC) synthesis and for the full board
+bitstream. Vivado is not installed on the Mac; the scripts run on the build machine
+(Vivado 2020.1). Fmax figures are derived from post-route WNS, because post-synthesis
+WNS is usually optimistic. Reports are written to `hardware/syn/rpt/` (gitignored) and
+bitstream outputs to `hardware/syn/impl/`.
 
-> **Status: in use.** Vivado is not installed on the Mac, so this runs on the build
-> machine (Vivado 2020.1). Every utilisation and Fmax figure in `docs/TESTING.md`
-> comes from it, taken **post-route** — post-synthesis WNS is usually optimistic.
+## Files
+
+| File | Purpose |
+|---|---|
+| `ooc_synth.tcl` | OOC synthesis, place and route of one module; prints Fmax and writes `rpt/<top>_fmax.txt` |
+| `ooc_mldsa.tcl` | The same for `mldsa_keygen`, `mldsa_sign`, `mldsa_verify` or `mldsa_engine`; reports are named by parameter set |
+| `trng_ooc.tcl` | OOC synthesis, place and route of the TRNG (default top `trng_axi`) |
+| `impl_bitstream.tcl` | Non-project flow for `zu3eg_hsm_top`, producing `.bit` and `.bin` in `syn/impl/` |
+| `constraints/ooc_seq.xdc` | Clocked modules: `clk` port at 100 MHz, 1 ns input and output delay, `rst_n` false path |
+| `constraints/ooc_comb.xdc` | Combinational modules: virtual clock, input-to-output paths only |
+| `constraints/trng_ro.xdc` | TRNG: clock, I/O budget, `rst_n` and `tamper` false paths |
+| `constraints/board_pins.xdc` | AXU3EGB pin constraints; the only pin is the fan PWM on `AA11` |
+
+## ooc_synth.tcl
 
 ```bash
 vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top_module>
@@ -14,102 +29,122 @@ vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs <part> <top_modul
 vivado -mode batch -source hardware/syn/ooc_synth.tcl -tclargs xazu3eg-sfvc784-1-i mlkem_encaps
 ```
 
-**Both tclargs are required, part first and top second.** Leaving out the part makes the
-script print its usage and exit — easy to lose a run to.
+Both arguments are required, part first. With either missing the script prints its usage
+and exits.
 
-Synthesisable top levels: `mont_reduce`, `barrett_reduce`, `butterfly_ct`,
-`butterfly_gs` (combinational, constrained by `ooc_comb.xdc`); `ntt_core`,
-`mldsa_ntt_core`, `keccak_f1600`, `sha3_core`, `pqc_accel_axi`, `mlkem_keygen` /
-`mlkem_encaps` / `mlkem_decaps`, `mlkem_cbd_stream`, `mlkem_bitpack`,
-`mlkem_bitunpack`, `key_vault`, `key_vault_axi`, `axi4lite_firewall`, `aes_core`,
-`sm4_core`, `sm3_core`, `sym_axi`, `sym_vault_top` (clocked, constrained by
-`ooc_seq.xdc`). The script selects the constraint file automatically; any other top
-name falls back to `ooc_comb.xdc`, so add a clocked module to the list in
-`ooc_synth.tcl` before running it.
+The script reads `rtl/common`, `mlkem`, `mldsa`, `keccak`, `bus`, `sym` and `trng`. The
+tops below get `ooc_seq.xdc`; any other name gets `ooc_comb.xdc`, so a new clocked top
+must be added to the list in `ooc_synth.tcl` first.
 
-`keccak_f1600` is the most informative one to run first: its utilisation directly tests
-the decision to build a single-round iterative core rather than a 24-round unrolled one.
-1600 state flip-flops plus one round of combinational logic should land in the low
-thousands of LUTs; unrolled, the logic is multiplied by 24 and will not fit on a small
-device. A synthesis report turns that from a design judgement into a number.
+| Constraint file | Tops |
+|---|---|
+| `ooc_seq.xdc` | `ntt_core`, `mldsa_ntt_core`, `keccak_f1600`, `sha3_core`, `pqc_accel_axi`, `mlkem_keygen`, `mlkem_encaps`, `mlkem_decaps`, `mlkem_cbd_stream`, `mlkem_bitpack`, `mlkem_bitunpack`, `key_vault`, `key_vault_axi`, `axi4lite_firewall`, `aes_core`, `sm4_core`, `sm3_core`, `sym_axi`, `sym_vault_top` |
+| `ooc_comb.xdc` | everything else, intended for `mont_reduce`, `barrett_reduce`, `butterfly_ct`, `butterfly_gs` |
 
-Common parts:
+A clocked module has to be constrained through its real clock port. With a virtual clock
+bound to no port, `clk` is unconstrained, no path is timed, and the timing summary looks
+better than it is.
+
+The OOC clock is 100 MHz (10 ns) rather than 150 MHz because the ML-KEM butterfly has two
+serial multiplications (`zeta·b`, and `m·Q` inside the Montgomery reduction) plus a
+modular reduction. The board runs the crypto cores at 75 MHz. `ntt_core` splits the
+butterfly with a register between `_head` and `_tail`, which is why a transform takes
+3457 cycles.
+
+## ooc_mldsa.tcl
+
+```bash
+vivado -mode batch -source hardware/syn/ooc_mldsa.tcl \
+       -tclargs <part> <keygen|sign|verify|engine> <44|65|87>
+# e.g.
+vivado -mode batch -source hardware/syn/ooc_mldsa.tcl -tclargs xazu3eg-sfvc784-1-i sign 87
+```
+
+The ML-DSA cores select the parameter set at run time, so one synthesis covers 44, 65
+and 87. The last argument only names the reports (`mldsa_<op>_<pset>_{utilization,timing}_{synth,route}.rpt`).
+
+## trng_ooc.tcl
+
+```bash
+vivado -mode batch -source hardware/syn/trng_ooc.tcl
+vivado -mode batch -source hardware/syn/trng_ooc.tcl -tclargs <part> <top>
+```
+
+It reads `trng`, `common` and `keccak`. Combinational loops are allowed on the ring
+oscillator nets and DRC `LUTLP-1` is lowered to a warning. After synthesis and again
+after routing it counts the LUTs under `u_ro*` and fails if fewer than 120 remain
+(8 rings of 13 to 27 stages give 160), since a ring that was optimised away leaves a
+constant generator and no error in the log. Do not define `TRNG_SIM_MODEL`; it replaces
+`ring_osc` with a simulation model that cannot be synthesised.
+
+## impl_bitstream.tcl
+
+```bash
+vivado -mode batch -source hardware/syn/impl_bitstream.tcl                 # zu3eg_hsm.bit
+PQC_DEV_OPEN=1    vivado -mode batch -source hardware/syn/impl_bitstream.tcl   # zu3eg_hsm_dev.bit
+PQC_CHARACTERIZE=1 vivado -mode batch -source hardware/syn/impl_bitstream.tcl  # zu3eg_hsm_char.bit
+```
+
+The flow creates the PS (`zynq_ultra_ps_e`, `M_AXI_HPM0_LPD` and `pl_clk0` at 150 MHz),
+reads `rtl/*` and `platform/fan_ctrl`, and runs synthesis, `opt_design`, `place_design`,
+`phys_opt_design`, `route_design`, a hold-fix pass, and `write_bitstream`. The PS
+configuration here only defines the PL-side ports; the PS setup on the board comes from
+the vendor `psu_init` in `BOOT.BIN`.
+
+| Variant | Environment | Result |
+|---|---|---|
+| default | none | `zu3eg_hsm.bit`: functional slaves with `SECURE_ONLY=1` |
+| development | `PQC_DEV_OPEN=1` | `zu3eg_hsm_dev.bit`: functional slaves with `SECURE_ONLY=0`; the key-register load port and seed ports stay secure-only |
+| characterisation | `PQC_CHARACTERIZE=1` | `zu3eg_hsm_char.bit`: lowered fan thresholds and the raw TRNG tap open; not for product use |
+
+The script stops before `write_bitstream` when any of these fail:
+
+- The `tamper_latched` flip-flops are missing from the netlist (the `tamper` path was
+  optimised to a constant).
+- The `fan` port is not on `AA11`, or `SYSMONE4` is missing or its `SIM_DEVICE` is not
+  `ZYNQ_ULTRASCALE`.
+- A PS clock or response input (`maxihpm0_lpd_aclk`, `maxigp2_rlast`, `maxigp2_bid`,
+  `maxigp2_rid`) has no driver. Vivado does not report a wire used before its
+  declaration; it creates an undriven net.
+- Setup WNS or hold WHS is negative, or the effective hold margin is below 0.050 ns.
+  The script adds 0.100 ns of hold uncertainty on the system clock so that the router
+  inserts delay on short paths, and the reported WHS already includes it.
+
+Timing is written to `syn/impl/timing_<name>.txt`. The `.bin` is the raw bitstream that
+`fpga_manager` and `fpgautil` load.
+
+## Result for the default bitstream
+
+Post-route, `zu3eg_hsm.bit` at 75 MHz on `xazu3eg-sfvc784-1-i` (build machine report,
+2026-10-10):
+
+| Resource | Used |
+|---|---|
+| LUT | 55,366 (78.5 %) |
+| Registers | 39,990 |
+| Block RAM tiles | 85 |
+| DSP | 199 |
+| Setup WNS | +1.615 ns |
+
+## Parts
 
 | Board | Part |
 |---|---|
-| AXU3EGB (the board this design runs on) | `xazu3eg-sfvc784-1-i` |
-| Kria KV260 (UltraScale+) | `xck26-sfvc784-2LV-c` |
+| AXU3EGB (the board used here) | `xazu3eg-sfvc784-1-i` |
+| Kria KV260 | `xck26-sfvc784-2LV-c` |
 | PYNQ-Z2 / Arty Z7-20 | `xc7z020clg400-1` |
 | Arty A7-100T | `xc7a100tcsg324-1` |
 
-## Why run this before buying a board
+`xazu3eg-sfvc784-1-i` is the automotive XA device on the AXU3EGB, with the XCZU3EG
+resources: 70,560 LUT, 141,120 FF, 360 DSP, 216 BRAM36.
 
-Utilisation, timing closure, and Fmax estimation do not need hardware — only a target
-part. Even `write_bitstream` runs; there is simply nowhere to load it. The one figure
-that remains an estimate is power, from a toggle-rate model with error up to 2×.
+## Planning before RTL
 
-The consequence is practical: choosing a board without a synthesis report is guesswork.
-If an 8-butterfly NTT core does not fit on an XC7A100T, that is worth knowing before
-ordering an Arty A7.
-
-## What can be decided without Vivado
-
-`tools/cycle_budget.py` computes the NTT cycle budget and the parallelism trade-off from
-first principles:
+`tools/cycle_budget.py` computes the ML-KEM NTT cycle budget for 1 to 16 parallel
+butterflies, with a rough DSP and bank estimate:
 
 ```
 $ python3 tools/cycle_budget.py --fmax 150
-ML-KEM 256-point NTT: 128 butterflies per layer x 7 layers = 896 butterfly operations
-  1 butterfly   ->  910 cycles -> 6.07 us
-  4 butterflies ->  238 cycles -> 1.59 us   (needs 2-4 BRAM banks)
-  8 butterflies ->  126 cycles -> 0.84 us   (memory ports become the bottleneck, 4-8 banks)
 ```
 
-The intended order is: fix the micro-architecture from this table, then write RTL, then
-use Vivado to check that the calculated numbers and the synthesised ones agree.
-
-## Layout
-
-```
-hardware/syn/
-├── ooc_synth.tcl            OOC synthesis + place & route, prints Fmax
-├── ooc_mldsa.tcl            OOC synthesis of mldsa_<keygen|sign|verify|engine> per parameter set (44/65/87)
-├── trng_ooc.tcl             OOC synthesis + place & route of the TRNG (default top trng_axi)
-├── impl_bitstream.tcl       Full non-project flow for zu3eg_hsm_top -> .bit/.bin
-│                            (PQC_DEV_OPEN=1 builds zu3eg_hsm_dev.bit with SECURE_ONLY=0)
-├── constraints/ooc_seq.xdc  Clocked modules: real clk port, 100 MHz, I/O delay, rst_n false path
-├── constraints/ooc_comb.xdc Combinational modules: virtual clock, in-to-out only
-├── constraints/trng_ro.xdc  TRNG: clock, I/O budget, rst_n false path
-├── constraints/board_pins.xdc  AXU3EGB pin constraints (only the fan PWM, AA11)
-└── rpt/                     Report output (gitignored)
-```
-
-## Why the constraints are split
-
-A clocked module must be constrained through its real clock port. Under a virtual clock
-bound to no port the `clk` port is unconstrained, no timing path is analysed, and
-`report_timing_summary` produces a distorted — and misleadingly favourable — result.
-Combinational modules, having no clock port, need the opposite treatment.
-
-`ooc_synth.tcl` routes each module to the appropriate constraint file:
-
-| Module | Constraints | Notes |
-|---|---|---|
-| every clocked top in the list above (`ntt_core`, `keccak_f1600`, `sha3_core`, `pqc_accel_axi`, ...) | `ooc_seq.xdc` | `create_clock -period 10 [get_ports clk]`, I/O delay, `rst_n` false path |
-| `mont_reduce`, `barrett_reduce`, `butterfly_ct`, `butterfly_gs` | `ooc_comb.xdc` | virtual clock, combinational path delay |
-
-**Why 100 MHz rather than 150 MHz.** The butterfly contains two serial multiplications
-(`zeta·b`, and `m·Q` inside the Montgomery reduction) plus a modular reduction. 6.667 ns
-is tight; a credible positive WNS at 100 MHz is more useful than an optimistic failure
-at 150.
-
-Measured after S3 (coefficients moved into a true dual-port BRAM, before the butterfly was split): `ntt_core` alone
-closes with WNS `+0.077 ns`; the whole `pqc_accel_axi` top misses by `-0.047 ns`
-(2 endpoints out of 6190, Fmax 99.5 MHz). The critical path is that same butterfly
-multiplication chain, now fed by the BRAM output — of its 9.693 ns, 0.998 ns is the
-BRAM clock-to-out. Two ways to close it were considered: enable the BRAM optional output register
-(`DO_REG=1`, which Vivado suggests in the synthesis log) at the cost of one more cycle
-of read latency everywhere, or pipeline the butterfly itself at the cost of one more
-cycle per butterfly. The second was taken: `butterfly_ct` / `butterfly_gs` are split into
-`_head` + `_tail` with a register between them in `ntt_core` (`rtl/mlkem/ntt_core.v`),
-which is why a transform now takes 3457 cycles. The figures above predate that change.
+It only covers the NTT. `tools/amdahl.py` estimates the end-to-end speedup of different hardware splits (Keccak, NTT) from profiling fractions.

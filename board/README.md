@@ -1,82 +1,97 @@
 # board/
 
-Everything that runs on the AXU3EGB board, plus the raw output of every run.
+Code, scripts and recorded output for the AXU3EGB board (XCZU3EG).
 
 | Path | Contents |
 |---|---|
-| `src/` | Standalone C programs that `mmap` `/dev/mem` at `0x8000_0000` and drive the cores directly (plus the D7/RPMB probes), and the generated KAT headers and their generator |
-| `scripts/` | Boot-time and operations scripts (`hsm-boot.sh` is the SD-card boot script that brings up `eth1`, the PL, `/dev/secmmio`, the TA and the daemons; `hsmreboot.sh`, `pl_deadman.sh`), the PL harness `plharness.sh`, and the payload scripts it runs (`pay_*.sh`) |
-| `demo/` | The on-board demos: `business_demo.sh` (deployed to the SD card as `demo/run.sh`; the hsmctl business flow with layered `[TEE]`/`[TEE→PL]`/`[PL]`/`[NW]`/`[HTTP]` log lines) and the classic ones (`board_demo.sh`, `run_demo.sh`, `functions_board.sh`). See [`demo/README.zh-CN.md`](demo/README.zh-CN.md) |
-| `logs/` | Raw output of board runs, kept verbatim as evidence |
-| `kmod/` | Kernel modules: `/dev/secmmio`, the PM/SiP caller (`pmsec`), the protection-unit dump (`protdump`), the boot-time XMPU poison switch (`xmpupoison`) |
-| `factory/` | Vendor-project bitstream build for the fan-only image |
-| `petalinux/` | PetaLinux recipe for the fan-quiet init |
+| `src/` | Standalone C programs that run on the board (self-tests, probes, benchmarks), plus the generated KAT headers and their generator |
+| `scripts/` | Boot and operations scripts, the PL harness `plharness.sh`, and the `pay_*.sh` payloads it runs |
+| `demo/` | On-board demos. See [`demo/README.zh-CN.md`](demo/README.zh-CN.md) |
+| `logs/` | Raw output of board runs (`RESULT_*.txt`) |
+| `kmod/` | Kernel modules: `secmmio` (`/dev/secmmio`), `pmsec` (PM SMC caller), `protdump` (XPPU/XMPU dump through EL3), `xmpupoison` (XMPU_DDR poison switch) |
+| `factory/` | Rebuild of the vendor design's bitstream with the fan logic replaced, and `make_boot_scr.sh` |
+| `petalinux/` | PetaLinux recipe `fanquiet` (loads the fan-controlled bitstream at boot) |
 | `recovery/` | JTAG rescue: `build_rescue.sh` builds the shim, device tree and initramfs that `jtag_rescue.tcl` loads |
 
-## The harness is not optional
+## Boot
+
+`scripts/hsm-boot.sh` lives on the SD card (`/media/sd-mmcblk1p2/hsm/`) and is called from an init script in the image. In order, it:
+
+1. Moves the clock forward if it is earlier than the newest of `pki/hsm_device.crt`, `pki/hsm_ca.crt` and `CLOCK_STAMP` (mTLS certificates would otherwise not be valid yet).
+2. Configures `eth1` (`192.168.50.175`, the PS GEM) and waits for link. Without link it stops before touching the PL.
+3. Unbinds the PL drivers and loads `zu3eg_hsm_dev.bit` with `fpgautil`. If the PL does not reach `operating`, it reloads `factory.bit` and rebinds.
+4. Loads `secmmio.ko`, copies `*.ta` from the SD card to `/lib/optee_armtz/` (`/lib` is an initramfs), and starts `tee-supplicant` if it is not running.
+5. Starts `pqchsm_fpgad` (the `-lock` argument is accepted and ignored) and `hsm_httpd 8443 8080` with the keystore in `/media/sd-mmcblk1p2/keys`.
+
+Progress is written to `hsm/HSM_STATUS` and `hsm/hsm-boot.log`. `READY=yes` is the last line of a complete boot. Without `zu3eg_hsm_dev.bit` on the card the PL stays on the vendor bitstream. `zu3eg_hsm.bit` (`SECURE_ONLY=1`) can be loaded at run time with `pl_deadman.sh <bit> <seconds>`, which rolls back unless someone logs in over `eth1` and touches `hsm/PL_KEEP` within the grace period.
+
+Other scripts:
+
+| Script | Purpose |
+|---|---|
+| `hsmreboot.sh` | Reboot through sysrq (`s`, `u`, `b`). `reboot` does not work on this board |
+| `pl_deadman.sh` | Load a bitstream and roll back unless confirmed |
+| `try_mldsa.sh`, `try_mldsa_dev.sh`, `try_fanquiet.sh` | Trial installs with a dead-man switch |
+| `pay_*.sh` | Payloads for `plharness.sh`: D7/D11 checks, secure-form KAT, seed and audit checks, TA deployment, TRNG characterization and restart matrices, fan checks |
+| `trng_restart_plreload.sh`, `verify_after_por.sh` | Restart matrix with PL reconfiguration as the restart; post-POR verification |
+| `jtag_por.tcl`, `xmpu_poison_on.tcl`, `uboot_multiboot.py`, `serial_console.py` | JTAG power-on reset, XMPU poison over JTAG, setting `CSU_MULTI_BOOT` from U-Boot, serial console from the Mac |
+| `fanquiet-init.sh`, `fan_minduty_sweep.sh`, `mk_image_hook.sh` | Fan control at boot, minimum-duty sweep, boot hook for `image.ub` |
+
+## plharness.sh
 
 ```sh
 sh /media/sd-mmcblk1p2/hsm/plharness.sh <payload.sh>
 ```
 
-**`eth0` is inside the PL** — `80000000.ethernet` is the vendor design's AXI
-Ethernet — so every PL reconfiguration has to unbind the PL drivers first and
-rebind afterwards. Reconfiguring the fabric with a live AXI master hangs the
-bus, and once AXI is down even sysrq cannot be written, so the watchdog cannot
-recover it either. Only a power cycle can.
+⚠️ Reconfiguring the PL while PL drivers with live AXI masters are bound hangs the bus. After that even writing to sysrq fails, and only a power cycle recovers the board. `eth0` (`80000000.ethernet`) is part of the vendor PL design, so every reconfiguration has to unbind the PL drivers first.
 
-`scripts/plharness.sh` therefore detaches from the terminal, restores the
-network unconditionally on exit, and arms a sysrq watchdog. Two rules inside it
-were each paid for with a power cycle:
+`plharness.sh` detaches from the terminal, unbinds the PL drivers, runs the payload, then unbinds again unconditionally (a payload may have rebound them), reloads `factory.bit`, rebinds and restores `eth0`. It also starts a watchdog that triggers sysrq `b` after 480 seconds. The watchdog does not help if the bus is already hung.
 
-- **Never put the unbind in a foreground SSH command.** The first device
-  unbound is `eth0`; the session dies on the spot and the rebind never runs.
-- **Teardown does not trust the payload's state.** It unbinds unconditionally
-  before reconfiguring, because some payloads rebind the drivers themselves.
-  Unbinding an already-unbound device is one ignored error.
+Never run the unbind from a foreground SSH command. The first device unbound is `eth0`, the session dies, and the rebind never runs.
 
 ## Logs
 
-`logs/` is evidence, not documentation. The files are the unedited output of
-real runs and should stay that way — the numbers quoted in
-[docs/TESTING.md](../docs/TESTING.md) are traceable to them.
+The files in `logs/` are unedited output of real runs. The numbers in [docs/TESTING.md](../docs/TESTING.md) come from them.
 
 | File | Run |
 |---|---|
-| `RESULT_hwtest.txt` | 24-item board self-test: ML-KEM-512 ACVP, symmetric and SM vectors, key vault boundary scan, canary, TRNG health |
-| `RESULT_hwtest_after_audit.txt` | The same suite re-run after the RTL audit fixes |
-| `RESULT_audit.txt` | Post-audit verification: address aliasing, zeroize, TRNG counters, illegal parameters |
-| `RESULT_seckem3.txt` | ML-KEM 512/768/1024 ACVP, throughput, constant-time sampling, from the secure world |
-| `RESULT_sechwtest.txt` | Board self-test driven through EL3 against `SECURE_ONLY=1` cores |
-| `RESULT_secproof.txt`, `RESULT_secneg.txt` | The AxPROT gate closed in both directions |
+| `RESULT_hwtest.txt` | 24-item self-test (`hsm_hwtest`): ML-KEM-512 ACVP, symmetric and SM vectors, key-register boundary scan, canary, TRNG health |
+| `RESULT_hwtest_after_audit.txt`, `RESULT_audit.txt` | The same suite and the audit checks (aliasing, zeroize, TRNG counters, illegal parameters) after the RTL audit fixes |
+| `RESULT_seckem3.txt` | ML-KEM 512/768/1024 ACVP, throughput, constant-time sampling, run from the secure world |
+| `RESULT_sechwtest.txt` | `hsm_hwtest` driven through EL3 against `SECURE_ONLY=1` cores |
+| `RESULT_secproof.txt`, `RESULT_secneg.txt` | Normal-world accesses to `SECURE_ONLY=1` cores (bus error / reads return 0) |
+| `RESULT_nocrash.txt` | `hsm_nocrash`: 9 refused or nonexistent addresses, 2000 reads and 2000 writes each (36,000 accesses), board stays up |
 | `RESULT_restart.txt` | SP 800-90B restart matrix, restart = TRNG zeroize (1000 rows) |
-| `RESULT_restart_plreload.txt` | The same matrix with restart = **PL reconfiguration** (200 rows): the ring oscillator is re-instantiated from the bitstream, which is closer to power-on. Still not a POR, and 200 rows is below the 1000 the standard suggests — both stated in the data file's own header |
-| `RESULT_service.txt` | End-to-end through the SDF interface, with the direct-access counter-proof |
-| `RESULT_harness.log` | Harness log from the corresponding run |
-| `RESULT_ctbprobe_before.txt`, `RESULT_ctbprobe_after.txt` | The c̃-comparison defect on silicon: 61 ordered Verify steps before and after the `verify.v` fix |
-| `RESULT_mldsa_after.txt`, `RESULT_mldsa_demoform.txt` | ML-DSA board self-test, 32/32: three parameter sets against ACVP, the on-chip vault, runtime parameter-set switching |
-| `RESULT_ctbprobe_demoform.txt` | The same 61-step probe re-run from the promoted default boot |
-| `RESULT_sdf_modes.txt` | Full SDF-style session: hardware RNG, ML-KEM, SM4 block, ML-DSA (three sets), the four cipher modes against SP 800-38A, and the counter-proof that a handle dies with its session |
-| `RESULT_secform_mldsa.txt` | Secure form (`SECURE_ONLY=1`): normal world reads all zero and the direct KAT program refuses to write, while the daemon reaches ML-DSA through the EL3 whitelist and signs end to end |
-| `RESULT_b1_*`, `RESULT_b2_*`, `RESULT_d7_*`, `RESULT_business_demo*.txt` and others | Later runs (seed custody, TA key operations, D7 symmetric-key custody and benchmarks, wire fuzzing, the business demo in its plain and HTTP forms) |
+| `RESULT_restart_plreload.txt` | Same matrix with restart = PL reconfiguration (200 rows). Not a power-on reset, and fewer rows than the 1000 the standard suggests; both are stated in the file header |
+| `RESULT_service.txt` | End-to-end through the SDF interface |
+| `RESULT_harness.log` | `plharness.sh` log of a run |
+| `RESULT_ctbprobe_before.txt`, `RESULT_ctbprobe_after.txt`, `RESULT_ctbprobe_demoform.txt` | `mldsa_ctb_probe`: 61 ordered Verify steps before and after the `verify.v` fix, and again from the default boot |
+| `RESULT_mldsa_after.txt`, `RESULT_mldsa_demoform.txt` | `mldsa_hwtest`, 32/32: three parameter sets against ACVP and runtime parameter-set switching. These runs predate the removal of the key-slot ABI |
+| `RESULT_sdf_modes.txt` | SDF session: hardware RNG, ML-KEM, SM4, ML-DSA, the four cipher modes against SP 800-38A, handle invalid after session end |
+| `RESULT_secform_mldsa.txt` | `SECURE_ONLY=1`: normal world reads zero, the daemon reaches ML-DSA through the EL3 whitelist |
+| `RESULT_b1_*`, `RESULT_b2_*`, `RESULT_d7_*`, `RESULT_business_demo*.txt`, others | Seed staging, TA key operations, symmetric-key loading and benchmarks, wire fuzzing, the business demo |
 
 ## Programs
 
+Build with an aarch64 cross compiler and copy to the board; they are static. `make CROSS=aarch64-linux-gnu- -C src` builds `mldsa_hwtest` and `d7probe` only; the other programs carry their own compile line in the file header (`d7bench` links `libsdfe` and OpenSSL, see `boot/d7/build-apps-d7.sh`).
+
 | File | Purpose |
 |---|---|
-| `src/hsm_hwtest.c` | The 24-item self-test |
+| `src/hsm_hwtest.c` | 24-item self-test |
 | `src/hsm_kem3.c` | ML-KEM three-parameter-set KAT, throughput, constant-time sampling |
-| `src/hsm_secneg.c` | Counter-proof: read the cores from the normal world and expect DECERR |
-| `src/hsm_audit.c` | Post-audit checks (aliasing, zeroize, illegal parameters) |
-| `src/trngraw.c` | Export pre-conditioning noise bits |
-| `src/trngrestart.c`, `src/restart_mcv.c` | SP 800-90B restart-test collection and on-board MCV computation |
-| `src/xmpu_probe.c` | Probe the PS-side protection units from the normal world |
+| `src/mldsa_hwtest.c` | ML-DSA KeyGen/Sign/Verify against ACVP for all parameter sets, runtime parameter-set switching |
+| `src/mldsa_ctb_probe.c` | Ordered Verify sequence that separates "parameter set not applied" from "c̃ comparison reads bytes left by the previous run" |
+| `src/hsm_secneg.c` | Reads the cores from the normal world and expects zeros (RAZ) |
+| `src/hsm_nocrash.c` | Reads and writes refused addresses 2000 times each. The current source has 10 sites (it includes `mldsa_axi`); the recorded run has 9 |
+| `src/hsm_audit.c` | Post-audit checks |
+| `src/d7probe.c` | Writes a key to the key-register load port from the normal world and checks that `LOAD_REJ` counts the 11 rejected writes; `d7probe vmap` reads `VALID_MAP` |
+| `src/d7bench.c` | Loads the public AES-256 KAT key into slot 7, reads the whole key-register and `sym_axi` windows through `/dev/mem` and checks that no key word appears, then measures load latency and AES-CBC throughput |
+| `src/seedprobe.c`, `src/seedel3.c` | Seed staging port checks (demo bitstream) and the EL3 seed path |
+| `src/iopack_bench.c` | A/B of the 4-byte packed I/O port against byte-wise I/O |
+| `src/dna_probe.c` | Reads the Device DNA window (`0xFFCA0050`), `-w` tries a write to confirm EL3 refuses it |
+| `src/trngraw.c` | Exports pre-conditioning noise bits |
+| `src/trngrestart.c`, `src/restart_mcv.c` | Restart-matrix collection and on-board MCV |
+| `src/xmpu_probe.c`, `src/protunit_probe.c` | XPPU/XMPU configuration, from the normal world and through the EL3 read window |
 | `src/plprobe.c`, `src/rdreg.c` | Minimal PL and register probes |
-| `src/mldsa_hwtest.c` | ML-DSA on silicon: KeyGen/Sign/Verify against ACVP for all three parameter sets, the on-chip key vault, and runtime parameter-set switching |
-| `src/mldsa_ctb_probe.c` | Attribution experiment for the isolated-Verify rejection: an ordered sequence that separates "runtime parameter set not applied" from "c̃ comparison reads bytes left by the previous run" |
+| `src/rpmb*.c` | eMMC RPMB probe and tool. `rpmb_tool provision` is disabled because it burns an irreversible key |
 | `src/gen_kat_mlkem_all.py` | Generates `kat_mlkem_all.h` from the ACVP vectors |
-
-Build them for the board with an aarch64 cross compiler (`make CROSS=aarch64-linux-gnu-`
-in `src/` builds `mldsa_hwtest` and `d7probe`; the others carry their own compile
-line in their file headers) and copy them across; they are static and have no
-runtime dependencies. The table above is not exhaustive — see `src/` for the rest.

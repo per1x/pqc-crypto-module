@@ -1,55 +1,37 @@
-# 后量子密码机原型 —— 怎么连、怎么跑
+# 板上演示
 
-一页纸。上电、插网线、跑一条命令。
+AXU3EGB 板子（XCZU3EG）上的演示：怎么连、怎么跑、每段演示看什么。
 
----
+## 系统分工
 
-## 这台机器是什么
+- OP-TEE 里的 TA 管密钥：生成对称密钥和后量子私钥的种子，用 KEK 包成 blob；需要时解开，经 PTA、BL31 的 SiP 写进 PL。KEK 不出 TA。
+- PL（FPGA）做全部密码运算：ML-KEM 512/768/1024、ML-DSA 44/65/87、AES-128/256、SM4、SM3，以及环振真随机数发生器。PL 不长期保存密钥。对称密钥只在会话期间放在对称密钥寄存器（`key_vault_axi`）里，会话结束即擦。后量子私钥每次运算由 TA 把种子写进 PL，在 PL 内展开，运算后由硬件擦除。
+- Linux 里的 `pqchsm_fpgad` 只调度请求、搬运句柄和 blob，看不到明文密钥，自己也不做密码运算。
 
-一块 Zynq UltraScale+ 板子（XCZU3EG），分工是：
+对外是 SDF 风格接口（`SDFE_*`），本机和远程调用方式相同。另有 HTTP 网关 `hsm_httpd` 和 PKCS#11 模块。
 
-- **密钥管理在 TEE**：OP-TEE 里的 TA 生成后量子私钥的种子与对称密钥，用 KEK
-  包成 blob 交出（KEK 不出 TA），需要时解开、经安全通路装进 FPGA；
-- **运算在 FPGA**：ML-KEM 512/768/1024、ML-DSA 44/65/87、AES-128/256、SM4、SM3，
-  以及一个环振噪声源做的真随机数发生器。私钥每次从种子现展开、算完即擦；
-- **Linux 不做任何密码运算**，手里也没有明文密钥 —— 它只调度请求、搬运句柄和 blob。
+## 接线
 
-对外是一套 SDF 风格的接口（`SDFE_*`），本机和远程调用完全一样。
+板子有两个网口，两个都插：
 
----
-
-## 一、接线
-
-板子上有**两个网口**，请**两个都插**：
-
-| 网口 | 接口名 | 在哪儿 | 地址 | 说明 |
+| 网口 | 接口名 | 位置 | 地址 | 说明 |
 |---|---|---|---|---|
-| PL 侧 | `eth0` | FPGA 逻辑里 | `192.168.50.174` | **装入密码位流后这个口会消失**，这是正常的 |
-| PS 侧 | `eth1` | 处理器硬核里 | `192.168.50.175` | 演示用这个。它不随 FPGA 重配而消失 |
+| PL 侧 | `eth0` | PL 里的 AXI Ethernet | `192.168.50.174` | 装入密码位流后消失 |
+| PS 侧 | `eth1` | 处理器里的 GEM | `192.168.50.175` | 演示用这个，不随 PL 重配消失 |
 
-> **为什么 `eth0` 会消失**：出厂位流里的网卡是用 FPGA 逻辑搭的。换成密码
-> 位流之后，那块网卡的硬件就不存在了。`eth1` 在处理器里，与 FPGA 无关，
-> 所以它是演示形态唯一可靠的入口。
+串口（备用）：Micro-USB，115200 8N1。
 
-串口（备用）：Micro-USB，**115200 8N1**。
+## 上电
 
----
+插电，约 35 秒后就绪，不需要登录或手工加载。`hsm/hsm-boot.sh` 依次做这些事：校时、配 `eth1`、装入密码位流、加载 `secmmio.ko`、把 TA 复制到 OP-TEE 找得到的位置、起 `pqchsm_fpgad`（mTLS 端口 9797）、起 `hsm_httpd`（本机 `127.0.0.1:8080` 明文，对外 `:8443` mTLS）。
 
-## 二、上电
-
-插电，等 **约 35 秒**。不需要按任何东西、不需要登录、不需要手动加载。
-
-上电后会自动完成（`hsm/hsm-boot.sh`）：校时 → 配好 `eth1` → 装入密码位流 →
-打开安全世界通道 → 把 TA 放到 OP-TEE 找得到的地方 → 起密码机服务（含 mTLS 远程端口）→
-起 HTTP 网关（本机明文口 + 对外 HTTPS）。
-
-确认就绪：
+查看状态：
 
 ```
 ssh root@192.168.50.175 cat /media/sd-mmcblk1p2/hsm/HSM_STATUS
 ```
 
-期望看到：
+正常输出：
 
 ```
 CLOCK=ok
@@ -64,92 +46,101 @@ HTTP=127.0.0.1:8080 本机接口可用
 READY=yes
 ```
 
-（`CLOCK=corrected` 表示开机时发现系统时间比 SD 上的凭据还早、已往前拨正；
-不拨的话 mTLS 会因证书尚未生效而被拒。）
+- `CLOCK=corrected` 表示开机时系统时间早于 SD 卡上凭据的修改时间，脚本把时钟拨到了那个时间。不拨的话证书尚未生效，mTLS 会被拒。
+- `PL=crypto` 表示 `zu3eg_hsm_dev.bit` 已装入。
+- `DAEMON=ok` 表示 daemon 已启动并建立了 socket。
+- `pki/` 下的 `hsm_ca.crt`、`hsm_device.crt`、`hsm_device.key` 缺一个，就不监听 9797 和 8443（`TCP=off`），本机 8080 不受影响。
+- 只有 `READY=yes` 才算就绪。失败原因写在 `hsm/hsm-boot.log`。
 
-**`READY=yes` 之外的任何结果都不要当成就绪。** 每一行都是实测的，不是假定的——
-比如 `DAEMON=ok` 的前提是服务启动时真的经安全世界读到了密码核的版本号，
-读不到它会拒绝启动，而不是装作好了。
+## 演示脚本
 
----
+SD 卡上的演示入口在 `/media/sd-mmcblk1p2/demo/`，对应仓库里的文件如下：
 
-## 三、跑演示
-
-```
-ssh root@192.168.50.175
-sh /media/sd-mmcblk1p2/demo/run.sh            # 业务流程演示（命令 + 输出 + 分层日志）
-sh /media/sd-mmcblk1p2/demo/run_classic.sh    # 原来那套（sdf_demo + 反证 + 管理功能面）
-```
-
-**业务流程演示**（[business_demo.sh](business_demo.sh)，部署为 `demo/run.sh`）用命令行工具
-`hsmctl` 一步一步走，共八部分：〇 设备 → 一 密钥管理（生成 SM4 / ML-DSA-65 / ML-KEM-768、
-列出、查看）→ 二 SM4-CBC 加解密 → 三 ML-DSA 签名验签（含改一位被拒）→ 四 ML-KEM
-封装/解封装 → 五 SM3 与随机数 → 六 备份、销毁、恢复（含篡改备份被拒）→ 七 安全性检查
-（篡改密钥被 TA 拒、普通世界绕过 TEE 装不进密钥、会话后金库为空）→ 八 应用经 HTTP
-接口调用（板上用 `nc` 向 `127.0.0.1:8080` 发原样 HTTP 请求，调用 `hsm_httpd` 的各条路由）。
-每条命令后面跟着 daemon 日志（`hsm/hsm-boot.log`）里**这条命令**产生的分层记录：
-`[TEE]` TA 里做的、`[TEE→PL]` 安全通路写进 FPGA、`[PL]` FPGA 里算的（带时延）、
-`[NW]` daemon 搬密文；第八部分还有 `[HTTP]` 网关收到请求的记录。
-
-输出可以用 `tools/demo_to_html.py` 转成一页 HTML 报告（样例：
-[docs/demo/business_demo.html](../../docs/demo/business_demo.html)）。
-
-### 原来那套
-
-`run_classic.sh`（仓库里是 [board_demo.sh](board_demo.sh)）：先打 `HSM_STATUS`，再依次跑
-`hsm/run_demo.sh`（[run_demo.sh](run_demo.sh)：① + ② 用 `sdf_demo` 走 SDF 接口，
-③ 绕过接口直接扫地址，④ 往被拒地址狂写）和 `functions.sh`（⑤ 管理功能面，仓库里是
-[functions_board.sh](functions_board.sh)）。
-
-### 在板子上
+| SD 卡上 | 仓库里 | 内容 |
+|---|---|---|
+| `demo/run.sh` | `business_demo.sh` | 业务流程演示，八部分 |
+| `demo/run_classic.sh` | `board_demo.sh` | 先打 `HSM_STATUS`，再依次跑 `hsm/run_demo.sh` 和 `demo/functions.sh` |
+| `demo/functions.sh` | `functions_board.sh` | 管理功能面演示（槽位、备份、安全存储），用的是主机侧软件密码机 |
+| `demo/bin/` | (交叉编译产物) | `functions.sh` 用的 `pqchsmd`、`pqchsm-cli`、`pqchsm-admin`、`mechs`、`roundtrip`、PKCS#11 模块 |
+| `hsm/run_demo.sh` | `run_demo.sh` | `sdf_demo`、绕过接口的反证、`hsm_nocrash` |
 
 ```
 ssh root@192.168.50.175
-sh /media/sd-mmcblk1p2/demo/run.sh
+sh /media/sd-mmcblk1p2/demo/run.sh            # 业务流程演示
+sh /media/sd-mmcblk1p2/demo/run_classic.sh    # sdf_demo + 反证 + 管理功能面
 ```
 
-### 从另一台机器（同一内网）
+### 业务流程演示
 
-**第一步：在那台机器上构建客户端。** 客户端不做任何密码运算，所以
-**不需要 liboqs、不需要 OpenSSL**，一条命令、只用系统的 `cc`：
+`run.sh` 用命令行工具 `hsmctl` 逐步演示，共八部分：
+
+| 部分 | 内容 |
+|---|---|
+| 〇 设备 | `hsmctl info` |
+| 一 密钥管理 | 生成 SM4、ML-DSA-65、ML-KEM-768 密钥，列出、查看 |
+| 二 数据加解密 | SM4-CBC |
+| 三 签名与验签 | ML-DSA-65；改一位的消息验签被拒 |
+| 四 密钥封装 | ML-KEM-768 封装、解封装 |
+| 五 杂凑与随机数 | SM3、随机数 |
+| 六 备份与恢复 | 备份、销毁、恢复；篡改过的备份被拒 |
+| 七 安全性检查 | 篡改密钥文件里的 blob，TA 拒绝装载；普通世界直接往密钥装载口写密钥（`d7probe`）；会话结束后对称密钥寄存器为空（`d7probe vmap`） |
+| 八 HTTP 接口 | 板上没有 curl，用 `nc` 向 `127.0.0.1:8080` 发原样 HTTP 请求，调用 `hsm_httpd` 的路由：`/v1/info`、`/v1/keys`（生成、列出、销毁）、加解密、签名验签、封装解封装、`/v1/sm3`、`/v1/random` |
+
+每条命令后面会附上 daemon 日志里这条命令产生的分层记录：
+
+| 标签 | 含义 |
+|---|---|
+| `[TEE]` | TA 里完成的操作 |
+| `[TEE→PL]` | TA 经安全通路把密钥材料写进 PL |
+| `[PL]` | PL 里的运算（带时延） |
+| `[NW]` | 普通世界 daemon 搬运 blob |
+| `[HTTP]` | 网关收到请求（第八部分） |
+
+演示用的密钥库在 `/tmp/hsm-demo`，结束后删除。第八部分用网关自己的密钥库（`/media/sd-mmcblk1p2/keys`），演示中创建的密钥最后都会删掉。
+
+输出可以用 `tools/demo_to_html.py` 转成 HTML 报告，样例见 [docs/demo/business_demo.html](../../docs/demo/business_demo.html)。
+
+### 经典演示
+
+`run_classic.sh` 的内容：
+
+| 编号 | 内容 | 判据 |
+|---|---|---|
+| ① ② | `sdf_demo` 经 SDF 接口调用 | ML-KEM 两端共享密钥一致；SM4 密文与 GB/T 32907 附录 A.1 逐字节相同；明文导入对称密钥被拒；blob 重装后密文相同；会话结束后句柄失效 |
+| ③ | 绕过接口，从普通世界直接访问 PL | 见下 |
+| ④ | `hsm_nocrash` 往被拒或不存在的地址读写 | 板子照常运行 |
+| ⑤ | `functions.sh` 管理功能面 | 见 [demo/functions/README.zh-CN.md](../../demo/functions/README.zh-CN.md) |
+
+③ 先读风扇观测口和 `trng_axi` 的 VERSION 判断当前位流：
+
+- 默认的演示形态（`zu3eg_hsm_dev.bit`，`SECURE_ONLY=0`）：功能核对普通世界开放，不能用读回 0 作判据。演示改为运行 `d7probe`，从普通世界往对称密钥寄存器的装载口写一把密钥，该口只接受安全世界的事务，写入全部被丢弃，`LOAD_REJ` 计数增加 11。
+- 送检形态（`zu3eg_hsm.bit`，`SECURE_ONLY=1`）：`hsm_secneg` 从普通世界读五个功能核的 VERSION，全部读回 0，而真值是 `0x00010000`。风扇观测口始终开放，读到真值，用来确认这条访问路径本身是通的。
+
+切换到送检形态：`sh plharness.sh pay_d7_sec.sh`（装送检位流，从普通世界扫描，经安全世界跑完整 KAT，最后装回厂家位流），跑完用 `hsmreboot.sh` 重启回到演示形态。
+
+④ 的记录在 `hsm/RESULT_nocrash.txt`：9 个被拒或不存在的地址，每个读 2000 次、写 2000 次，共 36,000 次访问。被拒的访问读回 0、写入被丢弃，不产生总线错误。如果被拒访问回 SLVERR，写是 posted 的，错误会以 SError 回到内核，内核无法处理，只能断电重启。违规计数器只有安全世界读得到。
+
+## 从另一台机器连
+
+**构建客户端。** 客户端不做密码运算，不需要 liboqs，只用系统的 `cc`：
 
 ```
 sh board/demo/build_client.sh
 ```
 
-> **只是想演示的话不必读下去** —— SSH 上板一条命令：
-> ```
-> sh /media/sd-mmcblk1p2/demo/run.sh
-> ```
-> 那个目录只放入口脚本（`run.sh`、`run_classic.sh`、`functions.sh`；`hsm/` 里有六十多个文件，
-> 不该让人在里面找）。`run.sh` 在仓库里是 [business_demo.sh](business_demo.sh)。
+产物是 `sdf_demo`（SDF 接口）和 `p11_hw_demo`（PKCS#11 接口）。
 
-它会产出两个东西：`sdf_demo`（SDF 接口）和 `p11_hw_demo`（标准 PKCS#11 接口）。
+**凭据。** 远程口是 mTLS，需要 `hsm_ca.crt`、`client.crt`、`client.key`。仓库里的 `demo/remote/creds` 是公开的演示凭据。使用自己的 PKI 时运行 `tools/demo_remote.sh <板子IP> --provision`。
 
-**第二步：拿凭据**（只需一次）。远程口是 mTLS，不是口令 —— 需要
-`hsm_ca.crt` / `client.crt` / `client.key` 三个文件。仓库里带了一份演示用的
-（`demo/remote/creds`），要自己那套就跑 `tools/demo_remote.sh <板子IP> --provision`。
-
-**第三步：连**。
-
-SDF 接口：
+**连接。**
 
 ```
 ./sdf_demo <板子IP> <凭据目录> [端口] [设备CN]
+./demo/remote/run.sh <板子IP>                 # 自动编译客户端并带默认参数
+./demo/remote/full_demo.sh <板子IP> [凭据目录]  # 板上 run.sh（经 ssh）+ 本机 curl 调 HTTPS，合成 demo-out/demo.html
 ```
 
-不想记这些参数，仓库根下有一条一键的：
-
-```
-./demo/remote/run.sh <板子IP>
-```
-
-想把「板上命令行 + 本机 curl 经 HTTPS（mTLS）调用」连同 HTML 报告一起跑完，用
-`./demo/remote/full_demo.sh <板子IP> [凭据目录]`（前一半经 ssh 跑 `demo/run.sh`，
-后一半是 `demo/remote/http_demo.sh`，结果合成 `demo-out/demo.html`）。
-
-标准 PKCS#11 接口（这一条最能说明问题——一个不认识这块板的标准应用，
-拿标准 `C_*` 调用过来，密钥就在 FPGA 里生成、私钥永不离开硬件）：
+PKCS#11 接口：
 
 ```
 PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=<板子IP> \
@@ -157,75 +148,23 @@ PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=<板子IP> \
     ./p11_hw_demo <PKCS#11 模块.so>
 ```
 
-`sdf_demo` 是普通的用户程序，链接 `libsdfe`，**不含任何硬件细节**。
-本机版和远程版是同一个程序、同一段代码，只有"打开设备"那一行不同。
-`p11_hw_demo` 更彻底：它只认 OASIS 的 `pkcs11.h`，连 `libsdfe` 都不直接调 ——
-后端是不是 FPGA，由环境变量决定，代码一个字不用改。
+`p11_hw_demo` 只用 OASIS 的 `pkcs11.h`。后端是不是板子由环境变量决定。它检查四件事：`C_GenerateKeyPair` 生成 ML-KEM 密钥对；读私钥的 `CKA_VALUE` 被拒；`C_EncapsulateKey` / `C_DecapsulateKey` 两端共享密钥一致；`C_Encrypt` / `C_Decrypt`（`CKM_AES_GCM`）对任意长度数据做 KEM-DEM 公钥加密。
 
----
+## 出问题时
 
-## 四、演示证明了什么
-
-| # | 展示 | 判据 |
-|---|---|---|
-| ① | 远程调用 → FPGA 算 → 结果对 | ML-KEM 两端共享密钥一致；SM4 密文与 **GB/T 32907 A.1** 逐字节相同 |
-| ② | 密钥在 TEE 里管 | 应用只拿到句柄与密文 blob；明文导入被拒；blob 重装同密文；后量子私钥由 TA 保管种子、FPGA 现展开算完即擦 |
-| ③ | 绕过接口也够不着 | 演示形态：普通世界直接往对称金库装载口写密钥，一笔不生效且被计数；送检形态：五个功能核的版本号**全部读回 0**（真值 `0x00010000`） |
-| ④ | 怎么打都崩不了板 | 往被拒或不存在的地址读写（10 个地点、各读写 2000 次），板子照常运行 |
-| ⑤ | **标准 PKCS#11 接口** → FPGA | `p11_hw_demo`：`C_GenerateKeyPair` 私钥留片内、读 `CKA_VALUE` 被拒（`CKR_ATTRIBUTE_SENSITIVE`）、`C_Encapsulate`/`C_Decapsulate` 两端一致、`C_Encrypt`/`C_Decrypt`（`CKM_AES_GCM`）公钥加密任意数据（KEM-DEM，KEM 在 FPGA、私钥留片内，DEM 带认证） |
-
-第 ⑤ 条是给"这东西能不能接进现有系统"这个问题的答案：不用任何私有 SDK，
-一个只认 OASIS `pkcs11.h` 的应用就能用它，而私钥从生成到使用一步都不出 FPGA。
-
-### 关于 ③：为什么"读回 0"是个强证据
-
-密码核对普通世界是关死的（AXI 防火墙按安全属性门控）。被拒的访问
-**读回 0**，而每个核真实的版本号是非零常量 `0x0001_0000`。
-
-所以"读到 0"同时说明了两件事：**事务确实到达了那个核**（路是通的、核在那儿），
-**并且值被扣下了**。作为对照，演示里还会读一个故意不设防的观测口 ——
-它读到真值，证明这条路本身是通的，"全是 0"不是因为什么都没发生。
-
-### 关于 ④：这条比听起来重要
-
-早先的版本里，被拒的访问会在总线上报错。而 ARM64 的写是"发出去就不管"的，
-错误要晚一些才以一种内核接不住的形式回来 —— 结果就是**一次写错地址 = 一次
-断电重启**。触发它甚至不需要有人捣乱：内核自己的驱动探测一个不存在的外设
-就打穿过一次。
-
-现在被拒的访问静悄悄地什么也不做（读返 0、写丢弃），所以**现场随便谁乱敲
-都弄不坏这台机器**。代价是打错地址不再报错，因此内部留了违规计数器，
-且**只有安全世界读得到**。
-
----
-
-## 五、出问题时
-
-| 现象 | 怎么办 |
+| 现象 | 处理 |
 |---|---|
-| `192.168.50.174` 连不上 | 正常。装入密码位流后 `eth0` 就没了，用 `.175` |
-| `.175` 也连不上 | 网线是不是只插了一个口？串口 115200 进去看 `HSM_STATUS` |
-| `READY=no` | 看 `/media/sd-mmcblk1p2/hsm/hsm-boot.log`，每一步失败都写了原因 |
-| 想回到出厂状态 | 删掉 `/media/sd-mmcblk1p2/hsm/zu3eg_hsm_dev.bit`（开机默认装的演示形态位流）再重启，就不装密码位流了 |
-| 远程连不上 | 凭据对不对？板上 `pki/` 三件套（`hsm_ca.crt` / `hsm_device.crt` / `hsm_device.key`）缺一就**不会**监听 9797 与 8443（有意为之；本机 `127.0.0.1:8080` 不受影响） |
-| `uptime` 显示 load 约 1.0，但 CPU 是 100% 空闲 | **正常，不用管。** 是一个 USB 集线器的内核工作线程常驻在不可中断等待里 —— 它不占 CPU，但按 Linux 的算法会永久计入 load。开机 5 秒时 USB 枚举就已经这样了，早于密码机的任何脚本，与本项目无关。别在演示时去追它 |
+| `192.168.50.174` 连不上 | 装入密码位流后 `eth0` 就消失了，用 `.175` |
+| `.175` 也连不上 | 检查两个网口是否都插了线；用串口（115200）进去看 `HSM_STATUS` |
+| `READY=no` | 看 `/media/sd-mmcblk1p2/hsm/hsm-boot.log` |
+| 想回到厂家位流 | 删掉 `/media/sd-mmcblk1p2/hsm/zu3eg_hsm_dev.bit` 再重启，开机脚本不再装密码位流 |
+| 远程连不上 | 检查凭据；板上 `pki/` 三个文件是否齐全；两端时钟差太大会导致证书未生效 |
+| `uptime` 的 load 约 1.0 而 CPU 空闲 | 正常。一个 USB 集线器的内核线程常驻不可中断等待，计入 load。开机 5 秒时就已如此，与本项目无关 |
 
-**重启**用 `sh /media/sd-mmcblk1p2/hsm/hsmreboot.sh`（这块板子的 `reboot`
-命令不生效，脚本里走的是内核的 sysrq 通道）。
+重启用 `sh /media/sd-mmcblk1p2/hsm/hsmreboot.sh`。这块板上 `reboot` 不生效，脚本走内核 sysrq。
 
----
+## 限制
 
-## 六、还没做的，说清楚
-
-- 远程接口是 **mTLS**（TLS 1.3 双向证书），传输加密与身份都有了，但**没有权限
-  分级** —— 握手过了就等于拿到全部操作，也没有吊销。而且仓库里那份演示凭据是
-  **公开的**（`demo/remote/creds`），凭它任何够得着这个口的人都能驱动这台机器。
-  内网演示够用，不是可以直接对外的形态；边界写在
-  [docs/SECURITY.zh-CN.md](../../docs/SECURITY.zh-CN.md#远程口)。
-- 后量子私钥的**权威副本是 TA 包裹的种子 blob**：PL 里不按槽常驻私钥，每次运算
-  由 TA 把种子送进 FPGA、现展开、算完由硬件无条件擦。对称密钥同理，由 TA 装进
-  FPGA 金库，会话结束即擦。服务进程手里只有句柄与 blob。
-- TA 的 KEK 派生自 SHA-256(Device DNA)，而 DNA 可读 —— 在这块板上，blob 对
-  "能读 DNA 又拿到 blob"的人不是真正的密文。真 HUK 依赖认证启动（见下一条）。
-- 没有烧写任何一次性熔丝，**所以不存在硬件信任根**。当前的边界由 FPGA 里的
-  防火墙 + 安全世界的受限通道构成，可以被有物理访问权的人换掉启动镜像绕过。
+- 远程接口是 mTLS（TLS 1.3 双向证书）。握手通过后可以执行全部操作，没有分级授权；可选的 `pki/hsm_acl` 按证书 CN 限制，文件不存在时 CA 签发的任何证书都放行；没有吊销。仓库里的演示凭据是公开的，任何能连到这个口的人都能用它驱动密码机，只适合内网演示。详见 [docs/SECURITY.zh-CN.md](../../docs/SECURITY.zh-CN.md#远程口)。
+- TA 的 KEK 派生自 SHA-256(Device DNA)。DNA 不是秘密，能读 DNA 又拿到 blob 的人可以解开 blob。
+- 没有烧写 eFUSE，没有硬件信任根。能物理访问板子的人可以替换 SD 卡上的启动镜像，绕过当前的边界。

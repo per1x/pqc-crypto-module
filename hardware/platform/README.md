@@ -1,45 +1,54 @@
 # hardware/platform/
 
-Fabric logic that is **not cryptographic**, kept in its own tree so that "the
-fan never touches a crypto signal" is visible in the filesystem and not only in
-a comment. It shares the clock and the reset with the crypto cores and nothing
-else.
-
-There is only one PL, and the single bitstream loaded at runtime is everything,
-so this does go into the same bitstream as the crypto cores — the separation is
-in the source tree, not in the device.
+PL logic that is not cryptographic. It is kept apart from `hardware/rtl/` so the source
+tree shows that the fan controller touches no crypto signal. It shares the clock and
+reset with the crypto cores and nothing else. There is one PL and one bitstream, so the
+fan controller is built into the same bitstream as the cores (`syn/impl_bitstream.tcl`
+reads this directory and `board_pins.xdc` constrains the one pin it drives).
 
 ## `fan_ctrl/`
 
-Junction-temperature-driven fan control: `SYSMONE4` → DRP poll → temperature →
-duty cycle → PWM on pin `AA11`.
+Fan control from junction temperature: `SYSMONE4` -> DRP polling -> temperature -> duty
+cycle -> PWM on pin `AA11`. The pin is active low (low = fan on); the only inversion is
+`fan_pin = ~pwm_on` in `fan_ctrl.v`.
 
 | File | Role |
 |---|---|
-| `sysmon_drp.v` | DRP polling, pure RTL |
-| `fan_sysmon.v` | `SYSMONE4` instantiation and configuration |
-| `fan_ctrl.v` | Temperature → duty cycle → PWM |
-| `fan_ctrl_axi.v` | AXI observation port (slot 5) — temperature, duty and status read-back, plus a debug-only override and a SYSMON DRP read window; removable |
+| `sysmon_drp.v` | DRP polling, plain RTL |
+| `fan_sysmon.v` | `SYSMONE4` instantiation and configuration (`SIM_DEVICE` is set explicitly to `ZYNQ_ULTRASCALE`) |
+| `fan_ctrl.v` | Temperature -> duty cycle -> PWM (25 kHz at 75 MHz) |
+| `fan_ctrl_axi.v` | AXI4-Lite observation port at slot 5: temperature, duty and status read-back, a debug override, and a SYSMON DRP read window |
 
-**Cooling must work when Linux does not**: during the first seconds of boot,
-while U-Boot sits at a prompt, and when the kernel has hung. So the temperature
-is read by the PL itself over DRP and the whole path depends only on the PL
-clock. The AXI slave at slot 5 is observation only (its override cannot beat the
-over-temperature force); delete it and the fan still runs.
+The temperature is read by the PL itself, so cooling works without Linux: during early
+boot, while U-Boot waits at a prompt, and after a kernel hang. Slot 5 is for
+observation. Its override cannot beat the over-temperature force, and the fan still runs
+if the slot is removed.
 
-**Every safety rule errs towards more airflow.** Minimum duty is 8 %, not 0 (25 % was
-the floor until the quiet step was measured on the board; it is now the second step).
-At ≥80 °C the fan is forced to 100 % and does not release until 74 °C. A stale
-temperature forces 100 %, because when the temperature is unknown the only safe
-assumption is that it is high.
+Duty steps and thresholds (SYSMON codes in `fan_ctrl.v`, shown in degrees C):
 
-A fourth rule was added after a board run: a reading whose bits never change
-also forces 100 %. The first SYSMON configuration was wrong in a way where DRP
-still answered and the register still held a plausible 32.5 °C — the ADC simply
-was not converting. "No reading" never became true, so the staleness rule could
-not fire. A real junction temperature always jitters, which makes perfect
-stability itself the fault signal.
+| Step | Duty | Enter at or above | Leave at or below |
+|---|---|---|---|
+| 0 | 8 % | (lowest step) | |
+| 1 | 25 % | 37 | 35 |
+| 2 | 40 % | 45 | 40 |
+| 3 | 60 % | 55 | 50 |
+| 4 | 80 % | 65 | 60 |
+| 5 | 100 % | 75 | 70 |
 
-Lint, synthesisability and cocotb coverage apply here exactly as they do to the
-crypto RTL. A wrong fan has no runtime symptom; it just quietly overheats the
-die, which is a reason for more static checking, not less.
+Three conditions force 100 %:
+
+- Temperature at or above 80 C, held until it falls to 74 C.
+- No valid reading for `STALE_LIMIT` clocks (about 0.9 s at 75 MHz).
+- A reading that does not change for `STUCK_LIMIT` consecutive samples (30000 samples at
+  1 ms, about 30 s). A SYSMON misconfigured so that the ADC does not convert still
+  answers DRP with a plausible constant, which the staleness check does not catch; a real
+  junction temperature always jitters.
+
+The lowest step is 8 %, not 0. The fan has no tach, and 8 % was measured on this board as
+able to start from standstill and to keep running for 3 minutes. Remeasure with
+`board/scripts/fan_minduty_sweep.sh` after changing the fan or enclosure. The thresholds
+are module parameters; the characterisation bitstream (`PQC_CHARACTERIZE=1`) lowers them
+to the range this board reaches.
+
+`tools/rtl_lint.sh` and `tools/rtl_synth_check.sh` cover this directory, and
+`test_fan_ctrl.py` and `test_sysmon_drp.py` are in the cocotb suite.
