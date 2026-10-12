@@ -4,12 +4,14 @@ Everything that runs on the AXU3EGB board, plus the raw output of every run.
 
 | Path | Contents |
 |---|---|
-| `src/` | Standalone C programs that `mmap` `/dev/mem` at `0x8000_0000` and drive the cores directly, plus the generated KAT headers and their generator |
-| `scripts/` | The PL harness and the payload scripts it runs (`pay_*.sh`) |
+| `src/` | Standalone C programs that `mmap` `/dev/mem` at `0x8000_0000` and drive the cores directly (plus the D7/RPMB probes), and the generated KAT headers and their generator |
+| `scripts/` | Boot-time and operations scripts (`hsm-boot.sh` is the SD-card boot script that brings up `eth1`, the PL, `/dev/secmmio`, the TA and the daemons; `hsmreboot.sh`, `pl_deadman.sh`), the PL harness `plharness.sh`, and the payload scripts it runs (`pay_*.sh`) |
+| `demo/` | The on-board demos: `business_demo.sh` (deployed to the SD card as `demo/run.sh`; the hsmctl business flow with layered `[TEE]`/`[TEE→PL]`/`[PL]`/`[NW]`/`[HTTP]` log lines) and the classic ones (`board_demo.sh`, `run_demo.sh`, `functions_board.sh`). See [`demo/README.zh-CN.md`](demo/README.zh-CN.md) |
 | `logs/` | Raw output of board runs, kept verbatim as evidence |
-| `kmod/` | Kernel modules: `/dev/secmmio`, the PM/SiP caller, the protection-unit dump |
+| `kmod/` | Kernel modules: `/dev/secmmio`, the PM/SiP caller (`pmsec`), the protection-unit dump (`protdump`), the boot-time XMPU poison switch (`xmpupoison`) |
 | `factory/` | Vendor-project bitstream build for the fan-only image |
 | `petalinux/` | PetaLinux recipe for the fan-quiet init |
+| `recovery/` | JTAG rescue: `build_rescue.sh` builds the shim, device tree and initramfs that `jtag_rescue.tcl` loads |
 
 ## The harness is not optional
 
@@ -56,6 +58,7 @@ real runs and should stay that way — the numbers quoted in
 | `RESULT_ctbprobe_demoform.txt` | The same 61-step probe re-run from the promoted default boot |
 | `RESULT_sdf_modes.txt` | Full SDF-style session: hardware RNG, ML-KEM, SM4 block, ML-DSA (three sets), the four cipher modes against SP 800-38A, and the counter-proof that a handle dies with its session |
 | `RESULT_secform_mldsa.txt` | Secure form (`SECURE_ONLY=1`): normal world reads all zero and the direct KAT program refuses to write, while the daemon reaches ML-DSA through the EL3 whitelist and signs end to end |
+| `RESULT_b1_*`, `RESULT_b2_*`, `RESULT_d7_*`, `RESULT_business_demo*.txt` and others | Later runs (seed custody, TA key operations, D7 symmetric-key custody and benchmarks, wire fuzzing, the business demo in its plain and HTTP forms) |
 
 ## Programs
 
@@ -73,5 +76,7 @@ real runs and should stay that way — the numbers quoted in
 | `src/mldsa_ctb_probe.c` | Attribution experiment for the isolated-Verify rejection: an ordered sequence that separates "runtime parameter set not applied" from "c̃ comparison reads bytes left by the previous run" |
 | `src/gen_kat_mlkem_all.py` | Generates `kat_mlkem_all.h` from the ACVP vectors |
 
-Build them for the board with an aarch64 cross compiler and copy them across;
-they are static and have no runtime dependencies.
+Build them for the board with an aarch64 cross compiler (`make CROSS=aarch64-linux-gnu-`
+in `src/` builds `mldsa_hwtest` and `d7probe`; the others carry their own compile
+line in their file headers) and copy them across; they are static and have no
+runtime dependencies. The table above is not exhaustive — see `src/` for the rest.

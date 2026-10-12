@@ -15,6 +15,7 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
 ```
 这台密码机在哪？
   板子的 IP 或主机名，例如 192.168.1.50 或 hsm.local
+  （板子的 eth1 是静态地址，上电约 35 秒后就绪；Ctrl-C 退出）
 
   地址： 192.168.1.50
 
@@ -23,7 +24,7 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
     2) 只打关键结论        --smoke
     3) 只连一下看在不在    --status
 
-  选 [1-3，回车= 1]:
+  选 [1-3，回车= 1]：
 ```
 
 Once it works it offers to remember the address, so later runs need nothing at
@@ -61,7 +62,7 @@ finds it and says so plainly if it is missing.
 public repository. That is deliberate — it is what makes the command above work
 with no setup — and the cost has to be stated rather than glossed over:
 
-- **Anyone who can reach the board on port 9797 can drive this crypto module.**
+- **Anyone who can reach the board on port 9797 (or the HTTPS gateway on 8443, same CA) can drive this crypto module.**
   The only thing making that acceptable is that the board sits on a private LAN
   with no route in from outside.
 - **This is not the security argument for the remote port.** mTLS buys "holds a
@@ -82,3 +83,10 @@ CREDS=~/.config/pqchsm/pki ./demo/remote/run.sh
 
 Provisioning a board with a fresh, private PKI is
 `tools/demo_remote.sh <board-ip> --provision`.
+
+## Also here: the board-CLI + HTTPS tour
+
+| Script | What it does |
+|---|---|
+| `http_demo.sh <board-ip> [creds-dir]` | Walks the business flow from this machine with `curl` over HTTPS + mTLS to the gateway on port 8443 (default creds dir `~/.config/pqchsm/pki`; needs `curl` and `python3`). Output has the same shape as the on-board demo |
+| `full_demo.sh <board-ip> [creds-dir]` | Runs `/media/sd-mmcblk1p2/demo/run.sh` on the board over ssh, then `http_demo.sh`, and merges both into `demo-out/demo.html` with `tools/demo_to_html.py`. Unlike `run.sh`, this one does use SSH |

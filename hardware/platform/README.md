@@ -19,15 +19,16 @@ duty cycle → PWM on pin `AA11`.
 | `sysmon_drp.v` | DRP polling, pure RTL |
 | `fan_sysmon.v` | `SYSMONE4` instantiation and configuration |
 | `fan_ctrl.v` | Temperature → duty cycle → PWM |
-| `fan_ctrl_axi.v` | AXI observation port — read-only, and removable |
+| `fan_ctrl_axi.v` | AXI observation port (slot 5) — temperature, duty and status read-back, plus a debug-only override and a SYSMON DRP read window; removable |
 
 **Cooling must work when Linux does not**: during the first seconds of boot,
 while U-Boot sits at a prompt, and when the kernel has hung. So the temperature
 is read by the PL itself over DRP and the whole path depends only on the PL
-clock. The AXI slave at slot 5 is observation only; delete it and the fan still
-runs.
+clock. The AXI slave at slot 5 is observation only (its override cannot beat the
+over-temperature force); delete it and the fan still runs.
 
-**Every safety rule errs towards more airflow.** Minimum duty is 25 %, not 0.
+**Every safety rule errs towards more airflow.** Minimum duty is 8 %, not 0 (25 % was
+the floor until the quiet step was measured on the board; it is now the second step).
 At ≥80 °C the fan is forced to 100 % and does not release until 74 °C. A stale
 temperature forces 100 %, because when the temperature is unknown the only safe
 assumption is that it is high.

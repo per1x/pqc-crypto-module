@@ -10,11 +10,15 @@ application → libsdfe → pqchsm_fpgad → /dev/secmmio → EL3 SiP → AXI fi
 | File | Role |
 |---|---|
 | `sdfe.h`, `libsdfe.c` | SDF-style client library. Stateless; several processes may each link it |
-| `pqchsm_fpgad.c` | Daemon: sessions, handles, serialisation, ML-KEM private key custody |
+| `pqchsm_fpgad.c` | Daemon: sessions, handles, serialisation of access to the cores; carries only TA-wrapped key blobs, never holds a private key or a symmetric key in the clear |
 | `wire.h` | The request/response encoding between the two |
 | `pqcs_tls.h`, `pqcs_tls.c` | mTLS for the remote port: why, and what it does and does not buy |
+| `sdfe_pkenc.h`, `sdfe_pkenc.c` | Post-quantum public-key encryption of arbitrary data (ML-KEM + AES-256-GCM, KEM-DEM) on top of `libsdfe`; built by the top-level CMake, not by this Makefile |
 | `sdf_demo.c` | A worked example application |
-| `hsmctl.c` | Command-line tool: one command per business operation (see below) |
+| `hsmops.h`, `hsmops.c` | Business operations (keystore, encrypt/sign/encapsulate, backup …) shared by `hsmctl` and `hsm_httpd` |
+| `hsmctl.c` | Command-line tool: thin terminal shell over `hsmops.c`, one command per business operation (see below) |
+| `hsm_httpd.c` | JSON-over-HTTP(S) gateway: thin shell over `hsmops.c` (see below) |
+| `tls_test.c`, `wire_fuzz.py` | mTLS transport regression (also driven by `tools/tls_regress.sh`); malformed-request fuzzer for the daemon's wire protocol (needs a board) |
 
 ```bash
 make                              # host build
@@ -38,7 +42,7 @@ result. Two processes interleaving on one core produce results that are mutually
 misaligned but individually plausible. Serialisation needs a single point, and
 that point has to remember sessions.
 
-## Why `sdf_demo` links no crypto library
+## Why `sdf_demo` implements no cryptography
 
 `sdf_demo` links `libsdfe` and OpenSSL, and **OpenSSL is used for TLS transport
 only** — there is no ML-KEM, ML-DSA, SM4 or SM3 implementation available to it at
@@ -59,6 +63,8 @@ line of it changes.
 
 Symmetric keys are generated and loaded by the TA (`SDFE_GenerateKey` /
 `SDFE_LoadKey` / `SDFE_LoadKatKey`; wire ops `OP_SYMKEY_GEN`/`LOAD`/`KAT`, 15–17).
+Post-quantum seed blobs cross sessions through `SDFE_ExportKeyBlob` /
+`SDFE_ImportKeyBlob` (ops `OP_PQC_BLOB_EXPORT`/`IMPORT`, 18–19).
 The daemon only carries the blob; slots 0..6 are product slots, slot 7 is
 KAT-only. `SDFE_ImportKey` (plaintext, op 6) always returns `SDR_NOTSUPPORT`,
 and the daemon wipes the symmetric vault at session end. Block encryption is

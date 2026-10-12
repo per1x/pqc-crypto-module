@@ -7,7 +7,7 @@ RTL 源码、验证环境、生成黄金向量的参考模型，以及综合脚�
 > **本目录已经不只是仿真了。** 在分支 `zu3eg-fpga-crypto` 上，这些源码被综合成
 > bitstream 并跑在一块 XCZU3EG 板子上：ML-KEM 512/768/1024 **在真硅上**与 NIST ACVP
 > 向量逐字节一致，AXI 防火墙的访问门控也已双向证明。下面描述的仿真环境仍然是第一道
-> 门（197 个 cocotb 测试），但不再是最后一道。
+> 门（272 个 cocotb 测试），但不再是最后一道。
 > 见 [../docs/SECURITY.zh-CN.md](../docs/SECURITY.zh-CN.md)。
 
 ```
@@ -15,7 +15,8 @@ hardware/
 ├── rtl/            密码逻辑
 │   ├── mlkem/      NTT、基乘、约减、采样、压缩、编解码，
 │   │               以及 KeyGen / Encaps / Decaps 三个整核
-│   ├── mldsa/      ML-DSA 算子：NTT、舍入、提示位、采样
+│   ├── mldsa/      ML-DSA 算子：NTT、舍入、提示位、采样，
+│   │               以及 KeyGen / Sign / Verify 三个整核和 `mldsa_engine` 适配层
 │   ├── keccak/     keccak_f1600.v、sha3_core.v
 │   ├── sym/        aes_core.v、sbox.v、sm4_core.v、sm3_core.v
 │   ├── trng/       环振源、健康检测（RCT/APT）、调理、FIFO、AXI 封装
@@ -29,8 +30,9 @@ hardware/
 └── syn/            Vivado out-of-context 综合与出 bitstream 的完整流程
 ```
 
-所有模块都是可推断的纯 Verilog-2001，未实例化任何厂商原语，因此同一份源码可原样综合
-到 Xilinx、Intel 或 Lattice。
+所有算法核都是可推断的纯 Verilog-2001，不含厂商原语，因此这些源码可原样综合到
+Xilinx、Intel 或 Lattice。厂商原语和 IP 只出现在它们之外：`rtl/board/zu3eg_hsm_top.v` 里的
+`BUFGCE_DIV` 与 PS 实例，以及 `platform/fan_ctrl/fan_sysmon.v` 里的 `SYSMONE4`。
 
 ## 现有模块
 
@@ -63,16 +65,23 @@ hardware/
 | `mlkem_decaps` | **完整 ML-KEM.Decaps_internal**：解密 + 例化 `mlkem_encaps` 重加密 + **常量时间**密文比对 + 隐式拒绝 J(z‖c) | 约 78.0 k / 次（768） |
 | `ram_dp` | 参数化真双口同步 RAM，推断成块 RAM | 读延迟 1 拍 |
 | `axi4lite_regs` | AXI4-Lite 从机，控制/状态寄存器 | — |
-| `axi4lite_firewall` | AXI4-Lite 防火墙：AxPROT / 地址窗口 / tamper 门控，**不合规的事务不进下游**，带违规计数 | 每笔访问 3~4 拍 |
+| `axi4lite_firewall` | AXI4-Lite 防火墙：AxPROT / 地址窗口 / tamper 门控，**不合规的事务不进下游**，被拒按 RAZ/WI 应答（读回 0、写丢弃、响应 OKAY，不是 DECERR），带违规计数 | 每笔访问 3~4 拍 |
 | `key_vault` | PL 内密钥仓，8 槽 × 256 bit 寄存器；只写入口 + 只给 PL 内部的使用口；tamper 一拍全清并锁存 | 擦除 1 拍 |
-| `key_vault_axi` | 密钥仓的 AXI4-Lite 从机 = 防火墙 + 元数据寄存器 + 仓 | — |
+| `key_vault_axi` | 密钥仓的 AXI4-Lite 从机 = 防火墙 + 元数据寄存器 + 仓；装载口只认安全写（`AxPROT[1]=0`），被拒的普通世界装载计入 `LOAD_REJ`（0x34）；带 `ext_zeroize` 输入 | — |
 | `aes_sbox`、`aes_inv_sbox`、`sm4_sbox` | 组合查表，由 `sym_oracle.py --emit-sbox` 生成 | — |
 | `aes_core` | AES-128/256 分组加解密（FIPS 197），密钥扩展与分组是两条命令 | 装密钥 41/53，每分组 11/15 |
 | `sm4_core` | SM4 分组加解密（GB/T 32907），解密复用加密通路只倒轮密钥 | 装密钥 32，每分组 33 |
 | `sm3_core` | SM3 杂凑（GB/T 32905），填充在核内做 | 65 / 64 字节块 |
-| `sym_axi` | AES/SM4/SM3 的 AXI4-Lite 从机；**没有 KEY 寄存器**，密钥从 `key_vault` 的 use 口进来 | — |
+| `sym_axi` | AES/SM4/SM3 的 AXI4-Lite 从机；**没有 KEY 寄存器**，密钥从 `key_vault` 的 use 口进来；带 `kv_zeroize` 输出 | — |
 | `sym_vault_top` | 密钥仓 + 对称核的顶层，两个从机各带一个防火墙，共用一根 tamper | — |
-| `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核 | — |
+| `pqc_accel_axi` | 加速器顶层：AXI4-Lite + AXI4-Stream + 算法核（只用于仿真与综合，不在板上镜像里） | — |
+| `mldsa_keygen`、`mldsa_sign`、`mldsa_verify` | ML-DSA（FIPS 204）三个整核；支持 ML-DSA-44/65/87 | — |
+| `mldsa_engine` | 适配层：把一个字节流写口翻译成三个 ML-DSA 核各自的原生端口 | — |
+| `mlkem_axi` | 三个 ML-KEM 核的 AXI4-Lite 从机 = 防火墙 + 两块 8 KB 输入/输出缓冲；`MODE[4]=CHAIN` 在 PL 内由种子展开私钥、算完即擦，PL 在两次运算之间不留密钥状态——软件每次运算后须等 `KEYSTAT[0]`（EXP_WIPING）清零 | — |
+| `mldsa_axi` | `mldsa_engine` 的 AXI4-Lite 从机；ML-DSA-44/65/87 在运行时由 `MODE.PSET` 选，`CHAIN` / `KEYSTAT` 约定与 `mlkem_axi` 相同 | — |
+| `trng_axi` | TRNG 的 AXI4-Lite 从机（`trng_top`：环振源、健康检测、调理） | — |
+| `axi4lite_xbar` | 一主多从的 AXI4-Lite 地址译码，每槽 64 KB；未命中按 RAZ/WI 应答 | — |
+| `zu3eg_hsm_top` | 上板顶层：PS 的 `M_AXI_HPM0_LPD` → xbar → `0x8000_0000 + 槽号*0x1_0000` 的各槽：0 `trng_axi`、1 `key_vault_axi`、2 `sym_axi`（1、2 是 `sym_vault_top` 的两个从机）、3 `mlkem_axi`、4 金丝雀 `key_vault_axi`、5 风扇观测口、6 `mldsa_axi`。默认构建里五个功能从机与金丝雀都是 `SECURE_ONLY=1`；`PQC_DEV_OPEN=1` 出 `zu3eg_hsm_dev.bit`，`SECURE_ONLY=0` | — |
 
 ML-KEM 与 ML-DSA 是两套不同的算术：模数不同（3329 对 8380417）、Montgomery 基不同
 （2¹⁶ 对 2³²）、系数位宽不同，所以两组模块彼此独立、不共用任何东西。ML-DSA 的 NTT 做满
@@ -118,7 +127,8 @@ AXI4-Stream，底下挂算法核。它实现的正是 `include/pqchsm/accel.h` �
 ## 验证
 
 ```bash
-./tools/rtl_sim.sh                        # 完整 cocotb 回归，Icarus Verilog
+./tools/rtl_sim_fast.sh                   # 迭代用：分模块 cocotb，Verilator（默认一组）
+./tools/rtl_sim.sh                        # 完整 cocotb 回归，Icarus Verilog（很慢，关卡时跑）
 ./tools/rtl_lint.sh                       # Verilator -Wall + Icarus，逐模块作顶层
 ./tools/rtl_synth_check.sh                # Yosys 可综合性检查，厂商中立
 python3 hardware/model/ntt_oracle.py      # 两道独立的 NTT 预言机

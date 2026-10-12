@@ -8,8 +8,9 @@
 ## 两级抽象
 
 **`pqc_backend_t`**（声明于 `include/pqchsm/pqc.h`）是密钥生成/封装/解封装/签名/验签
-的 vtable。`src/crypto/pqc_liboqs.c` 直接实现它；本目录的 `pqc_accel.c` 则在寄存器
-接口之上实现同一张表。
+的 vtable。`src/crypto/pqc_native.c` 以软件方式实现它（vendored 的 mlkem-native /
+mldsa-native，与 OP-TEE TA 共用同一棵源码树）；本目录的 `pqc_accel.c` 在寄存器接口
+之上实现同一张表，`pqc_sdfe.c` 则通过 `pqchsm_fpgad` 服务调用 FPGA 来实现它。
 
 **`accel_transport_t`**（声明于 `include/pqchsm/accel.h`）就是那个寄存器接口：一张
 AXI 风格的寄存器表，含 `CTRL`、`STATUS`、`MODE`、`PARAM`、`IN_LEN`、`OUT_LEN` 与
@@ -21,14 +22,20 @@ AXI 风格的寄存器表，含 `CTRL`、`STATUS`、`MODE`、`PARAM`、`IN_LEN`�
 | 文件 | 作用 |
 |---|---|
 | `pqc_accel.c` | 在寄存器接口之上实现 `pqc_backend_t`；同时提供 `accel_ntt()`、`accel_keccak_f1600()`、`accel_shake()` |
-| `accel_stub.c` | 软件 transport。精确实现寄存器语义，内部调用 liboqs。始终可用。 |
+| `accel_stub.c` | 软件 transport。精确实现寄存器语义，内部调用软件后端（`pqc_backend_native()`）。始终可用。 |
 | `accel_verilator.c` | 驱动 Verilator 仿真 RTL 的 transport。仅在存在 Verilator 时编入，否则 `accel_transport_verilator()` 返回 `NULL`。 |
+| `accel_axi.c` | 经真正的 AXI4-Lite 寄存器事务与 AXI4-Stream 数据包驱动仿真 RTL 的 transport（走 `docs/REGISTERS.zh-CN.md` 的契约）。仅在存在 Verilator 时编入，否则 `accel_transport_axi()` 返回 `NULL`。 |
 | `verilator/ntt_sim.cpp` | 对 Verilated `ntt_core` 的 C 包装 |
 | `verilator/keccak_sim.cpp` | 对 Verilated `keccak_f1600` 的 C 包装 |
-| `accel_mmap.c` | 打真 PL 的 `/dev/mem` + `mmap` transport。物理基址未在构建时给出时返回 `NULL`。 |
+| `verilator/axi_sim.cpp` | 对 Verilated 带 AXI 前端加速器的 C 包装，供 `accel_axi.c` 使用 |
+| `accel_mmap.c` | 打真 PL 的 `/dev/mem` + `mmap` transport。构建时未给出 `PQCHSM_ACCEL_MMAP_BASE` 与 `PQCHSM_ACCEL_MMAP_BUF` 时返回 `NULL`。尚未对着真 PL 驱动过。 |
 | `hwrng.c` | PL 熵源（`trng_axi`）驱动，照 `docs/REGISTERS.zh-CN.md` 的契约实现 |
 | `hwrng_stub.c` | `trng_axi` 寄存器语义的软件模型。FIFO 由 OpenSSL 填 —— 模拟的是**接口**，不是熵。 |
-| `hwrng_mmap.c` | PL 里 TRNG 的 `/dev/mem` + `mmap` transport |
+| `hwrng_mmap.c` | PL 里 TRNG 的 `/dev/mem` + `mmap` transport。构建时未给出 `PQCHSM_HWRNG_MMAP_BASE` 时返回 `NULL`；交付形态（`SECURE_ONLY`）下普通世界够不到这些寄存器，所以它只用于调试位流和作为 TA 驱动的原型 |
+| `hwrng_sdfe.c` | 字节级熵源（`hwrng_byte_source_sdfe()`）：经 `libsdfe` → `pqchsm_fpgad` 取 TRNG 字节；交付形态下真正走得通的那条路 |
+| `pqc_sdfe.c` | 经服务在 FPGA 上跑 ML-KEM / ML-DSA 的 `pqc_backend_t`（`pqc_backend_sdfe()`）。字节版 keygen/decaps/sign 有意不实现：私钥留在硬件里，只经句柄使用 |
+| `sdfe_conn.c`、`sdfe_conn.h` | 到服务的唯一一条共享连接（本机 socket；设了 `PQCHSM_SDFE_HOST` + `PQCHSM_SDFE_PKI` 则走 mTLS TCP），`hwrng_sdfe.c` 与 `pqc_sdfe.c` 共用；daemon 一次只服务一个连接 |
+| `hwrng_stub.h` | 软件 TRNG 模型的内部故障注入钩子（仅供测试） |
 
 ## 熵源是独立外设，没有并进加速器的操作码
 
@@ -41,8 +48,9 @@ AXI 风格的寄存器表，含 `CTRL`、`STATUS`、`MODE`、`PARAM`、`IN_LEN`�
 
 并进操作码会把这三件事搅在一起。
 
-装上 transport 之后，`pqc_random_bytes()` 与 liboqs 的随机源都改从它取，
-且**取不到时都不回退到软件源**。静默回退会让"熵来自硬件"这句话恰好在最要紧的
+装上硬件熵源（寄存器级 transport 或字节源）之后，`pqc_random_bytes()` 改从它取，
+且**取不到时不回退到软件源**。软件桩的 `is_hardware = 0`，装它不会改变
+`pqc_random_bytes()` 的取数来源（OpenSSL）。静默回退会让"熵来自硬件"这句话恰好在最要紧的
 时刻悄悄变成假话，而调用方无从知道。
 
 ## 软硬件的分工
@@ -68,14 +76,16 @@ AXI 风格的寄存器表，含 `CTRL`、`STATUS`、`MODE`、`PARAM`、`IN_LEN`�
 
 ## 仿真后端的覆盖范围
 
-Verilator transport 实现了 `NTT_FWD`、`NTT_INV` 与 `KECCAK_F1600`。其余模式一律置
-`STATUS.ERR` 并给出 `ERRCODE=3`，向上呈现为 `PQC_ERR_UNSUPPORTED`。它刻意**不**回退
-到软件：静默回退会让"RTL 路径已跑通"变成假象。完整的 ML-KEM/ML-DSA 核属于后续工作。
+Verilator 与 AXI 两条 transport 实现了 `NTT_FWD`、`NTT_INV` 与 `KECCAK_F1600`。其余
+模式一律置 `STATUS.ERR` 并给出 `ERRCODE=3`，向上呈现为 `PQC_ERR_UNSUPPORTED`。它们
+刻意**不**回退到软件：静默回退会让"RTL 路径已跑通"变成假象。完整的 ML-KEM/ML-DSA 核
+（`hardware/rtl/mlkem`、`hardware/rtl/mldsa`）够不到这两条仿真 transport；板上经
+`pqc_sdfe.c` 使用它们。
 
 ## 一致性要求
 
 软件桩与仿真 RTL 必须经由同一寄存器接口产出逐字节相同的结果。
-`tests/unit/test_accel.c` 对两个 NTT 方向以及整条 SHA3/SHAKE 路径断言这一点，并将
-后者与 OpenSSL 交叉比对。同样的要求也将适用于真实硬件 transport。
+`tests/unit/test_accel.c`（直连）与 `tests/unit/test_accel_axi.c`（经 AXI 事务）对两个
+NTT 方向以及整条 SHA3/SHAKE 路径断言这一点，并将后者与 OpenSSL 交叉比对。同样的要求也将适用于真实硬件 transport。
 
 本层如何嵌入模块整体，参见 [docs/ARCHITECTURE.zh-CN.md](../../docs/ARCHITECTURE.zh-CN.md)。

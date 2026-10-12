@@ -20,19 +20,19 @@ There are two of them in this repository, with completely different surfaces:
 
 | | On the board: `pqchsm_fpgad` | On the host: `pqchsmd` (this demo) |
 |---|---|---|
-| Slot management | ❌ Its "slots" are PL key-vault 0-7 — hardware that holds symmetric keys | ✅ State machine, labels, policy |
+| Slot management | ❌ No slot state machine. Keys are owned by the OP-TEE TA and handed out as handles plus wrapped blobs; "slots" 0-7 are PL key-vault entries the TA loads symmetric keys into | ✅ State machine, labels, policy |
 | PIN / session / role | ❌ | ✅ SO / User, login, failure counting |
-| Keystore | ❌ | ✅ AES-GCM wrapped, KEK from the KDR, whole-file MAC, epoch anti-rollback |
-| Backup / restore | ❌ | ✅ M-of-N Shamir shares |
+| Keystore | ❌ No PIN-protected keystore; the `hsmctl` / `hsm_httpd` keystore directory holds only TA-wrapped blobs (no plaintext key, readable only by this board's TA) | ✅ AES-GCM wrapped, KEK from the KDR, whole-file MAC, epoch anti-rollback |
+| Backup / restore | `hsmctl backup` / `restore`: a whole-keystore bundle with a per-entry SM3, no M-of-N | ✅ M-of-N Shamir shares |
 | Cryptographic operations | ✅ All in the FPGA | liboqs, or forwarded to the board |
 
 **Slot, backup and storage management all live on the host side.** The board half is
 in [demo/remote/](../remote/) and [board/demo/](../../board/demo/).
 
-The two connect: with `PQCHSM_BACKEND=sdfe`, ML-KEM key generation runs on the FPGA
-and the private key stays in the on-chip vault — so slots and backups are managed on
-the host while the key material lives in hardware. That comes with a real trade-off,
-below.
+The two connect: with `PQCHSM_BACKEND=sdfe`, ML-KEM key generation goes to the board —
+the TA holds the seed as a wrapped blob and the FPGA expands it per operation — so slots and
+backups are managed on the host while the key material stays on the board. That comes
+with a real trade-off, below.
 
 ## What each section proves
 
@@ -55,10 +55,12 @@ what it computes.
 authorises the backup*. What gets exported is every slot carrying the `BACKUPABLE`
 policy. The `pqchsm-admin` help string is ambiguous here.
 
-**"Backupable" and "stays in hardware" are mutually exclusive.** A backup carries the
-seed, and a private key that has entered the FPGA's on-chip vault has no read path —
-so it cannot be backed up. Recoverable ↔ non-exportable: pick one. That is not a
-defect; it is a decision the operator has to make.
+**"Backupable" and "stays on the board" are mutually exclusive in this keystore.** A
+host-side backup carries the seed, and a key that lives on the board is held there as a
+TA-wrapped blob that only this board's TA can open — the host keystore cannot export it.
+Recoverable ↔ non-exportable: pick one. That is not a defect; it is a decision the
+operator has to make. (The board's own bundle, `hsmctl backup`, restores only onto the
+same board.)
 
 ## Environment
 

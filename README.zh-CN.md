@@ -21,42 +21,48 @@ ARM 核上的 Linux 只是发命令的那一侧。
 | **后量子签名** | ML-DSA-44 / 65 / 87（FIPS 204），KeyGen / Sign / Verify 在 RTL 中实现，一份位流覆盖三个参数集——**在真硅上**与 ACVP 向量逐字节一致 |
 | **对称与 SM 系列** | AES-128/256、SM4、SM3——对照 FIPS 197、GB/T 32907、GB/T 32905 校验 |
 | **真随机源** | 8 环形振荡器熵源，SP 800-90B 健康测试（RCT/APT），SHA-3 海绵调节。实测最小熵 **H = 0.871 bit/sample** |
-| **硬件密钥仓** | 对称密钥经总线进入，只能沿一条通往密码核的专用线离开。**RTL 中不存在读出路径** |
+| **密钥归 TEE 管** | 所有密钥由 OP-TEE 里的 TA 生成，熵 = OP-TEE PRNG ⊕ PL 真随机源；落地的只有 KEK 包裹的 blob（AES-256-GCM）。后量子私钥只以种子形式存在，每次运算在 PL 里现展开、算完由硬件擦除 |
+| **硬件密钥仓** | 对称密钥**只能由 TA 经安全世界装入**（装载口只认 `AxPROT[1]=0`，普通世界的写被丢弃并计数），只能沿一条通往密码核的专用线离开。**RTL 中不存在读出路径**；会话结束即擦 |
 | **安全边界** | AXI 防火墙按 `AxPROT[1]` 门控，已在板上双向证明：安全世界读得到 `SECURE_ONLY=1` 的核，普通世界在总线上被拒 |
-| **标准前端** | SDF 风格（GM/T 0018）C 库与 PKCS#11 v3.2 模块，应用永远不必直接面对寄存器 |
+| **标准前端** | SDF 风格（GM/T 0018）C 库、PKCS#11 v3.2 模块、`hsmctl` 命令行与 HTTP（JSON）网关，应用永远不必直接面对寄存器 |
 
-占用**半块器件**：35,659 LUT（50.5 %）、140 DSP、15.5 BRAM，
-75 MHz 下 WNS +3.504 ns。
+当前送检位流（含 ML-DSA）布局布线后：55,366 LUT（78.5 %）、199 DSP、85 BRAM，
+75 MHz 下 WNS +1.615 ns。
 
 ## 架构
 
 ```
-   ┌──────────────────────── PS · Cortex-A53 ────────────────────────┐
-   │  application ──▶ libsdfe (SDF-style)  ──▶ pqchsm_fpgad          │
-   │                                              │                  │
-   │  ······················· normal world ·······│················  │
-   │                                       /dev/secmmio  →  EL3 SiP  │
-   └──────────────────────────────────────────────│──────────────────┘
-                       M_AXI_HPM0_LPD  (AXI4, AxPROT[1] = security bit)
-                                                  ▼
-   ┌──────────────────────── PL · FPGA fabric ───────────────────────┐
-   │              axi4lite_xbar  (full decode, one address per reg)  │
-   │   ┌──────┬──────────┬──────────┬──────────┬─────────┬────────┐  │
-   │   │ slot0│  slot1   │  slot2   │  slot3   │  slot4  │ slot5  │  │
-   │   │ trng │key_vault │   sym    │  mlkem   │ canary  │  fan   │  │
-   │   │      │          │AES/SM4/  │ 512/768/ │ same as │ observe│  │
-   │   │      │          │   SM3    │   1024   │ slot 1  │  only  │  │
-   │   │      SECURE_ONLY=1 (default build)              │ =0     │  │
-   │   └──────┴────┬─────┴────▲─────┴──────────┴─────────┴────────┘  │
-   │               └──────────┘  use_key: private wire, not the bus  │
-   │      every slot sits behind axi4lite_firewall (AxPROT gate)     │
-   └─────────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────── PS · Cortex-A53 ─────────────────────────────┐
+ │ application ─▶ libsdfe / hsmctl / hsm_httpd ─▶ pqchsm_fpgad (daemon)     │
+ │                                   op sequences │          │ key blobs    │
+ │ ···························· normal world ·····│··········│··············│
+ │                                     /dev/secmmio     OP-TEE TA (S-EL0)   │
+ │                                                │     gen / wrap / unwrap │
+ │                                                │     PTA (S-EL1)         │
+ │                                                ▼          ▼              │
+ │              BL31 SiP (EL3): whitelisted MMIO · seed / sym-key loading   │
+ └────────────────────────────────────────┬─────────────────────────────────┘
+                 M_AXI_HPM0_LPD  (AXI4-Lite, AxPROT[1] = security bit)
+                                          ▼
+ ┌──────────────────────────── PL · FPGA fabric ────────────────────────────┐
+ │                axi4lite_xbar  (full decode, one address per reg)         │
+ │ ┌───────┬──────────┬─────────┬──────────┬─────────┬─────────┬─────────┐  │
+ │ │ slot0 │  slot1   │  slot2  │  slot3   │  slot4  │  slot5  │  slot6  │  │
+ │ │ trng  │key_vault │   sym   │  mlkem   │ canary  │   fan   │  mldsa  │  │
+ │ │       │          │AES/SM4/ │ 512/768/ │ same as │ observe │44/65/87 │  │
+ │ │       │          │   SM3   │   1024   │ slot 1  │  only   │         │  │
+ │ └───────┴────┬─────┴────▲────┴──────────┴─────────┴─────────┴─────────┘  │
+ │              └──────────┘  use_key: private wire, not the bus            │
+ │  every slot sits behind axi4lite_firewall (AxPROT gate);                 │
+ │  SECURE_ONLY=1 on all but the fan (slot 5) in the default build          │
+ └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 每个 slot 占 64 KB，位于 `0x8000_0000 + slot × 0x1_0000`。
 
-**默认位流里四个功能从机全是 `SECURE_ONLY=1`** —— 普通世界一个都够不着，整套 KAT
-由安全世界经 BL31 SiP 驱动。slot 4 是密钥仓的第二个实例，在这个配置下充当同款对照：
+**默认位流里五个功能从机（槽 0/1/2/3/6）全是 `SECURE_ONLY=1`** —— 普通世界一个都够不着：
+daemon 的每一笔核访问都经 `/dev/secmmio` 转到 BL31 的 SiP，由 EL3 按白名单发出；
+密钥材料（后量子种子、对称密钥）则只走 TA → PTA → SiP 这条路，普通世界的白名单里没有这些口。slot 4 是密钥仓的第二个实例，在这个配置下充当同款对照：
 它证明"被拒"是门控干的，不是核坏了。风扇（slot 5）保持 0：它不在密码边界里，也不该在。
 
 另有一份开发用配置——`PQC_DEV_OPEN=1` 把功能从机设成 `SECURE_ONLY=0`，让 Linux
@@ -82,8 +88,9 @@ cd pqc-crypto-module
 python3 -m venv .venv-rtl && ./.venv-rtl/bin/pip install cocotb
 brew install icarus-verilog verilator      # or your distro's packages
 
-./tools/rtl_sim.sh          # 200 cocotb tests against the RTL
-./tools/rtl_lint.sh         # Verilator -Wall + Icarus, 70 modules, zero warnings
+./tools/rtl_sim_fast.sh     # 迭代用：分模块、Verilator，几十秒到几分钟
+./tools/rtl_sim.sh          # 全套 272 条 cocotb 用例、Icarus（约 40 分钟，合入前跑）
+./tools/rtl_lint.sh         # Verilator -Wall + Icarus，hardware/rtl 下逐模块，零告警
 ./tools/rtl_synth_check.sh  # Yosys synthesisability
 ```
 
@@ -110,7 +117,7 @@ vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 算法库**（它链的 OpenSSL 只做远程口的 TLS 传输），因此它打印出的任何正确结果
 都只可能来自 FPGA。
 
-从另一台机器一条命令跑完整演示（远程口是 **mTLS**）：
+从另一台机器一条命令跑完整演示（远程口 9797 是 **mTLS**）：
 
 ```bash
 ./demo/remote/run.sh                           # 交互问地址；仓库自带演示凭据，零配置
@@ -122,7 +129,8 @@ vivado -mode batch -source hardware/syn/impl_bitstream.tcl
 
 SDFE_HANDLE dev, ses;
 uint8_t ek[1600], ct[1600], ss[32];
-uint32_t ek_len = sizeof ek, ct_len = sizeof ct, ss_len = sizeof ss, kh;
+uint8_t blob[SDFE_SYMKEY_BLOB_MAX], pt[16], out[16];
+uint32_t ek_len = sizeof ek, ct_len = sizeof ct, ss_len = sizeof ss, kh, blen = sizeof blob;
 
 SDFE_OpenDevice(&dev);
 SDFE_OpenSession(dev, &ses);
@@ -134,10 +142,12 @@ SDFE_Encapsulate_MLKEM(ses, SDFE_MLKEM_768, ek, ek_len,
                        ss, &ss_len, ct, &ct_len);
 SDFE_Decapsulate_MLKEM(ses, kh, ct, ct_len, ss, &ss_len);   /* 按句柄 */
 
-SDFE_GenerateKey(ses, /*slot*/ 3, 16, blob, &blen); /* TA 生成 SM4 密钥装进 FPGA，交回 blob */
-SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 分组运算在 FPGA，密钥读不出来      */
+SDFE_GenerateKey(ses, /*slot*/ 3, 16, blob, &blen);  /* TA 生成 SM4 密钥装进 FPGA，交回 blob */
+SDFE_Encrypt(ses, SDFE_ALG_SM4, 3, pt, out);         /* 一个分组在 FPGA 里算，密钥读不出来  */
 SDFE_LoadKey(ses, 3, blob, blen);                    /* 下次会话：同一把密钥重新装回      */
 ```
+
+明文导入 `SDFE_ImportKey` 仍在接口上，但恒回 `SDR_NOTSUPPORT`：明文密钥不经过普通世界。
 
 构建并运行：`make -C service && ./service/sdf_demo`。
 接口参考：[docs/API.zh-CN.md](docs/API.zh-CN.md)。
@@ -307,7 +317,9 @@ printf 'POST /v1/sm3 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 14\r\nConnec
 | TRNG 最小熵，1,048,576 个调节前样本 | H = 0.871234 bit/sample → RCT 47、APT 672 |
 | Decaps 时序，有效密文 vs 隐式拒绝，各 200 次 | 中位数差异 0.000 % |
 | ML-KEM-512 吞吐 @ 75 MHz | 924 / 1339 / 1018 ops/s（KeyGen / Encaps / Decaps） |
-| cocotb 回归 · Verilator lint · Yosys | 200 项测试 · 70 个模块，0 条告警 · 全部可综合 |
+| 普通世界直接往密钥仓装载口写（D7，送检位流） | 11 笔全部丢弃，`LOAD_REJ` 0 → 11，槽仍空 |
+| daemon 线协议模糊测试（D7） | 41 / 41 |
+| cocotb 回归 · Verilator lint · Yosys | 272 条用例 · 逐模块 0 条告警 · 全部可综合 |
 
 方法与原始日志见 [docs/TESTING.zh-CN.md](docs/TESTING.zh-CN.md)；板上抓取的输出
 原样保存在 [board/logs/](board/logs/) 下。
@@ -316,18 +328,21 @@ printf 'POST /v1/sm3 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 14\r\nConnec
 
 关于本项目**不**做什么的准确陈述。
 
-- **RTL 里仍留着一条私钥导出路径。** 守护进程走的是 `MODE.DK_TO_SLOT`：`dk` 留在
-  片内金库、按句柄解封装，正常路径上私钥一个字节都不过总线。但"不进金库"那条路
-  仍在，因为 ACVP 验证必须把私钥读出来核对。交付形态下它由一次性闩锁关掉 ——
-  是闩锁不是熔丝，断一次电就又开了。
-- **root 仍然能驱动硬件。** EL3 SiP 暴露的是白名单内的 MMIO 读写，操作序列在普通
-  世界里拼装。普通世界*读*不到密钥材料；但它仍然能装载并使用密钥仓槽位。要堵上
-  这一点，需要一个以操作为粒度的 SiP。
-- **密钥派生根默认仍是桩，但设备绑定已经做出来了。** `src/crypto/kdr.c` 默认是固定
-  常量；设 `PQCHSM_KDR=device-dna` 可切到绑定这颗芯片 Device DNA 的派生根，板上与
-  远端主机两条取值路都在真硬件上跑通了。默认不开是因为换根会让既有 keystore 打不开，
-  且症状与被篡改一模一样。⚠️ **DNA 不是秘密**（有 JTAG 就能读到），它给的是防克隆，
-  不是机密性。
+- **ACVP 那条 KeyGen 仍会交出私钥。** 产品路径上私钥不出 PL：种子由 TA 生成、包裹，
+  经安全世界写进 PL 暂存口，每次运算（`MODE.CHAIN`）现展开、算完由硬件擦。但软件自带
+  `d‖z` 的那条 KeyGen 还在 —— ACVP 要按指定种子复现并核对私钥 —— 它的 `dk` 从
+  `OUT_DATA` 读出。`CTRL.SEED_LOCK` 能把 KeyGen 永久切到暂存口，但它是闩锁不是熔丝，
+  掉电即复位，且 daemon 默认不置。
+- **root 仍然能驱动硬件做运算。** daemon 的运算序列在普通世界拼装，经 EL3 SiP 的白名单
+  读写发出。密钥材料的装载已经收回安全世界（对称密钥装载口只认安全事务、白名单排除了
+  它），普通世界*读*不到也*塞*不进密钥；但它能用已经装好的密钥做运算，而且任何能以
+  `LOGIN_USER` 打开 TA 会话的进程都能让 TA 装一把**自己 blob 里**的密钥。按调用方身份
+  授权尚未实现。
+- **KEK 的根是可推导的。** TA 的 HUK 现在是 SHA-256(Device DNA)，不烧 eFUSE；DNA 可读，
+  所以对同时拿到 DNA 与 blob 的人，blob 不是真密文。真 HUK 绑在认证启动之后（见下面
+  加密启动那条）。主机侧的 `src/crypto/kdr.c` 在 DEV 形态下是桩常量（PRODUCTION 形态
+  编译不进来、没装 provider 就 fail-closed）；`PQCHSM_KDR=device-dna` 切到绑定 Device DNA
+  的派生根。⚠️ **DNA 不是秘密**，它给的是防克隆，不是机密性。
 - **没有 SM2 核。** SM4 与 SM3 有；SM2 非对称算法没有。
 - **这是一个安全原型，不是一个快的原型。** 吞吐数字包含逐字节的软件 AXI 流量，
   公布它们是为了给出各参数集之间 1 : 1.5 : 2.1 的比例，而不是作为性能主张。
@@ -354,11 +369,13 @@ hardware/platform/  Non-crypto fabric logic (fan control) — same bitstream, no
 hardware/tb/        cocotb testbenches, simulation tops, lint-only vendor stubs
 hardware/model/     Python reference model, independent oracles, vector export
 hardware/syn/       Vivado out-of-context synthesis and the RTL-to-bitstream flow
-service/            SDF-style client library, daemon, and a hardware-only demo
-boot/atf/           BL31 patches: the EL3 SiP that gives the secure world a path to the PL
+service/            SDF-style client library, daemon, hsmctl CLI, hsm_httpd JSON gateway, demo
+boot/atf/           BL31 patches: the EL3 SiPs (whitelisted MMIO, seed / sym-key / TRNG for the TA)
 board/              On-board programs, harness, kernel modules, and raw result logs
 include/ src/ cli/  Host software: keystore, slots, backup, audit, PKCS#11 front end
-tee/                OP-TEE trusted application (separate line of work)
+tee/                OP-TEE TA + host client: key generation / wrapping (KEK), seed and sym-key loading
+boot/d7/            Build recipes for the current boot image (BL31, OP-TEE, bitstream, apps)
+demo/               Off-board demos (remote SDF over mTLS, HTTP gateway) and HTML report generation
 tests/              Host-software unit, integration, KAT and fuzz targets
 tools/              Regression scripts, SP 800-90B estimators, static analysers
 docs/               Architecture, API, security model, testing, register maps

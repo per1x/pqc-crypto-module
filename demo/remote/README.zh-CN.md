@@ -15,6 +15,7 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
 ```
 这台密码机在哪？
   板子的 IP 或主机名，例如 192.168.1.50 或 hsm.local
+  （板子的 eth1 是静态地址，上电约 35 秒后就绪；Ctrl-C 退出）
 
   地址： 192.168.1.50
 
@@ -23,7 +24,7 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
     2) 只打关键结论        --smoke
     3) 只连一下看在不在    --status
 
-  选 [1-3，回车= 1]:
+  选 [1-3，回车= 1]：
 ```
 
 跑通之后它会问要不要记住这个地址，之后再跑就什么都不用给了。当然也可以一次
@@ -56,7 +57,7 @@ git clone https://github.com/per1x/pqc-crypto-module && cd pqc-crypto-module
 `creds/` 里放着一张客户端证书**和它的私钥**，就提交在这个公开仓库里。这样做
 是为了让上面那条命令零配置可用，但代价必须说清楚，不能含糊过去：
 
-- **任何够得着板子 9797 口的人都能驱动这台密码机。** 它成立的前提只有一条 ——
+- **任何够得着板子 9797 口（或同一 CA 的 8443 HTTPS 网关）的人都能驱动这台密码机。** 它成立的前提只有一条 ——
   板子在内网，外面路由不进来。
 - **它不是远程口的安全论证。** mTLS 买到的是"持有私钥"而不是"知道一个字符串"；
   把私钥公开发布，等于在这一条链路上自愿放弃那个区别。真实部署要自己生成 CA
@@ -72,3 +73,10 @@ CREDS=~/.config/pqchsm/pki ./demo/remote/run.sh
 ```
 
 给一块板子装一套全新的、私有的 PKI，用 `tools/demo_remote.sh <板子IP> --provision`。
+
+## 这里还有：板上命令行 + HTTPS 联跑
+
+| 脚本 | 作用 |
+|---|---|
+| `http_demo.sh <板子IP> [凭据目录]` | 在本机用 `curl` 经 HTTPS + mTLS 调板上 8443 口的网关，按业务流程走一遍（凭据目录默认 `~/.config/pqchsm/pki`；需要 `curl` 和 `python3`）。输出格式与板上的业务演示相同 |
+| `full_demo.sh <板子IP> [凭据目录]` | 先经 ssh 在板上跑 `/media/sd-mmcblk1p2/demo/run.sh`，再跑 `http_demo.sh`，用 `tools/demo_to_html.py` 合成 `demo-out/demo.html`。与 `run.sh` 不同，这一条要用 SSH |
