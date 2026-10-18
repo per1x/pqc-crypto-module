@@ -164,14 +164,16 @@ SDFE_LoadKey(ses, 3, blob, blen);                    /* 以后的会话用 blob 
 ./tools/demo_remote.sh <板子IP> --provision    # 换成自己的 PKI（只需做一次）
 ```
 
+从别的电脑 ssh 上板子：板上 dropbear 是 2019.78，主机密钥有 ssh-rsa 和 ECDSA 两把（ECDSA 那把在 SD 的 `hsm/ssh/`，开机由 `hsm-boot.sh` 带上），新版 OpenSSH 不用加参数就能连。登录可以用口令 `root`/`root`，也可以用公钥：ECDSA 或 RSA 公钥（RSA 要加 `-o PubkeyAcceptedAlgorithms=+ssh-rsa`），ed25519 这版 dropbear 不认。公钥追加到 SD 上的 `hsm/ssh/authorized_keys`，开机会并进 `/home/root/.ssh/authorized_keys`，重启不丢。板子没有 RTC，要走 9797 / 8443 的 mTLS 先对表：`ssh root@<板子IP> "date -u -s @$(date -u +%s)"`（`demo/remote/full_demo.sh` 会自动做）。
+
 ### 命令行：hsmctl
 
 源码 [service/hsmctl.c](service/hsmctl.c)，业务逻辑在 [service/hsmops.c](service/hsmops.c)，
 和 HTTP 网关共用。它只读写文件、做 PKCS#7 填充，加密、签名、杂凑、随机数都交给密码机。
 
 - 构建：`make -C service hsmctl`。板上的版本在构建机上交叉编译（[boot/d7/build-apps-d7.sh](boot/d7/build-apps-d7.sh)），放在 SD 卡的 `hsm/hsmctl`。
-- 运行位置：通过本机 UNIX socket 连 `pqchsm_fpgad`，所以要在板子上运行。`hsm/HSM_STATUS` 里有 `READY=yes` 才能用。
-- 密钥库：环境变量 `HSM_KEYSTORE` 指定的目录，默认 `./keystore`，不存在会自动创建。每把密钥一个 `<名字>.key` 文件（权限 0600）。对称密钥文件里是 TA 包裹的 blob（60 或 76 字节），后量子密钥文件里是公钥加 TA 包裹的种子 blob，都没有明文密钥。
+- 运行位置：通过本机 UNIX socket 连 `pqchsm_fpgad`，所以要在板子上运行。`hsm/HSM_STATUS` 里有 `READY=yes` 才能用。开机脚本会把它装成 `/usr/bin/hsmctl`，ssh 上去直接敲 `hsmctl` 即可；`hsm-demo` 跑整套板上演示。
+- 密钥库：环境变量 `HSM_KEYSTORE` 指定的目录。直接敲 `hsmctl` 时默认是 SD 上的 `/media/sd-mmcblk1p2/keys`（与 HTTP 网关共用，重启不丢）；直接跑 `hsm/hsmctl` 二进制时默认 `./keystore`。不存在会自动创建。每把密钥一个 `<名字>.key` 文件（权限 0600）。对称密钥文件里是 TA 包裹的 blob（60 或 76 字节），后量子密钥文件里是公钥加 TA 包裹的种子 blob，都没有明文密钥。
 
 | 命令 | 作用 | 执行位置 |
 |---|---|---|

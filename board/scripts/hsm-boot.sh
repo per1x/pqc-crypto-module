@@ -98,6 +98,9 @@ else
 fi
 # 推进一格，好让下一次开机至少不早于这一次
 touch $CLOCK_STAMP 2>/dev/null
+# 板子没有 RTC。开机后有人对过一次表（full_demo.sh 会对），就让戳一直跟着走：
+# 下次开机时钟只落后关机那段时间，而不是落回上一次开机的时刻。
+setsid sh -c "while sleep 600; do touch $CLOCK_STAMP; done" >/dev/null 2>&1 < /dev/null &
 
 # ============================================================================
 # 第一步：网络。**在碰 PL 之前**，而且不管后面成不成都先做完。
@@ -129,6 +132,62 @@ else
     st "PL=skipped 原因=eth1没链路，换位流会连eth0一起失去"
     st "READY=no"
     exit 0
+fi
+
+# ============================================================================
+# 第一步半：让别的电脑也能直接 ssh 上来跑演示
+# ============================================================================
+# 根文件系统是 initramfs，/usr/bin、/etc、authorized_keys 每次开机都回到镜像里的样子，
+# 所以这里每次重做一遍；持久的东西都放在 SD 的 $D/ssh/ 下。
+#
+# ① 板载 dropbear 2019.78 只有 ssh-rsa 主机密钥，OpenSSH 8.8 起默认不收，
+#    别的电脑一连就是 "no matching host key type found. Their offer: ssh-rsa"。
+#    加一把 ECDSA 主机密钥（这版 dropbear 支持，不支持 ed25519），钥匙放 SD 上，
+#    指纹不会每次开机都变。只重启监听进程，已有的 ssh 会话不受影响。
+#    新的起不来就按原参数拉回去 —— 宁可退回只有 ssh-rsa，也不能没有 22 口。
+SSHD=$D/ssh
+if [ -x /usr/sbin/dropbear ] && [ -d "$SSHD" ]; then
+    EK=$SSHD/dropbear_ecdsa_host_key
+    [ -s "$EK" ] || /usr/sbin/dropbearkey -t ecdsa -s 256 -f "$EK" >/dev/null 2>&1
+    RK=/etc/dropbear/dropbear_rsa_host_key
+    if [ -s "$EK" ]; then
+        chmod 600 "$EK"
+        [ -f /var/run/dropbear.pid ] && kill "$(cat /var/run/dropbear.pid)" 2>/dev/null
+        sleep 1
+        /usr/sbin/dropbear -r $RK -r "$EK" -p 22 -B -P /var/run/dropbear.pid
+        sleep 1
+        if busybox netstat -ltn 2>/dev/null | grep -q ":22 "; then
+            say "dropbear 已带上 ECDSA 主机密钥"
+            st "SSH=ok rsa+ecdsa"
+        else
+            /usr/sbin/dropbear -r $RK -p 22 -B -P /var/run/dropbear.pid
+            say "!!! 带 ECDSA 的 dropbear 没起来，已按原参数拉回"
+            st "SSH=rsa-only"
+        fi
+    fi
+    # ② 公钥：镜像里固化了几把；后加的放 $SSHD/authorized_keys，开机并进来，
+    #    这样新电脑的公钥重启后还在。客户端用 ECDSA 或 RSA 钥匙（ed25519 这版不认）。
+    if [ -s "$SSHD/authorized_keys" ]; then
+        mkdir -p /home/root/.ssh
+        touch /home/root/.ssh/authorized_keys
+        while read -r line; do
+            [ -n "$line" ] || continue
+            grep -qxF "$line" /home/root/.ssh/authorized_keys ||
+                echo "$line" >> /home/root/.ssh/authorized_keys
+        done < "$SSHD/authorized_keys"
+        chmod 600 /home/root/.ssh/authorized_keys
+    fi
+fi
+
+# ③ hsmctl 放进 PATH。默认密钥库放 SD（与 HTTP 网关共用，重启不丢）；
+#    设了 HSM_KEYSTORE 就用设的（演示脚本用 /tmp 下的临时库）。
+if [ -x "$D/hsmctl" ]; then
+    printf '#!/bin/sh\n: "${HSM_KEYSTORE:=/media/sd-mmcblk1p2/keys}"\nexport HSM_KEYSTORE\nmkdir -p "$HSM_KEYSTORE"\nexec %s/hsmctl "$@"\n' "$D" > /usr/bin/hsmctl
+    chmod 755 /usr/bin/hsmctl
+fi
+if [ -f /media/sd-mmcblk1p2/demo/run.sh ]; then
+    printf '#!/bin/sh\nexec sh /media/sd-mmcblk1p2/demo/run.sh "$@"\n' > /usr/bin/hsm-demo
+    chmod 755 /usr/bin/hsm-demo
 fi
 
 # ============================================================================

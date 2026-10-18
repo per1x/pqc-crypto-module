@@ -14,7 +14,9 @@ OUT=${DEMO_OUT:-$PWD/demo-out}
 mkdir -p "$OUT"
 
 echo "════════ 第一部分：板上命令行（ssh root@${HOST}） ════════"
-ssh -o HostKeyAlgorithms=+ssh-rsa "root@$HOST" 'sh /media/sd-mmcblk1p2/demo/run.sh' | tee "$OUT/cli.txt"
+# 板子没有 RTC，重启后时钟会倒退，第二部分的证书校验因此失败 —— 先用本机时间对一次表。
+ssh -o HostKeyAlgorithms=+ssh-rsa "root@$HOST" \
+    "date -u -s @$(date -u +%s) >/dev/null; sh /media/sd-mmcblk1p2/demo/run.sh" | tee "$OUT/cli.txt"
 
 echo
 echo "════════ 第二部分：HTTPS 接口（本机 curl → $HOST:8443） ════════"
