@@ -18,7 +18,8 @@ Code, scripts and recorded output for the AXU3EGB board (XCZU3EG).
 `scripts/hsm-boot.sh` lives on the SD card (`/media/sd-mmcblk1p2/hsm/`) and is called from an init script in the image. In order, it:
 
 1. Moves the clock forward if it is earlier than the newest of `pki/hsm_device.crt`, `pki/hsm_ca.crt` and `CLOCK_STAMP` (mTLS certificates would otherwise not be valid yet).
-2. Configures `eth1` (`192.168.50.175`, the PS GEM) and waits for link. Without link it stops before touching the PL.
+2. Brings up `eth1` (the PS GEM) and waits for link, then asks for a DHCP lease (host name `pqchsm`; `udhcpc` stays in the background to renew). With no lease it falls back to `192.168.50.175`. It always adds the link-local address `169.254.50.175`, and prints the address in the serial login banner. Without link it sets the fallback addresses and stops before touching the PL.
+   It also starts dropbear with an extra ECDSA host key kept in `hsm/ssh/` (the built-in dropbear 2019.78 otherwise offers only `ssh-rsa`, which current OpenSSH refuses), merges `hsm/ssh/authorized_keys` into root's keys, and installs `/usr/bin/hsmctl` (keystore `/media/sd-mmcblk1p2/keys`) and `/usr/bin/hsm-demo`.
 3. Unbinds the PL drivers and loads `zu3eg_hsm_dev.bit` with `fpgautil`. If the PL does not reach `operating`, it reloads `factory.bit` and rebinds.
 4. Loads `secmmio.ko`, copies `*.ta` from the SD card to `/lib/optee_armtz/` (`/lib` is an initramfs), and starts `tee-supplicant` if it is not running.
 5. Starts `pqchsm_fpgad` and `hsm_httpd 8443 8080` with the keystore in `/media/sd-mmcblk1p2/keys`.

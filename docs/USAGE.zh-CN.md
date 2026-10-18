@@ -222,7 +222,7 @@ cc -O2 -Iservice -o sdf_demo \
 
 ```bash
 # 凭据目录里要有 hsm_ca.crt / client.crt / client.key
-./sdf_demo 192.168.50.175 ~/.config/pqchsm/pki 9797 axu3egb-hsm-01
+./sdf_demo <板子IP> ~/.config/pqchsm/pki 9797 axu3egb-hsm-01
 #          └ 板子 IP      └ 凭据目录           └ 端口 └ 期望的设备 CN（可选）
 ```
 
@@ -268,7 +268,7 @@ java --enable-native-access=ALL-UNNAMED demo/java/PqcHsmDemo.java \
 ## 在板子上
 
 `board/scripts/hsm-boot.sh` 每次开机从 SD 卡（`/media/sd-mmcblk1p2/hsm/`）运行。它校正时钟，
-配置 `eth1`（`192.168.50.175`），载入 `zu3eg_hsm_dev.bit`，加载 `secmmio.ko`，装 TA 并启动
+配置 `eth1`（DHCP；没有 DHCP 时 `192.168.50.175`，另挂链路本地 `169.254.50.175`），载入 `zu3eg_hsm_dev.bit`，加载 `secmmio.ko`，装 TA 并启动
 `tee-supplicant`，然后启动 `pqchsm_fpgad` 和 `hsm_httpd 8443 8080`。全部成功时
 `hsm/HSM_STATUS` 以 `READY=yes` 结尾，上电后约 35 秒。步骤和其他脚本列在
 [board/README.md](../board/README.md)。运行时切换到默认位流：

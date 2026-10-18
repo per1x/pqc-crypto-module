@@ -17,25 +17,27 @@ AXU3EGB 板子（XCZU3EG）上的演示：怎么连、怎么跑、每段演示�
 | 网口 | 接口名 | 位置 | 地址 | 说明 |
 |---|---|---|---|---|
 | PL 侧 | `eth0` | PL 里的 AXI Ethernet | `192.168.50.174` | 装入密码位流后消失 |
-| PS 侧 | `eth1` | 处理器里的 GEM | `192.168.50.175` | 演示用这个，不随 PL 重配消失 |
+| PS 侧 | `eth1` | 处理器里的 GEM | DHCP；没有 DHCP 时 `192.168.50.175`；另常挂 `169.254.50.175` | 演示用这个，不随 PL 重配消失 |
 
 串口（备用）：Micro-USB，115200 8N1。
 
 ## 上电
 
-插电，约 35 秒后就绪，不需要登录或手工加载。`hsm/hsm-boot.sh` 依次做这些事：校时、配 `eth1`、装入密码位流、加载 `secmmio.ko`、把 TA 复制到 OP-TEE 找得到的位置、起 `pqchsm_fpgad`（mTLS 端口 9797）、起 `hsm_httpd`（本机 `127.0.0.1:8080` 明文，对外 `:8443` mTLS）。
+插电，约 35 秒后就绪（等 DHCP 最多再多十来秒），不需要登录或手工加载。`hsm/hsm-boot.sh` 依次做这些事：校时、配 `eth1`（DHCP，兜底与链路本地地址见上表）、给 dropbear 加 ECDSA 主机密钥、装 `/usr/bin/hsmctl` 和 `/usr/bin/hsm-demo`、装入密码位流、加载 `secmmio.ko`、把 TA 复制到 OP-TEE 找得到的位置、起 `pqchsm_fpgad`（mTLS 端口 9797）、起 `hsm_httpd`（本机 `127.0.0.1:8080` 明文，对外 `:8443` mTLS）。
 
 查看状态：
 
 ```
-ssh root@192.168.50.175 cat /media/sd-mmcblk1p2/hsm/HSM_STATUS
+ssh root@<板子IP> cat /media/sd-mmcblk1p2/hsm/HSM_STATUS
 ```
 
 正常输出：
 
 ```
 CLOCK=ok
-NET=ok eth1=192.168.50.175
+NET=ok eth1=192.168.50.185 dhcp
+NET_LINKLOCAL=169.254.50.175
+SSH=ok rsa+ecdsa
 PL=crypto
 SECMMIO=ok
 TA=ok
@@ -47,6 +49,7 @@ READY=yes
 ```
 
 - `CLOCK=corrected` 表示开机时系统时间早于 SD 卡上凭据的修改时间，脚本把时钟拨到了那个时间。不拨的话证书尚未生效，mTLS 会被拒。
+- `NET=` 行是板子当前的地址，`dhcp` 表示从 DHCP 拿到，`fallback` 表示网里没有 DHCP、用的兜底地址。不知道板子 IP 时，在电脑上跑 `python3 tools/find_board.py`，或看串口登录提示。
 - `PL=crypto` 表示 `zu3eg_hsm_dev.bit` 已装入。
 - `DAEMON=ok` 表示 daemon 已启动并建立了 socket。
 - `pki/` 下的 `hsm_ca.crt`、`hsm_device.crt`、`hsm_device.key` 缺一个，就不监听 9797 和 8443（`TCP=off`），本机 8080 不受影响。
@@ -65,8 +68,8 @@ SD 卡上的演示入口在 `/media/sd-mmcblk1p2/demo/`，对应仓库里的文�
 | `hsm/run_demo.sh` | `run_demo.sh` | `sdf_demo`、绕过接口的反证、`hsm_nocrash` |
 
 ```
-ssh root@192.168.50.175
-sh /media/sd-mmcblk1p2/demo/run.sh            # 业务流程演示
+ssh root@<板子IP>                              # 口令 root
+hsm-demo                                       # 业务流程演示，同 sh /media/sd-mmcblk1p2/demo/run.sh
 sh /media/sd-mmcblk1p2/demo/run_classic.sh    # sdf_demo + 反证 + 管理功能面
 ```
 
@@ -154,8 +157,9 @@ PQCHSM_BACKEND=sdfe PQCHSM_SDFE_HOST=<板子IP> \
 
 | 现象 | 处理 |
 |---|---|
-| `192.168.50.174` 连不上 | 装入密码位流后 `eth0` 就消失了，用 `.175` |
-| `.175` 也连不上 | 检查两个网口是否都插了线；用串口（115200）进去看 `HSM_STATUS` |
+| `192.168.50.174` 连不上 | 装入密码位流后 `eth0` 就消失了，用 `eth1` 的地址 |
+| 不知道板子地址 | 电脑上跑 `python3 tools/find_board.py`；或看路由器里的 `pqchsm`、串口登录提示 |
+| 找不到板子 | 检查两个网口是否都插了线；网络可能隔离了设备，网线直插电脑用 `169.254.50.175`；用串口（115200）进去看 `HSM_STATUS` |
 | `READY=no` | 看 `/media/sd-mmcblk1p2/hsm/hsm-boot.log` |
 | 想回到厂家位流 | 删掉 `/media/sd-mmcblk1p2/hsm/zu3eg_hsm_dev.bit` 再重启，开机脚本不再装密码位流 |
 | 远程连不上 | 检查凭据；板上 `pki/` 三个文件是否齐全；两端时钟差太大会导致证书未生效 |

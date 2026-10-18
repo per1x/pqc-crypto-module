@@ -22,4 +22,4 @@ setsid nohup sh -c '
     sleep 1
     echo b > /proc/sysrq-trigger      # 复位
 ' >/dev/null 2>&1 </dev/null &
-echo "已触发。约 35 秒后 ssh root@192.168.50.175 应当可用。"
+echo "已触发。约一分钟后可以重新 ssh（地址走 DHCP，可能变；不确定就用 tools/find_board.py 找）。"

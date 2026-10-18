@@ -20,6 +20,44 @@
 | 密钥管理 | 在 OP-TEE TA 里生成、包裹、解包；对外只给出 KEK 加密的 blob（AES-256-GCM） |
 | 接口 | SDF 风格（GM/T 0018）C 库、PKCS#11 v3.2 模块、`hsmctl` 命令行、HTTP（JSON）网关 |
 
+## 快速演示
+
+板子接到任何局域网都能演示，板子那边不用改任何设置。
+
+1. **接线上电**。两个网口都插上网线（演示走 `eth1`，即 PS 侧网口；另一个口装入密码位流后就失效了），插电后等约一分钟。
+2. **找地址**。`eth1` 走 DHCP，向路由器报的主机名是 `pqchsm`。下面三种办法任选：
+   - 在演示电脑上跑 `python3 tools/find_board.py`。它只用 Python 标准库，Windows、macOS、Linux 都能用，会扫电脑所在的网段。
+   - 看路由器设备列表里的 `pqchsm`。
+   - 看串口登录提示（115200 8N1），里面打印了当前地址。
+
+   网里没有 DHCP 时，板子用兜底地址 `192.168.50.175`。另外它一直挂着链路本地地址 `169.254.50.175`，网线直插笔记本、电脑上什么都不用设就能连。想让地址固定，就在路由器里给 MAC `00:0a:35:00:22:01` 做 DHCP 保留。
+3. **登录、跑演示**：
+
+   ```bash
+   ssh root@<板子IP>     # 口令 root；第一次连接时回答 yes
+   hsm-demo              # 板上业务流程演示，八部分，约一两分钟
+   ```
+
+   新电脑不用配公钥，也不用加 ssh 参数。`hsmctl` 在板上可以直接用，见[命令行：hsmctl](#命令行hsmctl)。
+4. **（可选）从电脑上调用 HTTPS 接口**。需要仓库、bash、curl、python3，以及客户端证书目录 `~/.config/pqchsm/pki/`（从已经配好的电脑上拷过来，或者用 `./tools/demo_remote.sh <板子IP> --provision` 重新生成）：
+
+   ```bash
+   ./demo/remote/full_demo.sh <板子IP>
+   ```
+
+   这条命令先用本机时间给板子对时，再经 ssh 跑板上演示，然后经 HTTPS（双向证书）调用 8443 端口，最后在 `demo-out/demo.html` 生成网页报告。
+
+出问题时：
+
+| 现象 | 处理 |
+|---|---|
+| `find_board.py` 找不到，ping 也不通 | 访客 Wi-Fi 和不少公司网络会隔离设备之间的访问。让电脑也插网线接到同一台交换机，或者网线直插板子，用 `169.254.50.175` |
+| HTTPS 那一步报 `bad certificate` | 板子没有电池时钟，重启后时间会倒退。先对时：`ssh root@<板子IP> "date -u -s @$(date -u +%s)"` |
+| `HSM_STATUS` 里不是 `READY=yes` | 看板上的 `/media/sd-mmcblk1p2/hsm/hsm-boot.log` |
+| 用公钥登录被拒 | 板上 dropbear 是 2019.78 版，不认 ed25519 公钥。用口令登录，或者改用 ECDSA 公钥（追加到 SD 上的 `hsm/ssh/authorized_keys`，开机时会并入）。RSA 公钥要加 `-o PubkeyAcceptedAlgorithms=+ssh-rsa` |
+
+更多板上细节（接线、开机流程、状态文件）见 [board/demo/README.zh-CN.md](board/demo/README.zh-CN.md)。
+
 ## 分工
 
 | 位置 | 做什么 | 不做什么 |
@@ -164,11 +202,7 @@ SDFE_LoadKey(ses, 3, blob, blen);                    /* 以后的会话用 blob 
 ./tools/demo_remote.sh <板子IP> --provision    # 换成自己的 PKI（只需做一次）
 ```
 
-从别的电脑 ssh 上板子：
-
-- **地址**：eth1 走 DHCP，换到哪个网段都行（向路由器报主机名 `pqchsm`）。网里没有 DHCP 时用兜底地址 `192.168.50.175`。另外常挂链路本地地址 `169.254.50.175`：网线直插笔记本、什么都不用设就能连。不知道地址时，在电脑上跑 `python3 tools/find_board.py`（只用标准库，Windows/macOS/Linux 通用），或看串口登录提示、`hsm/HSM_STATUS` 的 `NET=` 行。想固定地址就在路由器里给 MAC `00:0a:35:00:22:01` 做 DHCP 保留。
-- **登录**：`ssh root@<板子IP>`，口令 `root`，新电脑不用加公钥、不用加参数（板上 dropbear 2019.78 除了 ssh-rsa 还带一把 ECDSA 主机密钥，存在 SD 的 `hsm/ssh/`）。想免口令可以把 ECDSA 公钥追加到 SD 上的 `hsm/ssh/authorized_keys`，开机会并入；ed25519 这版 dropbear 不认，RSA 要加 `-o PubkeyAcceptedAlgorithms=+ssh-rsa`。
-- **时钟**：板子没有 RTC，要走 9797 / 8443 的 mTLS 先对表：`ssh root@<板子IP> "date -u -s @$(date -u +%s)"`（`demo/remote/full_demo.sh` 会自动做）。
+换个局域网怎么连板子、怎么跑演示，见[快速演示](#快速演示)。
 
 ### 命令行：hsmctl
 
@@ -293,7 +327,7 @@ printf 'POST /v1/sm3 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 14\r\nConnec
 
 ### 板上演示
 
-`sh /media/sd-mmcblk1p2/demo/run.sh` 按业务流程依次执行上面的命令（设备信息、密钥管理、
+板上敲 `hsm-demo`（即 `sh /media/sd-mmcblk1p2/demo/run.sh`）按业务流程依次执行上面的命令（设备信息、密钥管理、
 加解密、签名验签、密钥封装、杂凑与随机数、备份恢复、安全性检查），最后一部分改用 HTTP
 接口把主要操作再做一遍。每条命令后面附上它产生的分层日志。
 

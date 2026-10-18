@@ -22,6 +22,44 @@ used in production. Known problems are listed under [Limitations](#limitations).
 | Key management | Generation, wrapping and unwrapping in the OP-TEE TA; only KEK-wrapped blobs (AES-256-GCM) leave it |
 | Interfaces | SDF-style (GM/T 0018) C library, PKCS#11 v3.2 module, `hsmctl` CLI, HTTP (JSON) gateway |
 
+## Quick demo
+
+The board can be demonstrated on any LAN; nothing needs to be changed on the board.
+
+1. **Cable and power.** Plug in both Ethernet ports (the demo uses `eth1`, the PS-side port; the other port disappears once the crypto bitstream is loaded) and wait about a minute after power-on.
+2. **Find the address.** `eth1` uses DHCP and reports the host name `pqchsm`. Any of these works:
+   - Run `python3 tools/find_board.py` on the demo machine. It uses only the Python standard library, works on Windows, macOS and Linux, and scans the machine's own subnets.
+   - Look for `pqchsm` in the router's client list.
+   - Read the serial login banner (115200 8N1), which prints the current address.
+
+   With no DHCP server the board falls back to `192.168.50.175`. It also always has the link-local address `169.254.50.175`, so a laptop connected with a direct cable reaches it with no setup on the laptop. For a fixed address, add a DHCP reservation for MAC `00:0a:35:00:22:01` on the router.
+3. **Log in and run the demo:**
+
+   ```bash
+   ssh root@<board-ip>   # password root; answer yes on first connect
+   hsm-demo              # on-board business-flow demo, eight parts, a minute or two
+   ```
+
+   A new machine needs no key and no extra ssh options. `hsmctl` is on the board's PATH; see [Command line: hsmctl](#command-line-hsmctl).
+4. **(Optional) call the HTTPS API from the demo machine.** This needs the repository, bash, curl, python3 and the client credentials in `~/.config/pqchsm/pki/` (copy them from a machine that has them, or create new ones with `./tools/demo_remote.sh <board-ip> --provision`):
+
+   ```bash
+   ./demo/remote/full_demo.sh <board-ip>
+   ```
+
+   It sets the board clock from the local clock, runs the on-board demo over ssh, calls port 8443 over HTTPS with mutual TLS, and writes a web report to `demo-out/demo.html`.
+
+Troubleshooting:
+
+| Symptom | What to do |
+|---|---|
+| `find_board.py` finds nothing and ping fails | Guest Wi-Fi and many office networks isolate clients from each other. Put the laptop on the same wired switch, or connect it directly and use `169.254.50.175` |
+| The HTTPS step reports `bad certificate` | The board has no battery-backed clock and its time goes back after a reboot. Set it: `ssh root@<board-ip> "date -u -s @$(date -u +%s)"` |
+| `HSM_STATUS` does not end in `READY=yes` | Read `/media/sd-mmcblk1p2/hsm/hsm-boot.log` on the board |
+| Public-key login is refused | The board runs dropbear 2019.78, which does not accept ed25519 keys. Use the password, or an ECDSA key appended to `hsm/ssh/authorized_keys` on the SD card (merged at boot). RSA keys need `-o PubkeyAcceptedAlgorithms=+ssh-rsa` |
+
+More board detail (cabling, boot sequence, status file) is in [board/README.md](board/README.md) and, in Chinese, [board/demo/README.zh-CN.md](board/demo/README.zh-CN.md).
+
 ## Who does what
 
 | Where | Does | Does not |
@@ -177,6 +215,8 @@ Full demo from another machine over the remote port (TCP 9797, mutual TLS):
 ./tools/demo_remote.sh <board-ip> --provision  # switch to your own PKI (once)
 ```
 
+Connecting to the board on a different LAN and running the demo: see [Quick demo](#quick-demo).
+
 ### Command line: hsmctl
 
 Source [service/hsmctl.c](service/hsmctl.c); the business logic is in
@@ -185,8 +225,8 @@ writes files and does PKCS#7 padding; encryption, signing, hashing and random nu
 are done by the module.
 
 - Build: `make -C service hsmctl`. The board binary is cross-compiled on the build machine ([boot/d7/build-apps-d7.sh](boot/d7/build-apps-d7.sh)) and lives at `hsm/hsmctl` on the SD card.
-- Where it runs: on the board, talking to `pqchsm_fpgad` over a local UNIX socket. `hsm/HSM_STATUS` must contain `READY=yes`.
-- Keystore: the directory in `HSM_KEYSTORE` (default `./keystore`, created if missing), one `<name>.key` file per key, mode 0600. A symmetric key file holds the TA-wrapped blob (60 or 76 bytes); a post-quantum key file holds the public key and the TA-wrapped seed blob. No file contains a plaintext key.
+- Where it runs: on the board, talking to `pqchsm_fpgad` over a local UNIX socket. `hsm/HSM_STATUS` must contain `READY=yes`. The boot script installs it as `/usr/bin/hsmctl`, so after `ssh` just type `hsmctl`; `hsm-demo` runs the whole on-board demo.
+- Keystore: the directory in `HSM_KEYSTORE`, created if missing. `hsmctl` on the PATH defaults to `/media/sd-mmcblk1p2/keys` on the SD card (shared with the HTTP gateway, kept across reboots); the bare `hsm/hsmctl` binary defaults to `./keystore`, one `<name>.key` file per key, mode 0600. A symmetric key file holds the TA-wrapped blob (60 or 76 bytes); a post-quantum key file holds the public key and the TA-wrapped seed blob. No file contains a plaintext key.
 
 | Command | Does | Runs in |
 |---|---|---|
@@ -263,7 +303,7 @@ printf 'POST /v1/sm3 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 14\r\nConnec
 
 ### On-board demo
 
-`sh /media/sd-mmcblk1p2/demo/run.sh` runs the business flow (device info, key
+`hsm-demo` on the board (that is, `sh /media/sd-mmcblk1p2/demo/run.sh`) runs the business flow (device info, key
 management, encryption, signatures, key encapsulation, hash and random, backup and
 restore, security checks), then repeats the main operations through the HTTP API.
 Each command is followed by the layer log it produced. Convert the output to a web

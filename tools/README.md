@@ -41,6 +41,7 @@ the address of one.
 
 | Script | What it does |
 |---|---|
+| `find_board.py` | Finds the board on the LAN (its `eth1` uses DHCP): scans the host's private /24 subnets and `169.254.50.175` for a dropbear SSH banner plus an open port 9797. Standard library only, runs on Windows, macOS and Linux |
 | `mkpki.sh` | Generates the device PKI for the mTLS remote port on the host, so the CA private key stays off the board |
 | `demo_remote.sh` | Runs the board demo from a host over mTLS: `<IP> --provision` (install credentials, once), `--smoke`, `--status` |
 | `dna_bind_check.c` (CMake target `dna-bind-check`) | Checks device-bound key derivation, locally or against a remote board over mTLS |

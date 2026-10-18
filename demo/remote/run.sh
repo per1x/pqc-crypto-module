@@ -101,8 +101,8 @@ ask_board() {
     [ -t 0 ] || { printf '  \033[31m✗\033[0m 没给板子地址\n\n' >&2; usage; }
     ASKED=1
     printf '\n'; bold "这台密码机在哪？"
-    printf '  板子的 IP 或主机名，例如 \033[2m192.168.1.50\033[0m 或 \033[2mhsm.local\033[0m\n'
-    printf '  （板子的 eth1 是静态地址，上电约 35 秒后就绪；Ctrl-C 退出）\n\n'
+    printf '  板子的 IP 或主机名，例如 \033[2m192.168.1.50\033[0m\n'
+    printf '  （板子走 DHCP，不知道地址就跑 python3 tools/find_board.py；上电约一分钟后就绪；Ctrl-C 退出）\n\n'
     while :; do
         printf '  地址： '
         IFS= read -r ans || { printf '\n'; die "没读到输入"; }

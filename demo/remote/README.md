@@ -13,8 +13,8 @@ With no arguments the script asks for the board address and the mode (the prompt
 
 ```
 这台密码机在哪？
-  板子的 IP 或主机名，例如 192.168.1.50 或 hsm.local
-  （板子的 eth1 是静态地址，上电约 35 秒后就绪；Ctrl-C 退出）
+  板子的 IP 或主机名，例如 192.168.1.50
+  （板子走 DHCP，不知道地址就跑 python3 tools/find_board.py；上电约一分钟后就绪；Ctrl-C 退出）
 
   地址： 192.168.1.50
 

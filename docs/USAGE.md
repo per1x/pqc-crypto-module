@@ -252,7 +252,7 @@ cc -O2 -Iservice -o sdf_demo \
 
 ```bash
 # the credential directory must hold hsm_ca.crt / client.crt / client.key
-./sdf_demo 192.168.50.175 ~/.config/pqchsm/pki 9797 axu3egb-hsm-01
+./sdf_demo <board-ip> ~/.config/pqchsm/pki 9797 axu3egb-hsm-01
 #          └ board IP     └ credentials        └ port └ expected device CN (optional)
 ```
 
@@ -303,7 +303,7 @@ frameworks do not yet support these mechanisms; see
 
 `board/scripts/hsm-boot.sh` runs at every boot from the SD card
 (`/media/sd-mmcblk1p2/hsm/`). It corrects the clock, configures `eth1`
-(`192.168.50.175`), loads `zu3eg_hsm_dev.bit`, loads `secmmio.ko`, installs the TA
+(DHCP; `192.168.50.175` if there is no DHCP server, plus link-local `169.254.50.175`), loads `zu3eg_hsm_dev.bit`, loads `secmmio.ko`, installs the TA
 and starts `tee-supplicant`, then starts `pqchsm_fpgad` and
 `hsm_httpd 8443 8080`. `hsm/HSM_STATUS` ends with `READY=yes` when this has all
 worked, about 35 seconds after power-on. [board/README.md](../board/README.md) lists
