@@ -53,8 +53,13 @@ D=/media/sd-mmcblk1p2/hsm
 BIT=$D/zu3eg_hsm_dev.bit
 LOG=$D/hsm-boot.log
 STATUS=$D/HSM_STATUS
-ETH1_IP=192.168.50.175
-ETH1_MASK=255.255.255.0
+# eth1 先走 DHCP（换到哪个网段都能用）；网里没有 DHCP 才用这个固定地址兜底。
+# 另外常挂一个链路本地地址：网线直插笔记本时，笔记本自己会落到 169.254.x.x，
+# 不用改任何设置就能连上 169.254.50.175。
+ETH1_FALLBACK_IP=192.168.50.175
+ETH1_FALLBACK_MASK=255.255.255.0
+ETH1_LL_IP=169.254.50.175
+HSM_HOSTNAME=pqchsm
 
 say() { echo "[$(cut -d' ' -f1 /proc/uptime)] $*" >> $LOG; sync; }
 st()  { echo "$*" >> $STATUS; sync; }
@@ -106,7 +111,7 @@ setsid sh -c "while sleep 600; do touch $CLOCK_STAMP; done" >/dev/null 2>&1 < /d
 # 第一步：网络。**在碰 PL 之前**，而且不管后面成不成都先做完。
 # ============================================================================
 busybox ifconfig eth1 up 2>/dev/null
-busybox ifconfig eth1 "$ETH1_IP" netmask "$ETH1_MASK" up 2>/dev/null
+busybox hostname "$HSM_HOSTNAME" 2>/dev/null
 
 # 同网段两块网卡时，ARP 必须收敛到发起请求的那个口。默认行为下回包可能
 # 从另一个口出去，表现是"时通时不通" —— 演示里最难解释的那种故障。
@@ -122,13 +127,50 @@ while [ $i -lt 20 ]; do
 done
 
 if [ "$(cat /sys/class/net/eth1/carrier 2>/dev/null)" = "1" ]; then
-    say "eth1 就绪：${ETH1_IP}（等了 ${i}s）"
-    st "NET=ok eth1=$ETH1_IP"
+    # DHCP。udhcpc 常驻后台续租；拿到地址由下面这个钩子配上去并记进 /tmp/eth1.ip。
+    # 钩子对 deconfig 什么都不做 —— 默认脚本会把地址清成 0.0.0.0，那会把兜底地址也清掉。
+    busybox ifconfig eth1:1 "$ETH1_LL_IP" netmask 255.255.0.0 up 2>/dev/null
+    cat > /tmp/udhcpc-eth1.sh <<'EOF'
+#!/bin/sh
+case "$1" in
+bound|renew)
+    busybox ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}" up
+    if [ -n "${router:-}" ]; then
+        while busybox route del default dev "$interface" 2>/dev/null; do :; done
+        set -- $router
+        busybox route add default gw "$1" dev "$interface"
+    fi
+    echo "$ip" > /tmp/eth1.ip
+    ;;
+esac
+exit 0
+EOF
+    chmod 755 /tmp/udhcpc-eth1.sh
+    rm -f /tmp/eth1.ip
+    busybox udhcpc -i eth1 -b -t 5 -T 2 -s /tmp/udhcpc-eth1.sh \
+        -x "hostname:$HSM_HOSTNAME" -p /var/run/udhcpc.eth1.pid >/dev/null 2>&1
+    if [ -s /tmp/eth1.ip ]; then
+        ETH1_IP=$(cat /tmp/eth1.ip)
+        say "eth1 就绪：DHCP 拿到 ${ETH1_IP}（链路等了 ${i}s）"
+        st "NET=ok eth1=$ETH1_IP dhcp"
+    else
+        # udhcpc 留在后台继续要；之后要到了会直接换成 DHCP 地址
+        ETH1_IP=$ETH1_FALLBACK_IP
+        busybox ifconfig eth1 "$ETH1_IP" netmask "$ETH1_FALLBACK_MASK" up 2>/dev/null
+        say "eth1 就绪：没有 DHCP，用兜底地址 ${ETH1_IP}（链路等了 ${i}s）"
+        st "NET=ok eth1=$ETH1_IP fallback"
+    fi
+    st "NET_LINKLOCAL=$ETH1_LL_IP"
+    # 串口登录提示里也打出地址：换了网络、不知道板子 IP 时，看串口就知道
+    printf 'PQC HSM  eth1=%s  linklocal=%s  (ssh root@<IP>)\n\n' "$ETH1_IP" "$ETH1_LL_IP" >> /etc/issue
 else
     # 不 return —— 网线可能只是没插。此时 eth0 还在（PL 没动），
     # 这一轮仍然连得上；但**不能**再去换位流，那会把仅剩的路也断掉。
     say "!!! eth1 没有链路（等了 ${i}s）。为了不失联，跳过位流装载。"
-    st "NET=fail eth1=no-carrier"
+    # 先把兜底地址配上：网线后插上时，至少还能从这两个地址连进来
+    busybox ifconfig eth1 "$ETH1_FALLBACK_IP" netmask "$ETH1_FALLBACK_MASK" up 2>/dev/null
+    busybox ifconfig eth1:1 "$ETH1_LL_IP" netmask 255.255.0.0 up 2>/dev/null
+    st "NET=fail eth1=no-carrier fallback=$ETH1_FALLBACK_IP linklocal=$ETH1_LL_IP"
     st "PL=skipped 原因=eth1没链路，换位流会连eth0一起失去"
     st "READY=no"
     exit 0

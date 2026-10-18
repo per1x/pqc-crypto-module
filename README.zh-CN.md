@@ -164,7 +164,11 @@ SDFE_LoadKey(ses, 3, blob, blen);                    /* 以后的会话用 blob 
 ./tools/demo_remote.sh <板子IP> --provision    # 换成自己的 PKI（只需做一次）
 ```
 
-从别的电脑 ssh 上板子：板上 dropbear 是 2019.78，主机密钥有 ssh-rsa 和 ECDSA 两把（ECDSA 那把在 SD 的 `hsm/ssh/`，开机由 `hsm-boot.sh` 带上），新版 OpenSSH 不用加参数就能连。登录可以用口令 `root`/`root`，也可以用公钥：ECDSA 或 RSA 公钥（RSA 要加 `-o PubkeyAcceptedAlgorithms=+ssh-rsa`），ed25519 这版 dropbear 不认。公钥追加到 SD 上的 `hsm/ssh/authorized_keys`，开机会并进 `/home/root/.ssh/authorized_keys`，重启不丢。板子没有 RTC，要走 9797 / 8443 的 mTLS 先对表：`ssh root@<板子IP> "date -u -s @$(date -u +%s)"`（`demo/remote/full_demo.sh` 会自动做）。
+从别的电脑 ssh 上板子：
+
+- **地址**：eth1 走 DHCP，换到哪个网段都行（向路由器报主机名 `pqchsm`）。网里没有 DHCP 时用兜底地址 `192.168.50.175`。另外常挂链路本地地址 `169.254.50.175`：网线直插笔记本、什么都不用设就能连。不知道地址时，在电脑上跑 `python3 tools/find_board.py`（只用标准库，Windows/macOS/Linux 通用），或看串口登录提示、`hsm/HSM_STATUS` 的 `NET=` 行。想固定地址就在路由器里给 MAC `00:0a:35:00:22:01` 做 DHCP 保留。
+- **登录**：`ssh root@<板子IP>`，口令 `root`，新电脑不用加公钥、不用加参数（板上 dropbear 2019.78 除了 ssh-rsa 还带一把 ECDSA 主机密钥，存在 SD 的 `hsm/ssh/`）。想免口令可以把 ECDSA 公钥追加到 SD 上的 `hsm/ssh/authorized_keys`，开机会并入；ed25519 这版 dropbear 不认，RSA 要加 `-o PubkeyAcceptedAlgorithms=+ssh-rsa`。
+- **时钟**：板子没有 RTC，要走 9797 / 8443 的 mTLS 先对表：`ssh root@<板子IP> "date -u -s @$(date -u +%s)"`（`demo/remote/full_demo.sh` 会自动做）。
 
 ### 命令行：hsmctl
 
